@@ -1,0 +1,40 @@
+name: System dependencies
+description: >
+  Install the C libraries this crate links against. Kept in one place so
+  every job agrees on the list.
+
+inputs:
+  hdf5:
+    description: Also install libhdf5-dev (only the `hdf5` feature needs it).
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+
+        # Why each of these:
+        #   libopenblas-dev  legume-numeric / ndarray may pull BLAS linkage
+        #                    with no blas-src in the graph, so the host must
+        #                    provide it or the link fails.
+        #   libz-sys         data-beans links zlib directly.
+        #   clang / codecs   data-beans / zarr stack may pull compression libs.
+        sudo apt-get install -y --no-install-recommends \
+          build-essential pkg-config cmake \
+          clang libclang-dev \
+          libopenblas-dev \
+          zlib1g-dev libbz2-dev liblzma-dev \
+          libcurl4-openssl-dev libssl-dev
+
+    - shell: bash
+      if: inputs.hdf5 == 'true'
+      run: |
+        set -euo pipefail
+        sudo apt-get install -y --no-install-recommends libhdf5-dev
+        # Debian splits HDF5 across prefixes, so HDF5_DIR can't be set to one
+        # directory. hdf5-metno-sys finds it via pkg-config instead.
+        pkg-config --exists hdf5-serial || pkg-config --exists hdf5

@@ -1,0 +1,71 @@
+[package]
+name = "senna-rs"
+version = "0.18.0"
+edition = "2021"
+rust-version = "1.91"
+license = "MIT"
+authors = ["Yongjin Park <ypp@stat.ubc.ca> <yongjin.park@ubc.ca>"]
+description = "Stochastic embedding with nearest-neighbourhood adjustment"
+repository = "https://github.com/causalpathlab/senna-rs"
+homepage = "https://github.com/causalpathlab/senna-rs"
+readme = "README.md"
+keywords = ["genomics", "single-cell", "embedding", "topic-model"]
+categories = ["science", "command-line-utilities"]
+exclude = [
+    "**/.claude/**",
+    "**/.DS_Store",
+    "temp*/**",
+]
+
+[lib]
+name = "senna"
+path = "src/lib.rs"
+
+[[bin]]
+name = "senna"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda = [
+    "legume-numeric/cuda",
+    "cnv/cuda",
+    "data-beans/cuda",
+    "graph-embedding-util/cuda",
+]
+metal = [
+    "legume-numeric/metal",
+    "cnv/metal",
+    "data-beans/metal",
+    "graph-embedding-util/metal",
+]
+hdf5 = ["data-beans/hdf5"]
+
+[dependencies]
+mimalloc = "0.1"
+cnv = { version = "0.2.1", package = "mung-cnv" }
+data-beans = { version = "0.6.12", features = ["aux", "alg"] }
+legume-numeric = { version = "0.8.10", features = ["matrix", "param", "candle", "mcmc"] }
+genomic-data = { version = "0.4.1", package = "legume-genomic-types" }
+graph-embedding-util = { version = "0.8.4", package = "legume-graph-embedding" }
+hsblock = { version = "0.1.1", package = "hsblock-rs" }
+enrichment = { version = "0.3.9", package = "legume-enrichment" }
+
+anyhow = "1.0"
+clap = { version = "4.5.20", features = ["derive"] }
+num_cpus = "1.16.0"
+rayon = "1.10.0"
+tempfile = "3.2"
+rand = "0.10.1"
+rand_distr = "0.6"
+nalgebra = "0.34"
+nalgebra-sparse = "0.11"
+
+special = "0.13"
+indicatif = { version = "^0.18", features = ["rayon"] }
+log = "0.4"
+dashmap = { version = "6.1.0", features = ["rayon"] }
+rustc-hash = "2.1"
+colored = "3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
