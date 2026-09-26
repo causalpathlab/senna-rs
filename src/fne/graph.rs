@@ -12,7 +12,8 @@
 use data_beans::aux::feature_names::FeatureNameKind;
 use data_beans::aux::gene_sets::{read_membership_pairs, GeneSets};
 use data_beans::aux::ontology::{Ontology, Rel};
-use genomic_data::coordinates::{parse_region, tile_windows};
+use genomic_data::coordinates::{parse_region, PeakCoord};
+pub(crate) use genomic_data::gff::{is_ensembl_gene_id, strip_ensembl_version};
 use graph_embedding_util::fne::{
     NodeTypeTable, Relation, RelationPolarity, RelationTable, TypedEdgeList,
 };
@@ -20,7 +21,7 @@ use legume_numeric::matrix::common_io::{file_stem, read_lines_of_words_delim};
 use legume_numeric::matrix::membership::detect_delimiter;
 use legume_numeric::matrix::pair_graph::FeaturePairGraph;
 use log::{info, warn};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub(crate) use data_beans::aux::feature_types::{GENE_TYPE, REGION_TYPE, TERM_TYPE};
 
@@ -114,6 +115,12 @@ pub(crate) struct TypedGraph {
 
 pub(crate) struct TypedGraphBuilder {
     name_kind: FeatureNameKind,
+    /// Version-stripped Ensembl gene id → symbol (`--gene-gff`).
+    gene_symbols: Option<FxHashMap<Box<str>, Box<str>>>,
+    /// Raw gene spelling → local id of its canonical node.
+    raw_genes: FxHashMap<Box<str>, u32>,
+    /// Scratch for window names ([`Self::windows`]).
+    name_buf: String,
     types: Vec<TypeNodes>,
     type_index: FxHashMap<Box<str>, usize>,
     relations: Vec<RelSpec>,
@@ -124,11 +131,36 @@ impl TypedGraphBuilder {
     pub(crate) fn new(name_kind: FeatureNameKind) -> Self {
         Self {
             name_kind,
+            gene_symbols: None,
+            raw_genes: FxHashMap::default(),
+            name_buf: String::new(),
             types: Vec::new(),
             type_index: FxHashMap::default(),
             relations: Vec::new(),
             rel_index: FxHashMap::default(),
         }
+    }
+
+    /// Map Ensembl gene ids onto symbols before the name rule applies.
+    pub(crate) fn set_gene_symbols(&mut self, map: FxHashMap<Box<str>, Box<str>>) {
+        self.gene_symbols = Some(map);
+        self.raw_genes.clear();
+    }
+
+    /// The one gene-name rule every input goes through: drop the Ensembl
+    /// version (`ENSG00000141510.17` → `ENSG00000141510`), map a bare id to
+    /// its symbol when `--gene-gff` gave one, then apply the
+    /// `--feature-name-kind` rule.
+    pub(crate) fn canonical_gene(&self, name: &str) -> Box<str> {
+        let stripped = strip_ensembl_version(name.trim());
+        if let Some(sym) = self
+            .gene_symbols
+            .as_ref()
+            .and_then(|m| m.get(stripped.as_ref()))
+        {
+            return self.name_kind.canonicalize(sym);
+        }
+        self.name_kind.canonicalize(&stripped)
     }
 
     fn type_id(&mut self, ty: &str) -> usize {
@@ -149,22 +181,40 @@ impl TypedGraphBuilder {
     /// `(type id, local id)` of a node, inserting it on first sight.
     fn node(&mut self, ty: &str, name: &str) -> (usize, u32) {
         let t = self.type_id(ty);
-        let key: Box<str> = if ty == GENE_TYPE {
-            self.name_kind.canonicalize(name)
+        let is_gene = ty == GENE_TYPE;
+        // Hits allocate nothing: other types are keyed by the name itself,
+        // genes by a memo of the raw spellings already canonicalised (a
+        // GTEx file repeats each of ~20k ids a hundred times over).
+        let hit = if is_gene {
+            self.raw_genes.get(name)
+        } else {
+            self.types[t].index.get(name)
+        };
+        if let Some(&i) = hit {
+            return (t, i);
+        }
+        let key: Box<str> = if is_gene {
+            self.canonical_gene(name)
         } else {
             name.into()
         };
         let nodes = &mut self.types[t];
-        if let Some(&i) = nodes.index.get(&key) {
-            return (t, i);
+        let i = match nodes.index.get(&key) {
+            Some(&i) => i,
+            None => {
+                let i = nodes.names.len() as u32;
+                nodes.names.push(key.clone());
+                nodes.index.insert(key, i);
+                i
+            }
+        };
+        if is_gene {
+            self.raw_genes.insert(name.into(), i);
         }
-        let i = nodes.names.len() as u32;
-        nodes.names.push(key.clone());
-        nodes.index.insert(key, i);
         (t, i)
     }
 
-    fn relation(&mut self, name: &str, lhs: &str, rhs: &str) -> usize {
+    pub(crate) fn relation(&mut self, name: &str, lhs: &str, rhs: &str) -> usize {
         if let Some(&r) = self.rel_index.get(name) {
             return r;
         }
@@ -188,13 +238,13 @@ impl TypedGraphBuilder {
     }
 
     /// One edge from parsed names: resolve both nodes, insert the edge.
-    fn link(&mut self, r: usize, lt: &str, lhs: &str, rt: &str, rhs: &str, weight: f32) {
+    pub(crate) fn link(&mut self, r: usize, lt: &str, lhs: &str, rt: &str, rhs: &str, weight: f32) {
         let (_, i) = self.node(lt, lhs);
         let (_, j) = self.node(rt, rhs);
         self.add_edge(r, i, j, weight);
     }
 
-    fn add_edge(&mut self, r: usize, lhs: u32, rhs: u32, weight: f32) {
+    pub(crate) fn add_edge(&mut self, r: usize, lhs: u32, rhs: u32, weight: f32) {
         let rel = &mut self.relations[r];
         let key = if rel.undirected {
             if lhs == rhs {
@@ -431,7 +481,7 @@ impl TypedGraphBuilder {
 
     /// Attach text to a node (inserting it if new); a later call fills only
     /// the parts still missing.
-    fn set_text(&mut self, ty: &str, name: &str, text: NodeText) {
+    pub(crate) fn set_text(&mut self, ty: &str, name: &str, text: NodeText) {
         let (t, i) = self.node(ty, name);
         let slot = self.types[t].texts.entry(i).or_default();
         if slot.name.is_none() {
@@ -527,9 +577,19 @@ impl TypedGraphBuilder {
             warn!("fne: --obo given but no term nodes are in the graph; its hierarchy is skipped");
             return;
         };
+        // The ontology's own spelling of every id whose canonical CURIE
+        // differs (EFO's OBO writes `efo:EFO_0004340` for `EFO:0004340`).
+        let original: FxHashMap<Box<str>, &str> = onto
+            .ids()
+            .filter_map(|id| {
+                let c = canonical_term_id(id);
+                (c.as_ref() != id).then(|| (c.into_owned().into_boxed_str(), id))
+            })
+            .collect();
         let n_present = self.types[t].names.len();
         for i in 0..n_present {
             let id = &self.types[t].names[i];
+            let id = original.get(id).copied().unwrap_or(id);
             let text = NodeText {
                 name: onto.name(id).map(Box::from),
                 text: onto.def(id).map(Box::from),
@@ -557,7 +617,13 @@ impl TypedGraphBuilder {
         let index = &self.types[t].index;
         let mut edges: Vec<(u32, u32, Rel)> = onto
             .edges()
-            .filter_map(|(child, parent, rel)| Some((*index.get(child)?, *index.get(parent)?, rel)))
+            .filter_map(|(child, parent, rel)| {
+                Some((
+                    *index.get(canonical_term_id(child).as_ref())?,
+                    *index.get(canonical_term_id(parent).as_ref())?,
+                    rel,
+                ))
+            })
             .collect();
         edges.sort_unstable_by_key(|(c, p, rel)| (*c, *p, matches!(rel, Rel::PartOf)));
         let n = edges.len();
@@ -595,9 +661,7 @@ impl TypedGraphBuilder {
                 continue;
             };
             let weight = parse_weight(line.get(2).map(AsRef::as_ref), path)?;
-            for w in tile_windows(&region, window) {
-                self.link(r, REGION_TYPE, &w.to_string(), GENE_TYPE, &line[1], weight);
-            }
+            self.link_region(r, &region, window, GENE_TYPE, &line[1], weight);
             n_rows += 1;
         }
         if n_bad > 0 {
@@ -614,6 +678,93 @@ impl TypedGraphBuilder {
             self.types[self.type_index[REGION_TYPE]].names.len()
         );
         Ok(())
+    }
+
+    /// Link a region to a node of type `rt` from every `window`-bp window
+    /// the region overlaps; the region nodes are shared by every input.
+    pub(crate) fn link_region(
+        &mut self,
+        r: usize,
+        region: &PeakCoord,
+        window: i64,
+        rt: &str,
+        rhs: &str,
+        weight: f32,
+    ) {
+        let mut wins = Vec::new();
+        self.windows(region, window, &mut wins);
+        let j = self.node_id(rt, rhs);
+        self.link_windows(r, &wins, j, weight);
+    }
+
+    /// Local ids of the `window`-bp windows `region` overlaps (see
+    /// [`genomic_data::coordinates::tile_windows`]), inserting new ones, into
+    /// `out`. A window's name is
+    /// written into a reused buffer, so a window already seen costs a lookup
+    /// and no allocation.
+    pub(crate) fn windows(&mut self, region: &PeakCoord, window: i64, out: &mut Vec<u32>) {
+        use std::fmt::Write;
+        out.clear();
+        let t = self.type_id(REGION_TYPE);
+        let (first, last) = if window <= 0 {
+            (0, 0)
+        } else {
+            (
+                region.start.div_euclid(window),
+                (region.end - 1).max(region.start).div_euclid(window),
+            )
+        };
+        let mut name = std::mem::take(&mut self.name_buf);
+        for i in first..=last {
+            name.clear();
+            let (start, end) = if window <= 0 {
+                (region.start, region.end)
+            } else {
+                (i * window, (i + 1) * window)
+            };
+            let _ = write!(name, "{}:{start}-{end}", region.chr);
+            let nodes = &mut self.types[t];
+            let id = match nodes.index.get(name.as_str()) {
+                Some(&id) => id,
+                None => {
+                    let id = nodes.names.len() as u32;
+                    let key: Box<str> = name.as_str().into();
+                    nodes.names.push(key.clone());
+                    nodes.index.insert(key, id);
+                    id
+                }
+            };
+            out.push(id);
+        }
+        self.name_buf = name;
+    }
+
+    /// The local id of a node, inserting it on first sight.
+    pub(crate) fn node_id(&mut self, ty: &str, name: &str) -> u32 {
+        self.node(ty, name).1
+    }
+
+    /// Edges from every window in `wins` to the node `j`, in relation `r`.
+    pub(crate) fn link_windows(&mut self, r: usize, wins: &[u32], j: u32, weight: f32) {
+        for &i in wins {
+            self.add_edge(r, i, j, weight);
+        }
+    }
+
+    /// `true` when relation `r` starts at nodes of type `ty`.
+    pub(crate) fn relation_lhs_is(&self, r: usize, ty: &str) -> bool {
+        self.types[self.relations[r].lhs_type].name.as_ref() == ty
+    }
+
+    /// Edge count and the number of distinct lhs nodes of relation `r`.
+    pub(crate) fn relation_size(&self, r: usize) -> (usize, usize) {
+        let rel = &self.relations[r];
+        let lhs: FxHashSet<u32> = rel.edges.keys().map(|(i, _)| *i).collect();
+        (rel.edges.len(), lhs.len())
+    }
+
+    pub(crate) fn relation_name(&self, r: usize) -> &str {
+        &self.relations[r].name
     }
 
     /// Resolve `name=value` against the relation roster; shared by weight /
@@ -675,6 +826,167 @@ impl TypedGraphBuilder {
         Ok(())
     }
 
+    /// Drop the `ty` nodes that `--links` reached through fewer than
+    /// `min_windows` distinct region windows, then the windows left with no
+    /// edge. A node that also carries an edge outside `region:*` and the
+    /// ontology hierarchy (a GAF or GMT annotation, a typed edge) is kept:
+    /// only link-only nodes are judged. Returns `(nodes, windows)` dropped.
+    pub(crate) fn prune_sparse_link_nodes(
+        &mut self,
+        ty: &str,
+        min_windows: usize,
+    ) -> (usize, usize) {
+        let (Some(&t), Some(&reg)) = (self.type_index.get(ty), self.type_index.get(REGION_TYPE))
+        else {
+            return (0, 0);
+        };
+        let n = self.types[t].names.len();
+        let mut windows: Vec<(u32, u32)> = Vec::new();
+        let mut other = vec![false; n];
+        let hierarchy = |r: &RelSpec| r.lhs_type == t && r.rhs_type == t;
+        for rel in &self.relations {
+            if rel.lhs_type == reg && rel.rhs_type == t {
+                windows.extend(rel.edges.keys().map(|&(w, j)| (j, w)));
+            } else if (rel.lhs_type == t || rel.rhs_type == t) && !hierarchy(rel) {
+                for &(i, j) in rel.edges.keys() {
+                    if rel.lhs_type == t {
+                        other[i as usize] = true;
+                    }
+                    if rel.rhs_type == t {
+                        other[j as usize] = true;
+                    }
+                }
+            }
+        }
+        // A window can link the node in several relations: count it once.
+        let keep: Vec<bool> = distinct_per_node(windows, n)
+            .into_iter()
+            .zip(&other)
+            .map(|(k, &other)| other || k == 0 || k >= min_windows)
+            .collect();
+        let dropped = self.retain_nodes(t, &keep);
+        (dropped, self.drop_orphan_windows())
+    }
+
+    /// Drop the region windows no edge touches any more; how many went.
+    pub(crate) fn drop_orphan_windows(&mut self) -> usize {
+        let Some(&reg) = self.type_index.get(REGION_TYPE) else {
+            return 0;
+        };
+        let mut used = vec![false; self.types[reg].names.len()];
+        for rel in &self.relations {
+            for &(i, j) in rel.edges.keys() {
+                if rel.lhs_type == reg {
+                    used[i as usize] = true;
+                }
+                if rel.rhs_type == reg {
+                    used[j as usize] = true;
+                }
+            }
+        }
+        self.retain_nodes(reg, &used)
+    }
+
+    /// Keep an edge into a `ctx_type` node only when its lhs node (a window
+    /// or a gene) reaches at most `max(1, ⌈max_share · N⌉)` of the N context
+    /// nodes, counted across every relation into that type: a window active
+    /// in most cell types says nothing about any one of them. Returns the
+    /// edges dropped per lhs type name.
+    pub(crate) fn prune_shared_context_edges(
+        &mut self,
+        ctx_type: &str,
+        max_share: f64,
+    ) -> Vec<(Box<str>, usize, usize)> {
+        let Some(&c) = self.type_index.get(ctx_type) else {
+            return Vec::new();
+        };
+        let n_ctx = self.types[c].names.len();
+        let limit = ((max_share * n_ctx as f64).ceil() as usize).max(1);
+        let mut lhs_types: Vec<usize> = self
+            .relations
+            .iter()
+            .filter(|r| r.rhs_type == c && r.lhs_type != c)
+            .map(|r| r.lhs_type)
+            .collect();
+        lhs_types.sort_unstable();
+        lhs_types.dedup();
+        let mut out = Vec::new();
+        for lt in lhs_types {
+            // Distinct contexts per lhs node, over every relation into `c`.
+            let pairs: Vec<(u32, u32)> = self
+                .relations
+                .iter()
+                .filter(|r| r.lhs_type == lt && r.rhs_type == c)
+                .flat_map(|r| r.edges.keys().copied())
+                .collect();
+            let shared: Vec<bool> = distinct_per_node(pairs, self.types[lt].names.len())
+                .into_iter()
+                .map(|k| k > limit)
+                .collect();
+            let (mut dropped, mut kept) = (0usize, 0usize);
+            for rel in self
+                .relations
+                .iter_mut()
+                .filter(|r| r.lhs_type == lt && r.rhs_type == c)
+            {
+                let before = rel.edges.len();
+                rel.edges.retain(|&(i, _), _| !shared[i as usize]);
+                dropped += before - rel.edges.len();
+                kept += rel.edges.len();
+            }
+            out.push((self.types[lt].name.clone(), dropped, kept));
+        }
+        out
+    }
+
+    /// Keep the nodes of type `t` where `keep` is true, re-numbering the
+    /// survivors and every edge that touches them; edges to dropped nodes go.
+    fn retain_nodes(&mut self, t: usize, keep: &[bool]) -> usize {
+        let mut new_id: Vec<Option<u32>> = vec![None; keep.len()];
+        let nodes = &mut self.types[t];
+        let mut names = Vec::new();
+        for (i, name) in nodes.names.drain(..).enumerate() {
+            if keep[i] {
+                new_id[i] = Some(names.len() as u32);
+                names.push(name);
+            }
+        }
+        let dropped = keep.len() - names.len();
+        if dropped > 0 && self.type_index.get(GENE_TYPE) == Some(&t) {
+            self.raw_genes.clear();
+        }
+        let nodes = &mut self.types[t];
+        if dropped == 0 {
+            nodes.names = names;
+            return 0;
+        }
+        nodes.index = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), i as u32))
+            .collect();
+        nodes.names = names;
+        nodes.texts = std::mem::take(&mut nodes.texts)
+            .into_iter()
+            .filter_map(|(i, text)| Some((new_id[i as usize]?, text)))
+            .collect();
+        for rel in &mut self.relations {
+            if rel.lhs_type != t && rel.rhs_type != t {
+                continue;
+            }
+            let (lt, rt) = (rel.lhs_type, rel.rhs_type);
+            rel.edges = std::mem::take(&mut rel.edges)
+                .into_iter()
+                .filter_map(|((i, j), w)| {
+                    let i = if lt == t { new_id[i as usize]? } else { i };
+                    let j = if rt == t { new_id[j as usize]? } else { j };
+                    Some(((i, j), w))
+                })
+                .collect();
+        }
+        dropped
+    }
+
     pub(crate) fn n_edges(&self) -> usize {
         self.relations.iter().map(|r| r.edges.len()).sum()
     }
@@ -707,6 +1019,32 @@ impl TypedGraphBuilder {
             node_types.extend(std::iter::repeat_n(nodes.name.clone(), nodes.names.len()));
         }
         let types = NodeTypeTable::new(&type_specs)?;
+        if let Some(&g) = self.type_index.get(GENE_TYPE) {
+            let names = &self.types[g].names;
+            // An id the GFF knows maps to itself only when the gene has no
+            // symbol (GENCODE names unnamed genes by their id): nothing to
+            // merge with, so it is not counted.
+            let n_ens = names
+                .iter()
+                .filter(|n| is_ensembl_gene_id(n))
+                .filter(|n| {
+                    self.gene_symbols
+                        .as_ref()
+                        .is_none_or(|m| !m.contains_key(n.as_ref()))
+                })
+                .count();
+            if n_ens > 0 && n_ens < names.len() {
+                let hint = if self.gene_symbols.is_some() {
+                    "they are not in --gene-gff, so they stay separate nodes from their symbols"
+                } else {
+                    "pass --gene-gff to map the ids onto symbols so the two spellings merge"
+                };
+                warn!(
+                    "fne: {n_ens} of {} gene nodes are Ensembl ids and the rest symbols; {hint}",
+                    names.len()
+                );
+            }
+        }
 
         let mut relations = Vec::new();
         let mut relation_repeats = Vec::new();
@@ -769,18 +1107,55 @@ impl TypedGraphBuilder {
     }
 }
 
+/// An edge weight: a finite, non-negative number.
+pub(crate) fn weight_value(s: &str) -> Option<f32> {
+    s.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|w| w.is_finite() && *w >= 0.0)
+}
+
 fn parse_weight(tok: Option<&str>, path: &str) -> anyhow::Result<f32> {
     match tok {
         None => Ok(1.0),
-        Some(t) => {
-            let w: f32 = t
-                .parse()
-                .map_err(|e| anyhow::anyhow!("{path}: weight column `{t}`: {e}"))?;
-            anyhow::ensure!(
-                w.is_finite() && w >= 0.0,
-                "{path}: weight column `{t}` must be a non-negative number"
-            );
-            Ok(w)
-        }
+        Some(t) => weight_value(t).ok_or_else(|| {
+            anyhow::anyhow!("{path}: weight column `{t}` must be a non-negative number")
+        }),
     }
+}
+
+/// An ontology id as the OBO Foundry CURIE: `efo:EFO_0004340` (EFO's own
+/// OBO export) → `EFO:0004340`, the id every other source (GWAS Catalog
+/// URIs, GAFs, other OBOs) uses. Anything else is returned as given.
+pub(crate) fn canonical_term_id(id: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let curie = id.split_once(':').and_then(|(ns, local)| {
+        let prefix = local.split_once('_')?.0;
+        let own = !ns.is_empty()
+            && ns.bytes().all(|b| b.is_ascii_lowercase())
+            && prefix.eq_ignore_ascii_case(ns);
+        own.then(|| curie_from_underscore(local)).flatten()
+    });
+    curie.map_or(Cow::Borrowed(id), Cow::Owned)
+}
+
+/// The OBO Foundry underscore form of an id as its CURIE:
+/// `EFO_0004340` → `EFO:0004340` (the last segment of a PURL, or the local
+/// part of EFO's `efo:EFO_0004340`). `None` when it is not of that shape.
+pub(crate) fn curie_from_underscore(local: &str) -> Option<String> {
+    let (prefix, num) = local.split_once('_')?;
+    (!prefix.is_empty() && !num.is_empty() && !local.contains(':'))
+        .then(|| format!("{prefix}:{num}"))
+}
+
+/// For `(node, neighbour)` pairs, the number of distinct neighbours of each
+/// of `n` nodes: one sort of the flat pair list, not a vector per node.
+fn distinct_per_node(mut pairs: Vec<(u32, u32)>, n: usize) -> Vec<usize> {
+    pairs.sort_unstable();
+    pairs.dedup();
+    let mut count = vec![0usize; n];
+    for (i, _) in pairs {
+        count[i as usize] += 1;
+    }
+    count
 }

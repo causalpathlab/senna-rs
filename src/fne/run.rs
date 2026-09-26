@@ -3,6 +3,7 @@
 
 use super::args::FneArgs;
 use super::graph::TypedGraphBuilder;
+use super::links::{add_links, check_build, LinkOpts, LinkSpec};
 use super::output::{write_outputs, write_text_export};
 use data_beans::aux::gene_sets::{read_gaf, read_gmt, GafOpts};
 use data_beans::aux::ontology::Ontology;
@@ -21,17 +22,37 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         || !args.membership.is_empty()
         || args.gaf.is_some()
         || !args.gmt.is_empty()
-        || !args.region_gene.is_empty();
+        || !args.region_gene.is_empty()
+        || !args.links.is_empty();
     anyhow::ensure!(
         any_input,
-        "fne: no input files; pass gene-gene pair files, --named-pairs, --edges, --membership, --gaf, --gmt or --region-gene"
+        "fne: no input files; pass gene-gene pair files, --named-pairs, --edges, --membership, --gaf, --gmt, --region-gene or --links"
     );
     anyhow::ensure!(
-        args.gaf.is_none() || args.obo.is_some(),
+        args.gaf.is_none() || !args.obo.is_empty(),
         "fne: --gaf needs --obo to propagate the annotations up the ontology"
     );
 
+    let links: Vec<LinkSpec> = args
+        .links
+        .iter()
+        .map(|s| LinkSpec::parse(s))
+        .collect::<anyhow::Result<_>>()?;
+    let link_opts = LinkOpts::from_args(args)?;
+
     let mut builder = TypedGraphBuilder::new(args.name_kind());
+    if let Some(gff) = &args.gene_gff {
+        let map = genomic_data::gff::load_ensembl_symbol_map(gff)?;
+        anyhow::ensure!(
+            !map.is_empty(),
+            "fne: --gene-gff {gff}: no `gene` rows with both gene_id and gene_name"
+        );
+        info!(
+            "fne: --gene-gff {gff}: {} Ensembl id → symbol pairs",
+            map.len()
+        );
+        builder.set_gene_symbols(map);
+    }
     let ppi = super::graph::PpiOpts {
         min_shared_neighbors: args.ppi_min_shared_neighbors,
         max_degree: args.ppi_max_degree,
@@ -60,14 +81,21 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--membership `{spec}`: expected `type=path`"))?;
         builder.add_membership_file(ty.trim(), path.trim())?;
     }
-    let onto = match &args.obo {
-        Some(obo) => {
+    let ontologies: Vec<Ontology> = args
+        .obo
+        .iter()
+        .map(|obo| {
             let onto = Ontology::load_obo(obo)?;
             info!("fne: loaded ontology: {} terms from {obo}", onto.len());
-            Some(onto)
-        }
-        None => None,
-    };
+            Ok(onto)
+        })
+        .collect::<anyhow::Result<_>>()?;
+    // GAF annotations propagate up GO: the ontology that holds its root, or
+    // the only / first one given.
+    let go = ontologies
+        .iter()
+        .find(|o| o.contains("GO:0008150"))
+        .or(ontologies.first());
     if let Some(gaf) = &args.gaf {
         info!(
             "fne: reading GAF annotations from {gaf} (no_iea={})",
@@ -79,7 +107,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
                 no_iea: args.no_iea,
             },
         )?
-        .into_gene_sets(onto.as_ref());
+        .into_gene_sets(go);
         builder.add_gene_sets(&sets, &file_stem(gaf), args.min_gene_set, args.max_gene_set);
     }
     for gmt in &args.gmt {
@@ -87,11 +115,48 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         let sets = read_gmt(gmt)?;
         builder.add_gene_sets(&sets, &file_stem(gmt), args.min_gene_set, args.max_gene_set);
     }
-    if let Some(onto) = &onto {
-        builder.add_ontology(onto);
+    // The hierarchy is built once, over every term present by then: here
+    // when there are no --links (so such a run keeps its relation order),
+    // after the links otherwise, so it also spans the trait terms they bring.
+    if links.is_empty() {
+        for onto in &ontologies {
+            builder.add_ontology(onto);
+        }
     }
     for path in &args.region_gene {
+        check_build(path, "--region-gene", None, "", &link_opts)?;
         builder.add_region_file(path, args.region_window)?;
+    }
+    for spec in &links {
+        add_links(&mut builder, spec, &link_opts)?;
+    }
+    if args.links_context_max_share < 1.0 {
+        for (lhs, dropped, kept) in builder
+            .prune_shared_context_edges(super::links::CONTEXT_TYPE, args.links_context_max_share)
+        {
+            info!(
+                "fne: --links-context-max-share {}: {dropped} `{lhs}`→context edges dropped as shared, {kept} kept",
+                args.links_context_max_share
+            );
+        }
+        builder.drop_orphan_windows();
+    }
+    if args.links_min_trait_windows > 1 && !links.is_empty() {
+        for ty in [super::graph::TERM_TYPE, super::links::TRAIT_TYPE] {
+            let (n, w) = builder.prune_sparse_link_nodes(ty, args.links_min_trait_windows);
+            if n > 0 {
+                info!(
+                    "fne: dropped {n} `{ty}` nodes reached by fewer than {} windows \
+                     (--links-min-trait-windows) and {w} windows left without edges",
+                    args.links_min_trait_windows
+                );
+            }
+        }
+    }
+    if !links.is_empty() {
+        for onto in &ontologies {
+            builder.add_ontology(onto);
+        }
     }
     for spec in &args.relation_weight {
         builder.set_relation_weight(spec)?;
@@ -171,6 +236,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         .chain(args.gaf.iter())
         .chain(args.gmt.iter())
         .chain(args.region_gene.iter())
+        .chain(args.links.iter())
         .map(ToString::to_string)
         .collect();
     write_run_manifest(&RunDescription {

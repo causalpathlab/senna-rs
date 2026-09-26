@@ -12,10 +12,13 @@
 //!
 //! Thin by design: the recipe lives in the shared crate; this module owns
 //! the command line, the readers that turn edge files into a typed graph,
-//! and the artifacts.
+//! and the artifacts. `links` reads published association and enhancer–gene
+//! resources (GWAS Catalog, GTEx, eQTL Catalogue, ABC / ENCODE-rE2G,
+//! OpenGWAS) onto the same region windows.
 
 mod args;
 mod graph;
+mod links;
 mod output;
 mod run;
 
@@ -25,3 +28,7 @@ pub use run::fit_fne;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "links_tests.rs"]
+mod links_tests;
