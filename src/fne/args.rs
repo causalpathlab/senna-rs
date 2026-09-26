@@ -214,15 +214,22 @@ pub struct FneArgs {
 
     #[arg(
         long,
+        value_delimiter = ',',
         help_heading = "Membership and annotations",
-        help = "Ontology (OBO) for --gaf propagation, term:term edges and term text",
-        long_help = "An OBO ontology (go-basic.obo, cl-basic.obo).\n\
-                     Besides propagating --gaf annotations,\n\
-                     its hierarchy joins the graph as the relations `term:term/is_a` and `term:term/part_of`\n\
+        help = "Ontology file(s) (OBO) for --gaf propagation, term:term edges and term text",
+        long_help = "OBO ontologies (go-basic.obo, cl-basic.obo, efo.obo), comma-separated or repeated.\n\
+                     Besides propagating --gaf annotations (with the ontology that holds GO,\n\
+                     or the first one given),\n\
+                     each hierarchy joins the graph as the relations `term:term/is_a` and `term:term/part_of`\n\
                      over the terms kept (friend polarity),\n\
-                     and its names and definitions feed --export-text."
+                     and its names and definitions feed --export-text.\n\
+                     `--obo efo.obo` gives the GWAS Catalog's EFO / MONDO trait terms their hierarchy.\n\
+                     \n\
+                     Example:\n\
+                       senna fne --gaf goa_human.gaf.gz --obo go-basic.obo,efo.obo \\\n\
+                         --links gwas-catalog:associations.tsv -o out"
     )]
-    pub(crate) obo: Option<Box<str>>,
+    pub(crate) obo: Vec<Box<str>>,
 
     #[arg(
         long,
@@ -248,6 +255,58 @@ pub struct FneArgs {
 
     #[arg(
         long,
+        help_heading = "Regions and links",
+        value_name = "TSV",
+        help = "eQTL Catalogue dataset_metadata*.tsv: names each dataset's context (sample_group) and relation",
+        long_help = "The eQTL Catalogue's dataset table (`dataset_metadata_r8.tsv` in\n\
+                     github.com/eQTL-Catalogue/eQTL-Catalogue-resources, data_tables/).\n\
+                     A `--links eqtl-catalogue:QTD000356.credible_sets.tsv.gz` file then takes its\n\
+                     `sample_group` as its context (`blood`, `macrophage_Salmonella`, `CD4+_Th2`) and\n\
+                     `<study>_<sample_group>[_<quant>]` as its relation stem (`GTEx_v10_blood`).\n\
+                     Without it the dataset id names both."
+    )]
+    pub(crate) eqtl_metadata: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help_heading = "Regions and links",
+        help = "--links: do not tie links to their tissue / cell type (no `context` nodes)",
+        long_help = "By default a link measured in a tissue or cell type also ties its windows and its gene\n\
+                     to a `context` node, in `region:context/<stem>` and `gene:context/<stem>`\n\
+                     (the link's weight): GTEx takes the tissue from the file name (`Whole_Blood`),\n\
+                     the eQTL Catalogue the dataset's sample_group (--eqtl-metadata),\n\
+                     ABC / ENCODE-rE2G the CellType column, and `preset@context:path` names it for\n\
+                     any source (e.g. `gtex@blood:Whole_Blood.v10.eQTLs.signif_pairs.parquet`, which\n\
+                     also merges it with the eQTL Catalogue's `blood`). Labels are matched exactly.\n\
+                     This flag leaves the context out."
+    )]
+    pub(crate) no_links_context: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help_heading = "Regions and links",
+        help = "--links: keep a window/gene→context edge only if it reaches ≤ this share of all contexts (1 = keep all)",
+        long_help = "After every --links source is read, keep a window→context or gene→context edge\n\
+                     only when that window (or gene) reaches at most max(1, ⌈share · N⌉) of the N context\n\
+                     nodes, counted over every source. A window active in most cell types says nothing\n\
+                     about any one of them, and such windows are most of the E2G release (the median\n\
+                     window is active in ~23 of 659 cell types, the median gene in 424).\n\
+                     1 (default) keeps every edge; 0.05 keeps the specific ones."
+    )]
+    pub(crate) links_context_max_share: f64,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help_heading = "Regions and links",
+        help = "--links abc / e2g: keep enhancer-gene links scoring at least this"
+    )]
+    pub(crate) links_min_score: f64,
+
+    #[arg(
+        long,
         default_value_t = 5,
         help_heading = "Membership and annotations",
         help = "Smallest gene set (GAF/GMT term) kept"
@@ -266,7 +325,7 @@ pub struct FneArgs {
         long,
         value_delimiter = ',',
         help_heading = "Membership and annotations",
-        help = "Region-gene link file(s): region <TAB> gene [<TAB> score]",
+        help = "Plain region-gene link file(s): region <TAB> gene [<TAB> score]; see --links for published formats",
         long_help = "Genomic region→gene links (eQTL, peak-to-gene, ABC), comma-separated or repeated.\n\
                      A region is `chr:start-end`, `chr_start_end`, or a position `chr:pos` / `chr_pos`;\n\
                      `chr` prefixes are dropped.\n\
@@ -279,11 +338,155 @@ pub struct FneArgs {
 
     #[arg(
         long,
-        default_value_t = 5000,
-        help_heading = "Membership and annotations",
-        help = "Window size (bp) the regions are tiled onto; 0 keeps regions as given"
+        default_value_t = 10000,
+        help_heading = "Regions and links",
+        help = "Window size (bp) every region input is tiled onto; 0 keeps regions as given",
+        long_help = "Window size (bp) the regions of --region-gene and --links are tiled onto:\n\
+                     fixed windows `[i·w, (i+1)·w)` on 1-based coordinates.\n\
+                     One window size serves every region input, so sources that hit the same window\n\
+                     share one `region` node. 0 keeps each region as given\n\
+                     (only sensible when every source names the same intervals)."
     )]
     pub(crate) region_window: i64,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help_heading = "Regions and links",
+        value_name = "[PRESET:]PATH",
+        help = "Association / enhancer-gene resource(s) in their published formats → region:<type>/<stem>",
+        long_help = "Genomic link resources read in their published formats, repeatable\n\
+                     (comma-separated too). `PRESET:PATH`, or a bare PATH whose preset is detected\n\
+                     from its header. Every locus is tiled onto --region-window windows, and each\n\
+                     source becomes the relation `region:<type>/<file stem>` (friend polarity).\n\
+                     \n\
+                     Presets:\n\
+                       gwas-catalog    GWAS Catalog associations (v1.0.2, \"with ontology annotations\"):\n\
+                                       CHR_ID/CHR_POS → `term` nodes of the MAPPED_TRAIT_URI ids\n\
+                                       (EFO:…, MONDO:…; add --obo efo.obo for their hierarchy)\n\
+                       gtex            GTEx signif pairs (.parquet or .txt.gz): variant_id → gene_id\n\
+                       eqtl-catalogue  eQTL Catalogue SuSiE credible sets: variant → gene_id, weight = pip\n\
+                       abc             ABC / ENCODE-rE2G predictions: chr,start,end → TargetGene,\n\
+                                       weight = ABC.Score or Score (alias: encode-re2g)\n\
+                       opengwas        a GWAS-VCF (ES:SE:LP) or a directory of them:\n\
+                                       records with LP ≥ --links-min-lp → `trait` node per VCF sample\n\
+                       e2g             the E2G parquet release directory (gs://e2g: cell_types.parquet,\n\
+                                       enhancers.parquet, enhancer_gene_predictions/): enhancer → gene,\n\
+                                       weight = score, one relation per model, context = cell type name\n\
+                       positions       a VCF or a table of loci (locus/variant column, or chr+pos[+end]),\n\
+                                       optional label/trait and weight columns → `trait` nodes\n\
+                                       (the file stem when there is no label)\n\
+                     \n\
+                     `PRESET@CONTEXT:PATH` names the tissue / cell type of the whole file\n\
+                     (see --no-links-context).\n\
+                     \n\
+                     Every file's genome build must match --genome-build.\n\
+                     \n\
+                     Example:\n\
+                       senna fne --links gwas-catalog:gwas_catalog_v1.0.2-associations.tsv \\\n\
+                         --links eqtl-catalogue:QTD000356.credible_sets.tsv.gz \\\n\
+                         --links gtex:Whole_Blood.v10.eQTLs.signif_pairs.parquet \\\n\
+                         --links abc:ENCODE_rE2G_K562.tsv.gz \\\n\
+                         --gene-gff gencode.v39.basic.annotation.gtf.gz --obo efo.obo -o out/g2r"
+    )]
+    pub(crate) links: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        help_heading = "Regions and links",
+        help = "--links: keep rows with p ≤ this (GWAS Catalog, GTEx, eQTL Catalogue, positions)"
+    )]
+    pub(crate) links_max_pvalue: Option<f64>,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help_heading = "Regions and links",
+        help = "--links eqtl-catalogue: keep credible-set variants with PIP ≥ this"
+    )]
+    pub(crate) links_min_pip: f64,
+
+    #[arg(
+        long,
+        default_value_t = 7.30103,
+        help_heading = "Regions and links",
+        help = "--links opengwas: keep GWAS-VCF records with LP (−log10 p) ≥ this (default: p ≤ 5e-8)"
+    )]
+    pub(crate) links_min_lp: f64,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help_heading = "Regions and links",
+        help = "--links: drop trait/term nodes reached by fewer than this many distinct windows (≤1 = keep all)",
+        long_help = "Drop the `term` / `trait` nodes that the --links sources reach through fewer than\n\
+                     this many distinct region windows, and the windows left with no edge after that.\n\
+                     A trait backed by one or two loci carries almost no signal for the embedding but\n\
+                     still takes a row and crowds nearest-neighbour lists (about half of the\n\
+                     GWAS Catalog's terms, holding ~2% of its edges, fall under 5).\n\
+                     Terms that also carry a non-link edge (a --gaf / --gmt annotation, an --edges row)\n\
+                     are kept; the ontology hierarchy does not count. 0 or 1 keeps every trait."
+    )]
+    pub(crate) links_min_trait_windows: usize,
+
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "",
+        value_name = "COLUMN",
+        help_heading = "Regions and links",
+        help = "--links: one relation per group, `region:<type>/<stem>/<group>` (ABC default: CellType)",
+        long_help = "Split every --links source into one relation per group value,\n\
+                     `region:<type>/<stem>/<group>`. Without a COLUMN the preset's own group is used:\n\
+                     ABC / ENCODE-rE2G split by CellType, OpenGWAS by trait (VCF sample).\n\
+                     With a COLUMN, that column of any table source."
+    )]
+    pub(crate) links_split_by_group: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help_heading = "Regions and links",
+        help = "--links gwas-catalog: also link each hit to its MAPPED_GENEs (region:gene/<stem>/mapped_gene)",
+        long_help = "Also turn the GWAS Catalog's MAPPED_GENE column into the relation\n\
+                     `region:gene/<stem>/mapped_gene`. Off by default: the mapped genes are the\n\
+                     nearest or overlapping genes, a positional annotation rather than evidence,\n\
+                     and they would teach the embedding proximity that the windows already encode."
+    )]
+    pub(crate) gwas_mapped_gene: bool,
+
+    #[arg(
+        long,
+        default_value = "GRCh38",
+        help_heading = "Regions and links",
+        help = "Genome build of the run (GRCh38 or GRCh37); every region input must match",
+        long_help = "The reference assembly every region input is expected to be on.\n\
+                     A source whose build is declared (GWAS Catalog, eQTL Catalogue: GRCh38) or\n\
+                     detected (a `_b37` variant id, a VCF header, `hg19` in the file name) and differs\n\
+                     is an error: windows of different builds do not name the same DNA.\n\
+                     There is no in-tool liftover; lift the file over first."
+    )]
+    pub(crate) genome_build: Box<str>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help_heading = "Regions and links",
+        help = "Tile a source anyway when its genome build differs from --genome-build (warns)"
+    )]
+    pub(crate) allow_build_mismatch: bool,
+
+    #[arg(
+        long,
+        help_heading = "Regions and links",
+        help = "GFF/GTF mapping Ensembl gene ids to symbols across every input",
+        long_help = "A GENCODE / Ensembl GFF or GTF (gzip or not). Its `gene` rows map\n\
+                     version-stripped Ensembl ids onto gene symbols before the --feature-name-kind rule,\n\
+                     for every input, so `ENSG00000141510.17` from GTEx and `TP53` from the GWAS Catalog\n\
+                     or a PPI become one node. Without it, versions are still stripped, and a run that\n\
+                     mixes ids and symbols warns."
+    )]
+    pub(crate) gene_gff: Option<Box<str>>,
 
     #[arg(
         long,

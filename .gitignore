@@ -9,3 +9,4 @@
 temp*/
 *.parquet
 *.safetensors
+/target-cuda/
