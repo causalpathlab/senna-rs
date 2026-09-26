@@ -48,16 +48,10 @@ pub struct LayoutPhateArgs {
     )]
     orient_by_root: bool,
 
-    #[arg(
-        long,
-        help = "Ignored; root selection belongs to `lupin pseudotime`"
-    )]
+    #[arg(long, help = "Ignored; root selection belongs to `lupin pseudotime`")]
     root_cell: Option<Box<str>>,
 
-    #[arg(
-        long,
-        help = "Ignored; root selection belongs to `lupin pseudotime`"
-    )]
+    #[arg(long, help = "Ignored; root selection belongs to `lupin pseudotime`")]
     root_node: Option<usize>,
 
     #[arg(
@@ -181,9 +175,7 @@ fn obtain_pseudotime(
         cell_names.len()
     );
     if pt_cells != cell_names {
-        log::warn!(
-            "pseudotime row names differ from data cell names — using positional alignment"
-        );
+        log::warn!("pseudotime row names differ from data cell names — using positional alignment");
     }
     Ok((0..pt_mat.nrows()).map(|i| pt_mat[(i, 0)]).collect())
 }
