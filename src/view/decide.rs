@@ -22,6 +22,9 @@ pub struct Watcher {
     pub latest: Option<PathBuf>,
     pub error: Option<String>,
     stamp: Option<SystemTime>,
+    /// The decisions directory's modification time at the last search for a
+    /// status file, so the search reruns only when files come or go.
+    dir_stamp: Option<SystemTime>,
 }
 
 impl Watcher {
@@ -55,6 +58,7 @@ impl Watcher {
                     latest: None,
                     error: None,
                     stamp: None,
+                    dir_stamp: None,
                 };
                 w.refresh();
                 return Some(w);
@@ -68,6 +72,7 @@ impl Watcher {
             latest: None,
             error: None,
             stamp: None,
+            dir_stamp: None,
         })
     }
 
@@ -91,7 +96,11 @@ impl Watcher {
     /// Re-read the status file if it changed. Returns whether it did.
     pub fn refresh(&mut self) -> bool {
         if self.status.is_none() {
-            self.status = self.locate_status();
+            let dir = modified(run_manifest::manifest_dir(&self.decisions));
+            if dir != self.dir_stamp {
+                self.dir_stamp = dir;
+                self.status = self.locate_status();
+            }
         }
         let Some(status) = &self.status else {
             return false;

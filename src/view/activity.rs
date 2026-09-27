@@ -10,16 +10,21 @@
 //!   time. The backend is opened on first use.
 //!
 //! Values come back aligned to a set of points by cell name, ready to be
-//! mapped onto a colour ramp.
+//! mapped onto a colour ramp. Which model row each point is, is worked out
+//! once per view and cached, not per feature.
 
 use data_beans::utilities::name_matching::GeneIndex;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunManifest};
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
+use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Source {
     Expected,
     Observed,
@@ -73,7 +78,15 @@ struct Expected {
     features: Axis,
     cells: Vec<Box<str>>,
     model: Model,
+    /// Each feature's expected variance over all cells (embedding runs), for
+    /// the "varies most here" ranking; computed on first use.
+    variance_everywhere: OnceCell<Vec<f32>>,
+    /// θ and β out of log space (topic runs); computed on first use.
+    topic_linear: OnceCell<(Mat, Mat)>,
 }
+
+/// A point with no row in a source's cell table.
+const NO_ROW: u32 = u32::MAX;
 
 struct Observed {
     data: SparseIoVec,
@@ -113,12 +126,16 @@ impl Levels {
         let (lo, hi) = if sample.is_empty() {
             (0.0, 1.0)
         } else {
-            sample.sort_unstable_by(f32::total_cmp);
-            let q = |p: f32| sample[((sample.len() - 1) as f32 * p) as usize];
+            // Two linear-time selections, not a full sort.
+            let mut q = |p: f32| {
+                let k = ((sample.len() - 1) as f32 * p) as usize;
+                *sample.select_nth_unstable_by(k, f32::total_cmp).1
+            };
+            let hi = q(0.99);
             // Counts start the ramp at zero; model levels at a low quantile,
             // since their scale has no natural origin.
             let lo = if zero_is_off { 0.0 } else { q(0.02) };
-            (lo, q(0.99).max(lo + 1e-6))
+            (lo, hi.max(lo + 1e-6))
         };
         Self {
             values,
@@ -129,15 +146,20 @@ impl Levels {
     }
 }
 
-/// Values per source cell, the cell names they belong to, and the feature's
-/// name as its axis spells it.
-type Raw<'a> = (Vec<f32>, &'a [Box<str>], Box<str>);
-
 pub struct Activity {
     manifest: RunManifest,
     dir: PathBuf,
     expected: Option<Result<Expected, String>>,
     observed: Option<Result<Observed, String>>,
+    /// Row of each point of a view in a source's cell table, by (source,
+    /// view key).
+    rows: HashMap<(Source, usize), Arc<Vec<u32>>>,
+}
+
+impl std::hash::Hash for Source {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (*self as u8).hash(h);
+    }
 }
 
 fn read_table(dir: &Path, rel: &str) -> anyhow::Result<MatWithNames<Mat>> {
@@ -153,7 +175,47 @@ impl Activity {
             dir,
             expected: None,
             observed: None,
+            rows: HashMap::default(),
         }
+    }
+
+    /// Forget the per-view row maps, when the views themselves changed.
+    pub fn forget_views(&mut self) {
+        self.rows.clear();
+    }
+
+    /// Row of each of `names` in `source`'s cell table (`NO_ROW` if absent),
+    /// cached under `key` (the caller's view id).
+    fn rows(
+        &mut self,
+        source: Source,
+        key: usize,
+        names: &[Box<str>],
+    ) -> Result<Arc<Vec<u32>>, String> {
+        if let Some(r) = self
+            .rows
+            .get(&(source, key))
+            .filter(|r| r.len() == names.len())
+        {
+            return Ok(r.clone());
+        }
+        let cells: &[Box<str>] = match source {
+            Source::Expected => &self.expected()?.cells,
+            Source::Observed => &self.observed()?.cells,
+        };
+        let index: HashMap<&str, u32> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.as_ref(), i as u32))
+            .collect();
+        let rows: Arc<Vec<u32>> = Arc::new(
+            names
+                .iter()
+                .map(|n| index.get(n.as_ref()).copied().unwrap_or(NO_ROW))
+                .collect(),
+        );
+        self.rows.insert((source, key), rows.clone());
+        Ok(rows)
     }
 
     fn load_expected(&self) -> anyhow::Result<Expected> {
@@ -184,6 +246,8 @@ impl Activity {
                     rho: rho.mat,
                     bias,
                 },
+                variance_everywhere: OnceCell::new(),
+                topic_linear: OnceCell::new(),
             });
         }
         if let (true, Some(theta_rel), Some(beta_rel)) = (
@@ -206,6 +270,8 @@ impl Activity {
                     log_theta: theta.mat,
                     log_beta: beta.mat,
                 },
+                variance_everywhere: OnceCell::new(),
+                topic_linear: OnceCell::new(),
             });
         }
         anyhow::bail!("this run has no model tables to predict a feature from")
@@ -269,9 +335,9 @@ impl Activity {
         })
     }
 
-    /// Raw values of `feature` per source cell, with the cell names they
-    /// belong to and the name the axis spells the feature with.
-    fn raw(&mut self, feature: &str, source: Source) -> Result<Raw<'_>, String> {
+    /// Values of `feature` per source cell, and the name the axis spells the
+    /// feature with.
+    fn raw(&mut self, feature: &str, source: Source) -> Result<(Vec<f32>, Box<str>), String> {
         match source {
             Source::Expected => {
                 let e = self.expected()?;
@@ -288,19 +354,21 @@ impl Activity {
                         log_theta,
                         log_beta,
                     } => {
+                        // log Σ_k exp(log θ_nk + log β_gk), two passes, no
+                        // per-cell allocation.
                         let b = log_beta.row(g);
-                        log_theta
-                            .row_iter()
-                            .map(|t| {
-                                let s: Vec<f32> =
-                                    t.iter().zip(b.iter()).map(|(a, b)| a + b).collect();
-                                let m = s.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                                m + s.iter().map(|v| (v - m).exp()).sum::<f32>().ln()
+                        (0..log_theta.nrows())
+                            .into_par_iter()
+                            .map(|n| {
+                                let t = log_theta.row(n);
+                                let terms = || t.iter().zip(b.iter()).map(|(a, b)| a + b);
+                                let m = terms().fold(f32::NEG_INFINITY, f32::max);
+                                m + terms().map(|v| (v - m).exp()).sum::<f32>().ln()
                             })
                             .collect()
                     }
                 };
-                Ok((values, &e.cells, e.features.names[g].clone()))
+                Ok((values, e.features.names[g].clone()))
             }
             Source::Observed => {
                 let o = self.observed()?;
@@ -317,26 +385,35 @@ impl Activity {
                 for (&c, &v) in row.col_indices().iter().zip(row.values()) {
                     values[c] = v.ln_1p();
                 }
-                Ok((values, &o.cells, o.features.names[g].clone()))
+                Ok((values, o.features.names[g].clone()))
             }
         }
     }
 
-    /// `feature` on each of `points` (by name).
+    /// `values` (per source cell) on the points `rows` maps.
+    fn on_points(values: &[f32], rows: &[u32]) -> Vec<f32> {
+        rows.iter()
+            .map(|&r| {
+                if r == NO_ROW {
+                    f32::NAN
+                } else {
+                    values[r as usize]
+                }
+            })
+            .collect()
+    }
+
+    /// `feature` on each of the points `names` (the view `key`).
     pub fn levels(
         &mut self,
         feature: &str,
         source: Source,
-        point_index: &HashMap<Box<str>, usize>,
-        n_points: usize,
+        key: usize,
+        names: &[Box<str>],
     ) -> Result<(Levels, Box<str>), String> {
-        let (raw, cells, spelled) = self.raw(feature, source)?;
-        let mut values = vec![f32::NAN; n_points];
-        for (c, name) in cells.iter().enumerate() {
-            if let Some(&i) = point_index.get(name) {
-                values[i] = raw[c];
-            }
-        }
+        let rows = self.rows(source, key, names)?;
+        let (raw, spelled) = self.raw(feature, source)?;
+        let values = Self::on_points(&raw, &rows);
         Ok((
             Levels::from_values(values, source == Source::Observed),
             spelled,
@@ -350,14 +427,15 @@ impl Activity {
         &mut self,
         features: &[Box<str>],
         source: Source,
-        point_index: &HashMap<Box<str>, usize>,
-        n_points: usize,
+        key: usize,
+        names: &[Box<str>],
     ) -> Result<(Levels, usize), String> {
+        let n_points = names.len();
         let mut sum = vec![0f32; n_points];
         let mut seen = vec![false; n_points];
         let mut used = 0usize;
         for f in features {
-            let Ok((levels, _)) = self.levels(f, source, point_index, n_points) else {
+            let Ok((levels, _)) = self.levels(f, source, key, names) else {
                 continue;
             };
             used += 1;
@@ -400,23 +478,20 @@ impl Activity {
     /// A nudge from the model, not a test: `o` shows the observed counts.
     pub fn suggest(
         &mut self,
+        key: usize,
         universe: &[Box<str>],
         group: Option<&[bool]>,
         top: usize,
     ) -> Result<Vec<(Box<str>, f32)>, String> {
+        let rows = self.rows(Source::Expected, key, universe)?;
         let e = self.expected()?;
-        let index: HashMap<&str, usize> = e
-            .cells
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.as_ref(), i))
-            .collect();
         let pick = |want: Option<bool>| -> Vec<usize> {
-            universe
-                .iter()
+            rows.iter()
                 .enumerate()
-                .filter(|&(k, _)| want.is_none_or(|w| group.is_some_and(|g| g[k] == w)))
-                .filter_map(|(_, n)| index.get(n.as_ref()).copied())
+                .filter(|&(k, &r)| {
+                    r != NO_ROW && want.is_none_or(|w| group.is_some_and(|g| g[k] == w))
+                })
+                .map(|(_, &r)| r as usize)
                 .collect()
         };
         let scores: Vec<f32> = match (&e.model, group) {
@@ -433,15 +508,17 @@ impl Activity {
                 lfc
             }
             (Model::Embedding { z, rho, bias }, None) => {
-                let all_rows: Vec<usize> = (0..z.nrows()).collect();
                 let here = quadratic_forms(rho, &row_cov(z, &pick(None)));
-                let everywhere = quadratic_forms(rho, &row_cov(z, &all_rows));
+                let everywhere = e.variance_everywhere.get_or_init(|| {
+                    let all: Vec<usize> = (0..z.nrows()).collect();
+                    quadratic_forms(rho, &row_cov(z, &all))
+                });
                 let mut sorted = everywhere.clone();
                 sorted.sort_unstable_by(f32::total_cmp);
                 let floor = sorted[sorted.len() / 2];
                 let mut ratio: Vec<f32> = here
                     .iter()
-                    .zip(&everywhere)
+                    .zip(everywhere)
                     .map(|(&h, &a)| {
                         if a >= floor && a > 0.0 {
                             h / a
@@ -466,11 +543,12 @@ impl Activity {
                         "the focused group has no cells, or no other cells are in view".into(),
                     );
                 }
-                let theta = log_theta.map(f32::exp);
-                let beta = log_beta.map(f32::exp);
+                let (theta, beta) = e
+                    .topic_linear
+                    .get_or_init(|| (log_theta.map(f32::exp), log_beta.map(f32::exp)));
                 let (g, r) = (
-                    &beta * row_mean(&theta, &inside),
-                    &beta * row_mean(&theta, &rest),
+                    beta * row_mean(theta, &inside),
+                    beta * row_mean(theta, &rest),
                 );
                 g.iter()
                     .zip(r.iter())
@@ -522,15 +600,22 @@ fn row_mean(m: &Mat, rows: &[usize]) -> nalgebra::DVector<f32> {
     acc / rows.len().max(1) as f32
 }
 
-/// Covariance of the given rows of `m` (columns are variables).
+/// Covariance of the given rows of `m` (columns are variables), summed over
+/// chunks of rows in parallel.
 fn row_cov(m: &Mat, rows: &[usize]) -> Mat {
     let mu = row_mean(m, rows);
     let h = m.ncols();
-    let mut c = Mat::zeros(h, h);
-    for &i in rows {
-        let d = m.row(i).transpose() - &mu;
-        c.ger(1.0, &d, &d, 1.0);
-    }
+    let c = rows
+        .par_chunks(4096)
+        .map(|chunk| {
+            let mut c = Mat::zeros(h, h);
+            for &i in chunk {
+                let d = m.row(i).transpose() - &mu;
+                c.ger(1.0, &d, &d, 1.0);
+            }
+            c
+        })
+        .reduce(|| Mat::zeros(h, h), |a, b| a + b);
     c / (rows.len().max(2) - 1) as f32
 }
 

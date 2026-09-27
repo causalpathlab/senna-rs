@@ -28,6 +28,13 @@ pub fn linear_rgb(c: [u8; 3]) -> Rgb {
     c.map(srgb_to_linear)
 }
 
+/// The shared encoder, built on first use.
+#[must_use]
+pub fn encoder() -> &'static Encoder {
+    static ENCODER: std::sync::LazyLock<Encoder> = std::sync::LazyLock::new(Encoder::new);
+    &ENCODER
+}
+
 /// Linear `[0, 1]` → 8-bit sRGB through a 4096-entry table, built once.
 pub struct Encoder {
     lut: Vec<u8>,
