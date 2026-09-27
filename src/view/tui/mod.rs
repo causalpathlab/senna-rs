@@ -95,7 +95,7 @@ pub fn run(
     scene: Scene,
     graphics: Graphics,
     from: std::path::PathBuf,
-    decisions: Option<std::path::PathBuf>,
+    lupin: String,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     let result = (|| {
@@ -118,7 +118,7 @@ pub fn run(
             Graphics::Blocks => picker.set_protocol_type(ProtocolType::Halfblocks),
         }
         execute!(std::io::stdout(), EnableMouseCapture)?;
-        App::new(scene, picker, from, decisions).run(&mut terminal)
+        App::new(scene, picker, from, lupin).run(&mut terminal)
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
@@ -126,6 +126,12 @@ pub fn run(
 }
 
 type ZoomResult = Result<super::sublayout::Laid, String>;
+
+/// A decision lupin is applying on a worker thread.
+struct Relabeling {
+    merge: bool,
+    done: std::sync::mpsc::Receiver<Result<crate::view::decide::Reply, String>>,
+}
 
 /// A zoom into one group, running on a worker thread.
 struct Zooming {
@@ -188,9 +194,13 @@ struct App {
     side: Rect,
     /// Whether the sidebar may open (`b` toggles).
     sidebar: bool,
-    /// The `lupin relabel --watch` this view writes decisions for, if any.
+    /// A `lupin relabel --watch` on this chain, if one runs; its latest
+    /// round is followed.
     watcher: Option<Watcher>,
-    decisions: Option<std::path::PathBuf>,
+    /// The lupin binary decisions are handed to.
+    lupin: String,
+    /// A decision lupin is applying.
+    relabeling: Option<Relabeling>,
     /// Clusters marked for a merge (`v`), and the last one clicked.
     marked: Vec<i64>,
     clicked: Option<i64>,
@@ -200,16 +210,12 @@ struct App {
 }
 
 impl App {
-    fn new(
-        scene: Scene,
-        picker: Picker,
-        from: std::path::PathBuf,
-        decisions: Option<std::path::PathBuf>,
-    ) -> Self {
+    fn new(scene: Scene, picker: Picker, from: std::path::PathBuf, lupin: String) -> Self {
         let f = picker.font_size();
         Self {
-            watcher: Watcher::find(&from, decisions.as_deref()),
-            decisions,
+            watcher: Watcher::find(&from),
+            lupin,
+            relabeling: None,
             marked: Vec::new(),
             clicked: None,
             prompt: None,
@@ -244,7 +250,7 @@ impl App {
             if self.advance()? {
                 terminal.draw(|f| self.draw(f))?;
             }
-            if self.finish_zoom() {
+            if self.finish_zoom() || self.finish_relabel() {
                 continue;
             }
             if self.job.is_none() && self.checked.elapsed() >= Duration::from_secs(1) {
@@ -260,7 +266,7 @@ impl App {
             }
             let wait = if self.job.is_some() {
                 Duration::ZERO
-            } else if self.zooming.is_some() {
+            } else if self.zooming.is_some() || self.relabeling.is_some() {
                 Duration::from_millis(50)
             } else {
                 Duration::from_millis(250)
