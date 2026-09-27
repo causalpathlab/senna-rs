@@ -745,10 +745,13 @@ impl Scene {
         });
         let marks = staged.map_or(0, |c| c.marks.len());
         let verdict = staged.and_then(|c| c.verdict.as_ref());
-        let next = match (verdict, marks) {
-            (Some(_), _) => "next: ] for the next cluster · S when done (p previews)",
-            (None, 0) => "next: check the fit below, then + / - features (a accepts ?), then L",
-            (None, _) => "next: L to label it (or K to keep it, M to merge it with others)",
+        let merged = r.draft.merges.iter().find(|m| m.clusters.contains(&id));
+        let next = if verdict.is_some() || merged.is_some() {
+            "next: ] for the next cluster · S when done (p previews)"
+        } else if marks == 0 {
+            "next: check the fit below, then + / - features (a accepts ?), then L"
+        } else {
+            "next: L to label it (or K to keep it, M to merge it with others)"
         };
         let mut out = vec![
             format!(
@@ -769,6 +772,19 @@ impl Scene {
                 Verdict::Label { label, .. } => format!("staged: label {label}"),
                 Verdict::Keep { label, .. } => format!("staged: keep {label}"),
             });
+        }
+        if let Some(m) = merged {
+            let others: Vec<String> = m
+                .clusters
+                .iter()
+                .filter(|&&c| c != id)
+                .map(|c| format!("C{c}"))
+                .collect();
+            out.push(format!(
+                "staged: merge with {} as {}",
+                others.join(" "),
+                m.label
+            ));
         }
         out.push(format!("target {}", r.target.as_deref().unwrap_or("-")));
         out.push("markers fit here (tab picks the target):".into());
