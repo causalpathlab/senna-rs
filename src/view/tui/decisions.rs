@@ -66,6 +66,28 @@ impl App {
                     }
                 }
                 self.open_round(&path, "new round");
+                // Show what the round changed: the changed cells coloured,
+                // and what was applied, in the sidebar.
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                let mut lines = vec![
+                    format!("lupin wrote {name}"),
+                    String::new(),
+                    "applied:".into(),
+                ];
+                lines.extend(r.sent.iter().map(|l| format!("  {l}")));
+                lines.push(String::new());
+                lines.extend(self.scene.show_changes());
+                lines.push(String::new());
+                lines.push("x closes this · , goes back to the round before".into());
+                self.info = Some(lines);
+                self.message = Some(format!(
+                    "lupin applied {} decisions in {:.1} s · coloured by what changed",
+                    r.sent.len(),
+                    r.started.elapsed().as_secs_f32()
+                ));
+                self.restart();
             }
             Ok(Reply::Preview(v)) => {
                 if let Some(review) = self.scene.review.as_mut() {

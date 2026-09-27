@@ -115,8 +115,7 @@ impl App {
             }
             KeyCode::Char('s') => self.save(),
             KeyCode::Char('R') => self.toggle_review(),
-            KeyCode::Char('k') => self.change(Scene::keep_near),
-            KeyCode::Char('l') => self.change(Scene::lock_near),
+            KeyCode::Char('k' | 'l') => self.change(Scene::pin),
             _ => {}
         }
     }
@@ -335,6 +334,20 @@ impl App {
     }
 
     pub(super) fn handle(&mut self, ev: Event) {
+        // While lupin works on a request, nothing may change underneath it.
+        if self.relabeling.is_some() {
+            if let Event::Key(k) = &ev {
+                let ctrl_c =
+                    k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL);
+                if k.code == KeyCode::Char('q') || ctrl_c {
+                    self.quit = true;
+                }
+            }
+            if let Event::Resize(..) = ev {
+                self.vp = None;
+            }
+            return;
+        }
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
             Event::Mouse(m) => self.mouse(m),

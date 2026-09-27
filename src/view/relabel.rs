@@ -33,6 +33,9 @@ fn same_type(a: &str, b: &str) -> bool {
 const PROPOSE_DROP: f32 = 0.1;
 /// Features shown around a clicked cell.
 const NEAR: usize = 12;
+/// A cluster whose best-fitting type differs from its label is flagged only
+/// when that fit is at least this good.
+const SUGGEST_FIT: f32 = 0.3;
 
 /// One feature in the review list.
 pub(crate) struct Row {
@@ -64,10 +67,45 @@ pub(crate) struct Review {
     pub target: Option<String>,
     pub rows: Vec<Row>,
     pub row: usize,
-    /// Clusters marked for a merge.
-    pub marked: Vec<i64>,
+    /// Every cluster at a glance, in visiting order.
+    pub overview: Vec<Overview>,
+    /// Merge mode, when on.
+    pub merge: Option<MergeSel>,
     /// The last answer from lupin's preview, as text.
     pub preview: Option<Vec<String>>,
+}
+
+/// One cluster in the overview.
+pub(crate) struct Overview {
+    pub id: i64,
+    pub size: usize,
+    /// The round's current label (`None`: unassigned).
+    pub label: Option<String>,
+    /// The type whose markers fit it best, and how well.
+    pub best: Option<(String, f32)>,
+}
+
+impl Overview {
+    /// Whether its markers point somewhere other than its label.
+    #[must_use]
+    pub fn suggests_change(&self) -> bool {
+        match (&self.label, &self.best) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(l), Some((b, fit))) => *fit >= SUGGEST_FIT && !same_type(l, b),
+        }
+    }
+}
+
+/// Merge mode: clusters chosen by keyboard, and what they would be together.
+pub(crate) struct MergeSel {
+    /// Index into the overview.
+    pub cursor: usize,
+    pub chosen: std::collections::BTreeSet<i64>,
+    /// Per level of the cluster grouping: chosen or not (for drawing).
+    pub levels: Vec<bool>,
+    /// The best-fitting type of the chosen clusters together.
+    pub best: Option<(String, f32)>,
 }
 
 impl Review {
@@ -94,26 +132,13 @@ impl Scene {
             .iter()
             .position(|l| l.kind == LabelKind::Cluster)
             .ok_or("this round has no clusters to relabel")?;
-        let clusters = &self.data.labels[li];
-        let mut size = vec![0usize; clusters.levels.len()];
-        for &g in clusters.by_name.values() {
-            size[g as usize] += 1;
-        }
-        let mut order: Vec<(bool, usize, i64)> = clusters
-            .ids
-            .iter()
-            .enumerate()
-            .map(|(g, &id)| {
-                let (label, _) = round.call(&id.to_string());
-                (label.is_some(), usize::MAX - size[g], id)
-            })
-            .collect();
-        order.sort();
         let draft = Draft::load(&round.path);
         self.colour = Some(li);
+        self.focus = None;
         self.refresh_groups();
+        let overview = self.cluster_overview(li);
         self.review = Some(Review {
-            order: order.into_iter().map(|(.., id)| id).collect(),
+            order: overview.iter().map(|o| o.id).collect(),
             at: 0,
             draft,
             candidates: Vec::new(),
@@ -121,11 +146,238 @@ impl Scene {
             target: None,
             rows: Vec::new(),
             row: 0,
-            marked: Vec::new(),
+            overview,
+            merge: None,
             preview: None,
         });
         self.visit(0);
         Ok(())
+    }
+
+    /// Every cluster of grouping `li` with its size, label and best-fitting
+    /// type, in visiting order: unassigned first, then those whose markers
+    /// suggest a change, then the rest; larger first within each.
+    fn cluster_overview(&mut self, li: usize) -> Vec<Overview> {
+        let space = self.space;
+        let markers = self.markers_by_type();
+        let clusters = &self.data.labels[li];
+        let ids = clusters.ids.clone();
+        let n = ids.len();
+        let groups = clusters.align(&self.data.spaces[space].points);
+        let mut size = vec![0usize; n];
+        for &g in &groups {
+            if (g as usize) < n {
+                size[g as usize] += 1;
+            }
+        }
+        let labels: Vec<Option<String>> = ids
+            .iter()
+            .map(|id| {
+                self.data
+                    .round
+                    .as_ref()
+                    .and_then(|r| r.call(&id.to_string()).0)
+            })
+            .collect();
+        let mut best: Vec<Option<(String, f32)>> = vec![None; n];
+        if self.activity().is_some() {
+            let names = &self.data.spaces[space].points.names;
+            let activity = self.activity.as_mut().expect("made above");
+            if let Ok((per, features)) = activity.cluster_contrasts(space, names, &groups, n) {
+                for (g, scores) in per.iter().enumerate() {
+                    if scores.is_empty() {
+                        continue;
+                    }
+                    let score_of: BTreeMap<&str, f32> = features
+                        .iter()
+                        .zip(scores)
+                        .map(|(f, &v)| (f.as_ref(), v))
+                        .collect();
+                    best[g] = type_fits(&score_of, &markers)
+                        .into_iter()
+                        .next()
+                        .map(|(t, fit, _)| (t, fit));
+                }
+            }
+        }
+        let mut out: Vec<Overview> = (0..n)
+            .map(|g| Overview {
+                id: ids[g],
+                size: size[g],
+                label: labels[g].clone(),
+                best: best[g].clone(),
+            })
+            .collect();
+        out.sort_by_key(|o| (o.label.is_some(), !o.suggests_change(), usize::MAX - o.size));
+        out
+    }
+
+    /// Enter merge mode with the current cluster chosen.
+    pub fn begin_merge(&mut self) {
+        let Some(r) = self.review.as_mut() else {
+            return;
+        };
+        let id = r.cluster();
+        r.merge = Some(MergeSel {
+            cursor: r.at,
+            chosen: std::iter::once(id).collect(),
+            levels: Vec::new(),
+            best: None,
+        });
+        self.refresh_merge();
+    }
+
+    /// Choose or unchoose the cluster under the merge cursor.
+    pub fn toggle_merge_cursor(&mut self) {
+        let Some(r) = self.review.as_mut() else {
+            return;
+        };
+        let Some(m) = r.merge.as_mut() else { return };
+        let id = r.overview[m.cursor].id;
+        if !m.chosen.remove(&id) {
+            m.chosen.insert(id);
+        }
+        self.refresh_merge();
+    }
+
+    /// Recompute what the chosen clusters would be together, and which to
+    /// draw.
+    fn refresh_merge(&mut self) {
+        let Some(li) = self.colour else { return };
+        let Some(chosen) = self
+            .review
+            .as_ref()
+            .and_then(|r| r.merge.as_ref())
+            .map(|m| m.chosen.clone())
+        else {
+            return;
+        };
+        let ids = &self.data.labels[li].ids;
+        let levels: Vec<bool> = ids.iter().map(|id| chosen.contains(id)).collect();
+        let space = self.space;
+        let markers = self.markers_by_type();
+        let mask: Vec<bool> = self
+            .groups()
+            .map(|g| {
+                g.iter()
+                    .map(|&x| levels.get(x as usize).copied().unwrap_or(false))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut best = None;
+        if !mask.is_empty() && self.activity().is_some() {
+            let names = &self.data.spaces[space].points.names;
+            let activity = self.activity.as_mut().expect("made above");
+            if let Ok((scores, features)) = activity.contrast(space, names, Some(&mask)) {
+                let score_of: BTreeMap<&str, f32> = features
+                    .iter()
+                    .zip(&scores)
+                    .map(|(f, &v)| (f.as_ref(), v))
+                    .collect();
+                best = type_fits(&score_of, &markers)
+                    .into_iter()
+                    .next()
+                    .map(|(t, fit, _)| (t, fit));
+            }
+        }
+        if let Some(m) = self.review.as_mut().and_then(|r| r.merge.as_mut()) {
+            m.levels = levels;
+            m.best = best;
+        }
+    }
+
+    /// Sidebar text for merge mode.
+    pub fn merge_lines(&self) -> Option<Vec<String>> {
+        let r = self.review.as_ref()?;
+        let m = r.merge.as_ref()?;
+        let chosen: Vec<&Overview> = r
+            .overview
+            .iter()
+            .filter(|o| m.chosen.contains(&o.id))
+            .collect();
+        let total: usize = chosen.iter().map(|o| o.size).sum();
+        let mut out = vec![
+            format!("merge · {} clusters · {total} cells", chosen.len()),
+            match &m.best {
+                Some((t, fit)) => format!("together, markers fit {t} best ({fit:+.2})"),
+                None => "together: no marker fit".into(),
+            },
+            if chosen.len() < 2 {
+                "next: choose at least one more cluster (↑↓, space)".into()
+            } else {
+                "next: enter to name the merged cluster".into()
+            },
+            String::new(),
+        ];
+        for o in chosen {
+            out.push(format!(
+                "  C{:<4} {:>6} cells  now {}",
+                o.id,
+                o.size,
+                o.label.as_deref().unwrap_or("unassigned")
+            ));
+        }
+        Some(out)
+    }
+
+    /// Sidebar text for the cluster overview (the left panel).
+    pub fn overview_lines(&self) -> Option<Vec<String>> {
+        let r = self.review.as_ref()?;
+        let cursor = r.merge.as_ref().map_or(r.at, |m| m.cursor);
+        let cursor_best = r
+            .overview
+            .get(cursor)
+            .and_then(|o| o.best.as_ref())
+            .map(|b| b.0.clone());
+        let merged: std::collections::BTreeSet<i64> = r
+            .draft
+            .merges
+            .iter()
+            .flat_map(|m| m.clusters.iter().copied())
+            .collect();
+        let mut out = vec![
+            format!("clusters · {} decided", r.draft.decided()),
+            "? unassigned  → markers suggest  ✓ decided".into(),
+            String::new(),
+        ];
+        for (k, o) in r.overview.iter().enumerate() {
+            let here = if k == cursor { "▸" } else { " " };
+            let pick = match &r.merge {
+                Some(m) if m.chosen.contains(&o.id) => "[x]",
+                Some(_) => "[ ]",
+                None => "",
+            };
+            let staged = r.draft.clusters.get(&o.id).and_then(|c| c.verdict.as_ref());
+            let status = if let Some(v) = staged {
+                match v {
+                    Verdict::Label { label, .. } | Verdict::Keep { label, .. } => {
+                        format!("✓ {label}")
+                    }
+                }
+            } else if merged.contains(&o.id) {
+                "✓ merged".into()
+            } else if o.label.is_none() {
+                match &o.best {
+                    Some((b, _)) => format!("? → {b}"),
+                    None => "?".into(),
+                }
+            } else if o.suggests_change() {
+                format!("→ {}", o.best.as_ref().map_or("", |b| b.0.as_str()))
+            } else {
+                o.label.clone().unwrap_or_default()
+            };
+            let similar = r.merge.is_some()
+                && k != cursor
+                && cursor_best.is_some()
+                && o.best.as_ref().map(|b| &b.0) == cursor_best.as_ref();
+            out.push(format!(
+                "{here}{pick}{}C{:<4}{:>6} {status}",
+                if similar { "≈" } else { " " },
+                o.id,
+                o.size
+            ));
+        }
+        Some(out)
     }
 
     /// Leave relabel mode, keeping the draft on disk.
@@ -162,24 +414,10 @@ impl Scene {
         });
         let scores = self.cluster_scores();
         let markers = self.markers_by_type();
-        let mut fits: Vec<(String, f32, usize)> = markers
-            .iter()
-            .filter_map(|(t, ms)| {
-                let mut v: Vec<f32> = ms
-                    .iter()
-                    .filter_map(|m| scores.get(m.as_ref()).copied())
-                    .filter(|v| v.is_finite())
-                    .collect();
-                if v.is_empty() {
-                    return None;
-                }
-                v.sort_by(|a, b| b.total_cmp(a));
-                let n = v.len();
-                let fit = v.iter().take(FIT_TOP).sum::<f32>() / FIT_TOP as f32;
-                Some((t.clone(), fit, n))
-            })
-            .collect();
-        fits.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let fits = type_fits(
+            &scores.iter().map(|(f, &v)| (f.as_ref(), v)).collect(),
+            &markers,
+        );
         // Candidates: lupin's calls (spelled as the marker table spells them),
         // then the types whose markers fit best.
         let mut candidates: Vec<String> = called
@@ -363,19 +601,14 @@ impl Scene {
         }
     }
 
-    /// Stage a merge of the marked clusters (the current one included).
+    /// Stage a merge of the clusters chosen in merge mode, and leave it.
     pub fn stage_merge(&mut self, label: String, rationale: String) {
         let Some(r) = self.review.as_mut() else {
             return;
         };
-        let mut clusters = std::mem::take(&mut r.marked);
-        let id = r.cluster();
-        if !clusters.contains(&id) {
-            clusters.push(id);
-        }
-        clusters.sort_unstable();
+        let Some(m) = r.merge.take() else { return };
         r.draft.merges.push(Merge {
-            clusters,
+            clusters: m.chosen.into_iter().collect(),
             label,
             rationale,
         });
@@ -441,53 +674,51 @@ impl Scene {
         }
     }
 
-    /// Keep the features near the clicked cell: stage them as markers of the
-    /// target type for the current cluster.
-    pub fn keep_near(&mut self) {
-        let Some(near) = self.near.as_ref() else {
-            self.note = Some("click a cell first".into());
+    /// Pin feature names on the map: the features nearest the clicked cell,
+    /// else the feature on screen. Pinned names stay while other cells are
+    /// clicked, the camera moves or the colouring changes. With nothing new
+    /// to pin, the pins are cleared.
+    pub fn pin(&mut self) {
+        if let Some(n) = self.near.take() {
+            self.note = Some(format!(
+                "pinned {} names · k or l again clears",
+                n.features.len()
+            ));
+            self.locked.push(n);
             return;
-        };
-        let feats: Vec<(String, f32)> = near
-            .features
-            .iter()
-            .map(|(f, v)| (f.to_string(), *v))
-            .collect();
-        let Some(r) = self.review.as_mut() else {
-            self.note = Some("press R to relabel, then k keeps these features".into());
-            return;
-        };
-        let Some(t) = r.target.clone() else {
-            self.note = Some("choose a target type first (tab)".into());
-            return;
-        };
-        let id = r.cluster();
-        let n = feats.len();
-        let c = r.draft.cluster(id);
-        for (f, v) in feats {
-            c.marks.insert(
-                f,
-                (
-                    Mark::Include {
-                        cell_type: t.clone(),
-                    },
-                    v,
-                ),
-            );
         }
-        self.note = Some(format!("kept {n} features as markers of {t} for C{id}"));
-    }
-
-    /// Lock the features near the clicked cell on screen, so they stay while
-    /// other cells are clicked (again to unlock).
-    pub fn lock_near(&mut self) {
-        match self.near.take() {
-            Some(n) => self.locked.push(n),
-            None if !self.locked.is_empty() => {
-                self.locked.clear();
-                self.note = Some("unlocked".into());
+        if let Some(Pick::One(f)) = &self.pick {
+            let pinned = self
+                .locked
+                .iter()
+                .any(|n| n.features.iter().any(|(x, _)| x == f));
+            if !pinned {
+                let placed = self
+                    .feature_positions()
+                    .into_iter()
+                    .chain(
+                        (self.current().axis() == Axis::Features).then(|| &self.current().points),
+                    )
+                    .any(|p| p.names.iter().any(|n| n == f));
+                self.note = Some(if placed {
+                    format!("pinned {f} · k or l again clears")
+                } else {
+                    format!("{f} has no place on this map")
+                });
+                if placed {
+                    self.locked.push(Near {
+                        cell: f.clone(),
+                        features: vec![(f.clone(), f32::NAN)],
+                    });
+                }
+                return;
             }
-            None => self.note = Some("click a cell first".into()),
+        }
+        if self.locked.is_empty() {
+            self.note = Some("click a cell or show a feature, then k pins its names".into());
+        } else {
+            self.locked.clear();
+            self.note = Some("pins cleared".into());
         }
     }
 
@@ -517,7 +748,7 @@ impl Scene {
         let next = match (verdict, marks) {
             (Some(_), _) => "next: ] for the next cluster · S when done (p previews)",
             (None, 0) => "next: check the fit below, then + / - features (a accepts ?), then L",
-            (None, _) => "next: L to label it (or K to keep, v then M to merge)",
+            (None, _) => "next: L to label it (or K to keep it, M to merge it with others)",
         };
         let mut out = vec![
             format!(
@@ -578,7 +809,7 @@ impl Scene {
         }
         if let Some(near) = &self.near {
             out.push(String::new());
-            out.push(format!("near {} (k keeps · l locks)", near.cell));
+            out.push(format!("near {} (k pins their names)", near.cell));
             let names: Vec<&str> = near.features.iter().map(|(f, _)| f.as_ref()).collect();
             out.push(format!("  {}", names.join(" ")));
         }
@@ -614,9 +845,35 @@ impl Scene {
                 .map(|(f, v)| format!("  {f:<14} {v:+.2}")),
         );
         out.push(String::new());
-        out.push("l locks them on the map · R to relabel (then k keeps them)".into());
+        out.push("k or l pins their names on the map".into());
         Some(out)
     }
+}
+
+/// How well each type's markers fit, best first: the mean of its best
+/// `FIT_TOP` marker scores (missing ones as zero), with how many it has.
+fn type_fits(
+    score_of: &BTreeMap<&str, f32>,
+    markers: &BTreeMap<String, Vec<Box<str>>>,
+) -> Vec<(String, f32, usize)> {
+    let mut fits: Vec<(String, f32, usize)> = markers
+        .iter()
+        .filter_map(|(t, ms)| {
+            let mut v: Vec<f32> = ms
+                .iter()
+                .filter_map(|m| score_of.get(m.as_ref()).copied())
+                .filter(|v| v.is_finite())
+                .collect();
+            if v.is_empty() {
+                return None;
+            }
+            v.sort_by(|a, b| b.total_cmp(a));
+            let fit = v.iter().take(FIT_TOP).sum::<f32>() / FIT_TOP as f32;
+            Some((t.clone(), fit, v.len()))
+        })
+        .collect();
+    fits.sort_by(|a, b| b.1.total_cmp(&a.1));
+    fits
 }
 
 /// The cluster's features: the most differentially expressed, then each
