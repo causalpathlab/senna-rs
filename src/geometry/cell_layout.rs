@@ -1,6 +1,6 @@
 //! Cell-level layout: Nyström projection of individual cells onto the PB
 //! layout. The Nyström projector now lives in `legume_numeric::matrix::layout` (shared
-//! with `senna annotate-by-projection`); re-exported here to keep the
+//! with `lupin annotate` (projection)); re-exported here to keep the
 //! `crate::geometry::cell_layout::project_cells_nystrom` path stable.
 //!
 //! The former per-PB t-SNE fine-tune helpers (`refine_cells_local`,

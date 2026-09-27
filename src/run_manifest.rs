@@ -678,7 +678,7 @@ pub struct RunOutputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
     /// `{out}.pb_gene.parquet` — G × P pseudobulk gene aggregates at the
-    /// finest collapse level. Consumed by `senna annotate-by-enrichment` to build a
+    /// finest collapse level. Consumed by `lupin annotate` (enrichment) to build a
     /// permutation null without touching the raw zarr.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_gene: Option<String>,
@@ -698,7 +698,7 @@ pub struct RunOutputs {
     /// gene resolution: row-scaled by NB Fisher-info weights and column-
     /// normalized to the topic simplex. Avoids the lossy expand-from-coarse
     /// approximation in `dictionary` (which ships at the feature-coarsened
-    /// resolution and is interpolated back). `senna annotate-by-enrichment` prefers this
+    /// resolution and is interpolated back). `lupin annotate` (enrichment) prefers this
     /// when present; falls back to `dictionary` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dictionary_empirical: Option<String>,
@@ -719,7 +719,7 @@ pub struct RunOutputs {
     /// `{out}.feature_coembedding.parquet` — D × H SIMBA co-embed: each gene as
     /// a softmax-over-cells weighted average of the cell embeddings, so genes
     /// sit on the cell manifold and a Euclidean nearest-centroid call
-    /// (`annotate-by-projection`, `lineage`) is well posed. A lossy, one-way
+    /// (`lupin annotate` (projection), `lineage`) is well posed. A lossy, one-way
     /// derived view of `feature_embedding`. Present only when the co-embed
     /// ran: `bge` / `gem` / `simba` / `resolve-embedding-space`, not on an
     /// interrupted run.
@@ -977,7 +977,7 @@ pub struct RunCluster {
     pub unknown: Unknown,
 }
 
-/// Paths to artifacts produced by `senna annotate-by-enrichment` — the cluster-based
+/// Paths to artifacts produced by `lupin annotate` (enrichment) — the cluster-based
 /// marker enrichment annotation pass. Populated by annotate, not by training.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunAnnotate {

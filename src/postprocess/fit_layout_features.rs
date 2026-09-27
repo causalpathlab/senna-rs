@@ -227,7 +227,7 @@ pub(crate) fn record_cell_layout(
     // need PB-level coords must branch on `kind`.
     layout.pb_coords = pb_coords.map(rel);
     // Only the gene-space recompute path produces a proper pb_gene_mean; the
-    // fast path writes a proj-space file that `annotate-by-enrichment` would
+    // fast path writes a proj-space file that `lupin annotate` (enrichment) would
     // misread, so don't advertise it.
     layout.pb_gene_mean = pb_gene_mean.map(rel);
     layout.current = Some(method.to_string());

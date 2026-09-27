@@ -7,7 +7,7 @@
 //! / `masked-topic` run and **learns a shared cell+gene H-dimensional
 //! embedding** against the raw counts. The point is to recast a *good* topic
 //! result into a Euclidean metric space where genes, topic-archetypes, and
-//! cells coexist — so `senna annotate-by-projection` (marker→type annotation by
+//! cells coexist — so `lupin annotate` (projection) (marker→type annotation by
 //! projecting both into one inner-product space) can consume it, which it
 //! cannot do for a raw topic run (whose β is multinomial loadings, not an
 //! embedding).
@@ -35,7 +35,7 @@
 //! ([`graph_embedding_util::feature_coembedding`]) is applied post-hoc: each
 //! gene is re-placed at the softmax-over-cells weighted average of the *cell*
 //! embeddings Z, landing it on the cell manifold. It is written as
-//! `{out}.feature_coembedding.parquet` (the one `annotate-by-projection`
+//! `{out}.feature_coembedding.parquet` (the one `lupin annotate` (projection)
 //! reads) beside the raw ρ in `{out}.feature_embedding.parquet`. Cells are
 //! the reference and are unchanged, and training is untouched.
 
@@ -87,7 +87,7 @@ pub struct RestArgs {
                      {out}.senna.json                 run manifest\n\
                      \n\
                      The feature embedding is ρ re-embedded onto the cell manifold.\n\
-                     `annotate-by-projection` reads it, alongside the cell embedding.\n\
+                     `lupin annotate` (projection) reads it, alongside the cell embedding.\n\
                      The manifest records kind=resolve-embedding-space."
     )]
     out: Option<Box<str>>,
@@ -431,7 +431,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     // cell manifold Z = θ·α (gene = softmax-over-cells weighted average of the
     // cells), mirroring `senna bge`. Without it ρ fans out off the K-archetype
     // cell simplex, so a joint UMAP separates genes from cells; the co-embed
-    // lands genes on the cell manifold, which is what `annotate-by-projection`
+    // lands genes on the cell manifold, which is what `lupin annotate` (projection)
     // (reading feature_coembedding) wants. Written beside the raw ρ in
     // {out}.feature_embedding.parquet. Cells are the reference and are
     // unchanged. Post-hoc — training above is untouched. Run on CPU over the
@@ -487,7 +487,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     } else {
         info!(
             "Done — {out}.{{feature_embedding,cell_embedding,topic_embedding}}.parquet. \
-             Next: `senna annotate-by-enrichment --from {out}.senna.json --markers <markers.tsv>`."
+             Next: `lupin annotate -f {out}.senna.json -m <markers.tsv> -o <annot>`."
         );
     }
     Ok(())
