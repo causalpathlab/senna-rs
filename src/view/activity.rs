@@ -59,7 +59,12 @@ impl Axis {
 
 enum Model {
     /// `z` is N × H, `rho` is D × H.
-    Embedding { z: Mat, rho: Mat },
+    /// `bias` is the per-feature baseline log level, when the run has one.
+    Embedding {
+        z: Mat,
+        rho: Mat,
+        bias: Option<Vec<f32>>,
+    },
     /// `log_theta` is N × K, `log_beta` is D × K.
     Topic { log_theta: Mat, log_beta: Mat },
 }
@@ -154,7 +159,7 @@ impl Activity {
     fn load_expected(&self) -> anyhow::Result<Expected> {
         let m = &self.manifest;
         let o = &m.outputs;
-        if let (Some(z_rel), Ok((rho_path, _))) = (
+        if let (Some(z_rel), Ok((rho_path, bias_path))) = (
             o.cell_embedding.as_deref(),
             run_manifest::resolve_feature_embedding_for(m, &self.dir),
         ) {
@@ -166,12 +171,18 @@ impl Activity {
                 z.mat.ncols(),
                 rho.mat.ncols()
             );
+            // Only used when it lines up with the feature table.
+            let bias = bias_path
+                .and_then(|p| Mat::from_parquet_with_row_names(&p, Some(0)).ok())
+                .filter(|b| b.rows == rho.rows && b.mat.ncols() >= 1)
+                .map(|b| b.mat.column(0).iter().copied().collect());
             return Ok(Expected {
                 features: Axis::new(rho.rows),
                 cells: z.rows,
                 model: Model::Embedding {
                     z: z.mat,
                     rho: rho.mat,
+                    bias,
                 },
             });
         }
@@ -270,7 +281,7 @@ impl Activity {
                     .match_gene(feature)
                     .ok_or_else(|| format!("no feature {feature} in the model"))?;
                 let values = match &e.model {
-                    Model::Embedding { z, rho } => {
+                    Model::Embedding { z, rho, .. } => {
                         (z * rho.row(g).transpose()).iter().copied().collect()
                     }
                     Model::Topic {
@@ -372,5 +383,197 @@ impl Activity {
             Levels::from_values(values, source == Source::Observed),
             used,
         ))
+    }
+
+    /// Features worth looking at in a view, best first, with their scores.
+    ///
+    /// `universe` names the cells in view; `group` marks, in the same order,
+    /// the focused group's cells. With a group, a feature scores by its
+    /// expected log fold change, group over the rest of the view (for an
+    /// embedding run, `ρ_g · (mean z_group − mean z_rest)`). Without one, by
+    /// how much it varies across the view relative to how much it varies over
+    /// all cells, among features at least as variable as the median, which
+    /// points at what shapes a zoomed-in layout. Where the run records a
+    /// per-feature baseline, features below its median are left out, so
+    /// rarely expressed features with noisy loadings do not lead.
+    ///
+    /// A nudge from the model, not a test: `o` shows the observed counts.
+    pub fn suggest(
+        &mut self,
+        universe: &[Box<str>],
+        group: Option<&[bool]>,
+        top: usize,
+    ) -> Result<Vec<(Box<str>, f32)>, String> {
+        let e = self.expected()?;
+        let index: HashMap<&str, usize> = e
+            .cells
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.as_ref(), i))
+            .collect();
+        let pick = |want: Option<bool>| -> Vec<usize> {
+            universe
+                .iter()
+                .enumerate()
+                .filter(|&(k, _)| want.is_none_or(|w| group.is_some_and(|g| g[k] == w)))
+                .filter_map(|(_, n)| index.get(n.as_ref()).copied())
+                .collect()
+        };
+        let scores: Vec<f32> = match (&e.model, group) {
+            (Model::Embedding { z, rho, bias }, Some(_)) => {
+                let (inside, rest) = (pick(Some(true)), pick(Some(false)));
+                if inside.is_empty() || rest.is_empty() {
+                    return Err(
+                        "the focused group has no cells, or no other cells are in view".into(),
+                    );
+                }
+                let delta = row_mean(z, &inside) - row_mean(z, &rest);
+                let mut lfc: Vec<f32> = (rho * delta).iter().copied().collect();
+                drop_below_median(&mut lfc, bias.as_deref());
+                lfc
+            }
+            (Model::Embedding { z, rho, bias }, None) => {
+                let all_rows: Vec<usize> = (0..z.nrows()).collect();
+                let here = quadratic_forms(rho, &row_cov(z, &pick(None)));
+                let everywhere = quadratic_forms(rho, &row_cov(z, &all_rows));
+                let mut sorted = everywhere.clone();
+                sorted.sort_unstable_by(f32::total_cmp);
+                let floor = sorted[sorted.len() / 2];
+                let mut ratio: Vec<f32> = here
+                    .iter()
+                    .zip(&everywhere)
+                    .map(|(&h, &a)| {
+                        if a >= floor && a > 0.0 {
+                            h / a
+                        } else {
+                            f32::NEG_INFINITY
+                        }
+                    })
+                    .collect();
+                drop_below_median(&mut ratio, bias.as_deref());
+                ratio
+            }
+            (
+                Model::Topic {
+                    log_theta,
+                    log_beta,
+                },
+                Some(_),
+            ) => {
+                let (inside, rest) = (pick(Some(true)), pick(Some(false)));
+                if inside.is_empty() || rest.is_empty() {
+                    return Err(
+                        "the focused group has no cells, or no other cells are in view".into(),
+                    );
+                }
+                let theta = log_theta.map(f32::exp);
+                let beta = log_beta.map(f32::exp);
+                let (g, r) = (
+                    &beta * row_mean(&theta, &inside),
+                    &beta * row_mean(&theta, &rest),
+                );
+                g.iter()
+                    .zip(r.iter())
+                    .map(|(&a, &b)| (a.max(1e-12) / b.max(1e-12)).ln())
+                    .collect()
+            }
+            (Model::Topic { .. }, None) => {
+                return Err("on a topic run, focus a group first to get suggestions".into());
+            }
+        };
+        let mut ranked: Vec<(usize, f32)> = scores
+            .into_iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_finite())
+            .collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Ok(ranked
+            .into_iter()
+            .take(top)
+            .map(|(g, v)| (e.features.names[g].clone(), v))
+            .collect())
+    }
+}
+
+/// Set scores of features whose baseline is below the median to -inf.
+fn drop_below_median(scores: &mut [f32], baseline: Option<&[f32]>) {
+    let Some(b) = baseline.filter(|b| b.len() == scores.len()) else {
+        return;
+    };
+    let mut sorted: Vec<f32> = b.iter().copied().filter(|v| v.is_finite()).collect();
+    if sorted.is_empty() {
+        return;
+    }
+    sorted.sort_unstable_by(f32::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    for (s, &v) in scores.iter_mut().zip(b) {
+        if v.is_nan() || v < median {
+            *s = f32::NEG_INFINITY;
+        }
+    }
+}
+
+/// Mean of the given rows of `m`, as a column vector.
+fn row_mean(m: &Mat, rows: &[usize]) -> nalgebra::DVector<f32> {
+    let mut acc = nalgebra::DVector::<f32>::zeros(m.ncols());
+    for &i in rows {
+        acc += m.row(i).transpose();
+    }
+    acc / rows.len().max(1) as f32
+}
+
+/// Covariance of the given rows of `m` (columns are variables).
+fn row_cov(m: &Mat, rows: &[usize]) -> Mat {
+    let mu = row_mean(m, rows);
+    let h = m.ncols();
+    let mut c = Mat::zeros(h, h);
+    for &i in rows {
+        let d = m.row(i).transpose() - &mu;
+        c.ger(1.0, &d, &d, 1.0);
+    }
+    c / (rows.len().max(2) - 1) as f32
+}
+
+/// `x_gᵀ C x_g` for every row `x_g` of `x`.
+fn quadratic_forms(x: &Mat, c: &Mat) -> Vec<f32> {
+    let xc = x * c;
+    xc.row_iter()
+        .zip(x.row_iter())
+        .map(|(a, b)| a.dot(&b))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn below_median_baselines_are_dropped_and_others_kept() {
+        let mut scores = vec![1.0, 2.0, 3.0, 4.0];
+        drop_below_median(&mut scores, Some(&[0.1, 5.0, 3.0, f32::NAN]));
+        assert_eq!(scores[0], f32::NEG_INFINITY);
+        assert_eq!(scores[1], 2.0);
+        assert_eq!(scores[2], 3.0);
+        assert_eq!(scores[3], f32::NEG_INFINITY);
+        let mut untouched = vec![1.0, 2.0];
+        drop_below_median(&mut untouched, None);
+        assert_eq!(untouched, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn covariance_and_quadratic_forms_match_by_hand() {
+        // Two dims; rows 0..3. Only dim 0 varies: values 0, 2, 4.
+        let m = Mat::from_row_slice(3, 2, &[0.0, 1.0, 2.0, 1.0, 4.0, 1.0]);
+        let all = [0, 1, 2];
+        let mean = row_mean(&m, &all);
+        assert!((mean[0] - 2.0).abs() < 1e-6 && (mean[1] - 1.0).abs() < 1e-6);
+        let c = row_cov(&m, &all);
+        assert!((c[(0, 0)] - 4.0).abs() < 1e-5);
+        assert!(c[(1, 1)].abs() < 1e-6 && c[(0, 1)].abs() < 1e-6);
+        // A feature loading only on dim 0 has variance ρ² · 4; one on dim 1 has none.
+        let rho = Mat::from_row_slice(2, 2, &[0.5, 0.0, 0.0, 3.0]);
+        let q = quadratic_forms(&rho, &c);
+        assert!((q[0] - 1.0).abs() < 1e-5);
+        assert!(q[1].abs() < 1e-6);
     }
 }

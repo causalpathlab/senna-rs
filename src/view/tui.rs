@@ -27,7 +27,7 @@ use ratatui_image::{Image, Resize};
 use std::time::Duration;
 
 const KEYS: &str =
-    "tab space · c colour · [ ] focus · z zoom in · Z out · e style · g / feature · ? help";
+    "tab space · c colour · [ ] focus · n suggest · g / feature · z zoom · e style · ? help";
 
 const HELP: &[(&str, &str)] = &[
     (
@@ -42,8 +42,12 @@ const HELP: &[(&str, &str)] = &[
     ("[  ]", "focus previous / next group; others turn gray"),
     ("click", "focus the group of the nearest point"),
     (
+        "n",
+        "suggest features (model-based; check with o): what sets the focused group apart, or what varies here",
+    ),
+    (
         "g  G",
-        "next / previous marker feature (the focused group's, if any)",
+        "next / previous feature (suggestions, else the focused group's markers)",
     ),
     ("/", "search a feature by name; enter shows it"),
     ("a", "activity of the focused group's whole marker set"),
@@ -309,7 +313,7 @@ impl App {
 
         if let Some(menu) = &self.menu {
             self.draw_menu(f, map, menu, page);
-        } else if let Some(lines) = &self.info {
+        } else if let Some(lines) = self.info.clone().or_else(|| self.scene.suggestion_lines()) {
             let w = 56.min(map.width);
             let h = (lines.len() as u16 + 2).min(map.height);
             let r = Rect::new(map.x + map.width - w, map.y, w, h);
@@ -562,6 +566,7 @@ impl App {
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Esc | KeyCode::Char('x') => {
                 let cleared = self.info.take().is_some()
+                    || self.scene.clear_suggestions()
                     || self.scene.clear_pick()
                     || self.scene.focus.take().is_some();
                 if !cleared && k.code == KeyCode::Esc {
@@ -616,6 +621,7 @@ impl App {
                 self.vp = None;
             }
             KeyCode::Char('z') => self.start_zoom(),
+            KeyCode::Char('n') => self.change(Scene::suggest),
             KeyCode::Char(',') => self.step_round(true),
             KeyCode::Char('.') => self.step_round(false),
             KeyCode::Char('Z') | KeyCode::Backspace => {

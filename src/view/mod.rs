@@ -109,6 +109,19 @@ pub struct ViewArgs {
         help = "Start inside a fresh layout of this group's cells (a name in the starting grouping)"
     )]
     pub zoom_into: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Print suggested features for the starting view (with --png, show the top one)"
+    )]
+    pub suggest: bool,
+}
+
+/// Features suggested for one view, best first.
+struct Suggestions {
+    space: usize,
+    title: String,
+    list: Vec<(Box<str>, f32)>,
 }
 
 /// What a zoom into one group needs: its name, its cells, and the geometry
@@ -155,6 +168,8 @@ pub(crate) struct Scene {
     activity: Option<Activity>,
     shown: Option<Shown>,
     ramp: Vec<Rgb>,
+    /// Suggested features for one view.
+    suggestions: Option<Suggestions>,
     /// The run's geometry table, read on the first zoom into a group.
     geometry: Option<std::sync::Arc<sublayout::Geometry>>,
     /// A message for the status line, taken by the front end.
@@ -180,6 +195,7 @@ impl Scene {
             shown: None,
             ramp: color::activity_ramp(256),
             geometry: None,
+            suggestions: None,
             note: None,
         };
         scene.colour = scene.default_colour(args.colour_by.as_deref());
@@ -407,6 +423,7 @@ impl Scene {
         self.shown = None;
         self.activity = None;
         self.geometry = None;
+        self.suggestions = None;
         self.refresh_activity();
     }
 
@@ -463,7 +480,72 @@ impl Scene {
 
     /// Features `g` steps through: the focused group's markers, or every
     /// marker grouped by type.
+    /// Rank features for the view on screen: what distinguishes the focused
+    /// group from the rest of the view, or, with nothing focused, what varies
+    /// most here. Shows the first one straight away.
+    pub fn suggest(&mut self) {
+        const TOP: usize = 25;
+        if self.current().axis != Axis::Cells {
+            self.note = Some("suggestions work on a cell view".into());
+            return;
+        }
+        let space = self.space;
+        let universe = self.current().points.names.clone();
+        let mask: Option<Vec<bool>> = match (self.focus, self.groups()) {
+            (Some(f), Some(g)) => Some(g.iter().map(|&x| x == f).collect()),
+            _ => None,
+        };
+        let title = match self.focused_name() {
+            Some(name) => format!("features that set {name} apart in this view"),
+            None => "features that vary most in this view".to_string(),
+        };
+        let Some(activity) = self.activity() else {
+            self.note = Some("no manifest to read the model from".into());
+            return;
+        };
+        match activity.suggest(&universe, mask.as_deref(), TOP) {
+            Ok(list) if !list.is_empty() => {
+                let first = list[0].0.clone();
+                self.suggestions = Some(Suggestions { space, title, list });
+                self.set_pick(Pick::One(first));
+            }
+            Ok(_) => self.note = Some("no feature stands out here".into()),
+            Err(e) => self.note = Some(e),
+        }
+    }
+
+    /// Drop the suggestions. Returns whether there were any.
+    pub fn clear_suggestions(&mut self) -> bool {
+        self.suggestions.take().is_some()
+    }
+
+    /// Panel text for the suggestions of the view on screen, marking the
+    /// feature being shown.
+    pub fn suggestion_lines(&self) -> Option<Vec<String>> {
+        let Suggestions { space, title, list } = self.suggestions.as_ref()?;
+        if *space != self.space {
+            return None;
+        }
+        let shown = match &self.pick {
+            Some(Pick::One(f)) => Some(f.as_ref()),
+            _ => None,
+        };
+        let mut out = vec![title.clone(), "g / G step · o observed · x close".into()];
+        out.extend(list.iter().enumerate().map(|(k, (f, v))| {
+            let mark = if shown == Some(f.as_ref()) {
+                "▸"
+            } else {
+                " "
+            };
+            format!("{mark} {:>2}  {f:<16} {v:>6.2}", k + 1)
+        }));
+        Some(out)
+    }
+
     fn feature_list(&self) -> Vec<Box<str>> {
+        if let Some(sug) = self.suggestions.as_ref().filter(|s| s.space == self.space) {
+            return sug.list.iter().map(|(f, _)| f.clone()).collect();
+        }
         if let Some(name) = self.focused_name() {
             let own = self.marker_features(&name);
             if !own.is_empty() {
@@ -875,6 +957,15 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     let data = Dataset::load(&args.from)?;
     let scene = Scene::new(data, args);
 
+    let mut scene = scene;
+    if args.suggest {
+        scene.suggest();
+        match scene.suggestion_lines() {
+            Some(lines) => lines.iter().for_each(|l| println!("{l}")),
+            None => println!("{}", scene.note.take().unwrap_or_default()),
+        }
+    }
+
     if let Some(png) = &args.png {
         let (w, h) = args
             .size
@@ -964,6 +1055,7 @@ mod tests {
             observed: false,
             focus: None,
             zoom_into: None,
+            suggest: false,
         };
         Scene::new(data, &args)
     }
