@@ -134,6 +134,8 @@ pub struct Dataset {
     pub labels: Vec<Labels>,
     /// The manifest and its directory, for loading feature activity on demand.
     pub run: Option<(RunManifest, PathBuf)>,
+    /// Where this manifest sits among annotation rounds.
+    pub round: Option<super::rounds::Round>,
 }
 
 fn read_xy(path: &Path) -> anyhow::Result<Points> {
@@ -157,7 +159,7 @@ fn read_xy(path: &Path) -> anyhow::Result<Points> {
 }
 
 /// Rows of a text table, `#` comments and blank lines skipped.
-fn read_rows(path: &Path) -> anyhow::Result<Vec<Vec<String>>> {
+pub(super) fn read_rows(path: &Path) -> anyhow::Result<Vec<Vec<String>>> {
     let f =
         std::fs::File::open(path).map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
     let mut out = Vec::new();
@@ -246,7 +248,7 @@ fn read_dictionary_labels(path: &Path) -> anyhow::Result<Labels> {
 }
 
 /// Renumber levels in natural order (`T2` before `T10`).
-fn sort_levels_naturally(labels: &mut Labels) {
+pub(super) fn sort_levels_naturally(labels: &mut Labels) {
     let key = |s: &str| {
         let digits: String = s.chars().filter(char::is_ascii_digit).collect();
         (digits.parse::<u64>().unwrap_or(u64::MAX), s.to_string())
@@ -261,17 +263,6 @@ fn sort_levels_naturally(labels: &mut Labels) {
     for v in labels.by_name.values_mut() {
         *v = remap[*v as usize];
     }
-}
-
-/// `cell<TAB>label<TAB>confidence` with a header; `unassigned` is left out.
-fn read_annotation_labels(path: &Path) -> anyhow::Result<Labels> {
-    let pairs = read_rows(path)?.into_iter().skip(1).filter_map(|r| {
-        let mut it = r.into_iter();
-        Some((it.next()?.into_boxed_str(), it.next()?.into_boxed_str()))
-    });
-    let mut labels = Labels::from_pairs("annotation", Axis::Cells, pairs, &["unassigned"]);
-    sort_levels_naturally(&mut labels);
-    Ok(labels)
 }
 
 /// `feature<TAB>group` marker table, as used by annotation; a feature listed
@@ -413,8 +404,35 @@ impl Dataset {
             Ok(_) => {}
             Err(e) => log::warn!("view: skipping {what}: {e}"),
         };
+        let round = super::rounds::Round::load(&m, &dir, &manifest_path);
         if let Some(p) = &m.annotate.argmax {
-            try_add("annotation", read_annotation_labels(&at(p)));
+            match super::rounds::read_argmax(&at(p)) {
+                Ok(current) => {
+                    let mut ann = Labels::from_pairs(
+                        "annotation",
+                        Axis::Cells,
+                        current.iter().map(|(c, l)| (c.clone(), l.clone())),
+                        &["unassigned"],
+                    );
+                    sort_levels_naturally(&mut ann);
+                    try_add("annotation", Ok(ann));
+                    // Against the round this one was made from, when there is one.
+                    let source_argmax = round.source.as_deref().and_then(|src| {
+                        let (sm, sdir) = RunManifest::load(src).ok()?;
+                        Some(run_manifest::resolve(&sdir, sm.annotate.argmax.as_deref()?))
+                    });
+                    if let Some(sp) = source_argmax {
+                        match super::rounds::comparisons(&current, &sp) {
+                            Ok([before, changed]) => {
+                                try_add("changed", Ok(changed));
+                                try_add("previous annotation", Ok(before));
+                            }
+                            Err(e) => log::warn!("view: skipping round comparison: {e}"),
+                        }
+                    }
+                }
+                Err(e) => log::warn!("view: skipping annotation: {e}"),
+            }
         }
         if let Some(p) = &m.cluster.clusters {
             try_add("clusters", read_cluster_labels(&at(p)));
@@ -437,6 +455,7 @@ impl Dataset {
             spaces,
             labels,
             run: Some((m, dir)),
+            round: Some(round),
         })
     }
 }
