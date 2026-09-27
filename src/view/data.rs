@@ -132,6 +132,8 @@ impl Space {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LabelKind {
     Annotation,
+    /// Fine cell types, when the round's annotation is coarse.
+    FineAnnotation,
     Cluster,
     Topic,
     Markers,
@@ -147,6 +149,7 @@ impl LabelKind {
     pub fn title(self) -> &'static str {
         match self {
             LabelKind::Annotation => "annotation",
+            LabelKind::FineAnnotation => "fine annotation",
             LabelKind::Cluster => "cluster",
             LabelKind::Topic => "topic",
             LabelKind::Markers => "markers",
@@ -462,6 +465,18 @@ fn load_labels(m: &RunManifest, dir: &Path, round: &super::rounds::Round) -> Vec
             }
             Err(e) => log::warn!("view: skipping annotation: {e}"),
         }
+    }
+    if let Some(p) = super::rounds::annotate_str(m, "fine_argmax") {
+        keep(
+            "fine annotation",
+            super::rounds::read_argmax(&at(p)).map(|fine| {
+                Labels::new(
+                    LabelKind::FineAnnotation,
+                    fine,
+                    &[super::rounds::UNASSIGNED],
+                )
+            }),
+        );
     }
     if let Some(p) = &m.cluster.clusters {
         keep("clusters", read_cluster_labels(&at(p)));

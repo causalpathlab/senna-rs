@@ -22,7 +22,7 @@ pub fn read_argmax(path: &Path) -> anyhow::Result<HashMap<Box<str>, Box<str>>> {
     Ok(read_pairs(path)?.into_iter().collect())
 }
 
-fn annotate_str<'a>(m: &'a RunManifest, key: &str) -> Option<&'a str> {
+pub(super) fn annotate_str<'a>(m: &'a RunManifest, key: &str) -> Option<&'a str> {
     m.annotate.unknown.get(key).and_then(Value::as_str)
 }
 
@@ -33,6 +33,26 @@ fn read_json_object(path: &Path) -> HashMap<String, Value> {
     }
 }
 
+/// `{"groups": [{"name", "members": [...]}, ...]}`, as lupin's
+/// `celltype_tree` holds it. Groups of one member are not coarse.
+fn read_tree(v: &Value) -> Vec<(String, Vec<String>)> {
+    v.get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|g| {
+            let name = g.get("name")?.as_str()?.to_string();
+            let members: Vec<String> = g
+                .get("members")?
+                .as_array()?
+                .iter()
+                .filter_map(|m| Some(m.as_str()?.to_string()))
+                .collect();
+            (members.len() > 1).then_some((name, members))
+        })
+        .collect()
+}
+
 /// Where a round sits, and what lupin recorded about its clusters.
 pub struct Round {
     /// This manifest.
@@ -41,6 +61,9 @@ pub struct Round {
     pub source: Option<PathBuf>,
     summary: HashMap<String, Value>,
     history: HashMap<String, Value>,
+    /// Coarse groups of cell types and their members, when lupin called
+    /// this round at a coarse level.
+    tree: Vec<(String, Vec<String>)>,
 }
 
 impl Round {
@@ -56,7 +79,21 @@ impl Round {
             history: at("history")
                 .map(|p| read_json_object(&p))
                 .unwrap_or_default(),
+            tree: at("celltype_tree")
+                .and_then(|p| read_json(&p))
+                .map(|v| read_tree(&v))
+                .unwrap_or_default(),
         }
+    }
+
+    /// The member types of `label` when it names a coarse group.
+    #[must_use]
+    pub fn members_of(&self, label: &str) -> Option<&[String]> {
+        let norm = |s: &str| s.to_lowercase().replace(' ', "_");
+        self.tree
+            .iter()
+            .find(|(g, _)| norm(g) == norm(label))
+            .map(|(_, m)| m.as_slice())
     }
 
     /// The round made from this one, found next to it: a manifest in the same
@@ -147,6 +184,13 @@ impl Round {
             let size = s.get("size").and_then(Value::as_u64).unwrap_or(0);
             let label = s.get("label").and_then(Value::as_str).unwrap_or("-");
             out.push(format!("C{id} · {size} cells · {label}"));
+            if let Some(members) = self.members_of(label) {
+                out.push(format!(
+                    "a group of {} types (R, then L refines it):",
+                    members.len()
+                ));
+                out.push(format!("  {}", members.join(", ")));
+            }
             let num = |v: &Value, k: &str| {
                 v.get(k)
                     .and_then(Value::as_f64)
@@ -315,6 +359,33 @@ mod tests {
         let r2 = Round::load(&m2, &d2, &newer);
         assert!(r2.source.as_ref().unwrap().ends_with("r1.senna.json"));
         assert!(r2.newer().is_none());
+    }
+
+    #[test]
+    fn a_coarse_label_lists_its_member_types() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "s.json",
+            r#"{"4":{"size":10,"label":"G1","calls":[{"label":"CT1","q":0.01}]}}"#,
+        );
+        write(
+            dir.path(),
+            "t.json",
+            r#"{"source":"marker_sharing","groups":[{"name":"G1","members":["CT1","CT2"]},{"name":"CT3","members":["CT3"]}]}"#,
+        );
+        let path = write(
+            dir.path(),
+            "r.senna.json",
+            r#"{"version":2,"kind":"bge","prefix":"r","annotate":{"cluster_summary":"s.json","celltype_tree":"t.json"}}"#,
+        );
+        let (m, d) = RunManifest::load(&path).unwrap();
+        let round = Round::load(&m, &d, &path);
+        assert_eq!(round.members_of("g1").unwrap(), ["CT1", "CT2"]);
+        assert!(round.members_of("CT3").is_none());
+        let lines = round.cluster_lines("4");
+        assert!(lines[1].starts_with("a group of 2 types"));
+        assert_eq!(lines[2], "  CT1, CT2");
     }
 
     #[test]
