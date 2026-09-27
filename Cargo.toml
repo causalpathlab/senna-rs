@@ -26,7 +26,14 @@ name = "senna"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["view"]
+# `senna view`: terminal viewer for layouts, clusters and annotations.
+view = [
+    "dep:ratatui",
+    "dep:ratatui-image",
+    "dep:image",
+    "dep:noto-sans-mono-bitmap",
+]
 cuda = [
     "legume-numeric/cuda",
     "cnv/cuda",
@@ -52,6 +59,10 @@ hsblock = { version = "0.1.1", package = "hsblock-rs" }
 enrichment = { version = "0.3.9", package = "legume-enrichment" }
 
 anyhow = "1.0"
+ratatui = { version = "0.30", optional = true }
+ratatui-image = { version = "11.1", optional = true, default-features = false, features = ["crossterm"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+noto-sans-mono-bitmap = { version = "0.3", optional = true, default-features = false, features = ["regular", "bold", "size_16", "size_20", "size_24", "unicode-basic-latin"] }
 clap = { version = "4.5.20", features = ["derive"] }
 num_cpus = "1.16.0"
 rayon = "1.10.0"
