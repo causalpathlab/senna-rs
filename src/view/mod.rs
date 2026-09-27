@@ -10,6 +10,7 @@ mod color;
 mod data;
 mod render;
 mod style;
+mod sublayout;
 mod text;
 mod tui;
 
@@ -101,6 +102,20 @@ pub struct ViewArgs {
         help = "Start with this group focused (a name in the starting grouping)"
     )]
     pub focus: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Start inside a fresh layout of this group's cells (a name in the starting grouping)"
+    )]
+    pub zoom_into: Option<Box<str>>,
+}
+
+/// What a zoom into one group needs: its name, its cells, and the geometry
+/// table to lay them out from.
+pub(crate) struct ZoomRequest {
+    pub label: String,
+    pub names: Vec<Box<str>>,
+    pub geometry: std::sync::Arc<sublayout::Geometry>,
 }
 
 /// A feature, or one group's whole marker set, picked to show as activity.
@@ -139,6 +154,8 @@ pub(crate) struct Scene {
     activity: Option<Activity>,
     shown: Option<Shown>,
     ramp: Vec<Rgb>,
+    /// The run's geometry table, read on the first zoom into a group.
+    geometry: Option<std::sync::Arc<sublayout::Geometry>>,
     /// A message for the status line, taken by the front end.
     pub note: Option<String>,
 }
@@ -161,6 +178,7 @@ impl Scene {
             activity: None,
             shown: None,
             ramp: color::activity_ramp(256),
+            geometry: None,
             note: None,
         };
         scene.colour = scene.default_colour(args.colour_by.as_deref());
@@ -168,7 +186,7 @@ impl Scene {
         if args.observed {
             scene.source = Source::Observed;
         }
-        if let Some(want) = &args.focus {
+        if let Some(want) = args.focus.as_ref().or(args.zoom_into.as_ref()) {
             scene.focus = scene
                 .levels()
                 .iter()
@@ -176,6 +194,16 @@ impl Scene {
                 .map(|i| i as u32);
             if scene.focus.is_none() {
                 log::warn!("view: no group `{want}` in the starting grouping");
+            }
+        }
+        if args.zoom_into.is_some() && scene.focus.is_some() {
+            let parent = scene.space;
+            match scene.zoom_request().and_then(|z| {
+                let (found, xy) = z.geometry.layout(&z.names).map_err(|e| e.to_string())?;
+                Ok((z.label, found, xy))
+            }) {
+                Ok((label, names, xy)) => scene.add_zoomed(parent, &label, names, xy),
+                Err(e) => log::warn!("view: {e}"),
             }
         }
         if let Some(g) = &args.markers_of {
@@ -275,6 +303,85 @@ impl Scene {
         }
         self.refresh_groups();
         self.refresh_activity();
+    }
+
+    /// What zooming into the focused group needs: its name, its cells, and
+    /// the geometry table to lay them out from.
+    pub fn zoom_request(&mut self) -> Result<ZoomRequest, String> {
+        if self.current().axis != Axis::Cells {
+            return Err("zoom into a group from a cell view".into());
+        }
+        let (Some(f), Some(groups)) = (self.focus, self.groups()) else {
+            return Err("focus a group first ([ ] or click), then press z".into());
+        };
+        let points = &self.current().points;
+        let names: Vec<Box<str>> = groups
+            .iter()
+            .zip(&points.names)
+            .filter(|&(&g, _)| g == f)
+            .map(|(_, n)| n.clone())
+            .collect();
+        let label = self.levels()[f as usize].to_string();
+        if self.geometry.is_none() {
+            let (m, dir) = self
+                .data
+                .run
+                .as_ref()
+                .ok_or("no manifest to read the embedding from")?;
+            let g = sublayout::Geometry::load(m, dir).map_err(|e| e.to_string())?;
+            self.geometry = Some(std::sync::Arc::new(g));
+        }
+        let geometry = self.geometry.clone().expect("just loaded");
+        Ok(ZoomRequest {
+            label,
+            names,
+            geometry,
+        })
+    }
+
+    /// Add a layout of one group, zoomed from `parent`, and switch to it.
+    pub fn add_zoomed(
+        &mut self,
+        parent: usize,
+        label: &str,
+        names: Vec<Box<str>>,
+        xy: Vec<[f32; 2]>,
+    ) {
+        let method = format!("{} › {label}", self.data.spaces[parent].method);
+        self.data.spaces.push(data::Space {
+            method,
+            title: "cells",
+            axis: Axis::Cells,
+            points: data::Points::new(names, xy),
+            backdrop: None,
+            parent: Some(parent),
+        });
+        self.focus = None;
+        self.set_space(self.data.spaces.len() - 1);
+    }
+
+    /// Back to the layout this one was zoomed from. Returns whether there was one.
+    pub fn zoom_out(&mut self) -> bool {
+        match self.current().parent {
+            Some(p) => {
+                self.set_space(p);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Back to the top of the zoom chain. Returns whether it moved.
+    pub fn zoom_to_root(&mut self) -> bool {
+        let mut at = self.space;
+        while let Some(p) = self.data.spaces[at].parent {
+            at = p;
+        }
+        if at == self.space {
+            return false;
+        }
+        self.set_space(at);
+        true
     }
 
     fn markers(&self) -> Option<&data::Labels> {
@@ -755,6 +862,7 @@ mod tests {
             axis,
             points: pts(names),
             backdrop: None,
+            parent: None,
         }
     }
 
@@ -802,6 +910,7 @@ mod tests {
             markers_of: None,
             observed: false,
             focus: None,
+            zoom_into: None,
         };
         Scene::new(data, &args)
     }
@@ -857,6 +966,26 @@ mod tests {
         assert_eq!(s.focus, Some(0));
         s.step_focus(-1);
         assert_eq!(s.focus, Some(1));
+    }
+
+    #[test]
+    fn zooming_nests_and_steps_back_one_level_or_to_the_top() {
+        let mut s = scene();
+        let pts = |n: &[&str]| n.iter().map(|&x| x.into()).collect::<Vec<Box<str>>>();
+        let xy = vec![[0.0, 0.0], [1.0, 1.0]];
+        s.add_zoomed(0, "C1", pts(&["c2", "c3"]), xy.clone());
+        let first = s.space;
+        assert_eq!(s.current().parent, Some(0));
+        assert!(s.current().method.ends_with("C1"));
+        s.add_zoomed(first, "C1", pts(&["c2"]), vec![[0.0, 0.0]]);
+        assert_eq!(s.current().parent, Some(first));
+        assert!(s.zoom_out());
+        assert_eq!(s.space, first);
+        s.add_zoomed(first, "C1", pts(&["c3"]), vec![[0.0, 0.0]]);
+        assert!(s.zoom_to_root());
+        assert_eq!(s.space, 0);
+        assert!(!s.zoom_out());
+        assert!(!s.zoom_to_root());
     }
 
     #[test]
