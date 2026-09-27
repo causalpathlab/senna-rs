@@ -35,7 +35,6 @@ impl App {
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Esc | KeyCode::Char('x') => {
                 let cleared = self.info.take().is_some()
-                    || !std::mem::take(&mut self.marked).is_empty()
                     || self.scene.clear_suggestions()
                     || self.scene.clear_pick()
                     || self.scene.focus.take().is_some();
@@ -86,12 +85,9 @@ impl App {
             }
             KeyCode::Char('z') => self.start_zoom(),
             KeyCode::Char('n') => self.change(Scene::suggest),
-            KeyCode::Char('v') => self.toggle_mark(),
-            KeyCode::Char('L') => self.begin(Action::Label),
-            KeyCode::Char('M') => self.begin(Action::Merge),
-            KeyCode::Char('K') => self.begin(Action::Keep),
-            KeyCode::Char('A') => self.begin(Action::MarkersAdd),
-            KeyCode::Char('D') => self.begin(Action::MarkersDrop),
+            KeyCode::Char('v' | 'L' | 'M' | 'K' | 'A' | 'D') => {
+                self.message = Some("decisions are made in relabel mode: press R".into());
+            }
             KeyCode::Char('b') => {
                 self.sidebar = !self.sidebar;
                 if !self.sidebar {
@@ -273,11 +269,11 @@ impl App {
             .filter(|&g| g != crate::view::NONE);
         let on_features = self.scene.current().axis() == crate::view::Axis::Features;
         if !on_features {
-            self.clicked = self.scene.cluster_id_of(&name);
             // The features nearest this cell; in relabel mode, also go to its
             // cluster.
             self.scene.show_near(&name);
-            if let (Some(id), Some(r)) = (self.clicked, self.scene.review.as_ref()) {
+            let clicked = self.scene.cluster_id_of(&name);
+            if let (Some(id), Some(r)) = (clicked, self.scene.review.as_ref()) {
                 if let Some(i) = r.order.iter().position(|&c| c == id) {
                     if i != r.at {
                         self.scene.visit(i);

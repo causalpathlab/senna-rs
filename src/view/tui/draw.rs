@@ -8,41 +8,39 @@ impl App {
             .bg(rgb(color::BACKGROUND))
             .fg(rgb(color::INK));
         f.render_widget(Block::default().style(page), f.area());
-        let [_, status] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+        let [_, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(STATUS_LINES)])
+            .areas(f.area());
         let map = self.map;
         if let Some(p) = &self.proto {
             f.render_widget(Image::new(p), map);
         }
 
-        let left = match (&self.search, &self.prompt) {
+        // Status area: what is on screen (or the latest message), then the
+        // keys that act here.
+        let mut first = match (&self.search, &self.prompt) {
             (Some((q, hits)), _) => {
                 let shown: Vec<&str> = hits.iter().take(6).map(AsRef::as_ref).collect();
                 format!("/{q}   {}", shown.join("  "))
             }
             (None, Some(p)) => p.line(),
-            (None, None) => {
-                let mut text = self.message.clone().unwrap_or_else(|| self.scene.caption());
-                if !self.marked.is_empty() {
-                    let ids: Vec<String> = self.marked.iter().map(|c| format!("C{c}")).collect();
-                    text.push_str(&format!(" · marked {}", ids.join(" ")));
-                }
-                text
-            }
+            (None, None) => self.message.clone().unwrap_or_else(|| self.scene.caption()),
         };
-        let right = if self.job.is_some() {
-            "drawing…"
-        } else {
-            KEYS
-        };
-        let pad = (status.width as usize)
-            .saturating_sub(left.chars().count() + right.chars().count() + 2);
-        let line = Line::from(vec![
-            Span::raw(format!(" {left}")),
-            Span::raw(" ".repeat(pad)),
-            Span::styled(right, Style::default().fg(rgb(color::MUTED))),
-        ]);
-        f.render_widget(Paragraph::new(line).style(page), status);
+        if self.job.is_some() {
+            first.push_str("   · drawing…");
+        }
+        let [main, more] = self.status_keys();
+        let lines = vec![
+            Line::from(format!(" {first}")),
+            Line::from(Span::styled(
+                format!(" {main}"),
+                Style::default().fg(rgb(color::INK)),
+            )),
+            Line::from(Span::styled(
+                format!(" {more}"),
+                Style::default().fg(rgb(color::MUTED)),
+            )),
+        ];
+        f.render_widget(Paragraph::new(lines).style(page), status);
 
         let side = self.side;
         if side.width > 0 {
@@ -67,21 +65,19 @@ impl App {
         }
 
         if self.help {
-            let w = 72.min(map.width);
-            let h = (HELP.len() as u16 + 2).min(map.height);
+            let lines = self.help_lines();
+            let w = 96.min(map.width);
+            let h = (lines.len() as u16 + 2).min(map.height);
             let r = Rect::new(
                 map.x + (map.width - w) / 2,
                 map.y + (map.height - h) / 2,
                 w,
                 h,
             );
-            let lines: Vec<Line> = HELP
-                .iter()
-                .map(|(k, v)| Line::from(format!("  {k:<20} {v}")))
-                .collect();
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(lines)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
                     .block(Block::bordered().border_style(Style::default().fg(rgb(color::MUTED))))
                     .style(page),
                 r,

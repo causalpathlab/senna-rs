@@ -1,8 +1,8 @@
-//! Annotation decisions: the prompt, merge marks, sending a decision to
-//! lupin and following the rounds it writes.
+//! The decision prompt, and what comes back from lupin: rounds it wrote for
+//! this view, and rounds a watcher wrote.
 
 use super::*;
-use crate::view::decide::{relabel, Mode, Reply};
+use crate::view::decide::Reply;
 
 impl App {
     pub(super) fn prompt_key(&mut self, k: KeyEvent) {
@@ -31,11 +31,7 @@ impl App {
                 if p.why {
                     p.decision.rationale = text;
                     let p = self.prompt.take().expect("checked above");
-                    if p.stage {
-                        self.stage(p.decision);
-                    } else {
-                        self.send(&p.decision);
-                    }
+                    self.stage(p.decision);
                 } else {
                     p.decision.label = text;
                     p.why = true;
@@ -45,124 +41,6 @@ impl App {
             KeyCode::Char(c) => p.input.push(c),
             _ => {}
         }
-    }
-
-    /// The cluster a decision is about: the focused cluster when colouring by
-    /// cluster, else the one last clicked.
-    pub(super) fn target(&self) -> Option<i64> {
-        self.scene.focused_cluster().or(self.clicked)
-    }
-
-    pub(super) fn toggle_mark(&mut self) {
-        let Some(c) = self.target() else {
-            self.message = Some("focus or click a cluster to mark it".into());
-            return;
-        };
-        if let Some(i) = self.marked.iter().position(|&m| m == c) {
-            self.marked.remove(i);
-        } else {
-            self.marked.push(c);
-        }
-    }
-
-    /// Start typing a decision of kind `action`.
-    pub(super) fn begin(&mut self, action: Action) {
-        if self.relabeling.is_some() {
-            self.message = Some("lupin is still applying the last decision".into());
-            return;
-        }
-        let mut decision = Decision {
-            action,
-            clusters: Vec::new(),
-            features: Vec::new(),
-            label: String::new(),
-            rationale: String::new(),
-            evidence: Vec::new(),
-        };
-        let mut input = String::new();
-        match action {
-            Action::Merge => {
-                if self.marked.len() < 2 {
-                    self.message = Some("mark two or more clusters with v first".into());
-                    return;
-                }
-                decision.clusters = self.marked.clone();
-            }
-            Action::Label | Action::Keep => {
-                let Some(c) = self.target() else {
-                    self.message = Some("focus or click a cluster first".into());
-                    return;
-                };
-                decision.clusters = vec![c];
-                let (label, top) = self.scene.cluster_call(c);
-                if let Some((call, support)) = top {
-                    decision.evidence.push(serde_json::json!({
-                        "kind": "marker", "term": call.clone(), "stat": "support", "value": support,
-                    }));
-                    input = call;
-                }
-                if action == Action::Keep {
-                    let Some(l) = label else {
-                        self.message = Some(format!("C{c} has no current call to keep"));
-                        return;
-                    };
-                    decision.label = l;
-                }
-            }
-            Action::MarkersAdd | Action::MarkersDrop => {
-                let Some(Pick::One(f)) = self.scene.pick.clone() else {
-                    self.message = Some("show a feature first (n, g or /)".into());
-                    return;
-                };
-                if let Some(v) = self.scene.suggestion_score(&f) {
-                    decision.evidence.push(serde_json::json!({
-                        "kind": "marker", "term": f.as_ref(), "stat": "expected_lfc", "value": v,
-                    }));
-                }
-                decision.features = vec![f];
-                input = self
-                    .scene
-                    .focused_name()
-                    .map(|n| n.to_string())
-                    .unwrap_or_default();
-            }
-        }
-        // Keep reuses the cluster's current label; everything else asks for one.
-        let why = action == Action::Keep;
-        self.prompt = Some(Prompt {
-            decision,
-            why,
-            input: if why { String::new() } else { input },
-            known: self.scene.known_labels(),
-            stage: false,
-            why_prefill: String::new(),
-        });
-    }
-
-    /// Hand a decision to lupin on a worker thread; `finish_relabel` picks
-    /// up its answer.
-    pub(super) fn send(&mut self, d: &Decision) {
-        let round = self
-            .from
-            .canonicalize()
-            .unwrap_or_else(|_| self.from.clone());
-        let json = d.to_json(&round.to_string_lossy());
-        let lupin = self.lupin.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(relabel(&lupin, &round, &[json], Mode::Next));
-        });
-        self.relabeling = Some(Relabeling {
-            job: RelabelJob::One {
-                merge: d.action == Action::Merge,
-            },
-            done: rx,
-        });
-        self.message = Some(format!(
-            "{} {} · lupin is writing the next round…",
-            d.action.name(),
-            d.label
-        ));
     }
 
     /// Take lupin's answer, if it has come: open the round it wrote, or say
@@ -182,14 +60,10 @@ impl App {
         let r = self.relabeling.take().expect("checked above");
         match reply {
             Ok(Reply::Round(path)) => {
-                match r.job {
-                    RelabelJob::One { merge: true } => self.marked.clear(),
-                    RelabelJob::Submit => {
-                        if let Some(review) = self.scene.review.take() {
-                            review.draft.discard();
-                        }
+                if matches!(r.job, RelabelJob::Submit) {
+                    if let Some(review) = self.scene.review.take() {
+                        review.draft.discard();
                     }
-                    _ => {}
                 }
                 self.open_round(&path, "new round");
             }
@@ -201,9 +75,17 @@ impl App {
             }
             Ok(Reply::Refused { reason, latest }) => {
                 if let Some(l) = latest.filter(|l| !same_file(l, &self.from)) {
-                    self.open_round(&l, "latest round");
+                    // A newer round exists: say so, and leave it to the user
+                    // to open it (`.`) and decide again there.
+                    let name = l
+                        .file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    self.message = Some(format!(
+                        "lupin refused: this is not the latest round ({name} is) · . opens it; decide again there"
+                    ));
+                } else {
+                    self.message = Some(format!("lupin refused: {reason}"));
                 }
-                self.message = Some(format!("lupin refused: {reason}"));
             }
             Err(e) => self.message = Some(e),
         }
@@ -242,8 +124,6 @@ pub(super) struct Prompt {
     pub(super) input: String,
     /// Label completions offered for the current input.
     pub(super) known: Vec<Box<str>>,
-    /// Relabel mode: stage the decision in the draft instead of sending it.
-    pub(super) stage: bool,
     /// What the rationale starts as, once the label is in.
     pub(super) why_prefill: String,
 }

@@ -63,7 +63,26 @@ impl Round {
     /// directory whose `annotate.source` resolves to this file.
     #[must_use]
     pub fn newer(&self) -> Option<PathBuf> {
-        siblings(&self.path, ".senna.json").into_iter().find(|p| {
+        // lupin names a round's successor `{stem}.r{N}.senna.json`; prefer
+        // that chain over any other round made from this one.
+        let stem = self
+            .path
+            .file_name()
+            .map(|n| {
+                n.to_string_lossy()
+                    .trim_end_matches(".senna.json")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let mut found = siblings(&self.path, ".senna.json");
+        found.sort_by_key(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            !name.starts_with(&format!("{stem}.r"))
+        });
+        found.into_iter().find(|p| {
             read_json(p)
                 .and_then(|v| v.pointer("/annotate/source")?.as_str().map(String::from))
                 .is_some_and(|src| {

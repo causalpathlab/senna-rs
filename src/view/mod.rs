@@ -443,6 +443,18 @@ impl Scene {
     /// layout, grouping and focused group the view had, matched by name. A
     /// zoomed layout falls back to the layout it was zoomed from.
     pub fn replace_data(&mut self, data: Dataset) {
+        // A relabel draft uses the ids of the round it was made on; it must
+        // never be applied to another round. Keep it with its own round.
+        let left = self.review.as_ref().map(|r| r.draft.round.clone());
+        if let Some(round) = left {
+            self.leave_review();
+            let name = round
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            self.note = Some(format!(
+                "a different round is open: relabel mode left, the draft stays with {name}"
+            ));
+        }
         let (method, kind) = {
             let s = &self.data.spaces[self.root()];
             (s.method.clone(), s.kind)
@@ -516,13 +528,6 @@ impl Scene {
         Some(c.ids[*c.by_name.get(cell)? as usize])
     }
 
-    /// The focused group's cluster id, when colouring by cluster.
-    pub fn focused_cluster(&self) -> Option<i64> {
-        let labels = &self.data.labels[self.colour?];
-        let f = self.focus?;
-        (labels.kind == LabelKind::Cluster).then(|| labels.ids[f as usize])
-    }
-
     /// The label the current round gives cluster `id`, and its top call.
     pub fn cluster_call(&self, id: i64) -> (Option<String>, Option<(String, Option<f64>)>) {
         self.data
@@ -544,15 +549,6 @@ impl Scene {
         out.sort();
         out.dedup();
         out
-    }
-
-    /// The score the current suggestions gave `feature`, if it is among them.
-    pub fn suggestion_score(&self, feature: &str) -> Option<f32> {
-        let s = self.suggestions.as_ref()?;
-        s.list
-            .iter()
-            .find(|(f, _)| f.as_ref() == feature)
-            .map(|&(_, v)| v)
     }
 
     /// Back to the top of the zoom chain. Returns whether it moved.
@@ -1315,6 +1311,42 @@ mod tests {
         s.pick = Some(Pick::One("g1".into()));
         s.step_focus(1);
         assert!(s.pick.is_none());
+    }
+
+    #[test]
+    fn opening_another_round_leaves_relabel_mode_and_keeps_the_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let round = dir.path().join("r.senna.json");
+        let mut s = scene();
+        let mut draft = review::Draft {
+            round: round.clone(),
+            ..Default::default()
+        };
+        draft.cluster(1).verdict = Some(review::Verdict::Keep {
+            label: "CT1".into(),
+            rationale: "clear".into(),
+        });
+        s.review = Some(relabel::Review {
+            order: vec![1],
+            at: 0,
+            draft,
+            candidates: Vec::new(),
+            fits: Vec::new(),
+            target: None,
+            rows: Vec::new(),
+            row: 0,
+            marked: Vec::new(),
+            preview: None,
+        });
+        let other = scene().data;
+        s.replace_data(other);
+        assert!(s.review.is_none());
+        assert!(s
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("draft stays with r.senna.json"));
+        assert!(!review::Draft::load(&round).is_empty());
     }
 
     #[test]

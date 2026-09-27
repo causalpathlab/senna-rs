@@ -7,6 +7,7 @@
 
 mod decisions;
 mod draw;
+mod help;
 mod input;
 mod relabel;
 
@@ -34,62 +35,6 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 use std::time::Duration;
-
-const KEYS: &str =
-    "tab space · c colour · [ ] focus · n suggest · g / feature · z zoom · e style · ? help";
-
-const HELP: &[(&str, &str)] = &[
-    (
-        "tab / shift-tab",
-        "next / previous space (cells, features on cells, features)",
-    ),
-    ("m", "next layout method"),
-    (
-        "c",
-        "next grouping (annotation, cluster, topic, markers, none)",
-    ),
-    ("[  ]", "focus previous / next group; others turn gray"),
-    ("click", "focus the group of the nearest point"),
-    (
-        "n",
-        "suggest features (model-based; check with o): what sets the focused group apart, or what varies here",
-    ),
-    (
-        "g  G",
-        "next / previous feature (suggestions, else the focused group's markers)",
-    ),
-    ("/", "search a feature by name; enter shows it"),
-    ("a", "activity of the focused group's whole marker set"),
-    ("o", "expected (model) or observed (counts) activity"),
-    ("x / esc", "clear feature, then focus"),
-    ("z", "lay out the focused group's cells again, on their own"),
-    (
-        ",  .",
-        "previous (source) / next annotation round; the file reloads on change",
-    ),
-    (
-        "Z / backspace",
-        "back to the layout this one was zoomed from",
-    ),
-    (
-        "e",
-        "style menu: colour, shape, opacity, size, visibility per group",
-    ),
-    ("b", "sidebar on / off (suggestions, cluster summary, style menu)"),
-    ("L", "decide: label the focused / clicked cluster (asks label, then why)"),
-    ("v  M", "mark clusters for a merge; merge the marked ones"),
-    ("K", "decide: keep the cluster's current call"),
-    ("A  D", "decide: add / drop the feature on screen in a cell type's markers"),
-    ("t", "text labels on / off"),
-    ("+  -  scroll", "zoom"),
-    ("arrows  drag", "pan"),
-    ("click a cell", "its cluster's summary, and the features nearest it on the map"),
-    ("k  l", "keep those features as markers (relabel mode) / lock them on screen"),
-    ("R", "relabel mode: visit clusters, stage decisions, preview and submit to lupin"),
-    ("0", "reset: top-level layout, whole map in view"),
-    ("s", "save this view as PNG"),
-    ("q", "quit"),
-];
 
 fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
@@ -131,6 +76,9 @@ pub fn run(
 
 type ZoomResult = Result<super::sublayout::Laid, String>;
 
+/// Lines at the bottom: what is on screen, then two lines of keys.
+const STATUS_LINES: u16 = 3;
+
 /// A decision lupin is applying on a worker thread.
 struct Relabeling {
     job: RelabelJob,
@@ -139,8 +87,6 @@ struct Relabeling {
 
 /// What a lupin call was for.
 enum RelabelJob {
-    /// One decision typed outside relabel mode.
-    One { merge: bool },
     /// The whole relabel draft, as the next round.
     Submit,
     /// The whole relabel draft, previewed.
@@ -215,9 +161,6 @@ struct App {
     lupin: String,
     /// A decision lupin is applying.
     relabeling: Option<Relabeling>,
-    /// Clusters marked for a merge (`v`), and the last one clicked.
-    marked: Vec<i64>,
-    clicked: Option<i64>,
     /// A decision being typed.
     prompt: Option<Prompt>,
     quit: bool,
@@ -226,12 +169,22 @@ struct App {
 impl App {
     fn new(scene: Scene, picker: Picker, from: std::path::PathBuf, lupin: String) -> Self {
         let f = picker.font_size();
+        // Opened on an older round: say where the newest work is.
+        let newer = scene
+            .data
+            .round
+            .as_ref()
+            .and_then(crate::view::rounds::Round::newer)
+            .map(|n| {
+                let name = n
+                    .file_name()
+                    .map_or_else(String::new, |x| x.to_string_lossy().into_owned());
+                format!("a newer round exists ({name}) · . opens it")
+            });
         Self {
             watcher: Watcher::find(&from),
             lupin,
             relabeling: None,
-            marked: Vec::new(),
-            clicked: None,
             prompt: None,
             stamp: modified(&from),
             from,
@@ -246,7 +199,7 @@ impl App {
             vp: None,
             job: None,
             proto: None,
-            message: None,
+            message: newer,
             help: false,
             drag: None,
             search: None,
@@ -312,7 +265,7 @@ impl App {
     /// Map and sidebar areas and the viewport for the current terminal size.
     fn layout(&mut self, area: Rect) {
         let body = Rect {
-            height: area.height.saturating_sub(1),
+            height: area.height.saturating_sub(STATUS_LINES),
             ..area
         };
         // The sidebar takes its columns from the map rather than covering it.
