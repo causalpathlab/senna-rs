@@ -71,6 +71,8 @@ mod topic;
 mod tree_layout;
 mod update;
 mod vae;
+#[cfg(feature = "view")]
+mod view;
 
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
@@ -771,6 +773,21 @@ enum Commands {
                       to a machine that has no checkout beside it."
     )]
     Docs(DocsArgs),
+
+    #[cfg(feature = "view")]
+    #[command(
+        about = "Browse a run's layouts, clusters and annotation in the terminal",
+        long_about = "Interactive terminal viewer for `senna layout` results.\n\
+                      \n\
+                      Switch between layout methods (umap / phate / tsne) and spaces:\n\
+                      cells, features placed on the cell map, and features on their own.\n\
+                      Colour by annotation, clusters, topics or marker membership,\n\
+                      focus one group, zoom and pan. Uses kitty / sixel / iTerm2 images\n\
+                      when the terminal supports them, block characters otherwise.\n\
+                      \n\
+                      `--png FILE` renders the starting view to an image and exits."
+    )]
+    View(view::ViewArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -894,6 +911,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Clustering(args) => {
             run_clustering(args)?;
         }
+        #[cfg(feature = "view")]
+        Commands::View(args) => view::run_view(args)?,
     }
 
     info!("Done");
