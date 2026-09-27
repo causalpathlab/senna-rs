@@ -210,13 +210,29 @@ impl Scene {
                 })
                 .cloned()
         });
+        // Markers listed: the target's, and the best-fitting other candidate's.
+        let alternative = candidates
+            .iter()
+            .filter(|c| Some(c.as_str()) != target.as_deref())
+            .max_by(|a, b| {
+                fit_of(a)
+                    .unwrap_or(f32::NEG_INFINITY)
+                    .total_cmp(&fit_of(b).unwrap_or(f32::NEG_INFINITY))
+            })
+            .cloned();
+        let listed: Vec<String> = target.iter().cloned().chain(alternative).collect();
         let rows = review_rows(
             &scores,
             &markers,
-            &candidates,
+            &listed,
             target.as_deref(),
             staged.as_deref(),
         );
+        candidates.sort_by(|a, b| {
+            fit_of(b)
+                .unwrap_or(f32::NEG_INFINITY)
+                .total_cmp(&fit_of(a).unwrap_or(f32::NEG_INFINITY))
+        });
         let r = self.review.as_mut().expect("checked above");
         r.fits = candidates
             .iter()
@@ -376,10 +392,16 @@ impl Scene {
             .clusters
             .get(&id)
             .map(|c| {
-                c.marks
+                let mut kept: Vec<(&String, f32)> = c
+                    .marks
                     .iter()
                     .filter(|(_, (m, _))| matches!(m, Mark::Include { .. }))
-                    .map(|(f, (_, v))| format!("{f} {v:+.1}"))
+                    .map(|(f, (_, v))| (f, *v))
+                    .collect();
+                kept.sort_by(|a, b| b.1.total_cmp(&a.1));
+                kept.iter()
+                    .take(5)
+                    .map(|(f, v)| format!("{f} {v:+.1}"))
                     .collect()
             })
             .unwrap_or_default();
@@ -490,9 +512,16 @@ impl Scene {
             let g = self.groups()?;
             Some(g.iter().filter(|&&x| x == f && x != NONE).count())
         });
+        let marks = staged.map_or(0, |c| c.marks.len());
+        let verdict = staged.and_then(|c| c.verdict.as_ref());
+        let next = match (verdict, marks) {
+            (Some(_), _) => "next: ] for the next cluster · S when done (p previews)",
+            (None, 0) => "next: check the fit below, then + / - features (a accepts ?), then L",
+            (None, _) => "next: L to label it (or K to keep, v then M to merge)",
+        };
         let mut out = vec![
             format!(
-                "relabel · C{id} ({}/{}) · {} decided",
+                "relabel · C{id} ({} of {}) · {} decided",
                 r.at + 1,
                 r.order.len(),
                 r.draft.decided()
@@ -502,6 +531,7 @@ impl Scene {
                 size.unwrap_or(0),
                 label.as_deref().unwrap_or("unassigned")
             ),
+            next.to_string(),
         ];
         if let Some(v) = staged.and_then(|c| c.verdict.as_ref()) {
             out.push(match v {
@@ -524,6 +554,7 @@ impl Scene {
             });
         }
         out.push(String::new());
+        out.push("   mark feature       here  marker of".into());
         for (k, row) in r.rows.iter().enumerate() {
             let staged = staged.and_then(|c| c.marks.get(row.feature.as_ref()));
             let sign = match (staged, &row.proposal) {
@@ -555,9 +586,6 @@ impl Scene {
             out.push(String::new());
             out.extend(p.iter().cloned());
         }
-        out.push(String::new());
-        out.push("] [ cluster · ↑↓ row · enter show · + − space mark · a accept ?".into());
-        out.push("tab target · L label · K keep · v/M merge · p preview · S submit".into());
         Some(out)
     }
 
