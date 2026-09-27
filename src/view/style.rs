@@ -141,7 +141,7 @@ pub fn swatches() -> Vec<[u8; 3]> {
     let enc = color::Encoder::new();
     let to8 = |c: Rgb| c.map(|v| enc.encode(v));
     let mut out: Vec<[u8; 3]> = (0..12).map(|i| to8(color::category(i, 12))).collect();
-    out.extend((0..12).map(|i| to8(color::category_ink(i))));
+    out.extend((0..12).map(|i| to8(color::ink_for(color::category(i, 12)))));
     out.extend([[200, 199, 196], [150, 150, 150], [90, 90, 90], [30, 30, 30]]);
     out
 }
@@ -204,13 +204,10 @@ impl Book {
             .enumerate()
             .map(|(i, name)| {
                 let s = self.get(grouping, name);
-                let (colour, ink) = match s.colour {
-                    Some(c) => {
-                        let c = color::linear_rgb(c);
-                        (c, c.map(|v| v * 0.45))
-                    }
-                    None => (color::category(i, n), color::category_ink(i)),
-                };
+                let colour = s
+                    .colour
+                    .map_or_else(|| color::category(i, n), color::linear_rgb);
+                let ink = color::ink_for(colour);
                 Resolved {
                     colour,
                     ink,

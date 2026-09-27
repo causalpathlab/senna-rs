@@ -7,25 +7,19 @@
 //! Lupin's fields are read through the manifest's pass-through keys, so
 //! senna's schema does not carry them.
 
-use super::data::{read_rows, sort_levels_naturally, Axis, Labels};
+use super::data::{read_pairs, LabelKind, Labels};
+use super::files::{read_json, same_file, siblings};
 use rustc_hash::FxHashMap as HashMap;
 use senna::run_manifest::{self, RunManifest};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Label a round gives a cell it did not assign.
-const UNASSIGNED: &str = "unassigned";
+pub(super) const UNASSIGNED: &str = "unassigned";
 
 /// `cell<TAB>label<TAB>…` with a header, as `annotate.argmax` holds it.
 pub fn read_argmax(path: &Path) -> anyhow::Result<HashMap<Box<str>, Box<str>>> {
-    Ok(read_rows(path)?
-        .into_iter()
-        .skip(1)
-        .filter_map(|r| {
-            let mut it = r.into_iter();
-            Some((it.next()?.into_boxed_str(), it.next()?.into_boxed_str()))
-        })
-        .collect())
+    Ok(read_pairs(path)?.into_iter().collect())
 }
 
 fn annotate_str<'a>(m: &'a RunManifest, key: &str) -> Option<&'a str> {
@@ -33,11 +27,10 @@ fn annotate_str<'a>(m: &'a RunManifest, key: &str) -> Option<&'a str> {
 }
 
 fn read_json_object(path: &Path) -> HashMap<String, Value> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Map<String, Value>>(&s).ok())
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default()
+    match read_json(path) {
+        Some(Value::Object(m)) => m.into_iter().collect(),
+        _ => HashMap::default(),
+    }
 }
 
 /// Where a round sits, and what lupin recorded about its clusters.
@@ -70,37 +63,16 @@ impl Round {
     /// directory whose `annotate.source` resolves to this file.
     #[must_use]
     pub fn newer(&self) -> Option<PathBuf> {
-        let me = self.path.canonicalize().ok()?;
-        let dir = self
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-            .ok()?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.to_string_lossy().ends_with(".senna.json"))
-            .filter(|p| {
-                let Ok(s) = std::fs::read_to_string(p) else {
-                    return false;
-                };
-                let Ok(v) = serde_json::from_str::<Value>(&s) else {
-                    return false;
-                };
-                let Some(src) = v.pointer("/annotate/source").and_then(Value::as_str) else {
-                    return false;
-                };
-                let base = p.parent().unwrap_or_else(|| Path::new("."));
-                run_manifest::resolve(base, src)
-                    .canonicalize()
-                    .ok()
-                    .as_ref()
-                    == Some(&me)
-            })
-            .collect();
-        found.sort();
-        found.into_iter().next()
+        siblings(&self.path, ".senna.json").into_iter().find(|p| {
+            read_json(p)
+                .and_then(|v| v.pointer("/annotate/source")?.as_str().map(String::from))
+                .is_some_and(|src| {
+                    same_file(
+                        &run_manifest::resolve(run_manifest::manifest_dir(p), &src),
+                        &self.path,
+                    )
+                })
+        })
     }
 
     /// The label the round gives cluster `id`, and its top marker call with
@@ -224,13 +196,11 @@ pub fn comparisons(
     source_argmax: &Path,
 ) -> anyhow::Result<[Labels; 2]> {
     let previous = read_argmax(source_argmax)?;
-    let mut before = Labels::from_pairs(
-        "previous annotation",
-        Axis::Cells,
+    let before = Labels::new(
+        LabelKind::Previous,
         previous.iter().map(|(c, l)| (c.clone(), l.clone())),
         &[UNASSIGNED],
     );
-    sort_levels_naturally(&mut before);
     let unassigned: Box<str> = UNASSIGNED.into();
     let mut cells: Vec<&Box<str>> = current.keys().chain(previous.keys()).collect();
     cells.sort();
@@ -240,8 +210,7 @@ pub fn comparisons(
         let was = previous.get(c).unwrap_or(&unassigned);
         (now != was).then(|| (c.clone(), now.clone()))
     });
-    let mut changed = Labels::from_pairs("changed", Axis::Cells, changed_pairs, &[]);
-    sort_levels_naturally(&mut changed);
+    let changed = Labels::new(LabelKind::Changed, changed_pairs, &[]);
     Ok([before, changed])
 }
 

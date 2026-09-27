@@ -8,6 +8,7 @@
 //! has written, oldest first), `latest`, and `error` when a batch was
 //! refused. Paths in it are relative to the status file.
 
+use super::files::{modified, read_json, same_file, siblings};
 use senna::run_manifest;
 use serde_json::Value;
 use std::io::Write;
@@ -23,42 +24,17 @@ pub struct Watcher {
     stamp: Option<SystemTime>,
 }
 
-fn canonical(p: &Path) -> Option<PathBuf> {
-    p.canonicalize().ok()
-}
-
-fn modified(p: &Path) -> Option<SystemTime> {
-    std::fs::metadata(p).and_then(|m| m.modified()).ok()
-}
-
-fn read_status(path: &Path) -> Option<Value> {
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
-}
-
 impl Watcher {
     /// The watcher for the round at `open`: a status file beside it whose
     /// `base` or `rounds` include that round, or, when `decisions` is given,
     /// that file (with its status file if one points at it).
     #[must_use]
     pub fn find(open: &Path, decisions: Option<&Path>) -> Option<Self> {
-        let me = canonical(open)?;
-        let want = decisions.and_then(canonical);
-        let dir = open
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let mut statuses: Vec<PathBuf> = std::fs::read_dir(dir)
-            .ok()?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.to_string_lossy().ends_with(".relabel_status.json"))
-            .collect();
-        statuses.sort();
-        for status in statuses {
-            let Some(v) = read_status(&status) else {
+        for status in siblings(open, ".relabel_status.json") {
+            let Some(v) = read_json(&status) else {
                 continue;
             };
-            let base = status.parent().unwrap_or_else(|| Path::new("."));
+            let base = run_manifest::manifest_dir(&status);
             let at = |s: &str| run_manifest::resolve(base, s);
             let Some(dec) = v.get("decisions").and_then(Value::as_str).map(at) else {
                 continue;
@@ -70,8 +46,8 @@ impl Watcher {
                 .flatten()
                 .chain(v.get("base"))
                 .filter_map(Value::as_str)
-                .any(|r| canonical(&at(r)).as_ref() == Some(&me));
-            let named = want.is_some() && canonical(&dec) == want;
+                .any(|r| same_file(&at(r), open));
+            let named = decisions.is_some_and(|d| same_file(&dec, d));
             if covers || named {
                 let mut w = Self {
                     status: Some(status),
@@ -98,27 +74,17 @@ impl Watcher {
     /// The status file beside the decisions file that names it, once the
     /// watcher has written one.
     fn locate_status(&self) -> Option<PathBuf> {
-        let want = canonical(&self.decisions)?;
-        let dir = self
-            .decisions
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        std::fs::read_dir(dir)
-            .ok()?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.to_string_lossy().ends_with(".relabel_status.json"))
+        siblings(&self.decisions, ".relabel_status.json")
+            .into_iter()
             .find(|p| {
-                let base = p.parent().unwrap_or_else(|| Path::new("."));
-                read_status(p)
+                let base = run_manifest::manifest_dir(p);
+                read_json(p)
                     .and_then(|v| {
                         v.get("decisions")?
                             .as_str()
                             .map(|d| run_manifest::resolve(base, d))
                     })
-                    .and_then(|d| canonical(&d))
-                    == Some(want.clone())
+                    .is_some_and(|d| same_file(&d, &self.decisions))
             })
     }
 
@@ -135,10 +101,10 @@ impl Watcher {
             return false;
         }
         self.stamp = stamp;
-        let Some(v) = read_status(status) else {
+        let Some(v) = read_json(status) else {
             return false;
         };
-        let base = status.parent().unwrap_or_else(|| Path::new("."));
+        let base = run_manifest::manifest_dir(status);
         self.latest = v
             .get("latest")
             .and_then(Value::as_str)
@@ -154,8 +120,10 @@ impl Watcher {
     /// when it sits under the same directory, absolute otherwise.
     #[must_use]
     pub fn round_ref(&self, path: &Path) -> String {
-        let dir = self.decisions.parent().and_then(canonical);
-        match (dir, canonical(path)) {
+        let dir = run_manifest::manifest_dir(&self.decisions)
+            .canonicalize()
+            .ok();
+        match (dir, path.canonicalize().ok()) {
             (Some(d), Some(p)) => p.strip_prefix(&d).map_or_else(
                 |_| p.to_string_lossy().into_owned(),
                 |r| r.to_string_lossy().into_owned(),

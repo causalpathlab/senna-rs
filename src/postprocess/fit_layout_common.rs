@@ -22,7 +22,7 @@ use data_beans::alg::random_projection::binary_sort_columns;
 use rand::{rngs::SmallRng, SeedableRng};
 use rayon::prelude::*;
 use senna::embed_common::*;
-use senna::run_manifest::{self, load_cell_to_pb_raw, RunManifest};
+use senna::run_manifest::{self, load_cell_to_pb_raw, LayoutEntry, RunManifest};
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use std::path::{Path, PathBuf};
 
@@ -39,6 +39,9 @@ pub enum LandmarkStrategy {
     /// Falls back to Random for non-topic kinds (SVD).
     PerTopic,
 }
+
+/// Default winsorization of layout features, in MADs (`--trim-cell-mads`).
+pub(crate) const DEFAULT_TRIM_MADS: f32 = 5.0;
 
 /// Self-loop amount added during similarity regularization to prevent
 /// isolated nodes from collapsing the layout.
@@ -187,7 +190,7 @@ pub struct LayoutCommonArgs {
 
     #[arg(
         long = "trim-cell-mads",
-        default_value_t = 5.0,
+        default_value_t = DEFAULT_TRIM_MADS,
         help = "Winsorize cell features to ±N MADs before the layout; 0 = off",
         long_help = "Winsorize cell features before the layout. This is ON by default, at N=5.\n\
                      \n\
@@ -360,7 +363,7 @@ impl Default for LayoutCommonArgs {
             block_size: None,
             refine_weighting: crate::refine_weighting::WeightingArg::default(),
             similarity_threshold: 0.0,
-            trim_cell_mads: 5.0,
+            trim_cell_mads: DEFAULT_TRIM_MADS,
             local_scale_k: None,
             knn: 15,
             kernel_alpha: 10.0,
@@ -1448,10 +1451,13 @@ pub(crate) fn write_viz_outputs_pb(
     update_manifest_viz(
         resolved,
         method,
-        &cell_coords_path,
-        Some(&pb_coords_path),
+        &LayoutEntry {
+            cell_coords: Some(cell_coords_path),
+            pb_coords: Some(pb_coords_path),
+            feature_on_cell_coords: feature_path,
+            feature_coords: None,
+        },
         pb_feat_is_gene.then_some(pb_feat_path.as_str()),
-        feature_path.as_deref(),
     )?;
 
     Ok(())
@@ -1514,10 +1520,12 @@ pub(crate) fn write_viz_outputs_direct(
     update_manifest_viz(
         resolved,
         method,
-        &cell_coords_path,
+        &LayoutEntry {
+            cell_coords: Some(cell_coords_path),
+            feature_on_cell_coords: feature_path,
+            ..Default::default()
+        },
         None,
-        None,
-        feature_path.as_deref(),
     )?;
 
     Ok(())
@@ -1529,23 +1537,13 @@ pub(crate) fn write_viz_outputs_direct(
 fn update_manifest_viz(
     resolved: &mut ResolvedViz,
     method: &str,
-    cell_coords_path: &str,
-    pb_coords_path: Option<&str>,
+    written: &LayoutEntry,
     pb_gene_mean_path: Option<&str>,
-    feature_on_cell_path: Option<&str>,
 ) -> anyhow::Result<()> {
     let (Some(manifest), Some(manifest_path)) =
         (resolved.manifest.as_mut(), resolved.manifest_path.as_ref())
     else {
         return Ok(());
     };
-    record_cell_layout(
-        manifest,
-        manifest_path,
-        method,
-        cell_coords_path,
-        pb_coords_path,
-        pb_gene_mean_path,
-        feature_on_cell_path,
-    )
+    record_cell_layout(manifest, manifest_path, method, written, pb_gene_mean_path)
 }

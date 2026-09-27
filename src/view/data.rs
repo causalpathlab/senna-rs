@@ -7,10 +7,10 @@
 //! are joined to points by name, so a layout and a label table written by
 //! different commands still line up.
 
+use legume_numeric::matrix::common_io::read_lines_of_words_delim;
 use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
-use senna::run_manifest::{self, RunManifest};
-use std::io::{BufRead, BufReader};
+use senna::run_manifest::{self, LayoutEntry, RunManifest};
 use std::path::{Path, PathBuf};
 
 /// What a point stands for.
@@ -63,12 +63,49 @@ impl Points {
     }
 }
 
+/// Which points a space shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpaceKind {
+    Cells,
+    /// Features placed on a cell layout, drawn over that layout's cells.
+    FeaturesOnCells,
+    /// The feature embedding laid out on its own.
+    Features,
+}
+
+impl SpaceKind {
+    #[must_use]
+    pub fn axis(self) -> Axis {
+        match self {
+            SpaceKind::Cells => Axis::Cells,
+            SpaceKind::FeaturesOnCells | SpaceKind::Features => Axis::Features,
+        }
+    }
+
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            SpaceKind::Cells => "cells",
+            SpaceKind::FeaturesOnCells => "features on cells",
+            SpaceKind::Features => "features",
+        }
+    }
+
+    /// The title as a file-name and flag-friendly word.
+    #[must_use]
+    pub fn slug(self) -> &'static str {
+        match self {
+            SpaceKind::Cells => "cells",
+            SpaceKind::FeaturesOnCells => "features-on-cells",
+            SpaceKind::Features => "features",
+        }
+    }
+}
+
 /// A view of one layout method on one axis.
 pub struct Space {
     pub method: String,
-    /// `cells`, `features on cells`, or `features`.
-    pub title: &'static str,
-    pub axis: Axis,
+    pub kind: SpaceKind,
     pub points: Points,
     /// For features placed on a cell map: that map's cells, drawn muted
     /// underneath for context.
@@ -78,11 +115,62 @@ pub struct Space {
     pub parent: Option<usize>,
 }
 
+impl Space {
+    #[must_use]
+    pub fn axis(&self) -> Axis {
+        self.kind.axis()
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &'static str {
+        self.kind.title()
+    }
+}
+
+/// What a grouping is. Code dispatches on this; `title` is what the user
+/// sees and names in `--colour-by`, and keys saved styles.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LabelKind {
+    Annotation,
+    Cluster,
+    Topic,
+    Markers,
+    FeatureTopic,
+    /// Cells whose label differs from the source round's.
+    Changed,
+    /// The source round's annotation.
+    Previous,
+}
+
+impl LabelKind {
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            LabelKind::Annotation => "annotation",
+            LabelKind::Cluster => "cluster",
+            LabelKind::Topic => "topic",
+            LabelKind::Markers => "markers",
+            LabelKind::FeatureTopic => "feature topics",
+            LabelKind::Changed => "changed",
+            LabelKind::Previous => "previous annotation",
+        }
+    }
+
+    #[must_use]
+    pub fn axis(self) -> Axis {
+        match self {
+            LabelKind::Markers | LabelKind::FeatureTopic => Axis::Features,
+            _ => Axis::Cells,
+        }
+    }
+}
+
 /// A categorical labelling keyed by point name.
 pub struct Labels {
-    pub title: String,
-    pub axis: Axis,
+    pub kind: LabelKind,
     pub levels: Vec<Box<str>>,
+    /// For clusters: the numeric id of each level.
+    pub ids: Vec<i64>,
     pub by_name: HashMap<Box<str>, u32>,
 }
 
@@ -90,9 +178,11 @@ pub struct Labels {
 pub const NONE: u32 = u32::MAX;
 
 impl Labels {
-    pub(crate) fn from_pairs<I: IntoIterator<Item = (Box<str>, Box<str>)>>(
-        title: &str,
-        axis: Axis,
+    /// Group `(point, level)` pairs, leaving out levels in `skip`. A point
+    /// listed twice keeps its first level. Levels are numbered in natural
+    /// order (`T2` before `T10`).
+    pub(crate) fn new<I: IntoIterator<Item = (Box<str>, Box<str>)>>(
+        kind: LabelKind,
         pairs: I,
         skip: &[&str],
     ) -> Self {
@@ -109,11 +199,59 @@ impl Labels {
             });
             by_name.entry(name).or_insert(id);
         }
-        Self {
-            title: title.to_string(),
-            axis,
+        let mut labels = Self {
+            kind,
             levels,
+            ids: Vec::new(),
             by_name,
+        };
+        labels.sort_naturally();
+        labels
+    }
+
+    /// Clusters from `(point, id)` pairs, named `C{id}` and ordered by id.
+    pub(crate) fn clusters<I: IntoIterator<Item = (Box<str>, i64)>>(pairs: I) -> Self {
+        let pairs: Vec<(Box<str>, i64)> = pairs.into_iter().collect();
+        let mut labels = Self::new(
+            LabelKind::Cluster,
+            pairs
+                .iter()
+                .map(|(n, id)| (n.clone(), format!("C{id}").into_boxed_str())),
+            &[],
+        );
+        labels.ids = labels
+            .levels
+            .iter()
+            .map(|l| l[1..].parse().expect("written as C{id} above"))
+            .collect();
+        labels
+    }
+
+    #[must_use]
+    pub fn title(&self) -> &'static str {
+        self.kind.title()
+    }
+
+    #[must_use]
+    pub fn axis(&self) -> Axis {
+        self.kind.axis()
+    }
+
+    /// Renumber levels in natural order.
+    fn sort_naturally(&mut self) {
+        let key = |s: &str| {
+            let digits: String = s.chars().filter(char::is_ascii_digit).collect();
+            (digits.parse::<u64>().unwrap_or(u64::MAX), s.to_string())
+        };
+        let mut idx: Vec<usize> = (0..self.levels.len()).collect();
+        idx.sort_by_key(|&i| key(&self.levels[i]));
+        let mut remap = vec![0u32; idx.len()];
+        for (new, &old) in idx.iter().enumerate() {
+            remap[old] = new as u32;
+        }
+        self.levels = idx.iter().map(|&i| self.levels[i].clone()).collect();
+        for v in self.by_name.values_mut() {
+            *v = remap[*v as usize];
         }
     }
 
@@ -158,70 +296,48 @@ fn read_xy(path: &Path) -> anyhow::Result<Points> {
     Ok(Points::new(rows, xy))
 }
 
-/// Rows of a text table, `#` comments and blank lines skipped.
-pub(super) fn read_rows(path: &Path) -> anyhow::Result<Vec<Vec<String>>> {
-    let f =
-        std::fs::File::open(path).map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
-    let mut out = Vec::new();
-    for line in BufReader::new(f).lines() {
-        let line = line?;
-        let line = line.trim_end();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        out.push(line.split('\t').map(str::to_string).collect());
-    }
-    Ok(out)
+/// `(first, second)` columns of a tab-separated table (gzip allowed), header
+/// row skipped.
+pub(super) fn read_pairs(path: &Path) -> anyhow::Result<Vec<(Box<str>, Box<str>)>> {
+    let lines = read_lines_of_words_delim(&path.to_string_lossy(), &['\t'][..], -1)?.lines;
+    Ok(lines
+        .into_iter()
+        .skip(1)
+        .filter_map(|r| {
+            let mut it = r.into_iter();
+            Some((it.next()?, it.next()?))
+        })
+        .collect())
 }
 
-/// Integer ids from a one-column parquet (NaN = unassigned), as `C{id}`.
+/// Column of the largest entry in row `i`.
+fn row_argmax(m: &Mat, i: usize) -> usize {
+    (0..m.ncols())
+        .max_by(|&a, &b| m[(i, a)].total_cmp(&m[(i, b)]))
+        .unwrap_or(0)
+}
+
+/// Integer ids from a one-column parquet (NaN = unassigned).
 fn read_cluster_labels(path: &Path) -> anyhow::Result<Labels> {
     let MatWithNames { rows, mat, .. } =
         Mat::from_parquet_with_row_names(&path.to_string_lossy(), Some(0))?;
-    let mut pairs: Vec<(Box<str>, i64)> = rows
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, n)| {
+    Ok(Labels::clusters(rows.into_iter().enumerate().filter_map(
+        |(i, n)| {
             let v = mat[(i, 0)];
             (v.is_finite() && v >= 0.0).then_some((n, v as i64))
-        })
-        .collect();
-    // Level order follows the ids, not first appearance.
-    pairs.sort_by_key(|&(_, id)| id);
-    Ok(Labels::from_pairs(
-        "cluster",
-        Axis::Cells,
-        pairs
-            .into_iter()
-            .map(|(n, id)| (n, format!("C{id}").into_boxed_str())),
-        &[],
-    ))
+        },
+    )))
 }
 
-/// Argmax over each row of an N × K table, as `T{k}`.
-fn read_argmax_labels(path: &Path, title: &str, axis: Axis) -> anyhow::Result<Labels> {
+/// Topic argmax per cell from log θ (`cells × K`), as `T{k}`.
+fn read_topic_labels(path: &Path) -> anyhow::Result<Labels> {
     let MatWithNames { rows, mat, .. } =
         Mat::from_parquet_with_row_names(&path.to_string_lossy(), Some(0))?;
-    let k = mat.ncols();
-    let mut pairs: Vec<(Box<str>, usize)> = rows
+    let pairs = rows
         .into_iter()
         .enumerate()
-        .map(|(i, n)| {
-            let best = (0..k)
-                .max_by(|&a, &b| mat[(i, a)].total_cmp(&mat[(i, b)]))
-                .unwrap_or(0);
-            (n, best)
-        })
-        .collect();
-    pairs.sort_by_key(|&(_, t)| t);
-    Ok(Labels::from_pairs(
-        title,
-        axis,
-        pairs
-            .into_iter()
-            .map(|(n, t)| (n, format!("T{t}").into_boxed_str())),
-        &[],
-    ))
+        .map(|(i, n)| (n, format!("T{}", row_argmax(&mat, i)).into_boxed_str()));
+    Ok(Labels::new(LabelKind::Topic, pairs, &[]))
 }
 
 /// Per-row argmax of a column-simplex dictionary after normalizing each row,
@@ -235,221 +351,147 @@ fn read_dictionary_labels(path: &Path) -> anyhow::Result<Labels> {
         let m = row.max();
         row.apply(|v| *v = (*v - m).exp());
     }
-    let k = mat.ncols();
-    let pairs = rows.into_iter().enumerate().map(|(i, n)| {
-        let t = (0..k)
-            .max_by(|&a, &b| mat[(i, a)].total_cmp(&mat[(i, b)]))
-            .unwrap_or(0);
-        (n, format!("T{t}").into_boxed_str())
-    });
-    let mut labels = Labels::from_pairs("topic", Axis::Features, pairs, &[]);
-    sort_levels_naturally(&mut labels);
-    Ok(labels)
+    let pairs = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| (n, format!("T{}", row_argmax(&mat, i)).into_boxed_str()));
+    Ok(Labels::new(LabelKind::FeatureTopic, pairs, &[]))
 }
 
-/// Renumber levels in natural order (`T2` before `T10`).
-pub(super) fn sort_levels_naturally(labels: &mut Labels) {
-    let key = |s: &str| {
-        let digits: String = s.chars().filter(char::is_ascii_digit).collect();
-        (digits.parse::<u64>().unwrap_or(u64::MAX), s.to_string())
-    };
-    let mut idx: Vec<usize> = (0..labels.levels.len()).collect();
-    idx.sort_by_key(|&i| key(&labels.levels[i]));
-    let mut remap = vec![0u32; idx.len()];
-    for (new, &old) in idx.iter().enumerate() {
-        remap[old] = new as u32;
-    }
-    labels.levels = idx.iter().map(|&i| labels.levels[i].clone()).collect();
-    for v in labels.by_name.values_mut() {
-        *v = remap[*v as usize];
-    }
-}
-
-/// `feature<TAB>group` marker table, as used by annotation; a feature listed
-/// under several groups keeps the first.
+/// `feature<TAB>group` marker table, read the way annotation reads it; a
+/// feature listed under several groups keeps the first.
 fn read_marker_labels(path: &Path) -> anyhow::Result<Labels> {
-    let rows = read_rows(path)?;
-    let pairs = rows.into_iter().filter_map(|r| {
-        let mut it = r.into_iter();
-        Some((it.next()?.into_boxed_str(), it.next()?.into_boxed_str()))
-    });
-    let mut labels = Labels::from_pairs("markers", Axis::Features, pairs, &[]);
-    // A header row, if present, becomes a one-member level; drop it.
-    labels
-        .by_name
-        .retain(|n, _| !n.eq_ignore_ascii_case("gene"));
-    sort_levels_naturally(&mut labels);
-    Ok(labels)
+    let pairs = data_beans::aux::gene_sets::read_membership_pairs(&path.to_string_lossy())?;
+    Ok(Labels::new(LabelKind::Markers, pairs, &[]))
 }
 
-/// Layout files named by the `senna layout` convention,
-/// `{prefix}.{method}.{what}.parquet`, relative to the manifest directory.
-fn discover_layouts(dir: &Path, prefix: &str) -> Vec<(String, run_manifest::LayoutEntry)> {
-    let base = Path::new(prefix)
-        .file_name()
-        .map_or_else(|| prefix.to_string(), |b| b.to_string_lossy().into_owned());
-    let found = |method: &str, what: &str| {
-        let rel = format!("{base}.{method}.{what}.parquet");
-        dir.join(&rel).exists().then_some(rel)
-    };
-    ["umap", "phate", "tsne"]
+/// The run's layouts, the most recently computed first.
+fn ordered_methods(m: &RunManifest) -> Vec<(String, LayoutEntry)> {
+    let mut methods: Vec<(String, LayoutEntry)> = m
+        .layout
+        .methods
         .iter()
-        .filter_map(|&method| {
-            let e = run_manifest::LayoutEntry {
-                cell_coords: found(method, "cell_coords"),
-                pb_coords: found(method, "pb_coords"),
-                feature_on_cell_coords: found(method, "feature_on_cell_coords"),
-                feature_coords: found(method, "feature_coords"),
-            };
-            (e != run_manifest::LayoutEntry::default()).then(|| (method.to_string(), e))
-        })
-        .collect()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if methods.is_empty() {
+        if let Some(cc) = &m.layout.cell_coords {
+            methods.push((
+                "layout".into(),
+                LayoutEntry {
+                    cell_coords: Some(cc.clone()),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    if let Some(i) = m
+        .layout
+        .current
+        .as_ref()
+        .and_then(|cur| methods.iter().position(|(k, _)| k == cur))
+    {
+        let e = methods.remove(i);
+        methods.insert(0, e);
+    }
+    methods
+}
+
+fn load_spaces(m: &RunManifest, dir: &Path) -> anyhow::Result<Vec<Space>> {
+    let at = |rel: &str| run_manifest::resolve(dir, rel);
+    let mut spaces: Vec<Space> = Vec::new();
+    for (method, e) in ordered_methods(m) {
+        let mut cells = None;
+        for (slot, kind) in [
+            (&e.cell_coords, SpaceKind::Cells),
+            (&e.feature_on_cell_coords, SpaceKind::FeaturesOnCells),
+            (&e.feature_coords, SpaceKind::Features),
+        ] {
+            let Some(p) = slot else { continue };
+            spaces.push(Space {
+                method: method.clone(),
+                kind,
+                points: read_xy(&at(p))?,
+                backdrop: (kind == SpaceKind::FeaturesOnCells)
+                    .then_some(cells)
+                    .flatten(),
+                parent: None,
+            });
+            if kind == SpaceKind::Cells {
+                cells = Some(spaces.len() - 1);
+            }
+        }
+    }
+    Ok(spaces)
+}
+
+/// Every grouping the run carries. One that fails to read is skipped with a
+/// warning rather than failing the view.
+fn load_labels(m: &RunManifest, dir: &Path, round: &super::rounds::Round) -> Vec<Labels> {
+    let at = |rel: &str| run_manifest::resolve(dir, rel);
+    let mut labels = Vec::new();
+    let mut keep = |what: &str, r: anyhow::Result<Labels>| match r {
+        Ok(l) if !l.levels.is_empty() => labels.push(l),
+        Ok(_) => {}
+        Err(e) => log::warn!("view: skipping {what}: {e}"),
+    };
+    if let Some(p) = &m.annotate.argmax {
+        match super::rounds::read_argmax(&at(p)) {
+            Ok(current) => {
+                keep(
+                    "annotation",
+                    Ok(Labels::new(
+                        LabelKind::Annotation,
+                        current.iter().map(|(c, l)| (c.clone(), l.clone())),
+                        &[super::rounds::UNASSIGNED],
+                    )),
+                );
+                // Against the round this one was made from, when there is one.
+                let source_argmax = round.source.as_deref().and_then(|src| {
+                    let (sm, sdir) = RunManifest::load(src).ok()?;
+                    Some(run_manifest::resolve(&sdir, sm.annotate.argmax.as_deref()?))
+                });
+                if let Some(sp) = source_argmax {
+                    match super::rounds::comparisons(&current, &sp) {
+                        Ok([before, changed]) => {
+                            keep("changed", Ok(changed));
+                            keep("previous annotation", Ok(before));
+                        }
+                        Err(e) => log::warn!("view: skipping round comparison: {e}"),
+                    }
+                }
+            }
+            Err(e) => log::warn!("view: skipping annotation: {e}"),
+        }
+    }
+    if let Some(p) = &m.cluster.clusters {
+        keep("clusters", read_cluster_labels(&at(p)));
+    }
+    // An embedding run's `latent` is log θ only when Z went to
+    // `cell_embedding`; older manifests kept Z there instead.
+    let latent_is_topics = m.kind.latent_is_log_simplex() || m.outputs.cell_embedding.is_some();
+    if let Some(p) = m.outputs.latent.as_deref().filter(|_| latent_is_topics) {
+        keep("topics", read_topic_labels(&at(p)));
+    }
+    if let Some(p) = &m.annotate.markers {
+        keep("markers", read_marker_labels(&at(p)));
+    }
+    if let Some(p) = &m.outputs.softmax_dictionary {
+        keep("feature topics", read_dictionary_labels(&at(p)));
+    }
+    labels
 }
 
 impl Dataset {
     pub fn load(from: &str) -> anyhow::Result<Self> {
         let manifest_path = PathBuf::from(from);
         let (m, dir) = RunManifest::load(&manifest_path)?;
-        let at = |rel: &str| run_manifest::resolve(&dir, rel);
-
-        let mut spaces = Vec::new();
-        let mut methods: Vec<(String, run_manifest::LayoutEntry)> = m
-            .layout
-            .methods
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        if methods.is_empty() {
-            // The per-method table can be lost when a tool with an older
-            // manifest schema rewrites the file; the files are still there.
-            methods = discover_layouts(&dir, &m.prefix);
-            if !methods.is_empty() {
-                log::warn!(
-                    "view: manifest lists no layout methods; found {} on disk",
-                    methods.len()
-                );
-            }
-        }
-        if methods.is_empty() {
-            if let Some(cc) = &m.layout.cell_coords {
-                methods.push((
-                    "layout".into(),
-                    run_manifest::LayoutEntry {
-                        cell_coords: Some(cc.clone()),
-                        ..Default::default()
-                    },
-                ));
-            }
-        }
-        // The layout run last comes first; without a record of it, the one
-        // the top-level slot points at.
-        let current = m.layout.current.clone().or_else(|| {
-            let cc = m.layout.cell_coords.as_deref()?;
-            methods
-                .iter()
-                .find(|(_, e)| e.cell_coords.as_deref() == Some(cc))
-                .map(|(k, _)| k.clone())
-        });
-        if let Some(cur) = &current {
-            if let Some(i) = methods.iter().position(|(k, _)| k == cur) {
-                let e = methods.remove(i);
-                methods.insert(0, e);
-            }
-        }
-
-        for (method, e) in &methods {
-            let cell_space = if let Some(p) = &e.cell_coords {
-                info!("view: {method} cells from {p}");
-                spaces.push(Space {
-                    method: method.clone(),
-                    title: "cells",
-                    axis: Axis::Cells,
-                    points: read_xy(&at(p))?,
-                    backdrop: None,
-                    parent: None,
-                });
-                Some(spaces.len() - 1)
-            } else {
-                None
-            };
-            if let Some(p) = &e.feature_on_cell_coords {
-                spaces.push(Space {
-                    method: method.clone(),
-                    title: "features on cells",
-                    axis: Axis::Features,
-                    points: read_xy(&at(p))?,
-                    backdrop: cell_space,
-                    parent: None,
-                });
-            }
-            if let Some(p) = &e.feature_coords {
-                spaces.push(Space {
-                    method: method.clone(),
-                    title: "features",
-                    axis: Axis::Features,
-                    points: read_xy(&at(p))?,
-                    backdrop: None,
-                    parent: None,
-                });
-            }
-        }
+        let spaces = load_spaces(&m, &dir)?;
         anyhow::ensure!(
             !spaces.is_empty(),
             "{from} has no layout yet; run `senna layout umap --from {from}` first"
         );
-
-        let mut labels = Vec::new();
-        let mut try_add = |what: &str, r: anyhow::Result<Labels>| match r {
-            Ok(l) if !l.levels.is_empty() => labels.push(l),
-            Ok(_) => {}
-            Err(e) => log::warn!("view: skipping {what}: {e}"),
-        };
         let round = super::rounds::Round::load(&m, &dir, &manifest_path);
-        if let Some(p) = &m.annotate.argmax {
-            match super::rounds::read_argmax(&at(p)) {
-                Ok(current) => {
-                    let mut ann = Labels::from_pairs(
-                        "annotation",
-                        Axis::Cells,
-                        current.iter().map(|(c, l)| (c.clone(), l.clone())),
-                        &["unassigned"],
-                    );
-                    sort_levels_naturally(&mut ann);
-                    try_add("annotation", Ok(ann));
-                    // Against the round this one was made from, when there is one.
-                    let source_argmax = round.source.as_deref().and_then(|src| {
-                        let (sm, sdir) = RunManifest::load(src).ok()?;
-                        Some(run_manifest::resolve(&sdir, sm.annotate.argmax.as_deref()?))
-                    });
-                    if let Some(sp) = source_argmax {
-                        match super::rounds::comparisons(&current, &sp) {
-                            Ok([before, changed]) => {
-                                try_add("changed", Ok(changed));
-                                try_add("previous annotation", Ok(before));
-                            }
-                            Err(e) => log::warn!("view: skipping round comparison: {e}"),
-                        }
-                    }
-                }
-                Err(e) => log::warn!("view: skipping annotation: {e}"),
-            }
-        }
-        if let Some(p) = &m.cluster.clusters {
-            try_add("clusters", read_cluster_labels(&at(p)));
-        }
-        // An embedding run's `latent` is log θ only when Z went to
-        // `cell_embedding`; older manifests kept Z there instead.
-        let latent_is_topics = m.kind.latent_is_log_simplex() || m.outputs.cell_embedding.is_some();
-        if let Some(p) = m.outputs.latent.as_deref().filter(|_| latent_is_topics) {
-            try_add("topics", read_argmax_labels(&at(p), "topic", Axis::Cells));
-        }
-        if let Some(p) = &m.annotate.markers {
-            try_add("markers", read_marker_labels(&at(p)));
-        }
-        if let Some(p) = &m.outputs.softmax_dictionary {
-            try_add("feature topics", read_dictionary_labels(&at(p)));
-        }
-
+        let labels = load_labels(&m, &dir, &round);
         Ok(Self {
             prefix: run_manifest::derive_out_prefix(from),
             spaces,

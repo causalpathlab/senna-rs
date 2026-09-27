@@ -138,23 +138,19 @@ pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
 /// MDS is cubic in the point count, so it runs on a seeded subsample of
 /// `--n-landmarks` features and the rest are placed by Nyström.
 fn fit_feature_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
-    use rand::seq::SliceRandom;
     use rand::SeedableRng;
 
     let mut input = load_feature_layout_input(&args.common)?;
     let n = input.feat_kn.ncols();
-    let mut landmarks: Vec<usize> = (0..n).collect();
-    landmarks.shuffle(&mut rand::rngs::SmallRng::seed_from_u64(args.common.seed));
-    landmarks.truncate(args.common.n_landmarks.clamp(3, n.max(3)));
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(args.common.seed);
+    let mut landmarks: Vec<usize> = rand::seq::index::sample(
+        &mut rng,
+        n,
+        args.common.n_landmarks.clamp(3, n.max(3)).min(n),
+    )
+    .into_vec();
     landmarks.sort_unstable();
-
-    let h = input.feat_kn.nrows();
-    let mut landmark_kp = Mat::zeros(h, landmarks.len());
-    for (j, &g) in landmarks.iter().enumerate() {
-        landmark_kp
-            .column_mut(j)
-            .copy_from(&input.feat_kn.column(g));
-    }
+    let landmark_kp = input.feat_kn.select_columns(&landmarks);
     info!(
         "Feature PHATE on {} landmark features of {n}",
         landmarks.len()

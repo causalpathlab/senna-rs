@@ -13,10 +13,11 @@
 use super::fit_layout_common::LayoutCommonArgs;
 use crate::geometry::cell_layout::project_cells_nystrom;
 use rand::rngs::SmallRng;
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use senna::embed_common::*;
-use senna::run_manifest::{self, rel_to_manifest, CellSpace, LayoutEntry, RunManifest};
+use senna::run_manifest::{
+    self, manifest_dir, rel_to_manifest, CellSpace, LayoutEntry, RunManifest,
+};
 use std::path::{Path, PathBuf};
 
 /// Which axis `senna layout` lays out.
@@ -35,13 +36,6 @@ pub enum LayoutTarget {
 /// Each feature is compared against every landmark, so this bounds the cost
 /// at D × this × H.
 const FEATURE_ON_CELL_LANDMARKS: usize = 5000;
-
-fn manifest_dir(manifest_path: &Path) -> &Path {
-    manifest_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-}
 
 fn write_xy(path: &str, names: &[Box<str>], coords: &Mat, row_label: &str) -> anyhow::Result<()> {
     let cols: Vec<Box<str>> = vec!["x".into(), "y".into()];
@@ -93,22 +87,23 @@ pub(crate) fn place_features_on_cells(
     }
 
     // Landmarks: a seeded subsample of cells with finite coordinates.
-    let mut cells: Vec<usize> = (0..cell_coords.nrows())
+    let finite: Vec<usize> = (0..cell_coords.nrows())
         .filter(|&i| cell_coords[(i, 0)].is_finite() && cell_coords[(i, 1)].is_finite())
         .collect();
-    cells.shuffle(&mut SmallRng::seed_from_u64(args.seed));
-    cells.truncate(FEATURE_ON_CELL_LANDMARKS);
-    if cells.is_empty() {
+    if finite.is_empty() {
         return Ok(None);
     }
-    let h = cell_feat_kn.nrows();
-    let mut landmark_kp = Mat::zeros(h, cells.len());
-    let mut landmark_xy = Mat::zeros(cells.len(), 2);
-    for (j, &c) in cells.iter().enumerate() {
-        landmark_kp.column_mut(j).copy_from(&cell_feat_kn.column(c));
-        landmark_xy[(j, 0)] = cell_coords[(c, 0)];
-        landmark_xy[(j, 1)] = cell_coords[(c, 1)];
-    }
+    let mut rng = SmallRng::seed_from_u64(args.seed);
+    let cells: Vec<usize> = rand::seq::index::sample(
+        &mut rng,
+        finite.len(),
+        FEATURE_ON_CELL_LANDMARKS.min(finite.len()),
+    )
+    .into_iter()
+    .map(|i| finite[i])
+    .collect();
+    let landmark_kp = cell_feat_kn.select_columns(&cells);
+    let landmark_xy = cell_coords.select_rows(&cells);
 
     info!(
         "Placing {} features on the {method} cell map ({} landmark cells)",
@@ -134,6 +129,7 @@ pub(crate) fn place_features_on_cells(
 pub(crate) struct FeatureLayoutInput {
     pub manifest: RunManifest,
     pub manifest_path: PathBuf,
+    pub manifest_dir: PathBuf,
     pub out: String,
     pub names: Vec<Box<str>>,
     pub feat_kn: Mat,
@@ -163,12 +159,7 @@ pub(crate) fn load_feature_layout_input(
         ..
     } = Mat::from_parquet_with_row_names(&rho_path, Some(0))?;
     let mut feat_kn = rho_dh.transpose();
-    for mut col in feat_kn.column_iter_mut() {
-        let norm = col.norm();
-        if norm > 1e-12 {
-            col /= norm;
-        }
-    }
+    feat_kn.normalize_columns_inplace();
     info!(
         "Feature layout input: {} features × {} dims from {rho_path} (cosine)",
         feat_kn.ncols(),
@@ -178,6 +169,7 @@ pub(crate) fn load_feature_layout_input(
     Ok(FeatureLayoutInput {
         manifest,
         manifest_path,
+        manifest_dir: dir,
         out,
         names,
         feat_kn,
@@ -195,7 +187,7 @@ pub(crate) fn write_feature_layout(
     write_xy(&out_path, &input.names, coords, "feature")?;
     info!("Saved {out_path}");
 
-    let rel = rel_to_manifest(manifest_dir(&input.manifest_path), &out_path);
+    let rel = rel_to_manifest(&input.manifest_dir, &out_path);
     input
         .manifest
         .layout
@@ -207,38 +199,38 @@ pub(crate) fn write_feature_layout(
 }
 
 /// Record a cell layout under `manifest.layout.methods[method]` and point the
-/// top-level slots at it. A feature layout already recorded for the method is
-/// kept.
+/// top-level slots at it. `written` holds the paths just written (as written;
+/// they are made manifest-relative here). A feature layout already recorded
+/// for the method is kept.
+///
+/// `pb_gene_mean` is advertised only from the gene-space recompute path: the
+/// fast path writes a projection-space file that `lupin annotate`
+/// (enrichment) would misread.
 pub(crate) fn record_cell_layout(
     manifest: &mut RunManifest,
     manifest_path: &Path,
     method: &str,
-    cell_coords: &str,
-    pb_coords: Option<&str>,
+    written: &LayoutEntry,
     pb_gene_mean: Option<&str>,
-    feature_on_cell_coords: Option<&str>,
 ) -> anyhow::Result<()> {
     let dir = manifest_dir(manifest_path);
-    let rel = |p: &str| rel_to_manifest(dir, p);
+    let rel = |p: &Option<String>| p.as_deref().map(|p| rel_to_manifest(dir, p));
 
     let layout = &mut manifest.layout;
-    layout.cell_coords = Some(rel(cell_coords));
+    layout.cell_coords = rel(&written.cell_coords);
     // DirectCells mode emits no pb_coords, so the slot is cleared; callers that
     // need PB-level coords must branch on `kind`.
-    layout.pb_coords = pb_coords.map(rel);
-    // Only the gene-space recompute path produces a proper pb_gene_mean; the
-    // fast path writes a proj-space file that `lupin annotate` (enrichment) would
-    // misread, so don't advertise it.
-    layout.pb_gene_mean = pb_gene_mean.map(rel);
+    layout.pb_coords = rel(&written.pb_coords);
+    layout.pb_gene_mean = pb_gene_mean.map(|p| rel_to_manifest(dir, p));
     layout.current = Some(method.to_string());
 
     let prev = layout.methods.remove(method).unwrap_or_default();
     layout.methods.insert(
         method.to_string(),
         LayoutEntry {
-            cell_coords: Some(rel(cell_coords)),
-            pb_coords: pb_coords.map(rel),
-            feature_on_cell_coords: feature_on_cell_coords.map(rel),
+            cell_coords: rel(&written.cell_coords),
+            pb_coords: rel(&written.pb_coords),
+            feature_on_cell_coords: rel(&written.feature_on_cell_coords),
             feature_coords: prev.feature_coords,
         },
     );
@@ -270,26 +262,16 @@ mod tests {
             },
         );
 
-        record_cell_layout(
-            &mut m,
-            &mp,
-            "phate",
-            &p("r.phate.cell_coords.parquet"),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        record_cell_layout(
-            &mut m,
-            &mp,
-            "umap",
-            &p("r.umap.cell_coords.parquet"),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let written = LayoutEntry {
+            cell_coords: Some(p("r.phate.cell_coords.parquet")),
+            ..Default::default()
+        };
+        record_cell_layout(&mut m, &mp, "phate", &written, None).unwrap();
+        let written = LayoutEntry {
+            cell_coords: Some(p("r.umap.cell_coords.parquet")),
+            ..Default::default()
+        };
+        record_cell_layout(&mut m, &mp, "umap", &written, None).unwrap();
 
         let umap = &m.layout.methods["umap"];
         assert_eq!(
