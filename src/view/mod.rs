@@ -807,7 +807,12 @@ impl Scene {
         }
     }
 
+    /// Next grouping. A feature's activity would hide the groups, so it is
+    /// cleared (its suggestions stay; `g` brings them back).
     pub fn cycle_colour(&mut self) {
+        if self.clear_pick() {
+            self.note = Some("back to group colours · g brings the features back".into());
+        }
         let choices = self.colour_choices();
         self.colour = match self
             .colour
@@ -821,10 +826,16 @@ impl Scene {
         self.refresh_groups();
     }
 
+    /// Focus the next or previous group. Activity and suggestions shown for
+    /// the previous group no longer apply, so they are cleared.
     pub fn step_focus(&mut self, delta: i64) {
         let n = self.levels().len() as i64;
         if n == 0 {
             return;
+        }
+        let had_pick = self.clear_pick();
+        if self.clear_suggestions() || had_pick {
+            self.note = Some("n suggests features for this group".into());
         }
         self.focus = Some(match self.focus {
             None if delta > 0 => 0,
@@ -1097,8 +1108,8 @@ impl Scene {
             .map(|f| format!(" · focus {}", self.levels()[f as usize]))
             .unwrap_or_default();
         let pick = match &self.pick {
-            Some(Pick::One(f)) => format!(" · feature {f} ({})", self.source.name()),
-            Some(Pick::Markers(g)) => format!(" · {g} markers ({})", self.source.name()),
+            Some(Pick::One(f)) => format!(" · feature {f} ({}) · x clears", self.source.name()),
+            Some(Pick::Markers(g)) => format!(" · {g} markers ({}) · x clears", self.source.name()),
             None => String::new(),
         };
         format!(
@@ -1292,6 +1303,18 @@ mod tests {
         let (colour, focus) = (s.colour, s.focus);
         s.set_space(2);
         assert_eq!((s.colour, s.focus), (colour, focus));
+    }
+
+    #[test]
+    fn a_new_colouring_or_focus_clears_the_feature_on_screen() {
+        let mut s = scene();
+        s.pick = Some(Pick::One("g1".into()));
+        s.cycle_colour();
+        assert!(s.pick.is_none());
+        assert!(s.note.take().is_some());
+        s.pick = Some(Pick::One("g1".into()));
+        s.step_focus(1);
+        assert!(s.pick.is_none());
     }
 
     #[test]
