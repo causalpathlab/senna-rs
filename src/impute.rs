@@ -207,9 +207,8 @@ fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
                 "svd"
             }
         ),
-        // The graph / co-embedding kinds have no query-side projection at all,
-        // and another tool's run carries no senna model to project through.
-        RunKind::Fne | RunKind::ResolveEmbeddingSpace | RunKind::Foreign => {
+        // The graph / co-embedding kinds have no query-side projection at all.
+        RunKind::Fne | RunKind::ResolveEmbeddingSpace => {
             anyhow::bail!(
                 "impute needs a run with a transferable per-cell latent; `{kind}` runs \
                  have no query-side projection here"
