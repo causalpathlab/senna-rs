@@ -463,26 +463,26 @@ impl Activity {
         ))
     }
 
-    /// Features worth looking at in a view, best first, with their scores.
+    /// Every feature's score for a view, in the model's feature order, with
+    /// the features' names. `-inf` marks a feature left out.
     ///
-    /// `universe` names the cells in view; `group` marks, in the same order,
-    /// the focused group's cells. With a group, a feature scores by its
-    /// expected log fold change, group over the rest of the view (for an
-    /// embedding run, `ρ_g · (mean z_group − mean z_rest)`). Without one, by
-    /// how much it varies across the view relative to how much it varies over
-    /// all cells, among features at least as variable as the median, which
-    /// points at what shapes a zoomed-in layout. Where the run records a
-    /// per-feature baseline, features below its median are left out, so
-    /// rarely expressed features with noisy loadings do not lead.
+    /// `universe` names the cells in view (the view `key`); `group` marks, in
+    /// the same order, the focused group's cells. With a group, a feature
+    /// scores by its expected log fold change, group over the rest of the
+    /// view (for an embedding run, `ρ_g · (mean z_group − mean z_rest)`).
+    /// Without one, by how much it varies across the view relative to how
+    /// much it varies over all cells, among features at least as variable as
+    /// the median, which points at what shapes a zoomed-in layout. Where the
+    /// run records a per-feature baseline, features below its median are left
+    /// out, so rarely expressed features with noisy loadings do not lead.
     ///
     /// A nudge from the model, not a test: `o` shows the observed counts.
-    pub fn suggest(
+    pub fn contrast(
         &mut self,
         key: usize,
         universe: &[Box<str>],
         group: Option<&[bool]>,
-        top: usize,
-    ) -> Result<Vec<(Box<str>, f32)>, String> {
+    ) -> Result<(Vec<f32>, &[Box<str>]), String> {
         let rows = self.rows(Source::Expected, key, universe)?;
         let e = self.expected()?;
         let pick = |want: Option<bool>| -> Vec<usize> {
@@ -559,18 +559,57 @@ impl Activity {
                 return Err("on a topic run, focus a group first to get suggestions".into());
             }
         };
-        let mut ranked: Vec<(usize, f32)> = scores
-            .into_iter()
-            .enumerate()
-            .filter(|(_, v)| v.is_finite())
-            .collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-        Ok(ranked
-            .into_iter()
-            .take(top)
-            .map(|(g, v)| (e.features.names[g].clone(), v))
-            .collect())
+        Ok((scores, &e.features.names))
     }
+
+    /// The `top` best-scoring features of `contrast`, best first.
+    pub fn suggest(
+        &mut self,
+        key: usize,
+        universe: &[Box<str>],
+        group: Option<&[bool]>,
+        top: usize,
+    ) -> Result<Vec<(Box<str>, f32)>, String> {
+        let (scores, names) = self.contrast(key, universe, group)?;
+        Ok(best(&scores, names, top))
+    }
+
+    /// Features whose expected level is highest in cell `cell` relative to
+    /// the average cell (for an embedding run, `ρ_g · (z_cell − mean z)`):
+    /// the genes nearest that cell in the embedding. Rarely expressed
+    /// features are left out as in `contrast`.
+    pub fn near_cell(&mut self, cell: &str, top: usize) -> Result<Vec<(Box<str>, f32)>, String> {
+        let e = self.expected()?;
+        let Model::Embedding { z, rho, bias } = &e.model else {
+            return Err("neighbouring features need an embedding run".into());
+        };
+        let n = e
+            .cells
+            .iter()
+            .position(|c| c.as_ref() == cell)
+            .ok_or_else(|| format!("{cell} is not in the model"))?;
+        let all: Vec<usize> = (0..z.nrows()).collect();
+        let d = z.row(n).transpose() - row_mean(z, &all);
+        let mut scores: Vec<f32> = (rho * d).iter().copied().collect();
+        drop_below_median(&mut scores, bias.as_deref());
+        Ok(best(&scores, &e.features.names, top))
+    }
+}
+
+/// The `top` finite scores, best first, with their names.
+fn best(scores: &[f32], names: &[Box<str>], top: usize) -> Vec<(Box<str>, f32)> {
+    let mut ranked: Vec<(usize, f32)> = scores
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, v)| v.is_finite())
+        .collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    ranked
+        .into_iter()
+        .take(top)
+        .map(|(g, v)| (names[g].clone(), v))
+        .collect()
 }
 
 /// Set scores of features whose baseline is below the median to -inf.

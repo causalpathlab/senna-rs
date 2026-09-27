@@ -115,10 +115,19 @@ impl Watcher {
     }
 }
 
-/// What `lupin relabel --next` answered.
+/// Apply the decisions as the next round, or only preview their effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Next,
+    Preview,
+}
+
+/// What `lupin relabel` answered.
 pub enum Reply {
-    /// The round it wrote.
+    /// The round it wrote (`--next`).
     Round(PathBuf),
+    /// What the decisions would change, without writing (`--preview`).
+    Preview(Value),
     /// Why it refused, and the latest round when the one on screen was stale.
     Refused {
         reason: String,
@@ -126,13 +135,24 @@ pub enum Reply {
     },
 }
 
-/// Run `lupin relabel -f <round> -d - --next` with `decision` on stdin.
-/// `Err` means lupin could not be run at all (or cannot relabel).
-pub fn relabel_next(lupin: &str, round: &Path, decision: &Value) -> Result<Reply, String> {
+/// Run `lupin relabel -f <round> -d - --next|--preview` with `decisions` on
+/// stdin, one line each; lupin applies them together as one round (or
+/// previews them). `Err` means lupin could not be run at all (or cannot
+/// relabel).
+pub fn relabel(
+    lupin: &str,
+    round: &Path,
+    decisions: &[Value],
+    mode: Mode,
+) -> Result<Reply, String> {
+    let flag = match mode {
+        Mode::Next => "--next",
+        Mode::Preview => "--preview",
+    };
     let mut child = Command::new(lupin)
         .args(["relabel", "-f"])
         .arg(round)
-        .args(["-d", "-", "--next"])
+        .args(["-d", "-", flag])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -140,29 +160,36 @@ pub fn relabel_next(lupin: &str, round: &Path, decision: &Value) -> Result<Reply
         .map_err(|e| {
             format!("cannot run `{lupin}` ({e}); pass --lupin <path> or set SENNA_LUPIN")
         })?;
-    let mut line = serde_json::to_string(decision).map_err(|e| e.to_string())?;
-    line.push('\n');
+    let mut lines = String::new();
+    for d in decisions {
+        lines.push_str(&serde_json::to_string(d).map_err(|e| e.to_string())?);
+        lines.push('\n');
+    }
     if let Some(mut stdin) = child.stdin.take() {
         stdin
-            .write_all(line.as_bytes())
+            .write_all(lines.as_bytes())
             .map_err(|e| e.to_string())?;
     }
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     if out.status.success() {
-        let path = stdout
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .map(str::trim);
-        return path
-            .map(|p| Reply::Round(PathBuf::from(p)))
-            .ok_or_else(|| "lupin wrote no round path".to_string());
+        return match mode {
+            Mode::Preview => serde_json::from_str(&stdout)
+                .map(Reply::Preview)
+                .map_err(|e| format!("lupin's preview is not JSON: {e}")),
+            Mode::Next => stdout
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .map(|p| Reply::Round(PathBuf::from(p.trim())))
+                .ok_or_else(|| "lupin wrote no round path".to_string()),
+        };
     }
     if stderr.contains("unrecognized subcommand") || stderr.contains("unexpected argument") {
         return Err(format!(
-            "`{lupin}` cannot relabel (an older build?); pass --lupin <path> or set SENNA_LUPIN"
+            "`{lupin}` does not support `relabel {flag}` (an older build?); \
+             pass --lupin <path> or set SENNA_LUPIN"
         ));
     }
     let last = stderr
@@ -302,7 +329,9 @@ mod tests {
         let json = dec.to_json("r.senna.json");
 
         let ok = fake_lupin(d, "echo r.r1.senna.json");
-        let Ok(Reply::Round(p)) = relabel_next(&ok, Path::new("r.senna.json"), &json) else {
+        let Ok(Reply::Round(p)) =
+            relabel(&ok, Path::new("r.senna.json"), &[json.clone()], Mode::Next)
+        else {
             panic!("expected a round");
         };
         assert_eq!(p, PathBuf::from("r.r1.senna.json"));
@@ -315,9 +344,12 @@ mod tests {
             d,
             "echo 'Error: r.senna.json is not the latest round (that is r.r2.senna.json); reload and decide again' >&2; exit 1",
         );
-        let Ok(Reply::Refused { reason, latest }) =
-            relabel_next(&stale, Path::new("r.senna.json"), &json)
-        else {
+        let Ok(Reply::Refused { reason, latest }) = relabel(
+            &stale,
+            Path::new("r.senna.json"),
+            &[json.clone()],
+            Mode::Next,
+        ) else {
             panic!("expected a refusal");
         };
         assert!(reason.starts_with("r.senna.json is not the latest round"));
@@ -327,10 +359,31 @@ mod tests {
             d,
             "echo \"error: unrecognized subcommand 'relabel'\" >&2; exit 2",
         );
-        assert!(relabel_next(&old, Path::new("r.senna.json"), &json)
-            .err()
-            .unwrap()
-            .contains("cannot relabel"));
-        assert!(relabel_next("/nonexistent/lupin", Path::new("r.senna.json"), &json).is_err());
+        assert!(
+            relabel(&old, Path::new("r.senna.json"), &[json.clone()], Mode::Next)
+                .err()
+                .unwrap()
+                .contains("does not support")
+        );
+        assert!(relabel(
+            "/nonexistent/lupin",
+            Path::new("r.senna.json"),
+            &[json.clone()],
+            Mode::Next
+        )
+        .is_err());
+
+        let preview = fake_lupin(d, "echo '{\"cells_changed\": 7, \"clusters\": {}}'");
+        let Ok(Reply::Preview(v)) = relabel(
+            &preview,
+            Path::new("r.senna.json"),
+            &[json.clone(), json],
+            Mode::Preview,
+        ) else {
+            panic!("expected a preview");
+        };
+        assert_eq!(v["cells_changed"], 7);
+        let sent = std::fs::read_to_string(d.join("stdin.txt")).unwrap();
+        assert_eq!(sent.lines().count(), 2);
     }
 }

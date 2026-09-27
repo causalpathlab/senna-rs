@@ -13,6 +13,12 @@ impl App {
             self.prompt_key(k);
             return;
         }
+        if self.scene.review.is_some() && !self.help && self.menu.is_none() {
+            self.message = None;
+            if self.review_key(k) {
+                return;
+            }
+        }
         if self.menu.is_some() {
             self.menu_key(k);
             return;
@@ -101,21 +107,20 @@ impl App {
                     self.message = Some("already at the top-level layout".into());
                 }
             }
-            KeyCode::Char('h' | 'j' | 'k' | 'l')
-            | KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Up
-            | KeyCode::Down => {
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
                 let (sx, sy) = match k.code {
-                    KeyCode::Char('h') | KeyCode::Left => (1.0, 0.0),
-                    KeyCode::Char('l') | KeyCode::Right => (-1.0, 0.0),
-                    KeyCode::Char('k') | KeyCode::Up => (0.0, 1.0),
+                    KeyCode::Left => (1.0, 0.0),
+                    KeyCode::Right => (-1.0, 0.0),
+                    KeyCode::Up => (0.0, 1.0),
                     _ => (0.0, -1.0),
                 };
                 let d = step(self);
                 self.with_vp(|v| v.pan_px(sx * d, sy * d));
             }
             KeyCode::Char('s') => self.save(),
+            KeyCode::Char('R') => self.toggle_review(),
+            KeyCode::Char('k') => self.change(Scene::keep_near),
+            KeyCode::Char('l') => self.change(Scene::lock_near),
             _ => {}
         }
     }
@@ -269,6 +274,18 @@ impl App {
         let on_features = self.scene.current().axis() == crate::view::Axis::Features;
         if !on_features {
             self.clicked = self.scene.cluster_id_of(&name);
+            // The features nearest this cell; in relabel mode, also go to its
+            // cluster.
+            self.scene.show_near(&name);
+            if let (Some(id), Some(r)) = (self.clicked, self.scene.review.as_ref()) {
+                if let Some(i) = r.order.iter().position(|&c| c == id) {
+                    if i != r.at {
+                        self.scene.visit(i);
+                    }
+                    self.settle();
+                    return;
+                }
+            }
         }
         self.info = (!on_features)
             .then(|| self.scene.cluster_info(&name))
