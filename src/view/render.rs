@@ -1,26 +1,24 @@
 //! Progressive point rasterizer.
 //!
-//! Points are splatted as anti-aliased discs into a linear-light accumulator
-//! that keeps, per pixel, a weighted colour sum and the total weight. The
-//! composite shows the mean colour at an opacity that saturates with weight,
-//! `a = 1 − exp(−k·w)`: a lone point reads as a solid dot, a crowd reads as
-//! density, and overlapping groups mix instead of the last one drawn winning.
+//! Points are drawn as opaque, anti-aliased marks (circle, square, diamond,
+//! triangle, cross) straight onto a linear-light canvas; only a group given
+//! an opacity below one in the style menu is translucent. With opaque marks
+//! the draw order says what is seen, so each layer is drawn in rank order:
+//! muted and unlabelled points first, then labelled ones, then the focused
+//! group last so it pops on top; activity is drawn low to high.
 //!
-//! Points are visited in a fixed shuffled order, so every prefix is a
-//! uniform subsample. A job draws that order in chunks of doubling size and
-//! the viewer shows the composite after each chunk: the full picture appears
-//! at once, then fills in.
+//! Within a rank points keep a fixed shuffled order, so every prefix is a
+//! uniform subsample. A job draws in chunks of doubling size and the viewer
+//! shows the canvas after each chunk: the picture appears at once, then fills
+//! in.
 
+use super::activity::Levels;
 use super::color::{self, Encoder, Rgb};
 use super::data::{Points, NONE};
+use super::style::{Resolved, Shape};
 use super::text::{self, Canvas, Font};
 use image::RgbaImage;
 
-/// Opacity gain: one fully covered point reaches `1 − e^−k` ≈ 0.9.
-const OPACITY_GAIN: f32 = 2.3;
-/// Weight of a focused point relative to the rest, so a focused group stays
-/// saturated where it overlaps muted points.
-const FOCUS_WEIGHT: f32 = 6.0;
 /// First progressive chunk; each later chunk doubles.
 const FIRST_CHUNK: usize = 1 << 15;
 
@@ -84,113 +82,108 @@ impl Viewport {
     }
 }
 
-/// How one layer of points is coloured.
+/// How one layer of points is drawn.
 pub struct Paint<'a> {
     pub points: &'a Points,
     /// Group id per point (`NONE` = unlabelled), or `None` for a flat colour.
     pub groups: Option<&'a [u32]>,
-    pub palette: &'a [Rgb],
+    /// Style per group id.
+    pub styles: &'a [Resolved],
     pub focus: Option<u32>,
     /// Draw everything muted (a backdrop layer).
     pub muted: bool,
     /// Radius multiplier.
     pub size: f32,
-    /// Weight of a labelled point relative to an unlabelled one. Above 1 when
-    /// few points carry a label, so a sparse grouping (markers among all
-    /// features) is not buried under the gray majority.
-    pub boost: f32,
+    /// Feature activity per point, drawn on `ramp` instead of group colours.
+    pub levels: Option<(&'a Levels, &'a [Rgb])>,
 }
 
-/// Weight of unlabelled, unfocused and backdrop points.
-const RECEDE_WEIGHT: f32 = 0.4;
+/// One point's mark.
+struct Mark {
+    colour: Rgb,
+    alpha: f32,
+    shape: Shape,
+    size: f32,
+}
 
 impl Paint<'_> {
+    /// The mark for point `i`, or `None` when its group is hidden.
     #[inline]
-    fn colour(&self, i: usize, muted: Rgb) -> (Rgb, f32) {
+    fn mark(&self, i: usize, muted: Rgb) -> Option<Mark> {
+        let plain = |colour| Mark {
+            colour,
+            alpha: 1.0,
+            shape: Shape::Circle,
+            size: 1.0,
+        };
         if self.muted {
-            return (muted, RECEDE_WEIGHT);
+            return Some(plain(muted));
+        }
+        if let Some((levels, ramp)) = self.levels {
+            let t = levels.t(i);
+            if t < 0.0 {
+                return Some(plain(muted));
+            }
+            let k = ((ramp.len() - 1) as f32 * t).round() as usize;
+            return Some(plain(ramp[k]));
         }
         let g = self.groups.map_or(NONE, |g| g[i]);
-        match self.focus {
-            Some(f) if g == f => (self.palette[g as usize], FOCUS_WEIGHT),
-            Some(_) => (muted, RECEDE_WEIGHT),
-            None if g == NONE => (muted, RECEDE_WEIGHT),
-            None => (self.palette[g as usize], self.boost),
+        if g == NONE {
+            return Some(plain(muted));
         }
-    }
-}
-
-/// Labelled-point weight for a grouping covering `frac` of the points.
-#[must_use]
-pub fn sparsity_boost(frac: f32) -> f32 {
-    (0.5 / frac.max(1e-6)).clamp(1.0, FOCUS_WEIGHT)
-}
-
-pub struct Accum {
-    w: usize,
-    h: usize,
-    /// Per pixel: linear r, g, b sums and the total weight.
-    buf: Vec<[f32; 4]>,
-}
-
-impl Accum {
-    #[must_use]
-    pub fn new(w: usize, h: usize) -> Self {
-        Self {
-            w,
-            h,
-            buf: vec![[0.0; 4]; w * h],
+        let st = &self.styles[g as usize];
+        if st.hidden {
+            return None;
         }
+        let colour = match self.focus {
+            Some(f) if f != g => muted,
+            _ => st.colour,
+        };
+        Some(Mark {
+            colour,
+            alpha: st.alpha,
+            shape: st.shape,
+            size: st.size,
+        })
     }
 
+    /// Draw rank: higher is drawn later, on top.
     #[inline]
-    fn add(&mut self, x: usize, y: usize, c: Rgb, wt: f32) {
-        let p = &mut self.buf[y * self.w + x];
-        p[0] += c[0] * wt;
-        p[1] += c[1] * wt;
-        p[2] += c[2] * wt;
-        p[3] += wt;
+    fn rank(&self, i: usize) -> u8 {
+        if self.muted || self.levels.is_some() {
+            return 0;
+        }
+        match (self.groups.map_or(NONE, |g| g[i]), self.focus) {
+            (NONE, _) => 0,
+            (g, Some(f)) if g == f => 2,
+            (_, Some(_)) => 0,
+            (_, None) => 1,
+        }
     }
 
-    /// Anti-aliased disc of radius `r` at `(x, y)`.
-    #[inline]
-    fn disc(&mut self, x: f32, y: f32, r: f32, c: Rgb, wt: f32) {
-        let reach = r + 0.5;
-        let (x0, x1) = ((x - reach).floor().max(0.0), (x + reach).ceil());
-        let (y0, y1) = ((y - reach).floor().max(0.0), (y + reach).ceil());
-        let (x1, y1) = (x1.min(self.w as f32 - 1.0), y1.min(self.h as f32 - 1.0));
-        if x0 > x1 || y0 > y1 {
-            return;
+    /// The order to draw in: by rank (activity: by level), keeping the
+    /// shuffled order within a rank.
+    fn draw_order(&self) -> Vec<u32> {
+        let order = &self.points.order;
+        if let Some((levels, _)) = self.levels {
+            let mut o = order.clone();
+            o.sort_by(|&a, &b| levels.t(a as usize).total_cmp(&levels.t(b as usize)));
+            return o;
         }
-        for py in y0 as usize..=y1 as usize {
-            let dy = py as f32 + 0.5 - y;
-            for px in x0 as usize..=x1 as usize {
-                let dx = px as f32 + 0.5 - x;
-                let cov = (reach - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
-                if cov > 0.0 {
-                    self.add(px, py, c, wt * cov);
-                }
-            }
+        let mut buckets: [Vec<u32>; 3] = Default::default();
+        for &i in order {
+            buckets[self.rank(i as usize) as usize].push(i);
         }
+        buckets.concat()
     }
 }
 
-/// A point radius for `n_visible` points spread over the viewport: large
-/// discs when sparse, sub-pixel when crowded.
+/// A point radius for `n_visible` points spread over the viewport: small
+/// marks when crowded, a little larger when sparse.
 #[must_use]
 pub fn auto_radius(n_visible: usize, vp: &Viewport) -> f32 {
     let per_px = n_visible as f32 / (vp.w * vp.h).max(1) as f32;
-    (0.55 / per_px.max(1e-9).sqrt()).clamp(0.6, 3.2)
-}
-
-/// Weight per point so the *average* covered pixel sits at about a quarter
-/// of saturation: sparse views keep solid dots, crowded ones keep a density
-/// gradient instead of flooding to a flat colour.
-#[must_use]
-pub fn point_weight(n_visible: usize, radius: f32, vp: &Viewport) -> f32 {
-    let per_px = n_visible as f32 / (vp.w * vp.h).max(1) as f32;
-    let coverage = per_px * std::f32::consts::PI * (radius + 0.5).powi(2);
-    (0.25 / coverage.max(1e-9)).clamp(0.03, 1.0)
+    (0.35 / per_px.max(1e-9).sqrt()).clamp(0.6, 2.4)
 }
 
 /// Estimated count of `points` inside the viewport, from a prefix of the
@@ -214,34 +207,30 @@ pub fn visible_count(points: &Points, vp: &Viewport) -> usize {
 /// One progressive rendering of a scene.
 pub struct Job {
     pub vp: Viewport,
-    accum: Accum,
+    canvas: Vec<Rgb>,
+    orders: Vec<Vec<u32>>,
+    radius: Vec<f32>,
     /// Layer being drawn and position within its order.
     layer: usize,
     cursor: usize,
     chunk: usize,
-    radius: Vec<f32>,
-    weight: Vec<f32>,
 }
 
 impl Job {
     #[must_use]
     pub fn new(vp: Viewport, layers: &[Paint<'_>]) -> Self {
-        let (radius, weight) = layers
+        let radius = layers
             .iter()
-            .map(|l| {
-                let n = visible_count(l.points, &vp);
-                let r = l.size * auto_radius(n, &vp);
-                (r, point_weight(n, r, &vp))
-            })
-            .unzip();
+            .map(|l| l.size * auto_radius(visible_count(l.points, &vp), &vp))
+            .collect();
         Self {
             vp,
-            accum: Accum::new(vp.w, vp.h),
+            canvas: vec![color::linear_rgb(color::BACKGROUND); vp.w * vp.h],
+            orders: layers.iter().map(Paint::draw_order).collect(),
+            radius,
             layer: 0,
             cursor: 0,
             chunk: FIRST_CHUNK,
-            radius,
-            weight,
         }
     }
 
@@ -250,28 +239,56 @@ impl Job {
         self.layer >= layers.len()
     }
 
+    #[inline]
+    fn stamp(&mut self, x: f32, y: f32, r: f32, m: &Mark) {
+        let (w, h) = (self.vp.w, self.vp.h);
+        let reach = m.shape.reach(r);
+        let (x0, x1) = ((x - reach).floor().max(0.0), (x + reach).ceil());
+        let (y0, y1) = ((y - reach).floor().max(0.0), (y + reach).ceil());
+        let (x1, y1) = (x1.min(w as f32 - 1.0), y1.min(h as f32 - 1.0));
+        if x0 > x1 || y0 > y1 {
+            return;
+        }
+        for py in y0 as usize..=y1 as usize {
+            let dy = py as f32 + 0.5 - y;
+            for px in x0 as usize..=x1 as usize {
+                let a = m.alpha * m.shape.coverage(px as f32 + 0.5 - x, dy, r);
+                if a > 0.0 {
+                    let p = &mut self.canvas[py * w + px];
+                    for (v, c) in p.iter_mut().zip(m.colour) {
+                        *v += (c - *v) * a;
+                    }
+                }
+            }
+        }
+    }
+
     /// Draw the next chunk. Returns `true` once every layer is drawn.
     pub fn step(&mut self, layers: &[Paint<'_>]) -> bool {
         let muted = color::linear_rgb(color::MUTED);
         let mut budget = self.chunk;
         while budget > 0 && self.layer < layers.len() {
             let paint = &layers[self.layer];
-            let order = &paint.points.order;
+            let order = std::mem::take(&mut self.orders[self.layer]);
             let end = (self.cursor + budget).min(order.len());
-            let (r, pw) = (self.radius[self.layer], self.weight[self.layer]);
+            let base = self.radius[self.layer];
             let (w, h) = (self.vp.w as f32, self.vp.h as f32);
             for &i in &order[self.cursor..end] {
                 let i = i as usize;
                 let (x, y) = self.vp.to_px(paint.points.xy[i]);
-                if x < -r || y < -r || x > w + r || y > h + r {
+                let pad = 4.0 * base + 2.0;
+                if x < -pad || y < -pad || x > w + pad || y > h + pad {
                     continue;
                 }
-                let (c, wt) = paint.colour(i, muted);
-                self.accum.disc(x, y, r, c, wt * pw);
+                if let Some(m) = paint.mark(i, muted) {
+                    self.stamp(x, y, base * m.size, &m);
+                }
             }
             budget -= end - self.cursor;
             self.cursor = end;
-            if self.cursor >= order.len() {
+            let finished = self.cursor >= order.len();
+            self.orders[self.layer] = order;
+            if finished {
                 self.layer += 1;
                 self.cursor = 0;
             }
@@ -280,32 +297,14 @@ impl Job {
         self.done(layers)
     }
 
-    /// The current accumulation on the page background.
+    /// The canvas so far.
     #[must_use]
     pub fn composite(&self) -> Frame {
-        let bg = color::linear_rgb(color::BACKGROUND);
-        let px = self
-            .accum
-            .buf
-            .iter()
-            .map(|&[r, g, b, wt]| {
-                if wt <= 0.0 {
-                    return bg;
-                }
-                let a = 1.0 - (-OPACITY_GAIN * wt).exp();
-                let inv = 1.0 / wt;
-                [
-                    bg[0] + (r * inv - bg[0]) * a,
-                    bg[1] + (g * inv - bg[1]) * a,
-                    bg[2] + (b * inv - bg[2]) * a,
-                ]
-            })
-            .collect();
         Frame {
             w: self.vp.w,
             h: self.vp.h,
-            px,
-            bg,
+            px: self.canvas.clone(),
+            bg: color::linear_rgb(color::BACKGROUND),
         }
     }
 }
@@ -436,6 +435,57 @@ pub fn draw_legend(
         y += lh;
     }
     Some(area)
+}
+
+/// A key for an activity view in the top-left corner: the title, then the
+/// ramp as a thin bar. Returns the area it covers.
+pub fn draw_ramp_key(frame: &mut Frame, title: &str, ramp: &[Rgb], font: Font) -> [f32; 4] {
+    let bg = frame.background();
+    let lh = font.line_height() as i32;
+    let (x0, y0) = (lh / 2, lh / 2);
+    text::draw(
+        frame,
+        font,
+        title,
+        x0,
+        y0,
+        color::linear_rgb(color::INK),
+        bg,
+    );
+    let (bw, bh) = ((8 * lh).max(font.width(title) as i32 / 2), (lh / 4).max(3));
+    let by = y0 + lh + 2;
+    for dx in 0..bw {
+        let k = (dx as usize * (ramp.len() - 1)) / (bw as usize - 1).max(1);
+        for dy in 0..bh {
+            let (x, y) = ((x0 + dx) as usize, (by + dy) as usize);
+            if x < frame.w && y < frame.h {
+                frame.blend(x, y, ramp[k], 1.0);
+            }
+        }
+    }
+    [
+        0.0,
+        0.0,
+        (x0 + bw.max(font.width(title) as i32) + lh / 2) as f32,
+        (by + bh + lh / 2) as f32,
+    ]
+}
+
+/// A ring around `(x, y)`, to mark one point.
+pub fn draw_ring(frame: &mut Frame, x: f32, y: f32, r: f32, ink: Rgb) {
+    let reach = r + 2.0;
+    for py in (y - reach).floor() as i32..=(y + reach).ceil() as i32 {
+        for px in (x - reach).floor() as i32..=(x + reach).ceil() as i32 {
+            if px < 0 || py < 0 || px as usize >= frame.w || py as usize >= frame.h {
+                continue;
+            }
+            let d = ((px as f32 + 0.5 - x).powi(2) + (py as f32 + 0.5 - y).powi(2)).sqrt();
+            let a = (1.2 - (d - r).abs()).clamp(0.0, 1.0);
+            if a > 0.0 {
+                frame.blend(px as usize, py as usize, ink, a);
+            }
+        }
+    }
 }
 
 /// Median position of each group, from a prefix of the shuffled order (a
