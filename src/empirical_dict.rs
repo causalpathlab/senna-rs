@@ -17,7 +17,7 @@
 //! weight is computed via the shared
 //! `data_beans::alg::gene_weighting::compute_nb_fisher_weights` (same formula
 //! used during DC-Poisson refinement, kept consistent across pinto / senna /
-//! chickpea reporting). This is the dictionary `senna annotate-by-enrichment` consumes.
+//! chickpea reporting). This is the dictionary `lupin annotate` (enrichment) consumes.
 
 pub use data_beans::alg::gene_weighting::{apply_gene_weights, compute_nb_fisher_weights};
 use legume_numeric::matrix::traits::MatOps;

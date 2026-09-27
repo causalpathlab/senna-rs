@@ -1,6 +1,6 @@
 # Eliciting Expert Knowledge in Lineage Rooting
 
-Planning notes for `senna lineage` rooting. Not yet implemented; captures
+Planning notes for `lupin lineage` rooting. Not yet implemented; captures
 design directions for a future update.
 
 ## Why rooting deserves expert knowledge (the motivation)

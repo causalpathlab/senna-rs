@@ -201,7 +201,7 @@ pub struct ClusteringArgs {
         help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
         long_help = "When given, the manifest is updated in place with the cluster output path,\n\
                      under `cluster.clusters`,\n\
-                     so `senna annotate-by-enrichment` picks the cluster parquet up automatically."
+                     so `lupin annotate` picks the cluster parquet up automatically."
     )]
     from: Option<Box<str>>,
 }
