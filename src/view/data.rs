@@ -73,6 +73,9 @@ pub struct Space {
     /// For features placed on a cell map: that map's cells, drawn muted
     /// underneath for context.
     pub backdrop: Option<usize>,
+    /// For a layout of one group computed in the viewer: the space it was
+    /// zoomed from.
+    pub parent: Option<usize>,
 }
 
 /// A categorical labelling keyed by point name.
@@ -372,6 +375,7 @@ impl Dataset {
                     axis: Axis::Cells,
                     points: read_xy(&at(p))?,
                     backdrop: None,
+                    parent: None,
                 });
                 Some(spaces.len() - 1)
             } else {
@@ -384,6 +388,7 @@ impl Dataset {
                     axis: Axis::Features,
                     points: read_xy(&at(p))?,
                     backdrop: cell_space,
+                    parent: None,
                 });
             }
             if let Some(p) = &e.feature_coords {
@@ -393,6 +398,7 @@ impl Dataset {
                     axis: Axis::Features,
                     points: read_xy(&at(p))?,
                     backdrop: None,
+                    parent: None,
                 });
             }
         }

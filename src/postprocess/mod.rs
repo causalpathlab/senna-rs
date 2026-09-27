@@ -6,6 +6,8 @@ mod fit_layout_tsne;
 mod fit_layout_umap;
 pub(crate) mod viz_prep;
 
+pub(crate) use fit_layout_common::latent_layout_features;
+
 pub use fit_layout_phate::*;
 pub use fit_layout_tree::*;
 pub use fit_layout_tsne::*;

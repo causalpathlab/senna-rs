@@ -198,24 +198,9 @@ fn fit_layout_umap_direct(
     let n = prep.cell_proj_kn.ncols();
     info!("UMAP direct cell-level mode: {n} cells");
 
-    let edges = build_cell_cell_fuzzy_edges(
-        &prep.cell_proj_kn,
-        args.umap_finetune_knn,
-        args.common.block_size.unwrap_or(1000),
-    )?;
-
     // PCA(2) init (uwot's default is spectral/PCA, not random) so the global
     // structure is seeded from the embedding rather than noise.
-    let mut cell_coords = pca_init_2d(&prep.cell_proj_kn, args.common.seed);
-
-    run_cell_level_umap_in_place(
-        &mut cell_coords,
-        &edges,
-        args.umap_epochs,
-        args.umap_negative_rate,
-        args.umap_lr,
-        args.common.seed,
-    );
+    let cell_coords = tumap_on_columns(&prep.cell_proj_kn, &args.direct_params())?;
 
     write_viz_outputs_direct(&args.common, resolved, prep, &cell_coords, "umap")
 }
@@ -224,21 +209,47 @@ fn fit_layout_umap_direct(
 /// cosine fuzzy kNN graph with a PCA(2) init. Same SGD as the direct cell path.
 fn fit_feature_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
     let mut input = load_feature_layout_input(&args.common)?;
-    let edges = build_cell_cell_fuzzy_edges(
-        &input.feat_kn,
-        args.umap_finetune_knn,
-        args.common.block_size.unwrap_or(1000),
-    )?;
-    let mut coords = pca_init_2d(&input.feat_kn, args.common.seed);
-    run_cell_level_umap_in_place(
-        &mut coords,
-        &edges,
-        args.umap_epochs,
-        args.umap_negative_rate,
-        args.umap_lr,
-        args.common.seed,
-    );
+    let coords = tumap_on_columns(&input.feat_kn, &args.direct_params())?;
     write_feature_layout(&mut input, "umap", &coords)
+}
+
+/// Settings for a t-UMAP run straight on per-point features.
+pub(crate) struct DirectUmap {
+    pub knn: usize,
+    pub epochs: usize,
+    pub negative_rate: usize,
+    pub lr: f32,
+    pub block_size: usize,
+    pub seed: u64,
+}
+
+impl Default for DirectUmap {
+    fn default() -> Self {
+        let a = LayoutUmapArgs::default();
+        a.direct_params()
+    }
+}
+
+impl LayoutUmapArgs {
+    fn direct_params(&self) -> DirectUmap {
+        DirectUmap {
+            knn: self.umap_finetune_knn,
+            epochs: self.umap_epochs,
+            negative_rate: self.umap_negative_rate,
+            lr: self.umap_lr,
+            block_size: self.common.block_size.unwrap_or(1000),
+            seed: self.common.seed,
+        }
+    }
+}
+
+/// t-UMAP of the points given as columns of `feat_kn` (`dims × n`): a fuzzy
+/// kNN graph on the features, a PCA(2) start, then SGD. Returns `n × 2`.
+pub(crate) fn tumap_on_columns(feat_kn: &Mat, p: &DirectUmap) -> anyhow::Result<Mat> {
+    let edges = build_cell_cell_fuzzy_edges(feat_kn, p.knn, p.block_size)?;
+    let mut coords = pca_init_2d(feat_kn, p.seed);
+    run_cell_level_umap_in_place(&mut coords, &edges, p.epochs, p.negative_rate, p.lr, p.seed);
+    Ok(coords)
 }
 
 /// Build the undirected cell-cell fuzzy kNN edge list used by both the

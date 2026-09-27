@@ -670,6 +670,50 @@ fn align_data_to_cached_cells(
     Ok(())
 }
 
+/// The per-cell table a layout runs on, from a run's geometry latent
+/// (`cells × dims`, as read). Returns `dims × cells` (one column per cell)
+/// and a short description of the transform for logging.
+///
+/// - topic family: `softmax(log θ / τ)` then a Hellinger square root;
+/// - embedding kinds (bge, fne, …): the raw embedding, since its magnitude
+///   carries signal and a DistL2 kNN should see it (the caller must have
+///   resolved the table through `geometry_latent`, so this is Z, never log θ);
+/// - everything else: per-dimension z-scores.
+///
+/// Each dimension is then winsorized to ±`trim_mads` MADs.
+pub(crate) fn latent_layout_features(
+    kind: senna::run_manifest::RunKind,
+    latent_nk: &Mat,
+    theta_temperature: f32,
+    trim_mads: f32,
+) -> (Mat, String) {
+    let tau = theta_temperature.max(1e-6);
+    let mut feat_kn: Mat = latent_nk.transpose();
+    let latent_desc: String = if kind.is_topic_family() {
+        // softmax(log_θ / τ) per cell → Hellinger sqrt. τ=1 reduces to
+        // sqrt(exp(log_θ)); τ<1 sharpens, τ>1 softens.
+        if (tau - 1.0).abs() > 1e-6 {
+            feat_kn.apply(|v| *v /= tau);
+        }
+        feat_kn.normalize_exp_logits_columns_inplace();
+        feat_kn.apply(|v| *v = v.sqrt());
+        if (tau - 1.0).abs() < 1e-6 {
+            "Hellinger-θ".into()
+        } else {
+            format!("Hellinger-θ, τ={tau:.3}")
+        }
+    } else if kind.cell_space() == senna::run_manifest::CellSpace::Embedding {
+        // Unit-sphere/cosine normalization collapsed magnitude and sheared
+        // populations apart; a raw t-UMAP on the same embedding does not.
+        "raw Euclidean".into()
+    } else {
+        feat_kn.scale_rows_inplace();
+        "z-scored scores".into()
+    };
+    winsorize_rows_inplace(&mut feat_kn, trim_mads);
+    (feat_kn, latent_desc)
+}
+
 /// Latent-driven layout: topic θ is log-softmax on disk, so we apply
 /// Hellinger (`exp().sqrt()`) to make cosine ≡ Bhattacharyya; SVD
 /// scores are z-scored instead. PBs come from a random landmark
@@ -699,37 +743,12 @@ fn preprocess_layout_data_from_latent(
     } = Mat::from_parquet_with_row_names(latent_path, Some(0))?;
     align_data_to_cached_cells(&mut data_vec, &cell_names_cached, "latent")?;
 
-    let tau = args.theta_temperature.max(1e-6);
-    let mut feat_kn: Mat = latent_nk.transpose();
-    let latent_desc: String = if kind.is_topic_family() {
-        // softmax(log_θ / τ) per cell → Hellinger sqrt. τ=1 reduces to
-        // sqrt(exp(log_θ)); τ<1 sharpens, τ>1 softens.
-        if (tau - 1.0).abs() > 1e-6 {
-            feat_kn.apply(|v| *v /= tau);
-        }
-        feat_kn.normalize_exp_logits_columns_inplace();
-        feat_kn.apply(|v| *v = v.sqrt());
-        if (tau - 1.0).abs() < 1e-6 {
-            "Hellinger-θ".into()
-        } else {
-            format!("Hellinger-θ, τ={tau:.3}")
-        }
-    } else if kind.cell_space() == senna::run_manifest::CellSpace::Embedding {
-        // BGE / FNE embed cells in a Euclidean space where magnitude carries
-        // signal — run the layout on the RAW embedding so the DistL2 kNN
-        // respects it. (Unit-sphere/cosine normalization collapsed magnitude
-        // and sheared populations apart; a raw t-UMAP on the same embedding
-        // does not.)
-        //
-        // Sound because the caller resolved the path via `geometry_latent`:
-        // for these kinds that is `cell_embedding` (the H-space Z), never the
-        // log-θ `latent` an ETM-resolving bge run also writes.
-        "raw Euclidean".into()
-    } else {
-        feat_kn.scale_rows_inplace();
-        "z-scored scores".into()
-    };
-    winsorize_rows_inplace(&mut feat_kn, args.trim_cell_mads);
+    let (feat_kn, latent_desc) = latent_layout_features(
+        kind,
+        &latent_nk,
+        args.theta_temperature,
+        args.trim_cell_mads,
+    );
     let n_cells = feat_kn.ncols();
     info!(
         "Loaded latent: {n_cells} cells × {} dims ({latent_desc})",

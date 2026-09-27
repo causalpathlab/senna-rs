@@ -26,7 +26,8 @@ use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 use std::time::Duration;
 
-const KEYS: &str = "tab space · m method · c colour · [ ] focus · e style · g / feature · ? help";
+const KEYS: &str =
+    "tab space · c colour · [ ] focus · z zoom in · Z out · e style · g / feature · ? help";
 
 const HELP: &[(&str, &str)] = &[
     (
@@ -48,6 +49,11 @@ const HELP: &[(&str, &str)] = &[
     ("a", "activity of the focused group's whole marker set"),
     ("o", "expected (model) or observed (counts) activity"),
     ("x / esc", "clear feature, then focus"),
+    ("z", "lay out the focused group's cells again, on their own"),
+    (
+        "Z / backspace",
+        "back to the layout this one was zoomed from",
+    ),
     (
         "e",
         "style menu: colour, shape, opacity, size, visibility per group",
@@ -55,7 +61,7 @@ const HELP: &[(&str, &str)] = &[
     ("t", "text labels on / off"),
     ("+  -  scroll", "zoom"),
     ("hjkl  arrows  drag", "pan"),
-    ("0", "reset view"),
+    ("0", "reset: top-level layout, whole map in view"),
     ("s", "save this view as PNG"),
     ("q", "quit"),
 ];
@@ -93,6 +99,15 @@ pub fn run(scene: Scene, graphics: Graphics) -> anyhow::Result<()> {
     result
 }
 
+type ZoomResult = Result<super::sublayout::Laid, String>;
+
+/// A zoom into one group, running on a worker thread.
+struct Zooming {
+    parent: usize,
+    label: String,
+    done: std::sync::mpsc::Receiver<ZoomResult>,
+}
+
 /// The style menu's cursor: which group, which property.
 struct Menu {
     row: usize,
@@ -120,6 +135,8 @@ struct App {
     names: Option<Vec<Box<str>>>,
     /// Style menu: selected group and field.
     menu: Option<Menu>,
+    /// A group being laid out on a worker thread.
+    zooming: Option<Zooming>,
     quit: bool,
 }
 
@@ -140,6 +157,7 @@ impl App {
             search: None,
             names: None,
             menu: None,
+            zooming: None,
             quit: false,
         }
     }
@@ -151,9 +169,13 @@ impl App {
             if self.advance()? {
                 terminal.draw(|f| self.draw(f))?;
             }
-            let busy = self.job.is_some();
-            let wait = if busy {
+            if self.finish_zoom() {
+                continue;
+            }
+            let wait = if self.job.is_some() {
                 Duration::ZERO
+            } else if self.zooming.is_some() {
+                Duration::from_millis(50)
             } else {
                 Duration::from_millis(250)
             };
@@ -551,7 +573,18 @@ impl App {
             KeyCode::Char('-' | '_') => {
                 self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
             }
-            KeyCode::Char('0' | 'r') => self.vp = None,
+            KeyCode::Char('0' | 'r') => {
+                self.scene.zoom_to_root();
+                self.vp = None;
+            }
+            KeyCode::Char('z') => self.start_zoom(),
+            KeyCode::Char('Z') | KeyCode::Backspace => {
+                if self.scene.zoom_out() {
+                    self.vp = None;
+                } else {
+                    self.message = Some("already at the top-level layout".into());
+                }
+            }
             KeyCode::Char('h') | KeyCode::Left => {
                 let d = step(self);
                 self.with_vp(|v| v.pan_px(d, 0.0));
@@ -571,6 +604,61 @@ impl App {
             KeyCode::Char('s') => self.save(),
             _ => {}
         }
+    }
+
+    /// Start laying out the focused group's cells on a worker thread.
+    fn start_zoom(&mut self) {
+        if self.zooming.is_some() {
+            return;
+        }
+        match self.scene.zoom_request() {
+            Ok(super::ZoomRequest {
+                label,
+                names,
+                geometry,
+            }) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let n = names.len();
+                std::thread::spawn(move || {
+                    let _ = tx.send(geometry.layout(&names).map_err(|e| e.to_string()));
+                });
+                self.message = Some(format!("laying out {n} cells of {label}…"));
+                self.zooming = Some(Zooming {
+                    parent: self.scene.space,
+                    label,
+                    done: rx,
+                });
+            }
+            Err(e) => self.message = Some(e),
+        }
+    }
+
+    /// Take a finished zoom, if any, and switch to it. Returns whether it did.
+    fn finish_zoom(&mut self) -> bool {
+        let Some(z) = &self.zooming else {
+            return false;
+        };
+        let result = match z.done.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the layout worker stopped".into())
+            }
+        };
+        let z = self.zooming.take().expect("checked above");
+        match result {
+            Ok((names, xy)) => {
+                let n = names.len();
+                self.scene.add_zoomed(z.parent, &z.label, names, xy);
+                self.vp = None;
+                self.message = Some(format!(
+                    "{} · {n} cells laid out on their own · Z to go back",
+                    z.label
+                ));
+            }
+            Err(e) => self.message = Some(e),
+        }
+        true
     }
 
     fn switch_space(&mut self, i: usize) {
