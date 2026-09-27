@@ -10,6 +10,8 @@ pub(super) enum Context {
     /// A feature's activity is on the map.
     Feature,
     Relabel,
+    /// Choosing clusters to merge.
+    Merge,
     /// Typing a label or rationale.
     Prompt,
     Search,
@@ -54,7 +56,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("/", "search a feature by name"),
             ("a", "activity of the focused group's whole marker set"),
             ("o", "expected (model) or observed (counts)"),
-            ("l", "lock the features nearest the clicked cell on the map"),
+            ("k  l", "pin names on the map: those nearest the clicked cell, or the feature on screen (again clears)"),
             ("x  esc", "back to group colours"),
         ],
     ),
@@ -88,7 +90,11 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
         "1. Check the fit",
         &[
             (
-                "sidebar",
+                "left panel",
+                "every cluster: ? unassigned, → markers suggest another type, ✓ decided",
+            ),
+            (
+                "right panel",
                 "candidate types and how well their markers fit this cluster",
             ),
             (
@@ -106,7 +112,7 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "click a cell",
-                "the features nearest it; k keeps them as the target's markers",
+                "the features nearest it; k or l pins their names on the map",
             ),
         ],
     ),
@@ -128,7 +134,10 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
                 "label the cluster (target and rationale filled in; enter twice)",
             ),
             ("K", "keep its current call"),
-            ("v  M", "mark clusters, then merge them under one label"),
+            (
+                "M",
+                "merge mode: ↑ ↓ move, space choose, enter name the merged cluster, esc cancel",
+            ),
         ],
     ),
     (
@@ -150,8 +159,12 @@ impl App {
             Context::Prompt
         } else if self.menu.is_some() {
             Context::StyleMenu
-        } else if self.scene.review.is_some() {
-            Context::Relabel
+        } else if let Some(r) = &self.scene.review {
+            if r.merge.is_some() {
+                Context::Merge
+            } else {
+                Context::Relabel
+            }
         } else if self.scene.pick.is_some() {
             Context::Feature
         } else {
@@ -164,16 +177,20 @@ impl App {
     pub(super) fn status_keys(&self) -> [&'static str; 2] {
         match self.context() {
             Context::Browse => [
-                "click a cell: its cluster and the features nearest it   [ ] focus a group   c change the colouring   n suggest features",
+                "click a cell: its cluster and the features nearest it (k pins their names)   [ ] focus a group   c change the colouring   n suggest features",
                 "R relabel clusters   , . annotation rounds   tab / m other layouts   z zoom into a group   e style   ? all keys   q quit",
             ],
             Context::Feature => [
                 "g / G next or previous feature   o switch between counts and model   a the group's whole marker set   x back to group colours",
-                "/ search a feature   n new suggestions   [ ] focus a group   ? all keys",
+                "/ search a feature   n new suggestions   k pin its name   [ ] focus a group   ? all keys",
+            ],
+            Context::Merge => [
+                "↑ ↓ move   space choose or unchoose the cluster   enter name the merged cluster",
+                "≈ marks clusters whose markers fit the same type   esc or M cancel   ? the steps",
             ],
             Context::Relabel => [
                 "] / [ next or previous cluster   ↑ ↓ choose a feature   enter show it   + / - include or exclude   a accept all ? proposals",
-                "tab target type   L label   K keep   v then M merge   p preview with lupin   S submit all   R leave   ? the steps",
+                "tab target type   L label   K keep   M merge clusters   k pin names   p preview with lupin   S submit all   R leave   ? the steps",
             ],
             Context::Prompt => [
                 "type, or keep what is filled in   enter accepts   esc cancels",
@@ -192,7 +209,7 @@ impl App {
 
     /// The `?` overlay for the current context.
     pub(super) fn help_lines(&self) -> Vec<Line<'static>> {
-        let sections = if self.context() == Context::Relabel {
+        let sections = if matches!(self.context(), Context::Relabel | Context::Merge) {
             RELABEL_HELP
         } else {
             BROWSE_HELP

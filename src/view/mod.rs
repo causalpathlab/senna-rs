@@ -141,7 +141,8 @@ struct Suggestions {
 
 /// What a layer's draw order depends on: its space, the grouping and focus
 /// that rank its points, and which activity (by `Shown::id`) sorts them.
-type OrderKey = (usize, Option<usize>, Option<u32>, u64, bool);
+/// Space, colouring, focus, feature shown, merge selection, backdrop.
+type OrderKey = (usize, Option<usize>, Option<u32>, u64, u64, bool);
 
 /// What a zoom into one group needs: its name, its cells, and the geometry
 /// table to lay them out from.
@@ -508,6 +509,37 @@ impl Scene {
         self.refresh_activity();
     }
 
+    /// Colour by what the round changed against its source, and describe
+    /// it: how many cells now carry each label.
+    pub fn show_changes(&mut self) -> Vec<String> {
+        let Some(li) = self
+            .data
+            .labels
+            .iter()
+            .position(|l| l.kind == LabelKind::Changed)
+        else {
+            return vec!["no cell changed label".into()];
+        };
+        let labels = &self.data.labels[li];
+        let mut count = vec![0usize; labels.levels.len()];
+        for &g in labels.by_name.values() {
+            count[g as usize] += 1;
+        }
+        let mut out = vec![format!("{} cells changed label:", labels.by_name.len())];
+        let mut rows: Vec<(usize, &str)> = count
+            .iter()
+            .zip(&labels.levels)
+            .map(|(&n, l)| (n, l.as_ref()))
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.0));
+        out.extend(rows.iter().map(|(n, l)| format!("  {n:>6}  now {l}")));
+        self.colour = Some(li);
+        self.focus = None;
+        self.clear_pick();
+        self.refresh_groups();
+        out
+    }
+
     /// The run's clusters, when it has them.
     fn cluster_labels(&self) -> Option<&data::Labels> {
         self.data
@@ -851,19 +883,23 @@ impl Scene {
                 groups: None,
                 styles: &[],
                 focus: None,
+                selected: None,
                 muted: true,
                 size: 0.8,
                 levels: None,
                 order: None,
             });
-            keys.push((b, None, None, 0, true));
+            keys.push((b, None, None, 0, 0, true));
         }
         let shown = self.shown.as_ref().filter(|s| s.space == self.space);
+        let merge = self.review.as_ref().and_then(|r| r.merge.as_ref());
+        let selected = merge.map(|m| m.levels.as_slice());
         layers.push(Paint {
             points: &space.points,
             groups: self.groups(),
             styles: &self.styles,
             focus: self.focus,
+            selected,
             muted: false,
             size: if space.backdrop.is_some() { 1.5 } else { 1.0 },
             levels: shown.map(|s| (&s.levels, self.ramp.as_slice())),
@@ -874,6 +910,12 @@ impl Scene {
             self.colour,
             self.focus,
             shown.map_or(0, |s| s.id),
+            merge.map_or(0, |m| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                m.chosen.hash(&mut h);
+                h.finish() | 1
+            }),
             false,
         ));
         // The order only changes with these keys, not with the camera: reuse
@@ -1055,12 +1097,14 @@ impl Scene {
                 font,
             });
         }
-        // Features near a clicked cell (and locked sets), at their places on
-        // the cell map.
-        if let Some(pos) = self
-            .feature_positions()
-            .filter(|_| self.current().axis() == Axis::Cells)
-        {
+        // Features near a clicked cell (and pinned names), at their places:
+        // on a cell map, where the features sit among the cells; on a
+        // feature map, the features' own points.
+        let pos = match self.current().axis() {
+            Axis::Cells => self.feature_positions(),
+            Axis::Features => Some(&self.current().points),
+        };
+        if let Some(pos) = pos {
             let font = Font::for_cell_height(cell_px * 0.85, true);
             let ink = color::highlight_ink();
             for near in self.locked.iter().chain(&self.near) {
@@ -1335,7 +1379,8 @@ mod tests {
             target: None,
             rows: Vec::new(),
             row: 0,
-            marked: Vec::new(),
+            overview: Vec::new(),
+            merge: None,
             preview: None,
         });
         let other = scene().data;

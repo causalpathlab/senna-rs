@@ -23,7 +23,19 @@ impl App {
                 format!("/{q}   {}", shown.join("  "))
             }
             (None, Some(p)) => p.line(),
-            (None, None) => self.message.clone().unwrap_or_else(|| self.scene.caption()),
+            (None, None) => match &self.relabeling {
+                Some(r) => format!(
+                    "lupin is {} {} decision(s)… {:.1} s · editing is locked until it answers",
+                    if matches!(r.job, RelabelJob::Preview) {
+                        "previewing"
+                    } else {
+                        "applying"
+                    },
+                    r.sent.len(),
+                    r.started.elapsed().as_secs_f32()
+                ),
+                None => self.message.clone().unwrap_or_else(|| self.scene.caption()),
+            },
         };
         if self.job.is_some() {
             first.push_str("   · drawing…");
@@ -48,7 +60,8 @@ impl App {
                 self.draw_menu(f, side, menu, page);
             } else if let Some(lines) = self
                 .scene
-                .review_lines()
+                .merge_lines()
+                .or_else(|| self.scene.review_lines())
                 .or_else(|| self.info.clone())
                 .or_else(|| self.scene.suggestion_lines())
                 .or_else(|| self.scene.near_lines())
@@ -60,6 +73,32 @@ impl App {
                         .block(side_block())
                         .style(page),
                     side,
+                );
+            }
+        }
+
+        if self.left.width > 0 {
+            if let Some(lines) = self.scene.overview_lines() {
+                // Keep the cursor row in sight.
+                let rows = usize::from(self.left.height);
+                let at = lines.iter().position(|l| l.starts_with('▸')).unwrap_or(0);
+                let skip = (at + rows / 2)
+                    .saturating_sub(rows)
+                    .min(lines.len().saturating_sub(rows));
+                let text: Vec<Line> = lines
+                    .iter()
+                    .skip(skip)
+                    .map(|l| Line::from(format!("{l} ")))
+                    .collect();
+                f.render_widget(
+                    Paragraph::new(text)
+                        .block(
+                            Block::new()
+                                .borders(ratatui::widgets::Borders::RIGHT)
+                                .border_style(Style::default().fg(rgb(color::MUTED))),
+                        )
+                        .style(page),
+                    self.left,
                 );
             }
         }

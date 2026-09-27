@@ -242,6 +242,39 @@ pub struct Decision {
 }
 
 impl Decision {
+    /// One line saying what this decision does.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let ids = || {
+            self.clusters
+                .iter()
+                .map(|c| format!("C{c}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let feats = |sign: &str| {
+            let shown: Vec<String> = self
+                .features
+                .iter()
+                .take(4)
+                .map(|f| format!("{sign}{f}"))
+                .collect();
+            let more = self.features.len().saturating_sub(4);
+            if more > 0 {
+                format!("{} (+{more} more)", shown.join(" "))
+            } else {
+                shown.join(" ")
+            }
+        };
+        match self.action {
+            Action::Label => format!("label {} → {}", ids(), self.label),
+            Action::Keep => format!("keep {} as {}", ids(), self.label),
+            Action::Merge => format!("merge {} → {}", ids(), self.label),
+            Action::MarkersAdd => format!("markers of {}: {}", self.label, feats("+")),
+            Action::MarkersDrop => format!("markers of {}: {}", self.label, feats("-")),
+        }
+    }
+
     /// The JSON line lupin reads. `round` names the round whose cluster ids
     /// the decision uses.
     #[must_use]
@@ -329,9 +362,12 @@ mod tests {
         let json = dec.to_json("r.senna.json");
 
         let ok = fake_lupin(d, "echo r.r1.senna.json");
-        let Ok(Reply::Round(p)) =
-            relabel(&ok, Path::new("r.senna.json"), &[json.clone()], Mode::Next)
-        else {
+        let Ok(Reply::Round(p)) = relabel(
+            &ok,
+            Path::new("r.senna.json"),
+            std::slice::from_ref(&json),
+            Mode::Next,
+        ) else {
             panic!("expected a round");
         };
         assert_eq!(p, PathBuf::from("r.r1.senna.json"));
@@ -347,7 +383,7 @@ mod tests {
         let Ok(Reply::Refused { reason, latest }) = relabel(
             &stale,
             Path::new("r.senna.json"),
-            &[json.clone()],
+            std::slice::from_ref(&json),
             Mode::Next,
         ) else {
             panic!("expected a refusal");
@@ -359,16 +395,19 @@ mod tests {
             d,
             "echo \"error: unrecognized subcommand 'relabel'\" >&2; exit 2",
         );
-        assert!(
-            relabel(&old, Path::new("r.senna.json"), &[json.clone()], Mode::Next)
-                .err()
-                .unwrap()
-                .contains("does not support")
-        );
+        assert!(relabel(
+            &old,
+            Path::new("r.senna.json"),
+            std::slice::from_ref(&json),
+            Mode::Next
+        )
+        .err()
+        .unwrap()
+        .contains("does not support"));
         assert!(relabel(
             "/nonexistent/lupin",
             Path::new("r.senna.json"),
-            &[json.clone()],
+            std::slice::from_ref(&json),
             Mode::Next
         )
         .is_err());

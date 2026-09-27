@@ -92,6 +92,9 @@ pub struct Paint<'a> {
     /// Style per group id.
     pub styles: &'a [Resolved],
     pub focus: Option<u32>,
+    /// Groups picked out (by group id), drawn in colour and on top; the rest
+    /// muted. Overrides `focus`.
+    pub selected: Option<&'a [bool]>,
     /// Draw everything muted (a backdrop layer).
     pub muted: bool,
     /// Radius multiplier.
@@ -139,10 +142,11 @@ impl Paint<'_> {
         if st.hidden {
             return None;
         }
-        let colour = match self.focus {
-            Some(f) if f != g => muted,
-            _ => st.colour,
+        let picked = match self.selected {
+            Some(sel) => sel.get(g as usize).copied().unwrap_or(false),
+            None => self.focus.is_none_or(|f| f == g),
         };
+        let colour = if picked { st.colour } else { muted };
         Some(Mark {
             colour,
             alpha: st.alpha,
@@ -157,7 +161,15 @@ impl Paint<'_> {
         if self.muted || self.levels.is_some() {
             return 0;
         }
-        match (self.groups.map_or(NONE, |g| g[i]), self.focus) {
+        let g = self.groups.map_or(NONE, |g| g[i]);
+        if let (Some(sel), true) = (self.selected, g != NONE) {
+            return if sel.get(g as usize).copied().unwrap_or(false) {
+                2
+            } else {
+                0
+            };
+        }
+        match (g, self.focus) {
             (NONE, _) => 0,
             (g, Some(f)) if g == f => 2,
             (_, Some(_)) => 0,

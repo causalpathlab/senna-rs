@@ -82,6 +82,9 @@ const STATUS_LINES: u16 = 3;
 /// A decision lupin is applying on a worker thread.
 struct Relabeling {
     job: RelabelJob,
+    started: std::time::Instant,
+    /// What was sent, one line per decision.
+    sent: Vec<String>,
     done: std::sync::mpsc::Receiver<Result<crate::view::decide::Reply, String>>,
 }
 
@@ -152,6 +155,8 @@ struct App {
     info: Option<Vec<String>>,
     /// Sidebar area, beside the map; empty when there is nothing to show.
     side: Rect,
+    /// The cluster overview on the left of the map (relabel mode only).
+    left: Rect,
     /// Whether the sidebar may open (`b` toggles).
     sidebar: bool,
     /// A `lupin relabel --watch` on this chain, if one runs; its latest
@@ -191,6 +196,7 @@ impl App {
             checked: std::time::Instant::now(),
             info: None,
             side: Rect::default(),
+            left: Rect::default(),
             sidebar: true,
             scene,
             cell: (f32::from(f.width.max(1)), f32::from(f.height.max(1))),
@@ -248,6 +254,9 @@ impl App {
                     }
                 }
                 terminal.draw(|f| self.draw(f))?;
+            } else if self.relabeling.is_some() {
+                // Keep the elapsed time ticking while lupin works.
+                terminal.draw(|f| self.draw(f))?;
             }
         }
         Ok(())
@@ -276,11 +285,21 @@ impl App {
         } else {
             0
         };
+        // Relabel mode adds the cluster overview on the other side.
+        let left_w = if self.sidebar && self.scene.review.is_some() {
+            (area.width / 5)
+                .clamp(26, 40)
+                .min(area.width.saturating_sub(side_w + 20))
+        } else {
+            0
+        };
         let map = Rect {
-            width: body.width - side_w,
+            x: body.x + left_w,
+            width: body.width - side_w - left_w,
             ..body
         };
-        self.side = Rect::new(body.x + map.width, body.y, side_w, body.height);
+        self.left = Rect::new(body.x, body.y, left_w, body.height);
+        self.side = Rect::new(map.x + map.width, body.y, side_w, body.height);
         if map != self.map {
             let had_map = self.map.width > 0 && self.map.height > 0;
             self.map = map;

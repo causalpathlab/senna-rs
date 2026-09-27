@@ -22,15 +22,18 @@ impl App {
         let Some(r) = self.scene.review.as_mut() else {
             return false;
         };
+        if r.merge.is_some() {
+            return self.merge_key(k);
+        }
         let n_rows = r.rows.len();
-        let n_clusters = r.order.len();
+        let n_clusters = r.order.len().max(1);
         match k.code {
             KeyCode::Char(']') => {
-                let next = (r.at + 1) % n_clusters.max(1);
+                let next = (r.at + 1) % n_clusters;
                 self.change(|s| s.visit(next));
             }
             KeyCode::Char('[') => {
-                let prev = (r.at + n_clusters.max(1) - 1) % n_clusters.max(1);
+                let prev = (r.at + n_clusters - 1) % n_clusters;
                 self.change(|s| s.visit(prev));
             }
             KeyCode::Down => r.row = (r.row + 1).min(n_rows.saturating_sub(1)),
@@ -43,15 +46,7 @@ impl App {
             KeyCode::Tab => self.change(Scene::next_target),
             KeyCode::Char('L') => self.begin_staged(Action::Label),
             KeyCode::Char('K') => self.begin_staged(Action::Keep),
-            KeyCode::Char('M') => self.begin_staged(Action::Merge),
-            KeyCode::Char('v') => {
-                let id = r.cluster();
-                if let Some(i) = r.marked.iter().position(|&m| m == id) {
-                    r.marked.remove(i);
-                } else {
-                    r.marked.push(id);
-                }
-            }
+            KeyCode::Char('M') => self.change(Scene::begin_merge),
             KeyCode::Char('p') => self.send_draft(Mode::Preview),
             KeyCode::Char('S') => self.send_draft(Mode::Next),
             KeyCode::Esc | KeyCode::Char('R') => self.toggle_review(),
@@ -60,27 +55,53 @@ impl App {
         true
     }
 
-    /// Ask for a label (pre-filled with the target type) and a rationale
-    /// (pre-filled from what was staged), then stage the verdict.
+    /// Keys of merge mode: move through the cluster list, choose clusters,
+    /// then name the merged cluster.
+    fn merge_key(&mut self, k: KeyEvent) -> bool {
+        let Some(r) = self.scene.review.as_mut() else {
+            return false;
+        };
+        let n = r.overview.len();
+        let Some(m) = r.merge.as_mut() else {
+            return false;
+        };
+        match k.code {
+            KeyCode::Down => m.cursor = (m.cursor + 1).min(n.saturating_sub(1)),
+            KeyCode::Up => m.cursor = m.cursor.saturating_sub(1),
+            KeyCode::Char(' ') => self.change(Scene::toggle_merge_cursor),
+            KeyCode::Enter => self.begin_staged(Action::Merge),
+            KeyCode::Esc | KeyCode::Char('M') => {
+                r.merge = None;
+                self.message = Some("merge cancelled".into());
+                self.restart();
+            }
+            _ => return false,
+        }
+        self.restart();
+        true
+    }
+
+    /// Ask for a label (pre-filled with the target type, or for a merge the
+    /// type the chosen clusters fit best) and a rationale (pre-filled from
+    /// what was staged), then stage the decision.
     fn begin_staged(&mut self, action: Action) {
         let Some(r) = self.scene.review.as_ref() else {
             return;
         };
         let id = r.cluster();
-        let clusters = if action == Action::Merge {
-            let mut c = r.marked.clone();
-            if !c.contains(&id) {
-                c.push(id);
-            }
-            if c.len() < 2 {
-                self.message = Some("mark the clusters to merge with v first".into());
+        let (clusters, target) = if action == Action::Merge {
+            let Some(m) = r.merge.as_ref() else { return };
+            if m.chosen.len() < 2 {
+                self.message = Some("choose at least two clusters (↑↓, space)".into());
                 return;
             }
-            c
+            (
+                m.chosen.iter().copied().collect::<Vec<_>>(),
+                m.best.as_ref().map(|b| b.0.clone()).unwrap_or_default(),
+            )
         } else {
-            vec![id]
+            (vec![id], r.target.clone().unwrap_or_default())
         };
-        let target = r.target.clone().unwrap_or_default();
         let current = self.scene.cluster_call(id).0;
         let label = if action == Action::Keep {
             match current {
@@ -94,7 +115,18 @@ impl App {
             String::new()
         };
         let why = action == Action::Keep;
-        let prefill = self.scene.drafted_rationale();
+        let prefill = if action == Action::Merge {
+            let ids: Vec<String> = clusters.iter().map(|c| format!("C{c}")).collect();
+            let fit = r
+                .merge
+                .as_ref()
+                .and_then(|m| m.best.as_ref())
+                .map(|(t, v)| format!("; together their markers fit {t} ({v:+.2})"))
+                .unwrap_or_default();
+            format!("{} share one program{fit}", ids.join(" "))
+        } else {
+            self.scene.drafted_rationale()
+        };
         self.prompt = Some(Prompt {
             decision: Decision {
                 action,
@@ -150,7 +182,7 @@ impl App {
             .canonicalize()
             .unwrap_or_else(|_| self.from.clone());
         let lines = r.draft.lines(&round.to_string_lossy());
-        let n = lines.len();
+        let sent: Vec<String> = r.draft.decisions().iter().map(Decision::summary).collect();
         let lupin = self.lupin.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -161,11 +193,9 @@ impl App {
                 Mode::Next => RelabelJob::Submit,
                 Mode::Preview => RelabelJob::Preview,
             },
+            started: std::time::Instant::now(),
+            sent,
             done: rx,
-        });
-        self.message = Some(match mode {
-            Mode::Next => format!("sending {n} decisions to lupin as one round…"),
-            Mode::Preview => format!("asking lupin to preview {n} decisions…"),
         });
     }
 }

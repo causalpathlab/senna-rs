@@ -23,6 +23,9 @@ use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Per group, a score per feature; and the features, in column order.
+type GroupContrasts<'a> = (Vec<Vec<f32>>, &'a [Box<str>]);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Source {
@@ -560,6 +563,84 @@ impl Activity {
             }
         };
         Ok((scores, &e.features.names))
+    }
+
+    /// `contrast` for every group at once: each group over the rest of the
+    /// view. `groups` gives each point of `universe` its group (`u32::MAX`
+    /// for none). One pass over the cells: each group's rest is the total
+    /// minus the group. Returns one score vector per group (empty for an
+    /// empty group), in the model's feature order, and the feature names.
+    pub fn cluster_contrasts(
+        &mut self,
+        key: usize,
+        universe: &[Box<str>],
+        groups: &[u32],
+        n_groups: usize,
+    ) -> Result<GroupContrasts<'_>, String> {
+        let rows = self.rows(Source::Expected, key, universe)?;
+        let e = self.expected()?;
+        // Per-group sums of the per-cell table the scores are linear in.
+        let sums = |m: &Mat| -> (Vec<nalgebra::DVector<f32>>, Vec<usize>) {
+            let mut s = vec![nalgebra::DVector::<f32>::zeros(m.ncols()); n_groups];
+            let mut n = vec![0usize; n_groups];
+            for (k, &r) in rows.iter().enumerate() {
+                let g = groups[k];
+                if r == NO_ROW || g as usize >= n_groups {
+                    continue;
+                }
+                s[g as usize] += m.row(r as usize).transpose();
+                n[g as usize] += 1;
+            }
+            (s, n)
+        };
+        let split = |s: &[nalgebra::DVector<f32>], n: &[usize], g: usize| {
+            let total: nalgebra::DVector<f32> = s
+                .iter()
+                .fold(nalgebra::DVector::<f32>::zeros(s[g].len()), |a, b| a + b);
+            let all: usize = n.iter().sum();
+            let inside = &s[g] / n[g].max(1) as f32;
+            let rest = (total - &s[g]) / (all - n[g]).max(1) as f32;
+            (inside, rest)
+        };
+        let out = match &e.model {
+            Model::Embedding { z, rho, bias } => {
+                let (s, n) = sums(z);
+                (0..n_groups)
+                    .map(|g| {
+                        if n[g] == 0 {
+                            return Vec::new();
+                        }
+                        let (inside, rest) = split(&s, &n, g);
+                        let mut v: Vec<f32> = (rho * (inside - rest)).iter().copied().collect();
+                        drop_below_median(&mut v, bias.as_deref());
+                        v
+                    })
+                    .collect()
+            }
+            Model::Topic {
+                log_theta,
+                log_beta,
+            } => {
+                let (theta, beta) = e
+                    .topic_linear
+                    .get_or_init(|| (log_theta.map(f32::exp), log_beta.map(f32::exp)));
+                let (s, n) = sums(theta);
+                (0..n_groups)
+                    .map(|g| {
+                        if n[g] == 0 {
+                            return Vec::new();
+                        }
+                        let (inside, rest) = split(&s, &n, g);
+                        let (a, b) = (beta * inside, beta * rest);
+                        a.iter()
+                            .zip(b.iter())
+                            .map(|(&x, &y)| (x.max(1e-12) / y.max(1e-12)).ln())
+                            .collect()
+                    })
+                    .collect()
+            }
+        };
+        Ok((out, &e.features.names))
     }
 
     /// The `top` best-scoring features of `contrast`, best first.
