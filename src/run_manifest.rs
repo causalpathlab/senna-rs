@@ -1110,10 +1110,7 @@ impl RunManifest {
                 m.version
             );
         }
-        let dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let dir = manifest_dir(path).to_path_buf();
         Ok((m, dir))
     }
 
@@ -1209,6 +1206,15 @@ fn rel_to_manifest_from(cwd: &Path, manifest_dir: &Path, written_path: &str) -> 
         Ok(rel) => rel.to_string_lossy().into_owned(),
         Err(_) => written_abs.to_string_lossy().into_owned(),
     }
+}
+
+/// The directory a manifest (or any file) sits in, `.` for a bare file name.
+/// Relative paths recorded in a manifest resolve against this.
+#[must_use]
+pub fn manifest_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 /// Resolve a path listed in a manifest against the manifest's own

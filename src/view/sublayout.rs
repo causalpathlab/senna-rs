@@ -5,7 +5,7 @@
 //! the same t-UMAP, so a sub-population's structure gets the whole screen
 //! instead of the corner the global layout gave it.
 
-use crate::postprocess::{latent_layout_features, tumap_on_columns, DirectUmap};
+use crate::postprocess::{latent_layout_features, tumap_on_columns, DirectUmap, DEFAULT_TRIM_MADS};
 use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunKind, RunManifest};
@@ -13,8 +13,6 @@ use std::path::Path;
 
 /// Fewer cells than this do not make a layout worth looking at.
 const MIN_CELLS: usize = 10;
-/// Winsorization applied before the layout, as `senna layout` does by default.
-const TRIM_MADS: f32 = 5.0;
 
 /// Cells that were laid out, and their coordinates.
 pub type Laid = (Vec<Box<str>>, Vec<[f32; 2]>);
@@ -57,7 +55,7 @@ impl Geometry {
             rows.len()
         );
         let sub = self.latent_nk.select_rows(&rows);
-        let (feat_kn, _) = latent_layout_features(self.kind, &sub, 1.0, TRIM_MADS);
+        let (feat_kn, _) = latent_layout_features(self.kind, &sub, 1.0, DEFAULT_TRIM_MADS);
         let params = DirectUmap {
             knn: DirectUmap::default().knn.min(rows.len() - 1),
             ..DirectUmap::default()

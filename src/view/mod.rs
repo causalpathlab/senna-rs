@@ -9,6 +9,7 @@ mod activity;
 mod color;
 mod data;
 mod decide;
+mod files;
 mod render;
 mod rounds;
 mod style;
@@ -18,7 +19,7 @@ mod tui;
 
 use activity::{Activity, Levels, Source};
 use color::{Encoder, Rgb};
-use data::{Axis, Dataset, NONE};
+use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
 use render::{draw_labels, group_medians, Job, Label, Paint, Viewport};
 use rustc_hash::FxHashMap as HashMap;
@@ -247,9 +248,9 @@ impl Scene {
 
     /// Groupings that apply to the current axis.
     pub fn colour_choices(&self) -> Vec<usize> {
-        let axis = self.current().axis;
+        let axis = self.current().axis();
         (0..self.data.labels.len())
-            .filter(|&i| self.data.labels[i].axis == axis)
+            .filter(|&i| self.data.labels[i].axis() == axis)
             .collect()
     }
 
@@ -258,11 +259,11 @@ impl Scene {
         if let Some(w) = want {
             if let Some(&i) = choices
                 .iter()
-                .find(|&&i| self.data.labels[i].title.eq_ignore_ascii_case(w))
+                .find(|&&i| self.data.labels[i].title().eq_ignore_ascii_case(w))
             {
                 return Some(i);
             }
-            log::warn!("view: no `{w}` grouping for {}", self.current().title);
+            log::warn!("view: no `{w}` grouping for {}", self.current().title());
         }
         choices.first().copied()
     }
@@ -274,7 +275,7 @@ impl Scene {
             return;
         };
         let labels = &self.data.labels[li];
-        self.styles = self.book.resolve(&labels.title, &labels.levels);
+        self.styles = self.book.resolve(labels.title(), &labels.levels);
         if matches!(&self.groups, Some((s, l, _)) if *s == self.space && *l == li) {
             return;
         }
@@ -286,7 +287,7 @@ impl Scene {
     pub fn restyle(&mut self, g: usize, f: impl FnOnce(&mut style::Style)) {
         let Some(li) = self.colour else { return };
         let labels = &self.data.labels[li];
-        let (grouping, name) = (labels.title.clone(), labels.levels[g].to_string());
+        let (grouping, name) = (labels.title().to_string(), labels.levels[g].to_string());
         let mut st = self.book.get(&grouping, &name);
         f(&mut st);
         self.book.set(&grouping, &name, st);
@@ -300,7 +301,7 @@ impl Scene {
     pub fn style_of(&self, g: usize) -> style::Style {
         self.colour.map_or_else(style::Style::plain, |li| {
             let l = &self.data.labels[li];
-            self.book.get(&l.title, &l.levels[g])
+            self.book.get(l.title(), &l.levels[g])
         })
     }
 
@@ -319,9 +320,9 @@ impl Scene {
     }
 
     pub fn set_space(&mut self, space: usize) {
-        let axis = self.current().axis;
+        let axis = self.current().axis();
         self.space = space;
-        if self.current().axis != axis {
+        if self.current().axis() != axis {
             self.colour = self.default_colour(None);
             self.focus = None;
         }
@@ -332,7 +333,7 @@ impl Scene {
     /// What zooming into the focused group needs: its name, its cells, and
     /// the geometry table to lay them out from.
     pub fn zoom_request(&mut self) -> Result<ZoomRequest, String> {
-        if self.current().axis != Axis::Cells {
+        if self.current().axis() != Axis::Cells {
             return Err("zoom into a group from a cell view".into());
         }
         let (Some(f), Some(groups)) = (self.focus, self.groups()) else {
@@ -374,8 +375,7 @@ impl Scene {
         let method = format!("{} › {label}", self.data.spaces[parent].method);
         self.data.spaces.push(data::Space {
             method,
-            title: "cells",
-            axis: Axis::Cells,
+            kind: SpaceKind::Cells,
             points: data::Points::new(names, xy),
             backdrop: None,
             parent: Some(parent),
@@ -399,28 +399,24 @@ impl Scene {
     /// layout, grouping and focused group the view had, matched by name. A
     /// zoomed layout falls back to the layout it was zoomed from.
     pub fn replace_data(&mut self, data: Dataset) {
-        let mut root = self.space;
-        while let Some(p) = self.data.spaces[root].parent {
-            root = p;
-        }
-        let (method, title) = {
-            let s = &self.data.spaces[root];
-            (s.method.clone(), s.title)
+        let (method, kind) = {
+            let s = &self.data.spaces[self.root()];
+            (s.method.clone(), s.kind)
         };
-        let colour = self.colour.map(|i| self.data.labels[i].title.clone());
+        let colour = self.colour.map(|i| self.data.labels[i].kind);
         let focus = self.focused_name();
         self.data = data;
         self.space = self
             .data
             .spaces
             .iter()
-            .position(|s| s.method == method && s.title == title)
+            .position(|s| s.method == method && s.kind == kind)
             .unwrap_or(0);
         self.colour = colour
             .and_then(|t| {
                 self.colour_choices()
                     .into_iter()
-                    .find(|&i| self.data.labels[i].title == t)
+                    .find(|&i| self.data.labels[i].kind == t)
             })
             .or_else(|| self.default_colour(None));
         self.groups = None;
@@ -434,30 +430,31 @@ impl Scene {
         self.refresh_activity();
     }
 
+    /// The run's clusters, when it has them.
+    fn cluster_labels(&self) -> Option<&data::Labels> {
+        self.data
+            .labels
+            .iter()
+            .find(|l| l.kind == LabelKind::Cluster)
+    }
+
     /// What the round records about the cluster of cell `cell`, as panel lines.
     pub fn cluster_info(&self, cell: &str) -> Option<Vec<String>> {
-        let round = self.data.round.as_ref()?;
-        let clusters = self.data.labels.iter().find(|l| l.title == "cluster")?;
-        let level = &clusters.levels[*clusters.by_name.get(cell)? as usize];
-        let id = level.strip_prefix('C').unwrap_or(level);
-        Some(round.cluster_lines(id))
+        let id = self.cluster_id_of(cell)?;
+        Some(self.data.round.as_ref()?.cluster_lines(&id.to_string()))
     }
 
     /// The cluster id of cell `cell`, from the run's `cluster.clusters`.
     pub fn cluster_id_of(&self, cell: &str) -> Option<i64> {
-        let clusters = self.data.labels.iter().find(|l| l.title == "cluster")?;
-        let level = &clusters.levels[*clusters.by_name.get(cell)? as usize];
-        level.strip_prefix('C').unwrap_or(level).parse().ok()
+        let c = self.cluster_labels()?;
+        Some(c.ids[*c.by_name.get(cell)? as usize])
     }
 
     /// The focused group's cluster id, when colouring by cluster.
     pub fn focused_cluster(&self) -> Option<i64> {
-        let li = self.colour?;
-        if self.data.labels[li].title != "cluster" {
-            return None;
-        }
-        let name = self.focused_name()?;
-        name.strip_prefix('C').unwrap_or(&name).parse().ok()
+        let labels = &self.data.labels[self.colour?];
+        let f = self.focus?;
+        (labels.kind == LabelKind::Cluster).then(|| labels.ids[f as usize])
     }
 
     /// The label the current round gives cluster `id`, and its top call.
@@ -475,7 +472,7 @@ impl Scene {
             .data
             .labels
             .iter()
-            .filter(|l| l.title == "annotation" || l.title == "markers")
+            .filter(|l| matches!(l.kind, LabelKind::Annotation | LabelKind::Markers))
             .flat_map(|l| l.levels.iter().cloned())
             .collect();
         out.sort();
@@ -493,11 +490,17 @@ impl Scene {
     }
 
     /// Back to the top of the zoom chain. Returns whether it moved.
-    pub fn zoom_to_root(&mut self) -> bool {
+    /// The top of the current zoom chain.
+    fn root(&self) -> usize {
         let mut at = self.space;
         while let Some(p) = self.data.spaces[at].parent {
             at = p;
         }
+        at
+    }
+
+    pub fn zoom_to_root(&mut self) -> bool {
+        let at = self.root();
         if at == self.space {
             return false;
         }
@@ -506,7 +509,10 @@ impl Scene {
     }
 
     fn markers(&self) -> Option<&data::Labels> {
-        self.data.labels.iter().find(|l| l.title == "markers")
+        self.data
+            .labels
+            .iter()
+            .find(|l| l.kind == LabelKind::Markers)
     }
 
     /// The focused group's name, whichever grouping it belongs to.
@@ -541,7 +547,7 @@ impl Scene {
     /// most here. Shows the first one straight away.
     pub fn suggest(&mut self) {
         const TOP: usize = 25;
-        if self.current().axis != Axis::Cells {
+        if self.current().axis() != Axis::Cells {
             self.note = Some("suggestions work on a cell view".into());
             return;
         }
@@ -688,7 +694,7 @@ impl Scene {
             self.shown = None;
             return;
         };
-        if self.current().axis != Axis::Cells {
+        if self.current().axis() != Axis::Cells {
             self.shown = None;
             return;
         }
@@ -812,7 +818,7 @@ impl Scene {
             x >= 0.0 && y >= 0.0 && x < vp.w as f32 && y < vp.h as f32
         };
 
-        if space.axis == Axis::Cells {
+        if space.axis() == Axis::Cells {
             let Some(groups) = groups else { return out };
             let font = Font::for_cell_height(cell_px, true);
             let n = self.levels().len();
@@ -888,7 +894,7 @@ impl Scene {
     /// with the most points first.
     pub fn legend(&self) -> Vec<(String, Rgb, Rgb)> {
         const MAX_ENTRIES: usize = 24;
-        let (Some(groups), Axis::Features) = (self.groups(), self.current().axis) else {
+        let (Some(groups), Axis::Features) = (self.groups(), self.current().axis()) else {
             return Vec::new();
         };
         let mut count = vec![0usize; self.levels().len()];
@@ -921,7 +927,7 @@ impl Scene {
             return None;
         };
         let space = self.current();
-        if space.axis != Axis::Features {
+        if space.axis() != Axis::Features {
             return None;
         }
         GeneIndex::build(&space.points.names).match_gene(name)
@@ -962,9 +968,9 @@ impl Scene {
     /// One-line description of the view.
     pub fn caption(&self) -> String {
         let s = self.current();
-        let colour = self
-            .colour
-            .map_or("none".to_string(), |i| self.data.labels[i].title.clone());
+        let colour = self.colour.map_or("none".to_string(), |i| {
+            self.data.labels[i].title().to_string()
+        });
         let focus = self
             .focus
             .map(|f| format!(" · focus {}", self.levels()[f as usize]))
@@ -977,7 +983,7 @@ impl Scene {
         format!(
             "{} · {} · {} pts · colour {}{}{}",
             s.method,
-            s.title,
+            s.title(),
             s.points.order.len(),
             colour,
             focus,
@@ -987,14 +993,11 @@ impl Scene {
 }
 
 fn pick_space(data: &Dataset, method: Option<&str>, space: Option<&str>) -> usize {
-    let title = space.map(|s| s.replace('-', " "));
     data.spaces
         .iter()
         .position(|s| {
             method.is_none_or(|m| s.method.eq_ignore_ascii_case(m))
-                && title
-                    .as_deref()
-                    .is_none_or(|t| s.title.eq_ignore_ascii_case(t))
+                && space.is_none_or(|t| s.kind.slug().eq_ignore_ascii_case(t))
         })
         .unwrap_or(0)
 }
@@ -1055,11 +1058,10 @@ mod tests {
         Points::new(names.iter().map(|&n| n.into()).collect(), xy)
     }
 
-    fn space(method: &str, title: &'static str, axis: Axis, names: &[&str]) -> Space {
+    fn space(method: &str, kind: SpaceKind, names: &[&str]) -> Space {
         Space {
             method: method.into(),
-            title,
-            axis,
+            kind,
             points: pts(names),
             backdrop: None,
             parent: None,
@@ -1072,28 +1074,21 @@ mod tests {
         let data = Dataset {
             prefix: "r".into(),
             spaces: vec![
-                space("umap", "cells", Axis::Cells, &cells),
-                space("umap", "features", Axis::Features, &genes),
-                space("phate", "cells", Axis::Cells, &cells),
+                space("umap", SpaceKind::Cells, &cells),
+                space("umap", SpaceKind::Features, &genes),
+                space("phate", SpaceKind::Cells, &cells),
             ],
             run: None,
             round: None,
             labels: vec![
-                Labels::from_pairs(
-                    "cluster",
-                    Axis::Cells,
-                    [("c2", "C1"), ("c1", "C0"), ("c3", "C1")].map(|(a, b)| (a.into(), b.into())),
-                    &[],
-                ),
-                Labels::from_pairs(
-                    "annotation",
-                    Axis::Cells,
+                Labels::clusters([("c2", 1), ("c1", 0), ("c3", 1)].map(|(a, b)| (a.into(), b))),
+                Labels::new(
+                    LabelKind::Annotation,
                     [("c1", "CT1"), ("c4", "unassigned")].map(|(a, b)| (a.into(), b.into())),
                     &["unassigned"],
                 ),
-                Labels::from_pairs(
-                    "markers",
-                    Axis::Features,
+                Labels::new(
+                    LabelKind::Markers,
                     [("g3", "CT1")].map(|(a, b)| (a.into(), b.into())),
                     &[],
                 ),
@@ -1121,10 +1116,12 @@ mod tests {
     #[test]
     fn labels_join_points_by_name_and_skip_abstentions() {
         let s = scene();
-        assert_eq!(s.data.labels[0].title, "cluster");
+        assert_eq!(s.data.labels[0].title(), "cluster");
         let g = s.groups().unwrap();
-        assert_eq!(s.levels(), &["C1".into(), "C0".into()] as &[Box<str>]);
-        assert_eq!(g, &[1, 0, 0, NONE]);
+        assert_eq!(s.levels(), &["C0".into(), "C1".into()] as &[Box<str>]);
+        assert_eq!(g, &[0, 1, 1, NONE]);
+        assert_eq!(s.cluster_id_of("c2"), Some(1));
+        assert_eq!(s.cluster_id_of("c4"), None);
         let ann = s.data.labels[1].align(&s.data.spaces[0].points);
         assert_eq!(ann, vec![0, NONE, NONE, NONE]);
     }

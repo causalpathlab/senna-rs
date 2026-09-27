@@ -7,6 +7,7 @@
 
 use super::color;
 use super::decide::{Action, Decision, Watcher};
+use super::files::{modified, same_file};
 use super::render::{Job, Viewport};
 use super::style::{swatches, Shape};
 use super::{Graphics, Pick, Scene};
@@ -959,14 +960,8 @@ impl App {
             self.message = Some(format!("lupin refused the last decisions: {e}"));
         }
         let latest = w.latest.clone();
-        let same = |a: &std::path::Path, b: &std::path::Path| {
-            a.canonicalize()
-                .ok()
-                .zip(b.canonicalize().ok())
-                .is_some_and(|(x, y)| x == y)
-        };
         match latest {
-            Some(l) if !same(&l, &self.from) => {
+            Some(l) if !same_file(&l, &self.from) => {
                 self.open_round(&l, "new round");
                 true
             }
@@ -1101,7 +1096,7 @@ impl App {
             let m = methods[(at + k) % methods.len()];
             let same = spaces
                 .iter()
-                .position(|s| s.method == m && s.title == cur.title);
+                .position(|s| s.method == m && s.kind == cur.kind);
             let any = spaces.iter().position(|s| s.method == m);
             if let Some(i) = same.or(any) {
                 self.switch_space(i);
@@ -1117,7 +1112,7 @@ impl App {
             "{}.view.{}.{}.png",
             self.scene.data.prefix,
             s.method,
-            s.title.replace(' ', "_")
+            s.kind.slug()
         );
         let img = super::render_full(&self.scene, vp, self.cell.1);
         self.message = Some(match img.save(&path) {
@@ -1185,7 +1180,7 @@ impl App {
             .groups()
             .map(|g| g[i])
             .filter(|&g| g != super::NONE);
-        let on_features = self.scene.current().axis == super::Axis::Features;
+        let on_features = self.scene.current().axis() == super::Axis::Features;
         if !on_features {
             self.clicked = self.scene.cluster_id_of(&name);
         }
@@ -1291,11 +1286,6 @@ fn adjust(st: &mut super::style::Style, field: usize, step: i64, current: Option
         3 => st.size = (st.size + 0.25 * step as f32).clamp(0.25, 4.0),
         _ => st.hidden = !st.hidden,
     }
-}
-
-/// Modification time of `path`, if it can be read.
-fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// The sidebar's frame: one thin rule on the map side, nothing else.
