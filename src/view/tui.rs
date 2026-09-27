@@ -6,6 +6,7 @@
 //! simply replaces the job.
 
 use super::color;
+use super::decide::{Action, Decision, Watcher};
 use super::render::{Job, Viewport};
 use super::style::{swatches, Shape};
 use super::{Graphics, Pick, Scene};
@@ -67,6 +68,10 @@ const HELP: &[(&str, &str)] = &[
         "style menu: colour, shape, opacity, size, visibility per group",
     ),
     ("b", "sidebar on / off (suggestions, cluster summary, style menu)"),
+    ("L", "decide: label the focused / clicked cluster (asks label, then why)"),
+    ("v  M", "mark clusters for a merge; merge the marked ones"),
+    ("K", "decide: keep the cluster's current call"),
+    ("A  D", "decide: add / drop the feature on screen in a cell type's markers"),
     ("t", "text labels on / off"),
     ("+  -  scroll", "zoom"),
     ("hjkl  arrows  drag", "pan"),
@@ -79,7 +84,12 @@ fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 
-pub fn run(scene: Scene, graphics: Graphics, from: std::path::PathBuf) -> anyhow::Result<()> {
+pub fn run(
+    scene: Scene,
+    graphics: Graphics,
+    from: std::path::PathBuf,
+    decisions: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     let result = (|| {
         // A terminal that never answers must not stall startup; block
@@ -101,7 +111,7 @@ pub fn run(scene: Scene, graphics: Graphics, from: std::path::PathBuf) -> anyhow
             Graphics::Blocks => picker.set_protocol_type(ProtocolType::Halfblocks),
         }
         execute!(std::io::stdout(), EnableMouseCapture)?;
-        App::new(scene, picker, from).run(&mut terminal)
+        App::new(scene, picker, from, decisions).run(&mut terminal)
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
@@ -115,6 +125,55 @@ struct Zooming {
     parent: usize,
     label: String,
     done: std::sync::mpsc::Receiver<ZoomResult>,
+}
+
+/// A decision being typed in the status line: first the label (unless the
+/// action keeps the current one), then the rationale.
+struct Prompt {
+    decision: Decision,
+    /// Typing the rationale (after the label).
+    why: bool,
+    input: String,
+    /// Label completions offered for the current input.
+    known: Vec<Box<str>>,
+}
+
+impl Prompt {
+    fn subject(&self) -> String {
+        let d = &self.decision;
+        let ids: Vec<String> = d.clusters.iter().map(|c| format!("C{c}")).collect();
+        match d.action {
+            Action::Label => format!("label {}", ids.join(" ")),
+            Action::Merge => format!("merge {}", ids.join(" ")),
+            Action::Keep => format!("keep {} as {}", ids.join(" "), d.label),
+            Action::MarkersAdd => format!("add {} to markers of", d.features.join(" ")),
+            Action::MarkersDrop => format!("drop {} from markers of", d.features.join(" ")),
+        }
+    }
+
+    fn line(&self) -> String {
+        if self.why {
+            format!(
+                "{} · why? {}▏  (enter sends · esc cancels)",
+                self.subject(),
+                self.input
+            )
+        } else {
+            let hint: Vec<&str> = self
+                .known
+                .iter()
+                .filter(|k| k.to_lowercase().starts_with(&self.input.to_lowercase()))
+                .take(4)
+                .map(AsRef::as_ref)
+                .collect();
+            format!(
+                "{} as: {}▏  tab: {}",
+                self.subject(),
+                self.input,
+                hint.join(" · ")
+            )
+        }
+    }
 }
 
 /// The style menu's cursor: which group, which property.
@@ -157,13 +216,31 @@ struct App {
     side: Rect,
     /// Whether the sidebar may open (`b` toggles).
     sidebar: bool,
+    /// The `lupin relabel --watch` this view writes decisions for, if any.
+    watcher: Option<Watcher>,
+    decisions: Option<std::path::PathBuf>,
+    /// Clusters marked for a merge (`v`), and the last one clicked.
+    marked: Vec<i64>,
+    clicked: Option<i64>,
+    /// A decision being typed.
+    prompt: Option<Prompt>,
     quit: bool,
 }
 
 impl App {
-    fn new(scene: Scene, picker: Picker, from: std::path::PathBuf) -> Self {
+    fn new(
+        scene: Scene,
+        picker: Picker,
+        from: std::path::PathBuf,
+        decisions: Option<std::path::PathBuf>,
+    ) -> Self {
         let f = picker.font_size();
         Self {
+            watcher: Watcher::find(&from, decisions.as_deref()),
+            decisions,
+            marked: Vec::new(),
+            clicked: None,
+            prompt: None,
             stamp: modified(&from),
             from,
             checked: std::time::Instant::now(),
@@ -203,6 +280,9 @@ impl App {
                 if modified(&self.from) != self.stamp {
                     let from = self.from.clone();
                     self.open_round(&from, "reloaded");
+                    continue;
+                }
+                if self.follow_watcher() {
                     continue;
                 }
             }
@@ -330,12 +410,20 @@ impl App {
             f.render_widget(Image::new(p), map);
         }
 
-        let left = match &self.search {
-            Some((q, hits)) => {
+        let left = match (&self.search, &self.prompt) {
+            (Some((q, hits)), _) => {
                 let shown: Vec<&str> = hits.iter().take(6).map(AsRef::as_ref).collect();
                 format!("/{q}   {}", shown.join("  "))
             }
-            None => self.message.clone().unwrap_or_else(|| self.scene.caption()),
+            (None, Some(p)) => p.line(),
+            (None, None) => {
+                let mut text = self.message.clone().unwrap_or_else(|| self.scene.caption());
+                if !self.marked.is_empty() {
+                    let ids: Vec<String> = self.marked.iter().map(|c| format!("C{c}")).collect();
+                    text.push_str(&format!(" · marked {}", ids.join(" ")));
+                }
+                text
+            }
         };
         let right = if self.job.is_some() {
             "drawing…"
@@ -588,6 +676,10 @@ impl App {
             self.search_key(k);
             return;
         }
+        if self.prompt.is_some() {
+            self.prompt_key(k);
+            return;
+        }
         if self.menu.is_some() {
             self.menu_key(k);
             return;
@@ -604,6 +696,7 @@ impl App {
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Esc | KeyCode::Char('x') => {
                 let cleared = self.info.take().is_some()
+                    || !std::mem::take(&mut self.marked).is_empty()
                     || self.scene.clear_suggestions()
                     || self.scene.clear_pick()
                     || self.scene.focus.take().is_some();
@@ -660,6 +753,12 @@ impl App {
             }
             KeyCode::Char('z') => self.start_zoom(),
             KeyCode::Char('n') => self.change(Scene::suggest),
+            KeyCode::Char('v') => self.toggle_mark(),
+            KeyCode::Char('L') => self.begin(Action::Label),
+            KeyCode::Char('M') => self.begin(Action::Merge),
+            KeyCode::Char('K') => self.begin(Action::Keep),
+            KeyCode::Char('A') => self.begin(Action::MarkersAdd),
+            KeyCode::Char('D') => self.begin(Action::MarkersDrop),
             KeyCode::Char('b') => {
                 self.sidebar = !self.sidebar;
                 if !self.sidebar {
@@ -693,6 +792,185 @@ impl App {
             }
             KeyCode::Char('s') => self.save(),
             _ => {}
+        }
+    }
+
+    /// The cluster a decision is about: the focused cluster when colouring by
+    /// cluster, else the one last clicked.
+    fn target(&self) -> Option<i64> {
+        self.scene.focused_cluster().or(self.clicked)
+    }
+
+    fn toggle_mark(&mut self) {
+        let Some(c) = self.target() else {
+            self.message = Some("focus or click a cluster to mark it".into());
+            return;
+        };
+        if let Some(i) = self.marked.iter().position(|&m| m == c) {
+            self.marked.remove(i);
+        } else {
+            self.marked.push(c);
+        }
+    }
+
+    /// Start typing a decision of kind `action`.
+    fn begin(&mut self, action: Action) {
+        if self.watcher.is_none() {
+            self.watcher = Watcher::find(&self.from, self.decisions.as_deref());
+        }
+        if self.watcher.is_none() {
+            self.message = Some(
+                "no `lupin relabel --watch` found beside this round; start one, or pass --decisions"
+                    .into(),
+            );
+            return;
+        }
+        let mut decision = Decision {
+            action,
+            clusters: Vec::new(),
+            features: Vec::new(),
+            label: String::new(),
+            rationale: String::new(),
+            evidence: Vec::new(),
+        };
+        let mut input = String::new();
+        match action {
+            Action::Merge => {
+                if self.marked.len() < 2 {
+                    self.message = Some("mark two or more clusters with v first".into());
+                    return;
+                }
+                decision.clusters = self.marked.clone();
+            }
+            Action::Label | Action::Keep => {
+                let Some(c) = self.target() else {
+                    self.message = Some("focus or click a cluster first".into());
+                    return;
+                };
+                decision.clusters = vec![c];
+                let (label, top) = self.scene.cluster_call(c);
+                if let Some((call, support)) = top {
+                    decision.evidence.push(serde_json::json!({
+                        "kind": "marker", "term": call.clone(), "stat": "support", "value": support,
+                    }));
+                    input = call;
+                }
+                if action == Action::Keep {
+                    let Some(l) = label else {
+                        self.message = Some(format!("C{c} has no current call to keep"));
+                        return;
+                    };
+                    decision.label = l;
+                }
+            }
+            Action::MarkersAdd | Action::MarkersDrop => {
+                let Some(Pick::One(f)) = self.scene.pick.clone() else {
+                    self.message = Some("show a feature first (n, g or /)".into());
+                    return;
+                };
+                if let Some(v) = self.scene.suggestion_score(&f) {
+                    decision.evidence.push(serde_json::json!({
+                        "kind": "marker", "term": f.as_ref(), "stat": "expected_lfc", "value": v,
+                    }));
+                }
+                decision.features = vec![f];
+                input = self
+                    .scene
+                    .focused_name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+            }
+        }
+        let why = !action.needs_label();
+        self.prompt = Some(Prompt {
+            decision,
+            why,
+            input: if why { String::new() } else { input },
+            known: self.scene.known_labels(),
+        });
+    }
+
+    fn prompt_key(&mut self, k: KeyEvent) {
+        let Some(p) = self.prompt.as_mut() else {
+            return;
+        };
+        match k.code {
+            KeyCode::Esc => {
+                self.prompt = None;
+                self.message = Some("decision cancelled".into());
+            }
+            KeyCode::Backspace => {
+                p.input.pop();
+            }
+            KeyCode::Tab if !p.why => {
+                let low = p.input.to_lowercase();
+                if let Some(k) = p.known.iter().find(|k| k.to_lowercase().starts_with(&low)) {
+                    p.input = k.to_string();
+                }
+            }
+            KeyCode::Enter => {
+                let text = p.input.trim().to_string();
+                if text.is_empty() {
+                    return;
+                }
+                if p.why {
+                    p.decision.rationale = text;
+                    let p = self.prompt.take().expect("checked above");
+                    self.send(&p.decision);
+                } else {
+                    p.decision.label = text;
+                    p.why = true;
+                    p.input.clear();
+                }
+            }
+            KeyCode::Char(c) => p.input.push(c),
+            _ => {}
+        }
+    }
+
+    fn send(&mut self, d: &Decision) {
+        let Some(w) = &self.watcher else { return };
+        let line = d.to_json(&w.round_ref(&self.from));
+        self.message = Some(match w.append(&line) {
+            Ok(()) => {
+                if d.action == Action::Merge {
+                    self.marked.clear();
+                }
+                format!(
+                    "sent: {} {} · lupin will write the next round",
+                    d.action.name(),
+                    d.label
+                )
+            }
+            Err(e) => format!("could not write the decision: {e}"),
+        });
+    }
+
+    /// Open the watcher's latest round when it moves on, and show a refused
+    /// batch's reason. Returns whether a round was opened.
+    fn follow_watcher(&mut self) -> bool {
+        let Some(w) = self.watcher.as_mut() else {
+            return false;
+        };
+        if !w.refresh() {
+            return false;
+        }
+        if let Some(e) = &w.error {
+            self.message = Some(format!("lupin refused the last decisions: {e}"));
+        }
+        let latest = w.latest.clone();
+        let same = |a: &std::path::Path, b: &std::path::Path| {
+            a.canonicalize()
+                .ok()
+                .zip(b.canonicalize().ok())
+                .is_some_and(|(x, y)| x == y)
+        };
+        match latest {
+            Some(l) if !same(&l, &self.from) => {
+                self.open_round(&l, "new round");
+                true
+            }
+            _ => false,
         }
     }
 
@@ -908,6 +1186,9 @@ impl App {
             .map(|g| g[i])
             .filter(|&g| g != super::NONE);
         let on_features = self.scene.current().axis == super::Axis::Features;
+        if !on_features {
+            self.clicked = self.scene.cluster_id_of(&name);
+        }
         self.info = (!on_features)
             .then(|| self.scene.cluster_info(&name))
             .flatten();

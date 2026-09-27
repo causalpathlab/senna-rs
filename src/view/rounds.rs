@@ -103,6 +103,25 @@ impl Round {
         found.into_iter().next()
     }
 
+    /// The label the round gives cluster `id`, and its top marker call with
+    /// that call's bootstrap support, from the summary.
+    #[must_use]
+    pub fn call(&self, id: &str) -> (Option<String>, Option<(String, Option<f64>)>) {
+        let Some(s) = self.summary.get(id) else {
+            return (None, None);
+        };
+        let label = s.get("label").and_then(Value::as_str).map(String::from);
+        let top = s
+            .get("calls")
+            .and_then(Value::as_array)
+            .and_then(|c| c.first())
+            .and_then(|c| {
+                let l = c.get("label")?.as_str()?.to_string();
+                Some((l, c.get("support").and_then(Value::as_f64)))
+            });
+        (label, top)
+    }
+
     /// Text for the panel shown when a cell of cluster `id` is clicked: the
     /// summary lupin wrote for it, then its decision history, newest first.
     #[must_use]
