@@ -5,15 +5,20 @@
 //! grouping the run carries (annotation, clusters, topics, markers). Drawn by
 //! a progressive rasterizer on a light page with labels set on the map.
 
+mod activity;
 mod color;
 mod data;
 mod render;
+mod style;
 mod text;
 mod tui;
 
+use activity::{Activity, Levels, Source};
 use color::{Encoder, Rgb};
 use data::{Axis, Dataset, NONE};
+use data_beans::utilities::name_matching::GeneIndex;
 use render::{draw_labels, group_medians, Job, Label, Paint, Viewport};
+use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use text::Font;
 
@@ -73,9 +78,49 @@ pub struct ViewArgs {
         help = "PNG size as WIDTHxHEIGHT (with --png)"
     )]
     pub size: Box<str>,
+
+    #[arg(long, help = "Start showing this feature's activity on the cells")]
+    pub feature: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Start showing this group's marker-set activity",
+        long_help = "Start showing the combined activity of one group's markers.\n\
+                     The group is a name from the run's marker table."
+    )]
+    pub markers_of: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Use observed counts for activity instead of the model's expectation"
+    )]
+    pub observed: bool,
+
+    #[arg(
+        long,
+        help = "Start with this group focused (a name in the starting grouping)"
+    )]
+    pub focus: Option<Box<str>>,
 }
 
-/// What is on screen: which space, which grouping, what is focused.
+/// A feature, or one group's whole marker set, picked to show as activity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Pick {
+    One(Box<str>),
+    Markers(Box<str>),
+}
+
+/// Activity currently drawn: what it is of, where, and its levels.
+struct Shown {
+    space: usize,
+    pick: Pick,
+    source: Source,
+    title: String,
+    levels: Levels,
+}
+
+/// What is on screen: which space, which grouping, what is focused, and
+/// which feature's activity (if any) is drawn over the cells.
 pub(crate) struct Scene {
     pub data: Dataset,
     pub space: usize,
@@ -85,13 +130,23 @@ pub(crate) struct Scene {
     pub show_labels: bool,
     /// Group id per point, cached per (space, labels).
     groups: Option<(usize, usize, Vec<u32>)>,
-    palette: Vec<Rgb>,
-    boost: f32,
+    /// Resolved style per group of the current grouping.
+    styles: Vec<style::Resolved>,
+    /// Saved per-group styles for every grouping.
+    pub book: style::Book,
+    pub pick: Option<Pick>,
+    pub source: Source,
+    activity: Option<Activity>,
+    shown: Option<Shown>,
+    ramp: Vec<Rgb>,
+    /// A message for the status line, taken by the front end.
+    pub note: Option<String>,
 }
 
 impl Scene {
     fn new(data: Dataset, args: &ViewArgs) -> Self {
         let space = pick_space(&data, args.method.as_deref(), args.space.as_deref());
+        let book = style::Book::load(&data.prefix);
         let mut scene = Self {
             data,
             space,
@@ -99,11 +154,38 @@ impl Scene {
             focus: None,
             show_labels: true,
             groups: None,
-            palette: Vec::new(),
-            boost: 1.0,
+            styles: Vec::new(),
+            book,
+            pick: None,
+            source: Source::Expected,
+            activity: None,
+            shown: None,
+            ramp: color::activity_ramp(256),
+            note: None,
         };
         scene.colour = scene.default_colour(args.colour_by.as_deref());
         scene.refresh_groups();
+        if args.observed {
+            scene.source = Source::Observed;
+        }
+        if let Some(want) = &args.focus {
+            scene.focus = scene
+                .levels()
+                .iter()
+                .position(|l| l == want)
+                .map(|i| i as u32);
+            if scene.focus.is_none() {
+                log::warn!("view: no group `{want}` in the starting grouping");
+            }
+        }
+        if let Some(g) = &args.markers_of {
+            scene.set_pick(Pick::Markers(g.clone()));
+        } else if let Some(f) = &args.feature {
+            scene.set_pick(Pick::One(f.clone()));
+        }
+        if let Some(note) = scene.note.take() {
+            log::warn!("view: {note}");
+        }
         scene
     }
 
@@ -136,19 +218,43 @@ impl Scene {
     fn refresh_groups(&mut self) {
         let Some(li) = self.colour else {
             self.groups = None;
-            self.palette.clear();
+            self.styles.clear();
             return;
         };
+        let labels = &self.data.labels[li];
+        self.styles = self.book.resolve(&labels.title, &labels.levels);
         if matches!(&self.groups, Some((s, l, _)) if *s == self.space && *l == li) {
             return;
         }
-        let labels = &self.data.labels[li];
         let g = labels.align(&self.current().points);
-        let n = labels.levels.len();
-        self.palette = (0..n).map(|i| color::category(i, n)).collect();
-        let labelled = g.iter().filter(|&&v| v != NONE).count();
-        self.boost = render::sparsity_boost(labelled as f32 / g.len().max(1) as f32);
         self.groups = Some((self.space, li, g));
+    }
+
+    /// Change group `g`'s style in the current grouping and save the book.
+    pub fn restyle(&mut self, g: usize, f: impl FnOnce(&mut style::Style)) {
+        let Some(li) = self.colour else { return };
+        let labels = &self.data.labels[li];
+        let (grouping, name) = (labels.title.clone(), labels.levels[g].to_string());
+        let mut st = self.book.get(&grouping, &name);
+        f(&mut st);
+        self.book.set(&grouping, &name, st);
+        if let Err(e) = self.book.save(&self.data.prefix) {
+            self.note = Some(format!("could not save styles: {e}"));
+        }
+        self.refresh_groups();
+    }
+
+    /// Current style of group `g` in the current grouping.
+    pub fn style_of(&self, g: usize) -> style::Style {
+        self.colour.map_or_else(style::Style::plain, |li| {
+            let l = &self.data.labels[li];
+            self.book.get(&l.title, &l.levels[g])
+        })
+    }
+
+    /// Resolved style of group `g`, for drawing swatches.
+    pub fn resolved(&self, g: usize) -> Option<&style::Resolved> {
+        self.styles.get(g)
     }
 
     pub fn groups(&self) -> Option<&[u32]> {
@@ -168,6 +274,175 @@ impl Scene {
             self.focus = None;
         }
         self.refresh_groups();
+        self.refresh_activity();
+    }
+
+    fn markers(&self) -> Option<&data::Labels> {
+        self.data.labels.iter().find(|l| l.title == "markers")
+    }
+
+    /// The focused group's name, whichever grouping it belongs to.
+    pub fn focused_name(&self) -> Option<Box<str>> {
+        self.focus.map(|f| self.levels()[f as usize].clone())
+    }
+
+    /// Marker features of `group`, matched loosely (case, and spaces versus
+    /// underscores, which annotation tools rewrite).
+    fn marker_features(&self, group: &str) -> Vec<Box<str>> {
+        let norm = |s: &str| s.to_lowercase().replace(' ', "_");
+        let Some(m) = self.markers() else {
+            return Vec::new();
+        };
+        let Some(id) = m.levels.iter().position(|l| norm(l) == norm(group)) else {
+            return Vec::new();
+        };
+        let mut out: Vec<Box<str>> = m
+            .by_name
+            .iter()
+            .filter(|&(_, &g)| g as usize == id)
+            .map(|(n, _)| n.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Features `g` steps through: the focused group's markers, or every
+    /// marker grouped by type.
+    fn feature_list(&self) -> Vec<Box<str>> {
+        if let Some(name) = self.focused_name() {
+            let own = self.marker_features(&name);
+            if !own.is_empty() {
+                return own;
+            }
+        }
+        let Some(m) = self.markers() else {
+            return Vec::new();
+        };
+        let mut all: Vec<(u32, Box<str>)> =
+            m.by_name.iter().map(|(n, &g)| (g, n.clone())).collect();
+        all.sort();
+        all.into_iter().map(|(_, n)| n).collect()
+    }
+
+    pub fn step_feature(&mut self, delta: i64) {
+        let list = self.feature_list();
+        if list.is_empty() {
+            self.note = Some("no marker table in this run; press / to search a feature".into());
+            return;
+        }
+        let at = match &self.pick {
+            Some(Pick::One(n)) => list.iter().position(|x| x == n),
+            _ => None,
+        };
+        let n = list.len() as i64;
+        let next = match at {
+            Some(i) => (i as i64 + delta).rem_euclid(n),
+            None if delta > 0 => 0,
+            None => n - 1,
+        };
+        self.set_pick(Pick::One(list[next as usize].clone()));
+    }
+
+    pub fn set_pick(&mut self, pick: Pick) {
+        self.pick = Some(pick);
+        self.refresh_activity();
+    }
+
+    /// Show the focused group's marker set as one activity.
+    pub fn pick_marker_set(&mut self) {
+        let Some(name) = self.focused_name() else {
+            self.note = Some("focus a group first ([ ] or click), then press a".into());
+            return;
+        };
+        if self.marker_features(&name).is_empty() {
+            self.note = Some(format!("no markers listed for {name}"));
+            return;
+        }
+        self.set_pick(Pick::Markers(name));
+    }
+
+    pub fn toggle_source(&mut self) {
+        self.source = self.source.other();
+        self.refresh_activity();
+    }
+
+    /// Drop the activity view. Returns whether there was one.
+    pub fn clear_pick(&mut self) -> bool {
+        self.shown = None;
+        self.pick.take().is_some()
+    }
+
+    /// Feature names searchable under the current source.
+    pub fn searchable(&mut self) -> Vec<Box<str>> {
+        let source = self.source;
+        self.activity()
+            .and_then(|a| a.feature_names(source).map(<[_]>::to_vec).ok())
+            .unwrap_or_default()
+    }
+
+    fn activity(&mut self) -> Option<&mut Activity> {
+        if self.activity.is_none() {
+            let (m, dir) = self.data.run.clone()?;
+            self.activity = Some(Activity::new(m, dir));
+        }
+        self.activity.as_mut()
+    }
+
+    /// Recompute the activity drawn for the current pick, space and source.
+    /// Cell spaces only; on a feature space the pick is marked instead.
+    fn refresh_activity(&mut self) {
+        let Some(pick) = self.pick.clone() else {
+            self.shown = None;
+            return;
+        };
+        if self.current().axis != Axis::Cells {
+            self.shown = None;
+            return;
+        }
+        let (space, source) = (self.space, self.source);
+        if matches!(&self.shown, Some(s) if s.space == space && s.pick == pick && s.source == source)
+        {
+            return;
+        }
+        let points = &self.data.spaces[space].points;
+        let index: HashMap<Box<str>, usize> = points
+            .names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), i))
+            .collect();
+        let n = points.names.len();
+        let set = match &pick {
+            Pick::Markers(group) => self.marker_features(group),
+            Pick::One(_) => Vec::new(),
+        };
+        let Some(activity) = self.activity() else {
+            self.note = Some("no manifest to read activity from".into());
+            return;
+        };
+        let result = match &pick {
+            Pick::One(f) => activity
+                .levels(f, source, &index, n)
+                .map(|(l, spelled)| (l, format!("{spelled} · {}", source.name()))),
+            Pick::Markers(group) => activity
+                .set_levels(&set, source, &index, n)
+                .map(|(l, used)| (l, format!("{group} markers ({used}) · {}", source.name()))),
+        };
+        match result {
+            Ok((levels, title)) => {
+                self.shown = Some(Shown {
+                    space,
+                    pick,
+                    source,
+                    title,
+                    levels,
+                });
+            }
+            Err(e) => {
+                self.shown = None;
+                self.note = Some(e);
+            }
+        }
     }
 
     pub fn cycle_colour(&mut self) {
@@ -204,21 +479,26 @@ impl Scene {
             layers.push(Paint {
                 points: &self.data.spaces[b].points,
                 groups: None,
-                palette: &[],
+                styles: &[],
                 focus: None,
                 muted: true,
                 size: 0.8,
-                boost: 1.0,
+                levels: None,
             });
         }
+        let levels = self
+            .shown
+            .as_ref()
+            .filter(|s| s.space == self.space)
+            .map(|s| (&s.levels, self.ramp.as_slice()));
         layers.push(Paint {
             points: &space.points,
             groups: self.groups(),
-            palette: &self.palette,
+            styles: &self.styles,
             focus: self.focus,
             muted: false,
-            size: if space.backdrop.is_some() { 1.6 } else { 1.0 },
-            boost: self.boost,
+            size: if space.backdrop.is_some() { 1.5 } else { 1.0 },
+            levels,
         });
         layers
     }
@@ -248,7 +528,7 @@ impl Scene {
                 .enumerate()
             {
                 let Some((xy, size)) = m else { continue };
-                if self.focus.is_some_and(|f| f as usize != g) {
+                if self.focus.is_some_and(|f| f as usize != g) || self.styles[g].hidden {
                     continue;
                 }
                 let (x, y) = vp.to_px(xy);
@@ -256,7 +536,7 @@ impl Scene {
                     text: self.levels()[g].to_string(),
                     x,
                     y,
-                    ink: color::category_ink(g),
+                    ink: self.styles[g].ink,
                     priority: size as f32,
                     font,
                 });
@@ -290,10 +570,13 @@ impl Scene {
         for (rank, i) in named.into_iter().enumerate() {
             let g = group_of(i);
             let (x, y) = vp.to_px(space.points.xy[i]);
+            if g != NONE && self.styles[g as usize].hidden {
+                continue;
+            }
             let ink = if g == NONE {
                 color::linear_rgb(color::INK)
             } else {
-                color::category_ink(g as usize)
+                self.styles[g as usize].ink
             };
             out.push(Label {
                 text: space.points.names[i].to_string(),
@@ -322,7 +605,9 @@ impl Scene {
             }
         }
         let mut ids: Vec<usize> = (0..count.len())
-            .filter(|&g| count[g] > 0 && self.focus.is_none_or(|f| f as usize == g))
+            .filter(|&g| {
+                count[g] > 0 && !self.styles[g].hidden && self.focus.is_none_or(|f| f as usize == g)
+            })
             .collect();
         ids.sort_by_key(|&g| std::cmp::Reverse(count[g]));
         ids.truncate(MAX_ENTRIES);
@@ -330,21 +615,55 @@ impl Scene {
             .map(|g| {
                 (
                     self.levels()[g].to_string(),
-                    self.palette[g],
-                    color::category_ink(g),
+                    self.styles[g].colour,
+                    self.styles[g].ink,
                 )
             })
             .collect()
     }
 
-    /// Labels and legend over a composited frame.
+    /// Where the picked feature sits in a feature space, if it is one there.
+    fn picked_point(&self) -> Option<usize> {
+        let Some(Pick::One(name)) = &self.pick else {
+            return None;
+        };
+        let space = self.current();
+        if space.axis != Axis::Features {
+            return None;
+        }
+        GeneIndex::build(&space.points.names).match_gene(name)
+    }
+
+    /// Labels, key and marks over a composited frame.
     pub fn decorate(&self, frame: &mut render::Frame, vp: &Viewport, cell_px: f32) {
-        if !self.show_labels {
-            return;
+        // The picked feature is marked even with labels off: it is the answer
+        // to what was just asked for.
+        let mut reserved = Vec::new();
+        let mut labels = Vec::new();
+        if let Some(i) = self.picked_point() {
+            let (x, y) = vp.to_px(self.current().points.xy[i]);
+            let ink = color::highlight_ink();
+            render::draw_ring(frame, x, y, 0.45 * cell_px, ink);
+            let font = Font::for_cell_height(cell_px, true);
+            labels.push(Label {
+                text: self.current().points.names[i].to_string(),
+                x,
+                y: y - 0.45 * cell_px - font.line_height() as f32 * 0.6,
+                ink,
+                priority: f32::INFINITY,
+                font,
+            });
         }
         let font = Font::for_cell_height(cell_px * 0.8, false);
-        let legend = render::draw_legend(frame, &self.legend(), font);
-        draw_labels(frame, self.labels(vp, cell_px), legend.as_slice());
+        if let Some(s) = self.shown.as_ref().filter(|s| s.space == self.space) {
+            reserved.push(render::draw_ramp_key(frame, &s.title, &self.ramp, font));
+        } else if self.show_labels {
+            reserved.extend(render::draw_legend(frame, &self.legend(), font));
+        }
+        if self.show_labels {
+            labels.extend(self.labels(vp, cell_px));
+        }
+        draw_labels(frame, labels, &reserved);
     }
 
     /// One-line description of the view.
@@ -357,13 +676,19 @@ impl Scene {
             .focus
             .map(|f| format!(" · focus {}", self.levels()[f as usize]))
             .unwrap_or_default();
+        let pick = match &self.pick {
+            Some(Pick::One(f)) => format!(" · feature {f} ({})", self.source.name()),
+            Some(Pick::Markers(g)) => format!(" · {g} markers ({})", self.source.name()),
+            None => String::new(),
+        };
         format!(
-            "{} · {} · {} pts · colour {}{}",
+            "{} · {} · {} pts · colour {}{}{}",
             s.method,
             s.title,
             s.points.order.len(),
             colour,
-            focus
+            focus,
+            pick
         )
     }
 }
@@ -443,6 +768,7 @@ mod tests {
                 space("umap", "features", Axis::Features, &genes),
                 space("phate", "cells", Axis::Cells, &cells),
             ],
+            run: None,
             labels: vec![
                 Labels::from_pairs(
                     "cluster",
@@ -472,6 +798,10 @@ mod tests {
             png: None,
             space: None,
             size: "10x10".into(),
+            feature: None,
+            markers_of: None,
+            observed: false,
+            focus: None,
         };
         Scene::new(data, &args)
     }

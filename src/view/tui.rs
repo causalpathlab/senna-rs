@@ -7,7 +7,8 @@
 
 use super::color;
 use super::render::{Job, Viewport};
-use super::{Graphics, Scene};
+use super::style::{swatches, Shape};
+use super::{Graphics, Pick, Scene};
 use image::DynamicImage;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -25,7 +26,7 @@ use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 use std::time::Duration;
 
-const KEYS: &str = "tab space · m method · c colour · [ ] focus · t labels · s save · ? help";
+const KEYS: &str = "tab space · m method · c colour · [ ] focus · e style · g / feature · ? help";
 
 const HELP: &[(&str, &str)] = &[
     (
@@ -39,7 +40,18 @@ const HELP: &[(&str, &str)] = &[
     ),
     ("[  ]", "focus previous / next group; others turn gray"),
     ("click", "focus the group of the nearest point"),
-    ("x / esc", "clear focus"),
+    (
+        "g  G",
+        "next / previous marker feature (the focused group's, if any)",
+    ),
+    ("/", "search a feature by name; enter shows it"),
+    ("a", "activity of the focused group's whole marker set"),
+    ("o", "expected (model) or observed (counts) activity"),
+    ("x / esc", "clear feature, then focus"),
+    (
+        "e",
+        "style menu: colour, shape, opacity, size, visibility per group",
+    ),
     ("t", "text labels on / off"),
     ("+  -  scroll", "zoom"),
     ("hjkl  arrows  drag", "pan"),
@@ -81,6 +93,15 @@ pub fn run(scene: Scene, graphics: Graphics) -> anyhow::Result<()> {
     result
 }
 
+/// The style menu's cursor: which group, which property.
+struct Menu {
+    row: usize,
+    field: usize,
+}
+
+const FIELDS: [&str; 5] = ["colour", "shape", "opacity", "size", "visible"];
+const MENU_HINT: &str = "↑↓ group  ←→ change  tab property  space show/hide  r reset  enter done";
+
 struct App {
     scene: Scene,
     picker: Picker,
@@ -93,6 +114,12 @@ struct App {
     message: Option<String>,
     help: bool,
     drag: Option<(u16, u16, bool)>,
+    /// Feature search in progress: the query and its current matches.
+    search: Option<(String, Vec<Box<str>>)>,
+    /// Searchable feature names, loaded on the first `/`.
+    names: Option<Vec<Box<str>>>,
+    /// Style menu: selected group and field.
+    menu: Option<Menu>,
     quit: bool,
 }
 
@@ -110,6 +137,9 @@ impl App {
             message: None,
             help: false,
             drag: None,
+            search: None,
+            names: None,
+            menu: None,
             quit: false,
         }
     }
@@ -211,7 +241,13 @@ impl App {
             f.render_widget(Image::new(p), map);
         }
 
-        let left = self.message.clone().unwrap_or_else(|| self.scene.caption());
+        let left = match &self.search {
+            Some((q, hits)) => {
+                let shown: Vec<&str> = hits.iter().take(6).map(AsRef::as_ref).collect();
+                format!("/{q}   {}", shown.join("  "))
+            }
+            None => self.message.clone().unwrap_or_else(|| self.scene.caption()),
+        };
         let right = if self.job.is_some() {
             "drawing…"
         } else {
@@ -225,6 +261,10 @@ impl App {
             Span::styled(right, Style::default().fg(rgb(color::MUTED))),
         ]);
         f.render_widget(Paragraph::new(line).style(page), status);
+
+        if let Some(menu) = &self.menu {
+            self.draw_menu(f, map, menu, page);
+        }
 
         if self.help {
             let w = 72.min(map.width);
@@ -249,6 +289,88 @@ impl App {
         }
     }
 
+    /// The style menu, docked on the right of the map.
+    fn draw_menu(&self, f: &mut ratatui::Frame, map: Rect, menu: &Menu, page: Style) {
+        let enc = color::Encoder::new();
+        let to_color = |c: color::Rgb| {
+            let [r, g, b] = c.map(|v| enc.encode(v));
+            Color::Rgb(r, g, b)
+        };
+        let levels = self.scene.levels();
+        let w = 40.min(map.width);
+        let chrome = FIELDS.len() as u16 + 5;
+        let h = (levels.len() as u16 + chrome).min(map.height);
+        let r = Rect::new(map.x + map.width - w, map.y, w, h);
+        let list_rows = h.saturating_sub(chrome).max(1) as usize;
+        let first = menu
+            .row
+            .saturating_sub(list_rows / 2)
+            .min(levels.len().saturating_sub(list_rows));
+
+        let dim = Style::default().fg(rgb(color::MUTED));
+        let mut lines: Vec<Line> = Vec::new();
+        for (g, level) in levels.iter().enumerate().skip(first).take(list_rows) {
+            let st = self.scene.style_of(g);
+            let res = self.scene.resolved(g);
+            let mark = Span::styled(
+                format!(" {} ", st.shape.glyph()),
+                Style::default().fg(res.map_or(Color::Reset, |r| to_color(r.colour))),
+            );
+            let mut name = Style::default();
+            if st.hidden {
+                name = dim;
+            }
+            if g == menu.row {
+                name = name.add_modifier(ratatui::style::Modifier::REVERSED);
+            }
+            lines.push(Line::from(vec![
+                mark,
+                Span::styled(level.to_string(), name),
+            ]));
+        }
+        let st = self.scene.style_of(menu.row);
+        let res = self.scene.resolved(menu.row);
+        let values = [
+            Line::from(vec![
+                Span::raw("■■■■ "),
+                Span::styled(
+                    if st.colour.is_some() {
+                        "custom"
+                    } else {
+                        "default"
+                    },
+                    dim,
+                ),
+            ])
+            .style(Style::default().fg(res.map_or(Color::Reset, |r| to_color(r.colour)))),
+            Line::from(format!("{} {}", st.shape.glyph(), st.shape.name())),
+            Line::from(format!("{:.1}", st.alpha)),
+            Line::from(format!("{:.2}×", st.size)),
+            Line::from(if st.hidden { "hidden" } else { "shown" }),
+        ];
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", levels[menu.row]),
+            Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+        )));
+        for (k, (field, value)) in FIELDS.iter().zip(values).enumerate() {
+            let cursor = if k == menu.field { " ▸ " } else { "   " };
+            let mut spans = vec![Span::raw(format!("{cursor}{field:<8} "))];
+            spans.extend(value.spans.into_iter().map(|s| s.patch_style(value.style)));
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(Span::styled(format!(" {MENU_HINT}"), dim)));
+
+        f.render_widget(Clear, r);
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(Block::bordered().border_style(dim))
+                .style(page),
+            r,
+        );
+    }
+
     fn handle(&mut self, ev: Event) {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
@@ -265,7 +387,111 @@ impl App {
         }
     }
 
+    /// Run a scene change, surface its note, and redraw.
+    fn change(&mut self, f: impl FnOnce(&mut Scene)) {
+        f(&mut self.scene);
+        if let Some(note) = self.scene.note.take() {
+            self.message = Some(note);
+        }
+        self.restart();
+    }
+
+    fn search_key(&mut self, k: KeyEvent) {
+        let Some((query, _)) = self.search.as_mut() else {
+            return;
+        };
+        match k.code {
+            KeyCode::Esc => {
+                self.search = None;
+                return;
+            }
+            KeyCode::Enter => {
+                let pick = self
+                    .search
+                    .take()
+                    .and_then(|(_, hits)| hits.into_iter().next());
+                match pick {
+                    Some(name) => self.change(|s| s.set_pick(Pick::One(name))),
+                    None => self.message = Some("no matching feature".into()),
+                }
+                return;
+            }
+            KeyCode::Backspace => {
+                query.pop();
+            }
+            KeyCode::Char(c) => query.push(c),
+            _ => return,
+        }
+        let query = query.clone();
+        let hits = search(self.names.as_deref().unwrap_or(&[]), &query);
+        self.search = Some((query, hits));
+    }
+
+    fn open_menu(&mut self) {
+        let n = self.scene.levels().len();
+        if self.scene.colour.is_none() || n == 0 {
+            self.message = Some("choose a grouping with c first".into());
+            return;
+        }
+        let row = self.scene.focus.map_or(0, |f| f as usize).min(n - 1);
+        self.scene.focus = Some(row as u32);
+        self.menu = Some(Menu { row, field: 0 });
+        self.restart();
+    }
+
+    fn menu_key(&mut self, k: KeyEvent) {
+        let n = self.scene.levels().len();
+        let Some(menu) = self.menu.as_mut() else {
+            return;
+        };
+        if n == 0 {
+            self.menu = None;
+            return;
+        }
+        let row = menu.row;
+        let step: i64 = match k.code {
+            KeyCode::Left | KeyCode::Char('h') => -1,
+            KeyCode::Right | KeyCode::Char('l') => 1,
+            _ => 0,
+        };
+        match k.code {
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('e' | 'q') => {
+                self.menu = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => menu.row = (row + n - 1) % n,
+            KeyCode::Down | KeyCode::Char('j') => menu.row = (row + 1) % n,
+            KeyCode::Tab => menu.field = (menu.field + 1) % FIELDS.len(),
+            KeyCode::BackTab => menu.field = (menu.field + FIELDS.len() - 1) % FIELDS.len(),
+            KeyCode::Char(' ') => self.scene.restyle(row, |st| st.hidden = !st.hidden),
+            KeyCode::Char('r') => self
+                .scene
+                .restyle(row, |st| *st = super::style::Style::plain()),
+            _ if step != 0 => {
+                let field = menu.field;
+                let current = self.scene.resolved(row).map(|r| r.colour);
+                self.scene
+                    .restyle(row, |st| adjust(st, field, step, current));
+            }
+            _ => return,
+        }
+        if let Some(m) = &self.menu {
+            self.scene.focus = Some(m.row as u32);
+        }
+        if let Some(note) = self.scene.note.take() {
+            self.message = Some(note);
+        }
+        self.restart();
+    }
+
     fn key(&mut self, k: KeyEvent) {
+        if self.search.is_some() {
+            self.search_key(k);
+            return;
+        }
+        if self.menu.is_some() {
+            self.menu_key(k);
+            return;
+        }
         self.message = None;
         if self.help {
             self.help = false;
@@ -277,10 +503,27 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Esc | KeyCode::Char('x') => {
-                if self.scene.focus.take().is_none() && k.code == KeyCode::Esc {
+                let cleared = self.scene.clear_pick() || self.scene.focus.take().is_some();
+                if !cleared && k.code == KeyCode::Esc {
                     self.quit = true;
                 }
                 self.restart();
+            }
+            KeyCode::Char('e') => self.open_menu(),
+            KeyCode::Char('g') => self.change(|s| s.step_feature(1)),
+            KeyCode::Char('G') => self.change(|s| s.step_feature(-1)),
+            KeyCode::Char('a') => self.change(Scene::pick_marker_set),
+            KeyCode::Char('o') => self.change(Scene::toggle_source),
+            KeyCode::Char('/') => {
+                if self.names.is_none() {
+                    self.names = Some(self.scene.searchable());
+                }
+                if self.names.as_ref().is_some_and(Vec::is_empty) {
+                    self.names = None;
+                    self.message = Some("no feature names to search in this run".into());
+                } else {
+                    self.search = Some((String::new(), Vec::new()));
+                }
             }
             KeyCode::Char('?') => self.help = true,
             KeyCode::Tab => self.switch_space((self.scene.space + 1) % n_spaces),
@@ -438,13 +681,104 @@ impl App {
             .groups()
             .map(|g| g[i])
             .filter(|&g| g != super::NONE);
-        self.message = Some(match group {
+        let on_features = self.scene.current().axis == super::Axis::Features;
+        let mut msg = match group {
             Some(g) => {
                 self.scene.focus = Some(g);
                 format!("{name} · {}", self.scene.levels()[g as usize])
             }
-            None => name,
-        });
+            None => name.clone(),
+        };
+        // A feature clicked on a feature map becomes the pick, so the cell map
+        // shows its activity on the way back.
+        if on_features {
+            self.scene.set_pick(Pick::One(name.into()));
+            msg.push_str(" · tab to a cell view for its activity");
+        }
+        self.message = Some(msg);
         self.restart();
+    }
+}
+
+/// Features matching `query`: exact name first, then symbol (the part after
+/// an `ID_` prefix), then prefix, then substring; case-insensitive.
+fn search(names: &[Box<str>], query: &str) -> Vec<Box<str>> {
+    const MAX: usize = 8;
+    let q = query.to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let rank = |n: &str| {
+        let n = n.to_lowercase();
+        let symbol = n.rsplit_once('_').map_or(n.as_str(), |(_, s)| s);
+        if n == q || symbol == q {
+            Some(0)
+        } else if n.starts_with(&q) || symbol.starts_with(&q) {
+            Some(1)
+        } else if n.contains(&q) {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    let mut hits: Vec<(u8, usize, &Box<str>)> = names
+        .iter()
+        .filter_map(|n| rank(n).map(|r| (r, n.len(), n)))
+        .collect();
+    hits.sort();
+    hits.into_iter()
+        .take(MAX)
+        .map(|(.., n)| n.clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::search;
+
+    #[test]
+    fn search_ranks_exact_then_symbol_then_prefix_then_substring() {
+        let names: Vec<Box<str>> = ["ENSG1_GENE10", "GENE1", "XGENE1Y", "ENSG2_GENE1", "OTHER"]
+            .map(Into::into)
+            .to_vec();
+        let hits = search(&names, "gene1");
+        assert_eq!(&*hits[0], "GENE1");
+        assert_eq!(&*hits[1], "ENSG2_GENE1");
+        assert_eq!(&*hits[2], "ENSG1_GENE10");
+        assert_eq!(&*hits[3], "XGENE1Y");
+        assert_eq!(hits.len(), 4);
+        assert!(search(&names, "").is_empty());
+    }
+}
+
+/// Step one style property of a group by `step` (±1).
+fn adjust(st: &mut super::style::Style, field: usize, step: i64, current: Option<color::Rgb>) {
+    match field {
+        0 => {
+            let sw = swatches();
+            let enc = color::Encoder::new();
+            let now = st
+                .colour
+                .or_else(|| current.map(|c| c.map(|v| enc.encode(v))));
+            // Start from the swatch nearest the colour shown now.
+            let at = now.map_or(0, |c| {
+                (0..sw.len())
+                    .min_by_key(|&i| {
+                        (0..3)
+                            .map(|k| (i32::from(sw[i][k]) - i32::from(c[k])).pow(2))
+                            .sum::<i32>()
+                    })
+                    .unwrap_or(0)
+            });
+            let n = sw.len() as i64;
+            st.colour = Some(sw[(at as i64 + step).rem_euclid(n) as usize]);
+        }
+        1 => {
+            let at = Shape::ALL.iter().position(|&s| s == st.shape).unwrap_or(0) as i64;
+            st.shape = Shape::ALL[(at + step).rem_euclid(Shape::ALL.len() as i64) as usize];
+        }
+        2 => st.alpha = (st.alpha + 0.1 * step as f32).clamp(0.1, 1.0),
+        3 => st.size = (st.size + 0.25 * step as f32).clamp(0.25, 4.0),
+        _ => st.hidden = !st.hidden,
     }
 }

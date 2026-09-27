@@ -129,6 +129,8 @@ pub struct Dataset {
     pub prefix: String,
     pub spaces: Vec<Space>,
     pub labels: Vec<Labels>,
+    /// The manifest and its directory, for loading feature activity on demand.
+    pub run: Option<(RunManifest, PathBuf)>,
 }
 
 fn read_xy(path: &Path) -> anyhow::Result<Points> {
@@ -167,16 +169,23 @@ fn read_rows(path: &Path) -> anyhow::Result<Vec<Vec<String>>> {
     Ok(out)
 }
 
-/// Integer ids from a one-column parquet (NaN = unassigned), as `C{id}`.
+/// Integer cluster ids as `C{id}`: the column named `cluster` when there is
+/// one (a table that also carries per-cluster memberships), else the first.
+/// NaN or negative ids are unassigned, as is any row whose `entropy` column,
+/// when present, is NaN (a cell the clustering never saw).
 fn read_cluster_labels(path: &Path) -> anyhow::Result<Labels> {
-    let MatWithNames { rows, mat, .. } =
+    let MatWithNames { rows, cols, mat } =
         Mat::from_parquet_with_row_names(&path.to_string_lossy(), Some(0))?;
+    let named = |name: &str| cols.iter().position(|c| c.as_ref() == name);
+    let id_col = named("cluster").unwrap_or(0);
+    let entropy = named("entropy");
     let mut pairs: Vec<(Box<str>, i64)> = rows
         .into_iter()
         .enumerate()
         .filter_map(|(i, n)| {
-            let v = mat[(i, 0)];
-            (v.is_finite() && v >= 0.0).then_some((n, v as i64))
+            let v = mat[(i, id_col)];
+            let seen = entropy.is_none_or(|e| mat[(i, e)].is_finite());
+            (seen && v.is_finite() && v >= 0.0).then_some((n, v as i64))
         })
         .collect();
     // Level order follows the ids, not first appearance.
@@ -428,6 +437,7 @@ impl Dataset {
             prefix: run_manifest::derive_out_prefix(from),
             spaces,
             labels,
+            run: Some((m, dir)),
         })
     }
 }

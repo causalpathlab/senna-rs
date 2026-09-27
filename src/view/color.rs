@@ -101,3 +101,21 @@ pub fn category(i: usize, n: usize) -> Rgb {
 pub fn category_ink(i: usize) -> Rgb {
     oklch(0.42, 0.12, hue(i))
 }
+
+/// Sequential ramp for feature activity, light to deep, one hue family
+/// (cool blue into violet) so it reads as "more" on a light page.
+#[must_use]
+pub fn activity_ramp(n: usize) -> Vec<Rgb> {
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1).max(1) as f32;
+            oklch(0.88 - 0.52 * t, 0.04 + 0.13 * t, 235.0 + 75.0 * t)
+        })
+        .collect()
+}
+
+/// Ink for a highlighted single feature.
+#[must_use]
+pub fn highlight_ink() -> Rgb {
+    oklch(0.36, 0.17, 310.0)
+}
