@@ -103,6 +103,22 @@ impl App {
             }
         }
 
+        if let Some((text, _)) = &self.toast {
+            let w = (text.chars().count() as u16 + 4).min(map.width);
+            let r = Rect::new(map.x + (map.width - w) / 2, map.y + 1, w, 3.min(map.height));
+            f.render_widget(Clear, r);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    text.clone(),
+                    Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(Block::bordered().border_style(Style::default().fg(rgb(color::MUTED))))
+                .style(page),
+                r,
+            );
+        }
+
         if self.help {
             let lines = self.help_lines();
             let w = 96.min(map.width);

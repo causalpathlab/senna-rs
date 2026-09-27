@@ -4,6 +4,9 @@
 use super::*;
 use crate::view::decide::Reply;
 
+/// How long a popup stays.
+const TOAST_FOR: std::time::Duration = std::time::Duration::from_millis(2500);
+
 impl App {
     pub(super) fn prompt_key(&mut self, k: KeyEvent) {
         let Some(p) = self.prompt.as_mut() else {
@@ -87,6 +90,7 @@ impl App {
                     r.sent.len(),
                     r.started.elapsed().as_secs_f32()
                 ));
+                self.pop(format!("✓ lupin wrote {name}"));
                 self.restart();
             }
             Ok(Reply::Preview(v)) => {
@@ -94,6 +98,7 @@ impl App {
                     review.preview = Some(crate::view::relabel::preview_lines(&v));
                 }
                 self.message = Some("preview from lupin in the sidebar".into());
+                self.pop("✓ lupin answered: preview in the sidebar".into());
             }
             Ok(Reply::Refused { reason, latest }) => {
                 if let Some(l) = latest.filter(|l| !same_file(l, &self.from)) {
@@ -112,6 +117,11 @@ impl App {
             Err(e) => self.message = Some(e),
         }
         true
+    }
+
+    /// Show `text` in a short popup over the map.
+    pub(super) fn pop(&mut self, text: String) {
+        self.toast = Some((text, std::time::Instant::now() + TOAST_FOR));
     }
 
     /// Open the watcher's latest round when it moves on, and show a refused
