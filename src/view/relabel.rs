@@ -83,6 +83,8 @@ pub(crate) struct Overview {
     pub label: Option<String>,
     /// The type whose markers fit it best, and how well.
     pub best: Option<(String, f32)>,
+    /// Its label is a coarse group, to be refined to one of its members.
+    pub coarse: bool,
 }
 
 impl Overview {
@@ -92,6 +94,7 @@ impl Overview {
         match (&self.label, &self.best) {
             (_, None) => false,
             (None, Some(_)) => true,
+            _ if self.coarse => false,
             (Some(l), Some((b, fit))) => *fit >= SUGGEST_FIT && !same_type(l, b),
         }
     }
@@ -156,7 +159,8 @@ impl Scene {
 
     /// Every cluster of grouping `li` with its size, label and best-fitting
     /// type, in visiting order: unassigned first, then those whose markers
-    /// suggest a change, then the rest; larger first within each.
+    /// suggest a change or whose label is a coarse group, then the rest;
+    /// larger first within each.
     fn cluster_overview(&mut self, li: usize) -> Vec<Overview> {
         let space = self.space;
         let markers = self.markers_by_type();
@@ -206,9 +210,21 @@ impl Scene {
                 size: size[g],
                 label: labels[g].clone(),
                 best: best[g].clone(),
+                coarse: labels[g].as_deref().is_some_and(|l| {
+                    self.data
+                        .round
+                        .as_ref()
+                        .is_some_and(|r| r.members_of(l).is_some())
+                }),
             })
             .collect();
-        out.sort_by_key(|o| (o.label.is_some(), !o.suggests_change(), usize::MAX - o.size));
+        out.sort_by_key(|o| {
+            (
+                o.label.is_some(),
+                !(o.suggests_change() || o.coarse),
+                usize::MAX - o.size,
+            )
+        });
         out
     }
 
@@ -337,7 +353,8 @@ impl Scene {
             .collect();
         let mut out = vec![
             format!("clusters · {} decided", r.draft.decided()),
-            "? unassigned  → markers suggest  ✓ decided".into(),
+            "? unassigned  → markers suggest".into(),
+            "↓ a group to refine  ✓ decided".into(),
             String::new(),
         ];
         for (k, o) in r.overview.iter().enumerate() {
@@ -360,6 +377,12 @@ impl Scene {
                 match &o.best {
                     Some((b, _)) => format!("? → {b}"),
                     None => "?".into(),
+                }
+            } else if o.coarse {
+                // The group's name is on the map; the panel says where to go.
+                match &o.best {
+                    Some((b, _)) => format!("↓ {b}"),
+                    None => format!("↓ {}", o.label.as_deref().unwrap_or_default()),
                 }
             } else if o.suggests_change() {
                 format!("→ {}", o.best.as_ref().map_or("", |b| b.0.as_str()))
@@ -431,6 +454,23 @@ impl Scene {
             })
             .collect();
         candidates.dedup();
+        // A coarse call is refined to one of its members.
+        let (current, _) = self.cluster_call(id);
+        let members: Vec<String> = current
+            .as_deref()
+            .and_then(|l| self.data.round.as_ref()?.members_of(l))
+            .map(<[String]>::to_vec)
+            .unwrap_or_default();
+        for m in &members {
+            let m = markers
+                .keys()
+                .find(|t| same_type(t, m))
+                .cloned()
+                .unwrap_or_else(|| m.clone());
+            if !candidates.contains(&m) {
+                candidates.push(m);
+            }
+        }
         for (t, fit, _) in fits.iter().take(FITTING_TYPES) {
             if *fit > 0.0 && !candidates.contains(t) {
                 candidates.push(t.clone());
@@ -441,6 +481,7 @@ impl Scene {
         let target = staged.clone().or_else(|| {
             candidates
                 .iter()
+                .filter(|c| members.is_empty() || members.iter().any(|m| same_type(m, c)))
                 .max_by(|a, b| {
                     fit_of(a)
                         .unwrap_or(f32::NEG_INFINITY)
@@ -767,6 +808,15 @@ impl Scene {
             ),
             next.to_string(),
         ];
+        if let Some(members) = label
+            .as_deref()
+            .and_then(|l| self.data.round.as_ref()?.members_of(l))
+        {
+            out.push(format!(
+                "a coarse group of {} types: label it one of them (tab)",
+                members.len()
+            ));
+        }
         if let Some(v) = staged.and_then(|c| c.verdict.as_ref()) {
             out.push(match v {
                 Verdict::Label { label, .. } => format!("staged: label {label}"),
