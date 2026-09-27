@@ -66,6 +66,7 @@ const HELP: &[(&str, &str)] = &[
         "e",
         "style menu: colour, shape, opacity, size, visibility per group",
     ),
+    ("b", "sidebar on / off (suggestions, cluster summary, style menu)"),
     ("t", "text labels on / off"),
     ("+  -  scroll", "zoom"),
     ("hjkl  arrows  drag", "pan"),
@@ -152,6 +153,10 @@ struct App {
     checked: std::time::Instant,
     /// Panel with the clicked cluster's summary and history.
     info: Option<Vec<String>>,
+    /// Sidebar area, beside the map; empty when there is nothing to show.
+    side: Rect,
+    /// Whether the sidebar may open (`b` toggles).
+    sidebar: bool,
     quit: bool,
 }
 
@@ -163,6 +168,8 @@ impl App {
             from,
             checked: std::time::Instant::now(),
             info: None,
+            side: Rect::default(),
+            sidebar: true,
             scene,
             cell: (f32::from(f.width.max(1)), f32::from(f.height.max(1))),
             picker,
@@ -222,14 +229,46 @@ impl App {
     }
 
     /// Map area and viewport for the current terminal size.
+    /// Whether the sidebar has something to show.
+    fn side_content(&self) -> bool {
+        self.menu.is_some() || self.info.is_some() || self.scene.suggestion_lines().is_some()
+    }
+
     fn layout(&mut self, area: Rect) {
-        let map = Rect {
+        let body = Rect {
             height: area.height.saturating_sub(1),
             ..area
         };
+        // The sidebar takes its columns from the map rather than covering it.
+        let side_w = if self.sidebar && self.side_content() {
+            (area.width / 3)
+                .clamp(30, 48)
+                .min(area.width.saturating_sub(20))
+        } else {
+            0
+        };
+        let map = Rect {
+            width: body.width - side_w,
+            ..body
+        };
+        self.side = Rect::new(body.x + map.width, body.y, side_w, body.height);
         if map != self.map {
+            let had_map = self.map.width > 0 && self.map.height > 0;
             self.map = map;
-            self.vp = None;
+            // Keep the camera where it was: same centre, same scale, a
+            // different window onto it.
+            match self.vp.as_mut() {
+                Some(vp) if had_map => {
+                    let (w, h) = (
+                        (f32::from(map.width) * self.cell.0) as usize,
+                        (f32::from(map.height) * self.cell.1) as usize,
+                    );
+                    vp.w = w;
+                    vp.h = h;
+                    self.restart();
+                }
+                _ => self.vp = None,
+            }
         }
         if self.vp.is_none() {
             let (w, h) = self.map_px();
@@ -284,8 +323,9 @@ impl App {
             .bg(rgb(color::BACKGROUND))
             .fg(rgb(color::INK));
         f.render_widget(Block::default().style(page), f.area());
-        let [map, status] =
+        let [_, status] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+        let map = self.map;
         if let Some(p) = &self.proto {
             f.render_widget(Image::new(p), map);
         }
@@ -311,21 +351,21 @@ impl App {
         ]);
         f.render_widget(Paragraph::new(line).style(page), status);
 
-        if let Some(menu) = &self.menu {
-            self.draw_menu(f, map, menu, page);
-        } else if let Some(lines) = self.info.clone().or_else(|| self.scene.suggestion_lines()) {
-            let w = 56.min(map.width);
-            let h = (lines.len() as u16 + 2).min(map.height);
-            let r = Rect::new(map.x + map.width - w, map.y, w, h);
-            let text: Vec<Line> = lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
-            f.render_widget(Clear, r);
-            f.render_widget(
-                Paragraph::new(text)
-                    .wrap(ratatui::widgets::Wrap { trim: false })
-                    .block(Block::bordered().border_style(Style::default().fg(rgb(color::MUTED))))
-                    .style(page),
-                r,
-            );
+        let side = self.side;
+        if side.width > 0 {
+            if let Some(menu) = &self.menu {
+                self.draw_menu(f, side, menu, page);
+            } else if let Some(lines) = self.info.clone().or_else(|| self.scene.suggestion_lines())
+            {
+                let text: Vec<Line> = lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
+                f.render_widget(
+                    Paragraph::new(text)
+                        .wrap(ratatui::widgets::Wrap { trim: false })
+                        .block(side_block())
+                        .style(page),
+                    side,
+                );
+            }
         }
 
         if self.help {
@@ -359,10 +399,9 @@ impl App {
             Color::Rgb(r, g, b)
         };
         let levels = self.scene.levels();
-        let w = 40.min(map.width);
-        let chrome = FIELDS.len() as u16 + 5;
-        let h = (levels.len() as u16 + chrome).min(map.height);
-        let r = Rect::new(map.x + map.width - w, map.y, w, h);
+        let chrome = FIELDS.len() as u16 + 6;
+        let r = map;
+        let h = r.height;
         let list_rows = h.saturating_sub(chrome).max(1) as usize;
         let first = menu
             .row
@@ -423,11 +462,10 @@ impl App {
         }
         lines.push(Line::from(Span::styled(format!(" {MENU_HINT}"), dim)));
 
-        f.render_widget(Clear, r);
         f.render_widget(
             Paragraph::new(lines)
                 .wrap(ratatui::widgets::Wrap { trim: false })
-                .block(Block::bordered().border_style(dim))
+                .block(side_block())
                 .style(page),
             r,
         );
@@ -622,6 +660,12 @@ impl App {
             }
             KeyCode::Char('z') => self.start_zoom(),
             KeyCode::Char('n') => self.change(Scene::suggest),
+            KeyCode::Char('b') => {
+                self.sidebar = !self.sidebar;
+                if !self.sidebar {
+                    self.message = Some("sidebar hidden · b to show".into());
+                }
+            }
             KeyCode::Char(',') => self.step_round(true),
             KeyCode::Char('.') => self.step_round(false),
             KeyCode::Char('Z') | KeyCode::Backspace => {
@@ -971,4 +1015,11 @@ fn adjust(st: &mut super::style::Style, field: usize, step: i64, current: Option
 /// Modification time of `path`, if it can be read.
 fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// The sidebar's frame: one thin rule on the map side, nothing else.
+fn side_block() -> Block<'static> {
+    Block::new()
+        .borders(ratatui::widgets::Borders::LEFT)
+        .border_style(Style::default().fg(rgb(color::MUTED)))
 }
