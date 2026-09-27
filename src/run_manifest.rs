@@ -3,7 +3,7 @@
 //!
 //! Shape: `senna topic` / `masked-topic` / `joint-topic` write a fresh
 //! manifest at the end of training. `senna layout` reads it, produces 2D
-//! coords, and updates the `layout{}` section in place. `senna plot` (and
+//! coords, and updates the `layout{}` section in place. `lupin plot` (and
 //! future postprocess commands) read the fully-enriched manifest and
 //! work with zero further flags. CLI flags on those commands stay
 //! available and win over manifest values when both are supplied.
@@ -523,7 +523,7 @@ pub struct RunManifest {
 /// **`args` is deliberately untyped.** Every downstream command that touches a
 /// manifest loads it, mutates a section and saves it back, so all of them
 /// round-trip this field. Storing it as a typed struct would mean a senna
-/// version that added a flag could no longer *open* a run — `senna plot` would
+/// version that added a flag could no longer *open* a run — `lupin plot` would
 /// fail, not just `senna update`. As a [`serde_json::Value`] it passes through
 /// untouched and only the one command that interprets it can be affected.
 
@@ -625,7 +625,7 @@ impl ArtifactScale {
 pub struct RunOutputs {
     /// `{out}.latent.parquet`: cell × K matrix. For topic runs this is
     /// log-softmax topic proportions; for SVD runs it's component
-    /// scores. Consumers that argmax (e.g. `senna plot --colour-by
+    /// scores. Consumers that argmax (e.g. `lupin plot --colour-by
     /// topic`) should check `kind` before assuming topic semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latent: Option<String>,
@@ -659,7 +659,7 @@ pub struct RunOutputs {
     /// `ln(negative)`, i.e. silent NaN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub softmax_dictionary: Option<String>,
-    /// Optional `group_id<TAB>display_name` TSV for `senna plot` labels.
+    /// Optional `group_id<TAB>display_name` TSV for `lupin plot` labels.
     /// User-populated; no senna subcommand writes this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_labels: Option<String>,
@@ -841,7 +841,7 @@ impl RunOutputs {
     /// distance. Going through this accessor also keeps pre-contract manifests
     /// (Z stored in `latent`, no `cell_embedding`) working unchanged.
     ///
-    /// Topic-semantics consumers — `plot --colour-by topic`, `plot-topic` —
+    /// Topic-semantics consumers — `lupin plot --colour-by topic`, `lupin plot-topic` —
     /// must NOT use this; they need θ first and go through
     /// [`RunOutputs::structure_latent`], whose priority is the reverse.
     #[must_use]
@@ -849,8 +849,8 @@ impl RunOutputs {
         self.cell_embedding.as_deref().or(self.latent.as_deref())
     }
 
-    /// The cell × K table to use for a COMPOSITION view — `plot-topic`'s
-    /// structure bars, `plot --colour-by topic`: prefer `latent` (log θ),
+    /// The cell × K table to use for a COMPOSITION view — `lupin plot-topic`'s
+    /// structure bars, `lupin plot --colour-by topic`: prefer `latent` (log θ),
     /// fall back to `cell_embedding`.
     ///
     /// Those consumers exponentiate and row-normalise whatever they read, so
@@ -1048,7 +1048,7 @@ pub struct RunPseudotime {
     pub root_node: Option<usize>,
     /// `{pt_out}.tree_layout.cell_coords.parquet` — N × 2 cell positions
     /// in a Reingold-Tilford tree layout (x = sibling slot, y = geodesic
-    /// pseudotime). Used by `senna plot --colour-by pseudotime` to render
+    /// pseudotime). Used by `lupin plot --colour-by pseudotime` to render
     /// a Monocle-2-style tree plot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree_cell_coords: Option<String>,
@@ -1064,10 +1064,10 @@ pub struct RunPseudotime {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunDefaults {
-    /// Default `--colour-by` for `senna plot`: `"topic" | "cluster" | "pb-id"`.
+    /// Default `--colour-by` for `lupin plot`: `"topic" | "cluster" | "pb-id"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colour_by: Option<String>,
-    /// Default `--palette` for `senna plot`.
+    /// Default `--palette` for `lupin plot`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub palette: Option<String>,
     /// Fields this version does not know, written by another tool or a

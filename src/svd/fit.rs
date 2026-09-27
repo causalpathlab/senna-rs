@@ -266,7 +266,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     let gene_names = data_vec.row_names()?;
     let output_gene_names = gene_names.clone();
 
-    // SVD reuses the topic models' `T{c}` convention so `senna plot
+    // SVD reuses the topic models' `T{c}` convention so `lupin plot
     // --colour-by topic` reads the latent.parquet identically regardless
     // of upstream (`senna topic` or `senna svd`).
     senna::output_helpers::save_latent(
