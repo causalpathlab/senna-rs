@@ -135,15 +135,18 @@ pub struct Resolved {
 }
 
 /// Colours offered in the style menu: the categorical palette's hues at two
-/// lightnesses, then grays and near-black.
+/// lightnesses, then grays and near-black. Built once.
 #[must_use]
-pub fn swatches() -> Vec<[u8; 3]> {
-    let enc = color::Encoder::new();
-    let to8 = |c: Rgb| c.map(|v| enc.encode(v));
-    let mut out: Vec<[u8; 3]> = (0..12).map(|i| to8(color::category(i, 12))).collect();
-    out.extend((0..12).map(|i| to8(color::ink_for(color::category(i, 12)))));
-    out.extend([[200, 199, 196], [150, 150, 150], [90, 90, 90], [30, 30, 30]]);
-    out
+pub fn swatches() -> &'static [[u8; 3]] {
+    static SWATCHES: std::sync::LazyLock<Vec<[u8; 3]>> = std::sync::LazyLock::new(|| {
+        let enc = color::encoder();
+        let to8 = |c: Rgb| c.map(|v| enc.encode(v));
+        let mut out: Vec<[u8; 3]> = (0..12).map(|i| to8(color::category(i, 12))).collect();
+        out.extend((0..12).map(|i| to8(color::ink_for(color::category(i, 12)))));
+        out.extend([[200, 199, 196], [150, 150, 150], [90, 90, 90], [30, 30, 30]]);
+        out
+    });
+    &SWATCHES
 }
 
 /// Every saved style, by grouping then group name.

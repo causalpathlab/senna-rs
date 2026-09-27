@@ -1,6 +1,7 @@
 //! Input: keys, mouse, feature search and the style menu.
 
 use super::*;
+use rayon::prelude::*;
 
 impl App {
     pub(super) fn key(&mut self, k: KeyEvent) {
@@ -41,12 +42,18 @@ impl App {
             KeyCode::Char('g') => self.change(|s| s.step_feature(1)),
             KeyCode::Char('G') => self.change(|s| s.step_feature(-1)),
             KeyCode::Char('a') => self.change(Scene::pick_marker_set),
-            KeyCode::Char('o') => self.change(Scene::toggle_source),
+            KeyCode::Char('o') => {
+                // The other source has its own feature axis to search.
+                self.names = None;
+                self.change(Scene::toggle_source);
+            }
             KeyCode::Char('/') => {
                 if self.names.is_none() {
-                    self.names = Some(self.scene.searchable());
+                    let names = self.scene.searchable();
+                    let lower = names.iter().map(|n| n.to_lowercase()).collect();
+                    self.names = Some(SearchNames { names, lower });
                 }
-                if self.names.as_ref().is_some_and(Vec::is_empty) {
+                if self.names.as_ref().is_some_and(|n| n.names.is_empty()) {
                     self.names = None;
                     self.message = Some("no feature names to search in this run".into());
                 } else {
@@ -140,7 +147,10 @@ impl App {
             _ => return,
         }
         let query = query.clone();
-        let hits = search(self.names.as_deref().unwrap_or(&[]), &query);
+        let hits = self
+            .names
+            .as_ref()
+            .map_or_else(Vec::new, |n| search(&n.names, &n.lower, &query));
         self.search = Some((query, hits));
     }
 
@@ -162,6 +172,7 @@ impl App {
         match k.code {
             KeyCode::Enter | KeyCode::Esc | KeyCode::Char('e' | 'q') => {
                 self.menu = None;
+                self.scene.save_styles();
             }
             KeyCode::Up | KeyCode::Char('k') => menu.row = (row + n - 1) % n,
             KeyCode::Down | KeyCode::Char('j') => menu.row = (row + 1) % n,
@@ -238,7 +249,7 @@ impl App {
         let reach = 2.0 * self.cell.0.max(8.0);
         let best = pts
             .order
-            .iter()
+            .par_iter()
             .map(|&i| {
                 let (x, y) = vp.to_px(pts.xy[i as usize]);
                 (i as usize, (x - px).powi(2) + (y - py).powi(2))
@@ -330,7 +341,7 @@ fn adjust(
     match field {
         0 => {
             let sw = swatches();
-            let enc = color::Encoder::new();
+            let enc = color::encoder();
             let now = st
                 .colour
                 .or_else(|| current.map(|c| c.map(|v| enc.encode(v))));
@@ -359,15 +370,14 @@ fn adjust(
 
 /// Features matching `query`: exact name first, then symbol (the part after
 /// an `ID_` prefix), then prefix, then substring; case-insensitive.
-fn search(names: &[Box<str>], query: &str) -> Vec<Box<str>> {
+fn search(names: &[Box<str>], lower: &[String], query: &str) -> Vec<Box<str>> {
     const MAX: usize = 8;
     let q = query.to_lowercase();
     if q.is_empty() {
         return Vec::new();
     }
     let rank = |n: &str| {
-        let n = n.to_lowercase();
-        let symbol = n.rsplit_once('_').map_or(n.as_str(), |(_, s)| s);
+        let symbol = n.rsplit_once('_').map_or(n, |(_, s)| s);
         if n == q || symbol == q {
             Some(0)
         } else if n.starts_with(&q) || symbol.starts_with(&q) {
@@ -380,7 +390,8 @@ fn search(names: &[Box<str>], query: &str) -> Vec<Box<str>> {
     };
     let mut hits: Vec<(u8, usize, &Box<str>)> = names
         .iter()
-        .filter_map(|n| rank(n).map(|r| (r, n.len(), n)))
+        .zip(lower)
+        .filter_map(|(n, l)| rank(l).map(|r| (r, n.len(), n)))
         .collect();
     hits.sort();
     hits.into_iter()
@@ -398,12 +409,13 @@ mod tests {
         let names: Vec<Box<str>> = ["ENSG1_GENE10", "GENE1", "XGENE1Y", "ENSG2_GENE1", "OTHER"]
             .map(Into::into)
             .to_vec();
-        let hits = search(&names, "gene1");
+        let lower: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+        let hits = search(&names, &lower, "gene1");
         assert_eq!(&*hits[0], "GENE1");
         assert_eq!(&*hits[1], "ENSG2_GENE1");
         assert_eq!(&*hits[2], "ENSG1_GENE10");
         assert_eq!(&*hits[3], "XGENE1Y");
         assert_eq!(hits.len(), 4);
-        assert!(search(&names, "").is_empty());
+        assert!(search(&names, &lower, "").is_empty());
     }
 }

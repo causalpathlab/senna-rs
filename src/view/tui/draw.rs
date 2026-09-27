@@ -86,7 +86,7 @@ impl App {
 
     /// The style menu, docked on the right of the map.
     pub(super) fn draw_menu(&self, f: &mut ratatui::Frame, map: Rect, menu: &Menu, page: Style) {
-        let enc = color::Encoder::new();
+        let enc = color::encoder();
         let to_color = |c: color::Rgb| {
             let [r, g, b] = c.map(|v| enc.encode(v));
             Color::Rgb(r, g, b)

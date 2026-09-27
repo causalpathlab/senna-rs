@@ -142,6 +142,12 @@ struct Drag {
     moved: bool,
 }
 
+/// Feature names to search, with their lowercase forms computed once.
+struct SearchNames {
+    names: Vec<Box<str>>,
+    lower: Vec<String>,
+}
+
 /// The style menu's cursor: which group, which property.
 struct Menu {
     row: usize,
@@ -166,7 +172,7 @@ struct App {
     /// Feature search in progress: the query and its current matches.
     search: Option<(String, Vec<Box<str>>)>,
     /// Searchable feature names, loaded on the first `/`.
-    names: Option<Vec<Box<str>>>,
+    names: Option<SearchNames>,
     /// Style menu: selected group and field.
     menu: Option<Menu>,
     /// A group being laid out on a worker thread.
@@ -276,7 +282,7 @@ impl App {
 
     /// Whether the sidebar has something to show.
     fn side_content(&self) -> bool {
-        self.menu.is_some() || self.info.is_some() || self.scene.suggestion_lines().is_some()
+        self.menu.is_some() || self.info.is_some() || self.scene.has_suggestions()
     }
 
     /// Map and sidebar areas and the viewport for the current terminal size.
@@ -344,20 +350,22 @@ impl App {
         };
         let layers = self.scene.layers();
         let done = job.step(&layers);
-        let mut frame = job.composite();
-        if done {
-            self.scene.decorate(&mut frame, &job.vp, self.cell.1);
-        }
-        let img = frame.to_image(&color::Encoder::new());
+        drop(layers);
+        let img = if done {
+            let job = self.job.take().expect("checked above");
+            let vp = job.vp;
+            let mut frame = job.finish();
+            self.scene.decorate(&mut frame, &vp, self.cell.1);
+            frame.to_image()
+        } else {
+            job.image()
+        };
         let size = Size::new(self.map.width, self.map.height);
         self.proto = Some(self.picker.new_protocol(
             DynamicImage::ImageRgba8(img),
             size,
             Resize::Fit(Some(image::imageops::FilterType::Triangle)),
         )?);
-        if done {
-            self.job = None;
-        }
         Ok(true)
     }
 

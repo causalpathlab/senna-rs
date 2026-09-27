@@ -18,11 +18,10 @@ mod text;
 mod tui;
 
 use activity::{Activity, Levels, Source};
-use color::{Encoder, Rgb};
+use color::Rgb;
 use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
 use render::{draw_labels, group_medians, Job, Label, Paint, Viewport};
-use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use text::Font;
 
@@ -132,6 +131,10 @@ struct Suggestions {
     list: Vec<(Box<str>, f32)>,
 }
 
+/// What a layer's draw order depends on: its space, the grouping and focus
+/// that rank its points, and which activity (by `Shown::id`) sorts them.
+type OrderKey = (usize, Option<usize>, Option<u32>, u64, bool);
+
 /// What a zoom into one group needs: its name, its cells, and the geometry
 /// table to lay them out from.
 pub(crate) struct ZoomRequest {
@@ -149,6 +152,8 @@ pub(crate) enum Pick {
 
 /// Activity currently drawn: what it is of, where, and its levels.
 struct Shown {
+    /// Distinguishes one computed activity from the next, for caches.
+    id: u64,
     space: usize,
     pick: Pick,
     source: Source,
@@ -178,6 +183,14 @@ pub(crate) struct Scene {
     ramp: Vec<Rgb>,
     /// Suggested features for one view.
     suggestions: Option<Suggestions>,
+    /// Draw orders computed for recent layer states; see `layers`.
+    orders: std::cell::RefCell<Vec<(OrderKey, std::rc::Rc<Vec<u32>>)>>,
+    /// Source of `Shown::id`.
+    shown_ids: u64,
+    /// Name index of a feature space, for marking the picked feature.
+    feature_index: std::cell::RefCell<Option<(usize, GeneIndex)>>,
+    /// Group label anchors for a (space, grouping).
+    medians: std::cell::RefCell<Option<((usize, usize), render::Medians)>>,
     /// The run's geometry table, read on the first zoom into a group.
     geometry: Option<std::sync::Arc<sublayout::Geometry>>,
     /// A message for the status line, taken by the front end.
@@ -204,6 +217,10 @@ impl Scene {
             ramp: color::activity_ramp(256),
             geometry: None,
             suggestions: None,
+            orders: std::cell::RefCell::new(Vec::new()),
+            shown_ids: 0,
+            feature_index: std::cell::RefCell::new(None),
+            medians: std::cell::RefCell::new(None),
             note: None,
         };
         scene.colour = scene.default_colour(args.colour_by.as_deref());
@@ -291,10 +308,21 @@ impl Scene {
         let mut st = self.book.get(&grouping, &name);
         f(&mut st);
         self.book.set(&grouping, &name, st);
+        self.refresh_groups();
+    }
+
+    /// Write the style book beside the run (when the style menu closes).
+    pub fn save_styles(&mut self) {
         if let Err(e) = self.book.save(&self.data.prefix) {
             self.note = Some(format!("could not save styles: {e}"));
         }
-        self.refresh_groups();
+    }
+
+    /// Whether suggestions exist for the view on screen.
+    pub fn has_suggestions(&self) -> bool {
+        self.suggestions
+            .as_ref()
+            .is_some_and(|s| s.space == self.space)
     }
 
     /// Current style of group `g` in the current grouping.
@@ -405,7 +433,21 @@ impl Scene {
         };
         let colour = self.colour.map(|i| self.data.labels[i].kind);
         let focus = self.focused_name();
+        // A new annotation round of the same run points at the same model
+        // and data files; keep what was read from them.
+        let same_run = match (&self.data.run, &data.run) {
+            (Some((a, ad)), Some((b, bd))) => {
+                ad == bd
+                    && serde_json::to_value(&a.outputs).ok()
+                        == serde_json::to_value(&b.outputs).ok()
+                    && serde_json::to_value(&a.data).ok() == serde_json::to_value(&b.data).ok()
+            }
+            _ => false,
+        };
         self.data = data;
+        self.orders.borrow_mut().clear();
+        self.feature_index.borrow_mut().take();
+        self.medians.borrow_mut().take();
         self.space = self
             .data
             .spaces
@@ -424,8 +466,14 @@ impl Scene {
         self.focus =
             focus.and_then(|f| self.levels().iter().position(|l| *l == f).map(|i| i as u32));
         self.shown = None;
-        self.activity = None;
-        self.geometry = None;
+        if same_run {
+            if let Some(a) = self.activity.as_mut() {
+                a.forget_views();
+            }
+        } else {
+            self.activity = None;
+            self.geometry = None;
+        }
         self.suggestions = None;
         self.refresh_activity();
     }
@@ -550,7 +598,6 @@ impl Scene {
             return;
         }
         let space = self.space;
-        let universe = self.current().points.names.clone();
         let mask: Option<Vec<bool>> = match (self.focus, self.groups()) {
             (Some(f), Some(g)) => Some(g.iter().map(|&x| x == f).collect()),
             _ => None,
@@ -559,11 +606,13 @@ impl Scene {
             Some(name) => format!("features that set {name} apart in this view"),
             None => "features that vary most in this view".to_string(),
         };
-        let Some(activity) = self.activity() else {
+        if self.activity().is_none() {
             self.note = Some("no manifest to read the model from".into());
             return;
-        };
-        match activity.suggest(&universe, mask.as_deref(), TOP) {
+        }
+        let universe = &self.data.spaces[space].points.names;
+        let activity = self.activity.as_mut().expect("made above");
+        match activity.suggest(space, universe, mask.as_deref(), TOP) {
             Ok(list) if !list.is_empty() => {
                 let first = list[0].0.clone();
                 self.suggestions = Some(Suggestions { space, title, list });
@@ -703,33 +752,29 @@ impl Scene {
         {
             return;
         }
-        let points = &self.data.spaces[space].points;
-        let index: HashMap<Box<str>, usize> = points
-            .names
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.clone(), i))
-            .collect();
-        let n = points.names.len();
         let set = match &pick {
             Pick::Markers(group) => self.marker_features(group),
             Pick::One(_) => Vec::new(),
         };
-        let Some(activity) = self.activity() else {
+        if self.activity().is_none() {
             self.note = Some("no manifest to read activity from".into());
             return;
-        };
+        }
+        let names = &self.data.spaces[space].points.names;
+        let activity = self.activity.as_mut().expect("made above");
         let result = match &pick {
             Pick::One(f) => activity
-                .levels(f, source, &index, n)
+                .levels(f, source, space, names)
                 .map(|(l, spelled)| (l, format!("{spelled} · {}", source.name()))),
             Pick::Markers(group) => activity
-                .set_levels(&set, source, &index, n)
+                .set_levels(&set, source, space, names)
                 .map(|(l, used)| (l, format!("{group} markers ({used}) · {}", source.name()))),
         };
         match result {
             Ok((levels, title)) => {
+                self.shown_ids += 1;
                 self.shown = Some(Shown {
+                    id: self.shown_ids,
                     space,
                     pick,
                     source,
@@ -774,6 +819,7 @@ impl Scene {
     pub fn layers(&self) -> Vec<Paint<'_>> {
         let space = self.current();
         let mut layers = Vec::new();
+        let mut keys = Vec::new();
         if let Some(b) = space.backdrop {
             layers.push(Paint {
                 points: &self.data.spaces[b].points,
@@ -783,13 +829,11 @@ impl Scene {
                 muted: true,
                 size: 0.8,
                 levels: None,
+                order: None,
             });
+            keys.push((b, None, None, 0, true));
         }
-        let levels = self
-            .shown
-            .as_ref()
-            .filter(|s| s.space == self.space)
-            .map(|s| (&s.levels, self.ramp.as_slice()));
+        let shown = self.shown.as_ref().filter(|s| s.space == self.space);
         layers.push(Paint {
             points: &space.points,
             groups: self.groups(),
@@ -797,8 +841,31 @@ impl Scene {
             focus: self.focus,
             muted: false,
             size: if space.backdrop.is_some() { 1.5 } else { 1.0 },
-            levels,
+            levels: shown.map(|s| (&s.levels, self.ramp.as_slice())),
+            order: None,
         });
+        keys.push((
+            self.space,
+            self.colour,
+            self.focus,
+            shown.map_or(0, |s| s.id),
+            false,
+        ));
+        // The order only changes with these keys, not with the camera: reuse
+        // it across pans and zooms instead of re-ranking every point.
+        let mut cache = self.orders.borrow_mut();
+        for (paint, key) in layers.iter_mut().zip(keys) {
+            let order = match cache.iter().find(|(k, _)| *k == key) {
+                Some((_, o)) => o.clone(),
+                None => {
+                    let o = std::rc::Rc::new(paint.draw_order());
+                    cache.insert(0, (key, o.clone()));
+                    cache.truncate(4);
+                    o
+                }
+            };
+            paint.order = Some(order);
+        }
         layers
     }
 
@@ -822,10 +889,14 @@ impl Scene {
             let Some(groups) = groups else { return out };
             let font = Font::for_cell_height(cell_px, true);
             let n = self.levels().len();
-            for (g, m) in group_medians(&space.points, groups, n)
-                .into_iter()
-                .enumerate()
-            {
+            let key = (self.space, self.colour.unwrap_or(usize::MAX));
+            let mut cached = self.medians.borrow_mut();
+            if cached.as_ref().is_none_or(|(k, _)| *k != key) {
+                *cached = Some((key, group_medians(&space.points, groups, n)));
+            }
+            let medians = cached.as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
+            drop(cached);
+            for (g, m) in medians.into_iter().enumerate() {
                 let Some((xy, size)) = m else { continue };
                 if self.focus.is_some_and(|f| f as usize != g) || self.styles[g].hidden {
                     continue;
@@ -930,7 +1001,13 @@ impl Scene {
         if space.axis() != Axis::Features {
             return None;
         }
-        GeneIndex::build(&space.points.names).match_gene(name)
+        let mut cached = self.feature_index.borrow_mut();
+        if cached.as_ref().is_none_or(|(s, _)| *s != self.space) {
+            *cached = Some((self.space, GeneIndex::build(&space.points.names)));
+        }
+        cached
+            .as_ref()
+            .and_then(|(_, index)| index.match_gene(name))
     }
 
     /// Labels, key and marks over a composited frame.
@@ -1007,9 +1084,9 @@ pub(crate) fn render_full(scene: &Scene, vp: Viewport, cell_px: f32) -> image::R
     let layers = scene.layers();
     let mut job = Job::new(vp, &layers);
     while !job.step(&layers) {}
-    let mut frame = job.composite();
+    let mut frame = job.finish();
     scene.decorate(&mut frame, &vp, cell_px);
-    frame.to_image(&Encoder::new())
+    frame.to_image()
 }
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {

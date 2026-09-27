@@ -13,11 +13,13 @@
 //! in.
 
 use super::activity::Levels;
-use super::color::{self, Encoder, Rgb};
+use super::color::{self, Rgb};
 use super::data::{Points, NONE};
 use super::style::{Resolved, Shape};
 use super::text::{self, Canvas, Font};
 use image::RgbaImage;
+use rayon::prelude::*;
+use std::rc::Rc;
 
 /// First progressive chunk; each later chunk doubles.
 const FIRST_CHUNK: usize = 1 << 15;
@@ -96,6 +98,8 @@ pub struct Paint<'a> {
     pub size: f32,
     /// Feature activity per point, drawn on `ramp` instead of group colours.
     pub levels: Option<(&'a Levels, &'a [Rgb])>,
+    /// The draw order, when the caller has it cached; else it is computed.
+    pub order: Option<Rc<Vec<u32>>>,
 }
 
 /// One point's mark.
@@ -163,7 +167,8 @@ impl Paint<'_> {
 
     /// The order to draw in: by rank (activity: by level), keeping the
     /// shuffled order within a rank.
-    fn draw_order(&self) -> Vec<u32> {
+    #[must_use]
+    pub fn draw_order(&self) -> Vec<u32> {
         let order = &self.points.order;
         if let Some((levels, _)) = self.levels {
             let mut o = order.clone();
@@ -208,7 +213,7 @@ pub fn visible_count(points: &Points, vp: &Viewport) -> usize {
 pub struct Job {
     pub vp: Viewport,
     canvas: Vec<Rgb>,
-    orders: Vec<Vec<u32>>,
+    orders: Vec<Rc<Vec<u32>>>,
     radius: Vec<f32>,
     /// Layer being drawn and position within its order.
     layer: usize,
@@ -226,7 +231,10 @@ impl Job {
         Self {
             vp,
             canvas: vec![color::linear_rgb(color::BACKGROUND); vp.w * vp.h],
-            orders: layers.iter().map(Paint::draw_order).collect(),
+            orders: layers
+                .iter()
+                .map(|l| l.order.clone().unwrap_or_else(|| Rc::new(l.draw_order())))
+                .collect(),
             radius,
             layer: 0,
             cursor: 0,
@@ -268,7 +276,7 @@ impl Job {
         let mut budget = self.chunk;
         while budget > 0 && self.layer < layers.len() {
             let paint = &layers[self.layer];
-            let order = std::mem::take(&mut self.orders[self.layer]);
+            let order = self.orders[self.layer].clone();
             let end = (self.cursor + budget).min(order.len());
             let base = self.radius[self.layer];
             let (w, h) = (self.vp.w as f32, self.vp.h as f32);
@@ -286,7 +294,6 @@ impl Job {
             budget -= end - self.cursor;
             self.cursor = end;
             let finished = self.cursor >= order.len();
-            self.orders[self.layer] = order;
             if finished {
                 self.layer += 1;
                 self.cursor = 0;
@@ -296,13 +303,19 @@ impl Job {
         self.done()
     }
 
-    /// The canvas so far.
+    /// The canvas so far, encoded for display (intermediate frames).
     #[must_use]
-    pub fn composite(&self) -> Frame {
+    pub fn image(&self) -> RgbaImage {
+        encode(self.vp.w, self.vp.h, &self.canvas)
+    }
+
+    /// The finished canvas, handed over for labels and encoding.
+    #[must_use]
+    pub fn finish(self) -> Frame {
         Frame {
             w: self.vp.w,
             h: self.vp.h,
-            px: self.canvas.clone(),
+            px: self.canvas,
             bg: color::linear_rgb(color::BACKGROUND),
         }
     }
@@ -323,18 +336,19 @@ impl Frame {
     }
 
     #[must_use]
-    pub fn to_image(&self, enc: &Encoder) -> RgbaImage {
-        let mut img = RgbaImage::new(self.w as u32, self.h as u32);
-        for (dst, src) in img.pixels_mut().zip(&self.px) {
-            *dst = image::Rgba([
-                enc.encode(src[0]),
-                enc.encode(src[1]),
-                enc.encode(src[2]),
-                255,
-            ]);
-        }
-        img
+    pub fn to_image(&self) -> RgbaImage {
+        encode(self.w, self.h, &self.px)
     }
+}
+
+/// Linear-light pixels → 8-bit sRGBA, in parallel.
+fn encode(w: usize, h: usize, px: &[Rgb]) -> RgbaImage {
+    let enc = color::encoder();
+    let buf: Vec<u8> = px
+        .par_iter()
+        .flat_map_iter(|p| [enc.encode(p[0]), enc.encode(p[1]), enc.encode(p[2]), 255])
+        .collect();
+    RgbaImage::from_raw(w as u32, h as u32, buf).expect("w × h × 4 bytes")
 }
 
 impl Canvas for Frame {
@@ -480,14 +494,13 @@ fn blend_round(frame: &mut Frame, x: f32, y: f32, reach: f32, c: Rgb, cov: impl 
     }
 }
 
+/// Each group's median position and size, `None` for an empty group.
+pub type Medians = Vec<Option<([f32; 2], usize)>>;
+
 /// Median position of each group, from a prefix of the shuffled order (a
 /// uniform subsample, so the estimate is unbiased), with group sizes.
 #[must_use]
-pub fn group_medians(
-    points: &Points,
-    groups: &[u32],
-    n_groups: usize,
-) -> Vec<Option<([f32; 2], usize)>> {
+pub fn group_medians(points: &Points, groups: &[u32], n_groups: usize) -> Medians {
     const SAMPLE: usize = 50_000;
     let mut xs: Vec<Vec<f32>> = vec![Vec::new(); n_groups];
     let mut ys: Vec<Vec<f32>> = vec![Vec::new(); n_groups];
