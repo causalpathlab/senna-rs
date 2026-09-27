@@ -7,6 +7,7 @@ use super::fit_layout_common::{
     finalize_viz, preprocess_layout_data, random_init_2d, resolve_inputs, LayoutCommonArgs,
     LayoutPrep,
 };
+use super::fit_layout_features::LayoutTarget;
 use super::viz_prep::apply_svd_preprocessing;
 use crate::geometry::tsne::{similarity_to_distance, TSne};
 use senna::embed_common::*;
@@ -45,6 +46,11 @@ pub struct LayoutTsneArgs {
 }
 
 pub fn fit_layout_tsne(args: &LayoutTsneArgs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.common.target == LayoutTarget::Cells,
+        "`layout tsne` lays out cells only; use `layout umap` or `layout phate` \
+         with --target features"
+    );
     let mut resolved = resolve_inputs(&args.common)?;
     // t-SNE is PB-level (PB-PB similarity → 2D); a graph-trained latent
     // (bge/fne) goes through PB-then-Nyström too via `allow_direct_cells=false`
@@ -122,5 +128,5 @@ pub fn fit_layout_tsne(args: &LayoutTsneArgs) -> anyhow::Result<()> {
     }
     info!("t-SNE done");
 
-    finalize_viz(&args.common, &mut resolved, &prep, &pb_coords)
+    finalize_viz(&args.common, &mut resolved, &prep, &pb_coords, "tsne")
 }

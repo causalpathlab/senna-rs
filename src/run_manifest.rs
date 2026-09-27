@@ -60,6 +60,7 @@
 
 use legume_numeric::matrix::traits::IoOps;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -247,6 +248,9 @@ pub fn resolve_feature_embedding_for(
         .into_owned();
     resolve_feature_embedding(&prefix)
 }
+
+/// Manifest keys outside this version's schema, carried through verbatim.
+pub type Unknown = BTreeMap<String, serde_json::Value>;
 
 /// Schema version. Bump only on breaking renames or semantic changes.
 /// Readers accept any version and log a warning for newer-than-known.
@@ -507,6 +511,10 @@ pub struct RunManifest {
     /// commands that produce no re-runnable fit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub train_args: Option<TrainArgsRecord>,
+    /// Fields this version does not know, written by another tool or a
+    /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
 }
 
 /// The training subcommand's own argument struct, recorded so `senna update`
@@ -551,6 +559,10 @@ pub struct RunData {
     /// as the plain load rather than failing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multiome: Option<crate::multiome_layout::RunMultiome>,
+    /// Fields this version does not know, written by another tool or a
+    /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
 }
 
 /// The numeric SCALE a gene × component artifact is stored in.
@@ -782,6 +794,10 @@ pub struct RunOutputs {
     /// run's own axis, rather than trusting a stored id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub track_encoders: Vec<TrackEncoderSlot>,
+    /// Fields this version does not know, written by another tool or a
+    /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
 }
 
 /// One non-base-track cell encoder a `senna gem` run saved:
@@ -903,6 +919,12 @@ pub const GEOMETRY_TABLE_SLOTS: [&str; 5] = [
     "module_dictionary",
 ];
 
+/// Paths written by `senna layout`.
+///
+/// The top-level `cell_coords` / `pb_coords` always point at the most recent
+/// cell layout, so single-layout consumers (`plot`, `lineage`) keep reading one
+/// slot. `methods` keeps every layout that has been run, keyed by method name
+/// (`umap`, `phate`, `tsne`), so a viewer can switch between them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunLayout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -911,6 +933,35 @@ pub struct RunLayout {
     pub pb_coords: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_gene_mean: Option<String>,
+    /// Method name of the layout the top-level slots point at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub methods: BTreeMap<String, LayoutEntry>,
+    /// Fields this version does not know, written by another tool or a
+    /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
+}
+
+/// One layout method's outputs. Cells and features are laid out by separate
+/// commands, so any subset of the slots may be present.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LayoutEntry {
+    /// `{out}.{method}.cell_coords.parquet`: N × 2+ cell positions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_coords: Option<String>,
+    /// `{out}.{method}.pb_coords.parquet`: pseudobulk positions (PB path only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_coords: Option<String>,
+    /// `{out}.{method}.feature_on_cell_coords.parquet`: D × 2 feature
+    /// positions on this method's cell map, placed from `feature_coembedding`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_on_cell_coords: Option<String>,
+    /// `{out}.{method}.feature_coords.parquet`: D × 2 layout of the feature
+    /// embedding ρ on its own (`senna layout {method} --target features`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_coords: Option<String>,
 }
 
 /// Paths to artifacts produced by `senna cluster`. Populated by `senna
@@ -920,6 +971,10 @@ pub struct RunCluster {
     /// `{cluster_out}.clusters.parquet` — cells × 1 cluster id (NaN for unassigned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clusters: Option<String>,
+    /// Fields this version does not know, written by another tool or a
+    /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
 }
 
 /// Paths to artifacts produced by `senna annotate-by-enrichment` — the cluster-based
@@ -963,6 +1018,10 @@ pub struct RunAnnotate {
     /// contrasted module-score effect backing the GO/GMT signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ontology_term_effect: Option<String>,
+    /// Fields this version does not know, written by another tool or a
+    /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
 }
 
 /// Paths to artifacts produced by `senna pseudotime`. Populated when the
@@ -997,6 +1056,10 @@ pub struct RunPseudotime {
     /// node positions in the same tree layout as `tree_cell_coords`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree_nodes_2d: Option<String>,
+    /// Fields this version does not know, written by another tool or a
+    /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1007,6 +1070,10 @@ pub struct RunDefaults {
     /// Default `--palette` for `senna plot`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub palette: Option<String>,
+    /// Fields this version does not know, written by another tool or a
+    /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
 }
 
 impl RunManifest {
@@ -1023,6 +1090,7 @@ impl RunManifest {
             pseudotime: RunPseudotime::default(),
             defaults: RunDefaults::default(),
             train_args: None,
+            unknown: Unknown::default(),
         }
     }
 
@@ -1638,6 +1706,25 @@ mod tests {
             back.layout.cell_coords.as_deref(),
             Some("run1.cell_coords.parquet")
         );
+    }
+
+    /// Another tool (or a newer senna) may add keys this version does not
+    /// know; saving must not drop them, at the top level or inside a section.
+    #[test]
+    fn unknown_keys_survive_a_round_trip() {
+        let json = r#"{
+            "version": 2, "kind": "bge", "prefix": "r",
+            "layout": {"cell_coords": "r.umap.cell_coords.parquet", "novel": {"a": 1}},
+            "annotate": {"argmax": "a.argmax.tsv", "extra_table": "a.x.parquet"},
+            "something_new": [1, 2]
+        }"#;
+        let m: RunManifest = serde_json::from_str(json).unwrap();
+        let back: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back["layout"]["novel"]["a"], 1);
+        assert_eq!(back["layout"]["cell_coords"], "r.umap.cell_coords.parquet");
+        assert_eq!(back["annotate"]["extra_table"], "a.x.parquet");
+        assert_eq!(back["something_new"][1], 2);
     }
 
     /// Composition views read the latent first and only fall back to the

@@ -6,7 +6,9 @@ use super::fit_layout_common::{
     finalize_viz, preprocess_layout_data, resolve_inputs, LayoutCommonArgs, LayoutPrep,
     PbLayoutPrep, PhateCliArgs, ResolvedViz,
 };
+use super::fit_layout_features::{load_feature_layout_input, write_feature_layout, LayoutTarget};
 use super::viz_prep::apply_svd_preprocessing;
+use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::orient::rotate_root_to_bottom;
 use crate::geometry::phate::phate_layout_2d;
 use senna::embed_common::*;
@@ -80,6 +82,9 @@ impl Default for LayoutPhateArgs {
 }
 
 pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
+    if args.common.target == LayoutTarget::Features {
+        return fit_feature_layout_phate(args);
+    }
     let mut resolved = resolve_inputs(&args.common)?;
     // PHATE is PB-level (diffusion-MDS over landmark features → 2D, O(n³) MDS),
     // so even a graph-trained latent (bge/fne) goes through the PB-then-Nyström
@@ -126,7 +131,43 @@ pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
         pb_coords
     };
 
-    finalize_viz(&args.common, &mut resolved, &prep, &pb_coords)
+    finalize_viz(&args.common, &mut resolved, &prep, &pb_coords, "phate")
+}
+
+/// `--target features`: PHATE of the feature embedding on its own. PHATE's
+/// MDS is cubic in the point count, so it runs on a seeded subsample of
+/// `--n-landmarks` features and the rest are placed by Nyström.
+fn fit_feature_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+
+    let mut input = load_feature_layout_input(&args.common)?;
+    let n = input.feat_kn.ncols();
+    let mut landmarks: Vec<usize> = (0..n).collect();
+    landmarks.shuffle(&mut rand::rngs::SmallRng::seed_from_u64(args.common.seed));
+    landmarks.truncate(args.common.n_landmarks.clamp(3, n.max(3)));
+    landmarks.sort_unstable();
+
+    let h = input.feat_kn.nrows();
+    let mut landmark_kp = Mat::zeros(h, landmarks.len());
+    for (j, &g) in landmarks.iter().enumerate() {
+        landmark_kp
+            .column_mut(j)
+            .copy_from(&input.feat_kn.column(g));
+    }
+    info!(
+        "Feature PHATE on {} landmark features of {n}",
+        landmarks.len()
+    );
+    let landmark_xy = phate_layout_2d(&landmark_kp.transpose(), &(&args.phate).into());
+    let coords = project_cells_nystrom(
+        &input.feat_kn,
+        &landmark_kp,
+        &landmark_xy,
+        args.common.knn,
+        args.common.kernel_alpha,
+    );
+    write_feature_layout(&mut input, "phate", &coords)
 }
 
 /// Resolve per-cell pseudotime for orientation from a cached
