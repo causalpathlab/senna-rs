@@ -1,0 +1,173 @@
+//! Drawing: the map image, the status line, the sidebar and help.
+
+use super::*;
+
+impl App {
+    pub(super) fn draw(&self, f: &mut ratatui::Frame) {
+        let page = Style::default()
+            .bg(rgb(color::BACKGROUND))
+            .fg(rgb(color::INK));
+        f.render_widget(Block::default().style(page), f.area());
+        let [_, status] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+        let map = self.map;
+        if let Some(p) = &self.proto {
+            f.render_widget(Image::new(p), map);
+        }
+
+        let left = match (&self.search, &self.prompt) {
+            (Some((q, hits)), _) => {
+                let shown: Vec<&str> = hits.iter().take(6).map(AsRef::as_ref).collect();
+                format!("/{q}   {}", shown.join("  "))
+            }
+            (None, Some(p)) => p.line(),
+            (None, None) => {
+                let mut text = self.message.clone().unwrap_or_else(|| self.scene.caption());
+                if !self.marked.is_empty() {
+                    let ids: Vec<String> = self.marked.iter().map(|c| format!("C{c}")).collect();
+                    text.push_str(&format!(" · marked {}", ids.join(" ")));
+                }
+                text
+            }
+        };
+        let right = if self.job.is_some() {
+            "drawing…"
+        } else {
+            KEYS
+        };
+        let pad = (status.width as usize)
+            .saturating_sub(left.chars().count() + right.chars().count() + 2);
+        let line = Line::from(vec![
+            Span::raw(format!(" {left}")),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(right, Style::default().fg(rgb(color::MUTED))),
+        ]);
+        f.render_widget(Paragraph::new(line).style(page), status);
+
+        let side = self.side;
+        if side.width > 0 {
+            if let Some(menu) = &self.menu {
+                self.draw_menu(f, side, menu, page);
+            } else if let Some(lines) = self.info.clone().or_else(|| self.scene.suggestion_lines())
+            {
+                let text: Vec<Line> = lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
+                f.render_widget(
+                    Paragraph::new(text)
+                        .wrap(ratatui::widgets::Wrap { trim: false })
+                        .block(side_block())
+                        .style(page),
+                    side,
+                );
+            }
+        }
+
+        if self.help {
+            let w = 72.min(map.width);
+            let h = (HELP.len() as u16 + 2).min(map.height);
+            let r = Rect::new(
+                map.x + (map.width - w) / 2,
+                map.y + (map.height - h) / 2,
+                w,
+                h,
+            );
+            let lines: Vec<Line> = HELP
+                .iter()
+                .map(|(k, v)| Line::from(format!("  {k:<20} {v}")))
+                .collect();
+            f.render_widget(Clear, r);
+            f.render_widget(
+                Paragraph::new(lines)
+                    .block(Block::bordered().border_style(Style::default().fg(rgb(color::MUTED))))
+                    .style(page),
+                r,
+            );
+        }
+    }
+
+    /// The style menu, docked on the right of the map.
+    pub(super) fn draw_menu(&self, f: &mut ratatui::Frame, map: Rect, menu: &Menu, page: Style) {
+        let enc = color::Encoder::new();
+        let to_color = |c: color::Rgb| {
+            let [r, g, b] = c.map(|v| enc.encode(v));
+            Color::Rgb(r, g, b)
+        };
+        let levels = self.scene.levels();
+        let chrome = FIELDS.len() as u16 + 6;
+        let r = map;
+        let h = r.height;
+        let list_rows = h.saturating_sub(chrome).max(1) as usize;
+        let first = menu
+            .row
+            .saturating_sub(list_rows / 2)
+            .min(levels.len().saturating_sub(list_rows));
+
+        let dim = Style::default().fg(rgb(color::MUTED));
+        let mut lines: Vec<Line> = Vec::new();
+        for (g, level) in levels.iter().enumerate().skip(first).take(list_rows) {
+            let st = self.scene.style_of(g);
+            let res = self.scene.resolved(g);
+            let mark = Span::styled(
+                format!(" {} ", st.shape.glyph()),
+                Style::default().fg(res.map_or(Color::Reset, |r| to_color(r.colour))),
+            );
+            let mut name = Style::default();
+            if st.hidden {
+                name = dim;
+            }
+            if g == menu.row {
+                name = name.add_modifier(ratatui::style::Modifier::REVERSED);
+            }
+            lines.push(Line::from(vec![
+                mark,
+                Span::styled(level.to_string(), name),
+            ]));
+        }
+        let st = self.scene.style_of(menu.row);
+        let res = self.scene.resolved(menu.row);
+        let values = [
+            Line::from(vec![
+                Span::raw("■■■■ "),
+                Span::styled(
+                    if st.colour.is_some() {
+                        "custom"
+                    } else {
+                        "default"
+                    },
+                    dim,
+                ),
+            ])
+            .style(Style::default().fg(res.map_or(Color::Reset, |r| to_color(r.colour)))),
+            Line::from(format!("{} {}", st.shape.glyph(), st.shape.name())),
+            Line::from(format!("{:.1}", st.alpha)),
+            Line::from(format!("{:.2}×", st.size)),
+            Line::from(if st.hidden { "hidden" } else { "shown" }),
+        ];
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", levels[menu.row]),
+            Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+        )));
+        for (k, (field, value)) in FIELDS.iter().zip(values).enumerate() {
+            let cursor = if k == menu.field { " ▸ " } else { "   " };
+            let mut spans = vec![Span::raw(format!("{cursor}{field:<8} "))];
+            spans.extend(value.spans.into_iter().map(|s| s.patch_style(value.style)));
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(Span::styled(format!(" {MENU_HINT}"), dim)));
+
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(side_block())
+                .style(page),
+            r,
+        );
+    }
+}
+
+/// The sidebar's frame: one thin rule on the map side, nothing else.
+fn side_block() -> Block<'static> {
+    Block::new()
+        .borders(ratatui::widgets::Borders::LEFT)
+        .border_style(Style::default().fg(rgb(color::MUTED)))
+}

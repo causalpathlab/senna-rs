@@ -234,9 +234,8 @@ impl Job {
         }
     }
 
-    #[must_use]
-    pub fn done(&self, layers: &[Paint<'_>]) -> bool {
-        self.layer >= layers.len()
+    fn done(&self) -> bool {
+        self.layer >= self.orders.len()
     }
 
     #[inline]
@@ -294,7 +293,7 @@ impl Job {
             }
         }
         self.chunk *= 2;
-        self.done(layers)
+        self.done()
     }
 
     /// The canvas so far.
@@ -418,19 +417,7 @@ pub fn draw_legend(
             break;
         }
         let (cx, cy) = (x0 as f32, y as f32 + 0.5 * lh as f32);
-        let reach = r + 1.0;
-        for py in (cy - reach) as i32..=(cy + reach) as i32 {
-            for px in (cx - reach) as i32..=(cx + reach) as i32 {
-                if px < 0 || py < 0 || px as usize >= frame.w || py as usize >= frame.h {
-                    continue;
-                }
-                let d = ((px as f32 + 0.5 - cx).powi(2) + (py as f32 + 0.5 - cy).powi(2)).sqrt();
-                let a = (r + 0.5 - d).clamp(0.0, 1.0);
-                if a > 0.0 {
-                    frame.blend(px as usize, py as usize, *dot, a);
-                }
-            }
-        }
+        blend_round(frame, cx, cy, r + 1.0, *dot, |d| r + 0.5 - d);
         text::draw(frame, font, name, text_x, y, *ink, bg);
         y += lh;
     }
@@ -473,16 +460,21 @@ pub fn draw_ramp_key(frame: &mut Frame, title: &str, ramp: &[Rgb], font: Font) -
 
 /// A ring around `(x, y)`, to mark one point.
 pub fn draw_ring(frame: &mut Frame, x: f32, y: f32, r: f32, ink: Rgb) {
-    let reach = r + 2.0;
+    blend_round(frame, x, y, r + 2.0, ink, |d| 1.2 - (d - r).abs());
+}
+
+/// Blend `c` over the pixels within `reach` of `(x, y)`, each at the opacity
+/// `cov(distance)` clamped to `[0, 1]`: a disc, a ring, whatever `cov` draws.
+fn blend_round(frame: &mut Frame, x: f32, y: f32, reach: f32, c: Rgb, cov: impl Fn(f32) -> f32) {
     for py in (y - reach).floor() as i32..=(y + reach).ceil() as i32 {
         for px in (x - reach).floor() as i32..=(x + reach).ceil() as i32 {
             if px < 0 || py < 0 || px as usize >= frame.w || py as usize >= frame.h {
                 continue;
             }
             let d = ((px as f32 + 0.5 - x).powi(2) + (py as f32 + 0.5 - y).powi(2)).sqrt();
-            let a = (1.2 - (d - r).abs()).clamp(0.0, 1.0);
+            let a = cov(d).clamp(0.0, 1.0);
             if a > 0.0 {
-                frame.blend(px as usize, py as usize, ink, a);
+                frame.blend(px as usize, py as usize, c, a);
             }
         }
     }

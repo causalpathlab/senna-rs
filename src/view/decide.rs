@@ -173,12 +173,6 @@ impl Action {
             Action::MarkersDrop => "markers_drop",
         }
     }
-
-    /// Whether the user types a label for it (keep reuses the current one).
-    #[must_use]
-    pub fn needs_label(self) -> bool {
-        self != Action::Keep
-    }
 }
 
 /// One decision, ready to be written.

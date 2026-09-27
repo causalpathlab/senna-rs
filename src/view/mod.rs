@@ -540,8 +540,6 @@ impl Scene {
         out
     }
 
-    /// Features `g` steps through: the focused group's markers, or every
-    /// marker grouped by type.
     /// Rank features for the view on screen: what distinguishes the focused
     /// group from the rest of the view, or, with nothing focused, what varies
     /// most here. Shows the first one straight away.
@@ -604,6 +602,8 @@ impl Scene {
         Some(out)
     }
 
+    /// Features `g` steps through: the current suggestions, else the focused
+    /// group's markers, else every marker grouped by type.
     fn feature_list(&self) -> Vec<Box<str>> {
         if let Some(sug) = self.suggestions.as_ref().filter(|s| s.space == self.space) {
             return sug.list.iter().map(|(f, _)| f.clone()).collect();
@@ -1014,9 +1014,8 @@ pub(crate) fn render_full(scene: &Scene, vp: Viewport, cell_px: f32) -> image::R
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     let data = Dataset::load(&args.from)?;
-    let scene = Scene::new(data, args);
+    let mut scene = Scene::new(data, args);
 
-    let mut scene = scene;
     if args.suggest {
         scene.suggest();
         match scene.suggestion_lines() {
