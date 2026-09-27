@@ -308,6 +308,13 @@ pub enum RunKind {
     /// product), `deconvolve` takes the gene axis and Z, and `update` re-fits
     /// on the union.
     Simba,
+    /// A run written by another tool under a `kind` senna does not produce
+    /// (for example a pinto run recorded by `lupin annotate`). The original
+    /// string is kept in [`RunManifest::foreign_kind`] and written back on
+    /// save. Only tool-agnostic readers such as `senna view` accept it; every
+    /// command that relies on a senna model refuses it.
+    #[serde(other)]
+    Foreign,
 }
 
 /// What the table [`RunOutputs::geometry_latent`] returns actually IS.
@@ -355,6 +362,9 @@ impl RunKind {
             RunKind::MaskedVae | RunKind::Vae | RunKind::Svd | RunKind::JointSvd => {
                 CellSpace::Signed
             }
+            // Written by another tool: assume nothing (no exp, no angular
+            // metric), which is what the signed treatment does.
+            RunKind::Foreign => CellSpace::Signed,
         }
     }
 
@@ -373,6 +383,7 @@ impl RunKind {
             RunKind::ResolveEmbeddingSpace => "resolve-embedding-space",
             RunKind::Gem => "gem",
             RunKind::Simba => "simba",
+            RunKind::Foreign => "foreign",
         }
     }
 
@@ -395,7 +406,8 @@ impl RunKind {
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
             | RunKind::Gem
-            | RunKind::Simba => false,
+            | RunKind::Simba
+            | RunKind::Foreign => false,
         }
     }
 
@@ -428,7 +440,8 @@ impl RunKind {
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace => false,
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Foreign => false,
         }
     }
 
@@ -451,7 +464,8 @@ impl RunKind {
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace => false,
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Foreign => false,
         }
     }
 
@@ -475,7 +489,8 @@ impl RunKind {
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
             | RunKind::Gem
-            | RunKind::Simba => false,
+            | RunKind::Simba
+            | RunKind::Foreign => false,
         }
     }
 }
@@ -490,6 +505,11 @@ impl std::fmt::Display for RunKind {
 pub struct RunManifest {
     pub version: u32,
     pub kind: RunKind,
+    /// The original `kind` string when it is not one of senna's
+    /// ([`RunKind::Foreign`]); written back on save so another tool's
+    /// manifest keeps its own kind.
+    #[serde(skip)]
+    pub foreign_kind: Option<String>,
     /// The `--out` prefix the training command was run with.
     pub prefix: String,
     #[serde(default)]
@@ -1090,6 +1110,7 @@ impl RunManifest {
             pseudotime: RunPseudotime::default(),
             defaults: RunDefaults::default(),
             train_args: None,
+            foreign_kind: None,
             unknown: Unknown::default(),
         }
     }
@@ -1102,6 +1123,11 @@ impl RunManifest {
         let mut m: Self = serde_json::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
         m.lift_v1_feature_slots();
+        if m.kind == RunKind::Foreign {
+            m.foreign_kind = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("kind")?.as_str().map(String::from));
+        }
         if m.version > MANIFEST_VERSION {
             log::warn!(
                 "manifest {} is v{} but this binary supports up to v{MANIFEST_VERSION}; \
@@ -1142,7 +1168,11 @@ impl RunManifest {
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        let s = serde_json::to_string_pretty(self)?;
+        let mut v = serde_json::to_value(self)?;
+        if let Some(k) = &self.foreign_kind {
+            v["kind"] = k.clone().into();
+        }
+        let s = serde_json::to_string_pretty(&v)?;
         fs::write(path, s).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
         log::info!("wrote {}", path.display());
         Ok(())
@@ -1439,6 +1469,11 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         // is a feature embedding to inherit.
         | RunKind::Gem
         | RunKind::Simba => {}
+        RunKind::Foreign => anyhow::bail!(
+            "--from manifest was written by another tool (kind '{}'); there is no senna \
+             feature embedding to inherit",
+            m.foreign_kind.as_deref().unwrap_or("unknown")
+        ),
         RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
              use a bge / fne / topic-family run as the source",
@@ -1706,6 +1741,21 @@ mod tests {
             back.layout.cell_coords.as_deref(),
             Some("run1.cell_coords.parquet")
         );
+    }
+
+    /// Another tool's manifest loads under its own kind and saves it back.
+    #[test]
+    fn a_foreign_kind_loads_and_is_written_back_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.senna.json");
+        std::fs::write(&p, r#"{"version": 2, "kind": "pinto-cage", "prefix": "x"}"#).unwrap();
+        let (m, _) = RunManifest::load(&p).unwrap();
+        assert_eq!(m.kind, RunKind::Foreign);
+        assert_eq!(m.foreign_kind.as_deref(), Some("pinto-cage"));
+        m.save(&p).unwrap();
+        let back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(back["kind"], "pinto-cage");
     }
 
     /// Another tool (or a newer senna) may add keys this version does not
