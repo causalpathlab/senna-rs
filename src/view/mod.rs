@@ -119,9 +119,9 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        help = "Decisions file of a running `lupin relabel --watch` (found beside the round if omitted)"
+        help = "lupin binary that applies annotation decisions (default: $SENNA_LUPIN, else `lupin`)"
     )]
-    pub decisions: Option<Box<str>>,
+    pub lupin: Option<Box<str>>,
 }
 
 /// Features suggested for one view, best first.
@@ -1118,7 +1118,11 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         scene,
         args.graphics,
         std::path::PathBuf::from(args.from.as_ref()),
-        args.decisions.as_deref().map(std::path::PathBuf::from),
+        args.lupin
+            .as_deref()
+            .map(String::from)
+            .or_else(|| std::env::var("SENNA_LUPIN").ok())
+            .unwrap_or_else(|| "lupin".into()),
     )
 }
 
@@ -1184,7 +1188,7 @@ mod tests {
             focus: None,
             zoom_into: None,
             suggest: false,
-            decisions: None,
+            lupin: None,
         };
         Scene::new(data, &args)
     }

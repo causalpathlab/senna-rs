@@ -1,18 +1,18 @@
-//! Decisions typed in the view, handed to `lupin relabel --watch` through a
-//! file. The view only writes what the user decided; lupin applies it and
-//! writes the next round, which the view then opens. Neither tool calls the
-//! other.
+//! Decisions typed in the view, applied by lupin. For each one the view runs
+//! `lupin relabel -f <round on screen> -d - --next` with the decision as one
+//! JSON line on stdin; lupin writes the next round and prints its path, and
+//! the view opens it. The view applies nothing itself.
 //!
-//! The watcher keeps `{prefix}.relabel_status.json` beside its rounds:
-//! `decisions` (the file to append to), `base` and `rounds` (the rounds it
-//! has written, oldest first), `latest`, and `error` when a batch was
-//! refused. Paths in it are relative to the status file.
+//! A `lupin relabel --watch` may also be running on the same chain (for
+//! decisions made elsewhere); its `{prefix}.relabel_status.json` names the
+//! latest round, which the view follows. Paths in it are relative to it.
 
 use super::files::{modified, read_json, same_file, siblings};
 use senna::run_manifest;
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
 /// A running `lupin relabel --watch`, as seen through its status file.
@@ -29,10 +29,9 @@ pub struct Watcher {
 
 impl Watcher {
     /// The watcher for the round at `open`: a status file beside it whose
-    /// `base` or `rounds` include that round, or, when `decisions` is given,
-    /// that file (with its status file if one points at it).
+    /// `base` or `rounds` include that round.
     #[must_use]
-    pub fn find(open: &Path, decisions: Option<&Path>) -> Option<Self> {
+    pub fn find(open: &Path) -> Option<Self> {
         for status in siblings(open, ".relabel_status.json") {
             let Some(v) = read_json(&status) else {
                 continue;
@@ -50,8 +49,7 @@ impl Watcher {
                 .chain(v.get("base"))
                 .filter_map(Value::as_str)
                 .any(|r| same_file(&at(r), open));
-            let named = decisions.is_some_and(|d| same_file(&dec, d));
-            if covers || named {
+            if covers {
                 let mut w = Self {
                     status: Some(status),
                     decisions: dec,
@@ -64,16 +62,7 @@ impl Watcher {
                 return Some(w);
             }
         }
-        // A decisions file named explicitly works without a status file; the
-        // view then just waits for new rounds to appear.
-        decisions.map(|d| Self {
-            status: None,
-            decisions: d.to_path_buf(),
-            latest: None,
-            error: None,
-            stamp: None,
-            dir_stamp: None,
-        })
+        None
     }
 
     /// The status file beside the decisions file that names it, once the
@@ -124,40 +113,71 @@ impl Watcher {
             .map(String::from);
         true
     }
+}
 
-    /// `path` as a decision's `round` field: relative to the decisions file
-    /// when it sits under the same directory, absolute otherwise.
-    #[must_use]
-    pub fn round_ref(&self, path: &Path) -> String {
-        let dir = run_manifest::manifest_dir(&self.decisions)
-            .canonicalize()
-            .ok();
-        match (dir, path.canonicalize().ok()) {
-            (Some(d), Some(p)) => p.strip_prefix(&d).map_or_else(
-                |_| p.to_string_lossy().into_owned(),
-                |r| r.to_string_lossy().into_owned(),
-            ),
-            _ => path.to_string_lossy().into_owned(),
-        }
-    }
+/// What `lupin relabel --next` answered.
+pub enum Reply {
+    /// The round it wrote.
+    Round(PathBuf),
+    /// Why it refused, and the latest round when the one on screen was stale.
+    Refused {
+        reason: String,
+        latest: Option<PathBuf>,
+    },
+}
 
-    /// Append one decision as a single newline-terminated line, in one write,
-    /// so the watcher never reads half of it.
-    pub fn append(&self, decision: &Value) -> anyhow::Result<()> {
-        let mut line = serde_json::to_string(decision)?;
-        line.push('\n');
-        anyhow::ensure!(
-            line.len() < 4096,
-            "decision is {} bytes; keep it under 4 KB (shorter rationale or fewer evidence items)",
-            line.len()
-        );
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.decisions)?;
-        f.write_all(line.as_bytes())?;
-        Ok(())
+/// Run `lupin relabel -f <round> -d - --next` with `decision` on stdin.
+/// `Err` means lupin could not be run at all (or cannot relabel).
+pub fn relabel_next(lupin: &str, round: &Path, decision: &Value) -> Result<Reply, String> {
+    let mut child = Command::new(lupin)
+        .args(["relabel", "-f"])
+        .arg(round)
+        .args(["-d", "-", "--next"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!("cannot run `{lupin}` ({e}); pass --lupin <path> or set SENNA_LUPIN")
+        })?;
+    let mut line = serde_json::to_string(decision).map_err(|e| e.to_string())?;
+    line.push('\n');
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(line.as_bytes())
+            .map_err(|e| e.to_string())?;
     }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        let path = stdout
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(str::trim);
+        return path
+            .map(|p| Reply::Round(PathBuf::from(p)))
+            .ok_or_else(|| "lupin wrote no round path".to_string());
+    }
+    if stderr.contains("unrecognized subcommand") || stderr.contains("unexpected argument") {
+        return Err(format!(
+            "`{lupin}` cannot relabel (an older build?); pass --lupin <path> or set SENNA_LUPIN"
+        ));
+    }
+    let last = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("lupin failed without a reason")
+        .trim();
+    let reason = last.strip_prefix("Error: ").unwrap_or(last).to_string();
+    // "<round> is not the latest round (that is <path>); reload and decide again"
+    let latest = reason
+        .split_once("(that is ")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(p, _)| PathBuf::from(p.trim()));
+    Ok(Reply::Refused { reason, latest })
 }
 
 /// What a decision does. Label, merge and keep act on clusters; the marker
@@ -234,23 +254,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_watcher_is_found_by_its_rounds_and_lines_are_appended_whole() {
+    fn a_watcher_is_found_by_its_rounds_and_its_status_read() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         std::fs::write(d.join("r.senna.json"), "{}").unwrap();
         std::fs::write(d.join("r.r1.senna.json"), "{}").unwrap();
+        std::fs::write(d.join("x.senna.json"), "{}").unwrap();
         std::fs::write(
             d.join("r.relabel_status.json"),
             r#"{"decisions":"d.jsonl","base":"r.senna.json","rounds":["r.senna.json","r.r1.senna.json"],
                 "latest":"r.r1.senna.json","error":{"lines":[1,1],"message":"no rationale"}}"#,
         )
         .unwrap();
-        let w = Watcher::find(&d.join("r.r1.senna.json"), None).unwrap();
-        assert!(w.decisions.ends_with("d.jsonl"));
+        let w = Watcher::find(&d.join("r.r1.senna.json")).unwrap();
         assert!(w.latest.as_ref().unwrap().ends_with("r.r1.senna.json"));
         assert_eq!(w.error.as_deref(), Some("no rationale"));
-        assert_eq!(w.round_ref(&d.join("r.r1.senna.json")), "r.r1.senna.json");
+        assert!(Watcher::find(&d.join("x.senna.json")).is_none());
+    }
 
+    /// A stand-in `lupin` that behaves as `relabel --next` does.
+    #[cfg(unix)]
+    fn fake_lupin(dir: &Path, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("lupin");
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\ncat > {}/stdin.txt\n{body}\n", dir.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relabel_next_reads_the_new_round_or_the_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
         let dec = Decision {
             action: Action::Merge,
             clusters: vec![3, 5],
@@ -259,36 +299,38 @@ mod tests {
             rationale: "same markers".into(),
             evidence: Vec::new(),
         };
-        w.append(&dec.to_json("r.r1.senna.json")).unwrap();
-        let add = Decision {
-            action: Action::MarkersAdd,
-            clusters: Vec::new(),
-            features: vec!["GENE1".into()],
-            label: "CT1".into(),
-            rationale: "high in CT1".into(),
-            evidence: Vec::new(),
-        };
-        w.append(&add.to_json("r.r1.senna.json")).unwrap();
-        let text = std::fs::read_to_string(d.join("d.jsonl")).unwrap();
-        let lines: Vec<Value> = text
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert!(text.ends_with('\n'));
-        assert_eq!(lines[0]["clusters"], serde_json::json!([3, 5]));
-        assert_eq!(lines[0]["round"], "r.r1.senna.json");
-        assert_eq!(lines[1]["action"], "markers_add");
-        assert_eq!(lines[1]["features"], serde_json::json!(["GENE1"]));
-    }
+        let json = dec.to_json("r.senna.json");
 
-    #[test]
-    fn a_round_no_watcher_covers_finds_none_unless_named() {
-        let dir = tempfile::tempdir().unwrap();
-        let d = dir.path();
-        std::fs::write(d.join("x.senna.json"), "{}").unwrap();
-        assert!(Watcher::find(&d.join("x.senna.json"), None).is_none());
-        let w = Watcher::find(&d.join("x.senna.json"), Some(&d.join("mine.jsonl"))).unwrap();
-        assert!(w.decisions.ends_with("mine.jsonl"));
-        assert!(w.latest.is_none());
+        let ok = fake_lupin(d, "echo r.r1.senna.json");
+        let Ok(Reply::Round(p)) = relabel_next(&ok, Path::new("r.senna.json"), &json) else {
+            panic!("expected a round");
+        };
+        assert_eq!(p, PathBuf::from("r.r1.senna.json"));
+        let sent: Value =
+            serde_json::from_str(&std::fs::read_to_string(d.join("stdin.txt")).unwrap()).unwrap();
+        assert_eq!(sent["clusters"], serde_json::json!([3, 5]));
+        assert_eq!(sent["round"], "r.senna.json");
+
+        let stale = fake_lupin(
+            d,
+            "echo 'Error: r.senna.json is not the latest round (that is r.r2.senna.json); reload and decide again' >&2; exit 1",
+        );
+        let Ok(Reply::Refused { reason, latest }) =
+            relabel_next(&stale, Path::new("r.senna.json"), &json)
+        else {
+            panic!("expected a refusal");
+        };
+        assert!(reason.starts_with("r.senna.json is not the latest round"));
+        assert_eq!(latest, Some(PathBuf::from("r.r2.senna.json")));
+
+        let old = fake_lupin(
+            d,
+            "echo \"error: unrecognized subcommand 'relabel'\" >&2; exit 2",
+        );
+        assert!(relabel_next(&old, Path::new("r.senna.json"), &json)
+            .err()
+            .unwrap()
+            .contains("cannot relabel"));
+        assert!(relabel_next("/nonexistent/lupin", Path::new("r.senna.json"), &json).is_err());
     }
 }

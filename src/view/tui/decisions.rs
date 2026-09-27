@@ -2,6 +2,7 @@
 //! lupin and following the rounds it writes.
 
 use super::*;
+use crate::view::decide::{relabel_next, Reply};
 
 impl App {
     pub(super) fn prompt_key(&mut self, k: KeyEvent) {
@@ -62,14 +63,8 @@ impl App {
 
     /// Start typing a decision of kind `action`.
     pub(super) fn begin(&mut self, action: Action) {
-        if self.watcher.is_none() {
-            self.watcher = Watcher::find(&self.from, self.decisions.as_deref());
-        }
-        if self.watcher.is_none() {
-            self.message = Some(
-                "no `lupin relabel --watch` found beside this round; start one, or pass --decisions"
-                    .into(),
-            );
+        if self.relabeling.is_some() {
+            self.message = Some("lupin is still applying the last decision".into());
             return;
         }
         let mut decision = Decision {
@@ -138,22 +133,61 @@ impl App {
         });
     }
 
+    /// Hand a decision to lupin on a worker thread; `finish_relabel` picks
+    /// up its answer.
     pub(super) fn send(&mut self, d: &Decision) {
-        let Some(w) = &self.watcher else { return };
-        let line = d.to_json(&w.round_ref(&self.from));
-        self.message = Some(match w.append(&line) {
-            Ok(()) => {
-                if d.action == Action::Merge {
+        let round = self
+            .from
+            .canonicalize()
+            .unwrap_or_else(|_| self.from.clone());
+        let json = d.to_json(&round.to_string_lossy());
+        let lupin = self.lupin.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(relabel_next(&lupin, &round, &json));
+        });
+        self.relabeling = Some(Relabeling {
+            merge: d.action == Action::Merge,
+            done: rx,
+        });
+        self.message = Some(format!(
+            "{} {} · lupin is writing the next round…",
+            d.action.name(),
+            d.label
+        ));
+    }
+
+    /// Take lupin's answer, if it has come: open the round it wrote, or say
+    /// why it refused (opening the latest round when this one was stale).
+    /// Returns whether it did anything.
+    pub(super) fn finish_relabel(&mut self) -> bool {
+        let Some(r) = &self.relabeling else {
+            return false;
+        };
+        let reply = match r.done.try_recv() {
+            Ok(reply) => reply,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the lupin call stopped without an answer".into())
+            }
+        };
+        let r = self.relabeling.take().expect("checked above");
+        match reply {
+            Ok(Reply::Round(path)) => {
+                if r.merge {
                     self.marked.clear();
                 }
-                format!(
-                    "sent: {} {} · lupin will write the next round",
-                    d.action.name(),
-                    d.label
-                )
+                self.open_round(&path, "new round");
             }
-            Err(e) => format!("could not write the decision: {e}"),
-        });
+            Ok(Reply::Refused { reason, latest }) => {
+                if let Some(l) = latest.filter(|l| !same_file(l, &self.from)) {
+                    self.open_round(&l, "latest round");
+                }
+                self.message = Some(format!("lupin refused: {reason}"));
+            }
+            Err(e) => self.message = Some(e),
+        }
+        true
     }
 
     /// Open the watcher's latest round when it moves on, and show a refused
