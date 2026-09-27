@@ -9,6 +9,7 @@ mod activity;
 mod color;
 mod data;
 mod render;
+mod rounds;
 mod style;
 mod sublayout;
 mod text;
@@ -369,6 +370,53 @@ impl Scene {
             }
             None => false,
         }
+    }
+
+    /// Swap in a reloaded or different round of the same run, keeping the
+    /// layout, grouping and focused group the view had, matched by name. A
+    /// zoomed layout falls back to the layout it was zoomed from.
+    pub fn replace_data(&mut self, data: Dataset) {
+        let mut root = self.space;
+        while let Some(p) = self.data.spaces[root].parent {
+            root = p;
+        }
+        let (method, title) = {
+            let s = &self.data.spaces[root];
+            (s.method.clone(), s.title)
+        };
+        let colour = self.colour.map(|i| self.data.labels[i].title.clone());
+        let focus = self.focused_name();
+        self.data = data;
+        self.space = self
+            .data
+            .spaces
+            .iter()
+            .position(|s| s.method == method && s.title == title)
+            .unwrap_or(0);
+        self.colour = colour
+            .and_then(|t| {
+                self.colour_choices()
+                    .into_iter()
+                    .find(|&i| self.data.labels[i].title == t)
+            })
+            .or_else(|| self.default_colour(None));
+        self.groups = None;
+        self.refresh_groups();
+        self.focus =
+            focus.and_then(|f| self.levels().iter().position(|l| *l == f).map(|i| i as u32));
+        self.shown = None;
+        self.activity = None;
+        self.geometry = None;
+        self.refresh_activity();
+    }
+
+    /// What the round records about the cluster of cell `cell`, as panel lines.
+    pub fn cluster_info(&self, cell: &str) -> Option<Vec<String>> {
+        let round = self.data.round.as_ref()?;
+        let clusters = self.data.labels.iter().find(|l| l.title == "cluster")?;
+        let level = &clusters.levels[*clusters.by_name.get(cell)? as usize];
+        let id = level.strip_prefix('C').unwrap_or(level);
+        Some(round.cluster_lines(id))
     }
 
     /// Back to the top of the zoom chain. Returns whether it moved.
@@ -840,7 +888,11 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    tui::run(scene, args.graphics)
+    tui::run(
+        scene,
+        args.graphics,
+        std::path::PathBuf::from(args.from.as_ref()),
+    )
 }
 
 #[cfg(test)]
@@ -877,6 +929,7 @@ mod tests {
                 space("phate", "cells", Axis::Cells, &cells),
             ],
             run: None,
+            round: None,
             labels: vec![
                 Labels::from_pairs(
                     "cluster",

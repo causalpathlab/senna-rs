@@ -51,6 +51,10 @@ const HELP: &[(&str, &str)] = &[
     ("x / esc", "clear feature, then focus"),
     ("z", "lay out the focused group's cells again, on their own"),
     (
+        ",  .",
+        "previous (source) / next annotation round; the file reloads on change",
+    ),
+    (
         "Z / backspace",
         "back to the layout this one was zoomed from",
     ),
@@ -70,7 +74,7 @@ fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 
-pub fn run(scene: Scene, graphics: Graphics) -> anyhow::Result<()> {
+pub fn run(scene: Scene, graphics: Graphics, from: std::path::PathBuf) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     let result = (|| {
         // A terminal that never answers must not stall startup; block
@@ -92,7 +96,7 @@ pub fn run(scene: Scene, graphics: Graphics) -> anyhow::Result<()> {
             Graphics::Blocks => picker.set_protocol_type(ProtocolType::Halfblocks),
         }
         execute!(std::io::stdout(), EnableMouseCapture)?;
-        App::new(scene, picker).run(&mut terminal)
+        App::new(scene, picker, from).run(&mut terminal)
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
@@ -137,13 +141,24 @@ struct App {
     menu: Option<Menu>,
     /// A group being laid out on a worker thread.
     zooming: Option<Zooming>,
+    /// The manifest on screen, its last-seen modification time, and when
+    /// that was last checked.
+    from: std::path::PathBuf,
+    stamp: Option<std::time::SystemTime>,
+    checked: std::time::Instant,
+    /// Panel with the clicked cluster's summary and history.
+    info: Option<Vec<String>>,
     quit: bool,
 }
 
 impl App {
-    fn new(scene: Scene, picker: Picker) -> Self {
+    fn new(scene: Scene, picker: Picker, from: std::path::PathBuf) -> Self {
         let f = picker.font_size();
         Self {
+            stamp: modified(&from),
+            from,
+            checked: std::time::Instant::now(),
+            info: None,
             scene,
             cell: (f32::from(f.width.max(1)), f32::from(f.height.max(1))),
             picker,
@@ -171,6 +186,14 @@ impl App {
             }
             if self.finish_zoom() {
                 continue;
+            }
+            if self.job.is_none() && self.checked.elapsed() >= Duration::from_secs(1) {
+                self.checked = std::time::Instant::now();
+                if modified(&self.from) != self.stamp {
+                    let from = self.from.clone();
+                    self.open_round(&from, "reloaded");
+                    continue;
+                }
             }
             let wait = if self.job.is_some() {
                 Duration::ZERO
@@ -286,6 +309,19 @@ impl App {
 
         if let Some(menu) = &self.menu {
             self.draw_menu(f, map, menu, page);
+        } else if let Some(lines) = &self.info {
+            let w = 56.min(map.width);
+            let h = (lines.len() as u16 + 2).min(map.height);
+            let r = Rect::new(map.x + map.width - w, map.y, w, h);
+            let text: Vec<Line> = lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
+            f.render_widget(Clear, r);
+            f.render_widget(
+                Paragraph::new(text)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(Block::bordered().border_style(Style::default().fg(rgb(color::MUTED))))
+                    .style(page),
+                r,
+            );
         }
 
         if self.help {
@@ -525,7 +561,9 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Esc | KeyCode::Char('x') => {
-                let cleared = self.scene.clear_pick() || self.scene.focus.take().is_some();
+                let cleared = self.info.take().is_some()
+                    || self.scene.clear_pick()
+                    || self.scene.focus.take().is_some();
                 if !cleared && k.code == KeyCode::Esc {
                     self.quit = true;
                 }
@@ -578,6 +616,8 @@ impl App {
                 self.vp = None;
             }
             KeyCode::Char('z') => self.start_zoom(),
+            KeyCode::Char(',') => self.step_round(true),
+            KeyCode::Char('.') => self.step_round(false),
             KeyCode::Char('Z') | KeyCode::Backspace => {
                 if self.scene.zoom_out() {
                     self.vp = None;
@@ -659,6 +699,54 @@ impl App {
             Err(e) => self.message = Some(e),
         }
         true
+    }
+
+    /// Open the manifest at `path` (a reload, or another round), keeping the
+    /// camera, layout, grouping and focus where they still apply.
+    fn open_round(&mut self, path: &std::path::Path, what: &str) {
+        match super::Dataset::load(&path.to_string_lossy()) {
+            Ok(data) => {
+                let before = self.scene.current().points.bounds;
+                self.scene.replace_data(data);
+                self.stamp = modified(path);
+                self.from = path.to_path_buf();
+                self.info = None;
+                if self.scene.current().points.bounds != before {
+                    self.vp = None;
+                }
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                self.message = Some(format!("{what} {name}"));
+                self.restart();
+            }
+            Err(e) => {
+                // Keep showing what we have; a half-written file will be
+                // picked up on the next check.
+                self.stamp = modified(path);
+                self.message = Some(format!("could not open {}: {e}", path.display()));
+            }
+        }
+    }
+
+    /// Step to the source round (`back`) or to the round made from this one.
+    fn step_round(&mut self, back: bool) {
+        let round = self.scene.data.round.as_ref();
+        let target = if back {
+            round.and_then(|r| r.source.clone())
+        } else {
+            round.and_then(super::rounds::Round::newer)
+        };
+        match target {
+            Some(p) => self.open_round(&p, if back { "source round" } else { "newer round" }),
+            None => {
+                self.message = Some(if back {
+                    "this round records no source round".into()
+                } else {
+                    "no round made from this one next to it".into()
+                });
+            }
+        }
     }
 
     fn switch_space(&mut self, i: usize) {
@@ -770,6 +858,9 @@ impl App {
             .map(|g| g[i])
             .filter(|&g| g != super::NONE);
         let on_features = self.scene.current().axis == super::Axis::Features;
+        self.info = (!on_features)
+            .then(|| self.scene.cluster_info(&name))
+            .flatten();
         let mut msg = match group {
             Some(g) => {
                 self.scene.focus = Some(g);
@@ -869,4 +960,9 @@ fn adjust(st: &mut super::style::Style, field: usize, step: i64, current: Option
         3 => st.size = (st.size + 0.25 * step as f32).clamp(0.25, 4.0),
         _ => st.hidden = !st.hidden,
     }
+}
+
+/// Modification time of `path`, if it can be read.
+fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
