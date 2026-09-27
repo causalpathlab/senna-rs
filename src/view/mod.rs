@@ -8,6 +8,7 @@
 mod activity;
 mod color;
 mod data;
+mod decide;
 mod render;
 mod rounds;
 mod style;
@@ -115,6 +116,12 @@ pub struct ViewArgs {
         help = "Print suggested features for the starting view (with --png, show the top one)"
     )]
     pub suggest: bool,
+
+    #[arg(
+        long,
+        help = "Decisions file of a running `lupin relabel --watch` (found beside the round if omitted)"
+    )]
+    pub decisions: Option<Box<str>>,
 }
 
 /// Features suggested for one view, best first.
@@ -434,6 +441,55 @@ impl Scene {
         let level = &clusters.levels[*clusters.by_name.get(cell)? as usize];
         let id = level.strip_prefix('C').unwrap_or(level);
         Some(round.cluster_lines(id))
+    }
+
+    /// The cluster id of cell `cell`, from the run's `cluster.clusters`.
+    pub fn cluster_id_of(&self, cell: &str) -> Option<i64> {
+        let clusters = self.data.labels.iter().find(|l| l.title == "cluster")?;
+        let level = &clusters.levels[*clusters.by_name.get(cell)? as usize];
+        level.strip_prefix('C').unwrap_or(level).parse().ok()
+    }
+
+    /// The focused group's cluster id, when colouring by cluster.
+    pub fn focused_cluster(&self) -> Option<i64> {
+        let li = self.colour?;
+        if self.data.labels[li].title != "cluster" {
+            return None;
+        }
+        let name = self.focused_name()?;
+        name.strip_prefix('C').unwrap_or(&name).parse().ok()
+    }
+
+    /// The label the current round gives cluster `id`, and its top call.
+    pub fn cluster_call(&self, id: i64) -> (Option<String>, Option<(String, Option<f64>)>) {
+        self.data
+            .round
+            .as_ref()
+            .map_or((None, None), |r| r.call(&id.to_string()))
+    }
+
+    /// Cell-type names already in use (annotation and markers), for label
+    /// completion.
+    pub fn known_labels(&self) -> Vec<Box<str>> {
+        let mut out: Vec<Box<str>> = self
+            .data
+            .labels
+            .iter()
+            .filter(|l| l.title == "annotation" || l.title == "markers")
+            .flat_map(|l| l.levels.iter().cloned())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The score the current suggestions gave `feature`, if it is among them.
+    pub fn suggestion_score(&self, feature: &str) -> Option<f32> {
+        let s = self.suggestions.as_ref()?;
+        s.list
+            .iter()
+            .find(|(f, _)| f.as_ref() == feature)
+            .map(|&(_, v)| v)
     }
 
     /// Back to the top of the zoom chain. Returns whether it moved.
@@ -983,6 +1039,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         scene,
         args.graphics,
         std::path::PathBuf::from(args.from.as_ref()),
+        args.decisions.as_deref().map(std::path::PathBuf::from),
     )
 }
 
@@ -1056,6 +1113,7 @@ mod tests {
             focus: None,
             zoom_into: None,
             suggest: false,
+            decisions: None,
         };
         Scene::new(data, &args)
     }
