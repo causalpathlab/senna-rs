@@ -12,7 +12,7 @@ use senna::embed_common::*;
 
 /// Resolve the ETM topic side from a finished bge run, with no further
 /// training, and write a topic-model-shaped output layout so that
-/// `senna {plot, plot-topic, clustering, annotate} --from` consume the
+/// `senna clustering` and `lupin {plot, plot-topic, annotate} --from` consume the
 /// topics directly (matching the `senna topic` / `masked-topic` conventions:
 /// `latent` = log θ, `dictionary` = β).
 ///

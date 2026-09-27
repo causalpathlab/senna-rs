@@ -342,10 +342,9 @@ impl From<&PhateCliArgs> for crate::geometry::phate::PhateArgs {
 }
 
 // Defaults mirror the clap `default_value_t` annotations on each field
-// above. Used by callers that construct args programmatically — e.g.
-// `senna plot` auto-running `senna layout umap` when the manifest is
-// missing `layout.cell_coords`. If a clap default changes, update this
-// to match.
+// above. Used by callers that construct args programmatically (the view's
+// zoom-in layout reads its t-UMAP settings from here). If a clap default
+// changes, update this to match.
 impl Default for LayoutCommonArgs {
     fn default() -> Self {
         Self {

@@ -55,7 +55,7 @@ pub fn cell_subset(
 
 /// Save cell × K latent matrix as `{out}.latent.parquet`.
 /// Columns: `T0..T(K-1)` (topic / component convention shared across
-/// topic and svd routines so `senna plot --colour-by topic` reads the
+/// topic and svd routines so `lupin plot --colour-by topic` reads the
 /// file identically regardless of upstream).
 ///
 /// `keep_idx` is the optional near-empty output keep-mask from cell QC

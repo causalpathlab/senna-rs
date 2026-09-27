@@ -34,7 +34,7 @@ use legume_numeric::candle::vae::masked_topic::LatentHead;
 /// Deliberately **not** listed: `dictionary_empirical`, `pb_gene`, `pb_latent`,
 /// `latent`, `cell_proj`. Those come from the pseudobulk collapse, which only training
 /// performs. Consumers
-/// fall back (`plot-topic` does `dictionary_empirical.or(dictionary)`), which is the
+/// fall back (`lupin plot-topic` does `dictionary_empirical.or(dictionary)`), which is the
 /// same fallback `vae` and `joint-topic` already rely on.
 pub const REQUIRED: &[&str] = &[
     "model.json",

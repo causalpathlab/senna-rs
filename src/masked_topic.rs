@@ -1416,7 +1416,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // Neither dominates, and this is not the "sharper" of the two — the softmax over ρ·αᵀ makes the
     // factorized β the more peaked one. It is an *independent* estimate, so having both lets a
     // caller cross-check a topic against something the model did not itself construct. It is also
-    // the same object `senna topic` writes, so consumers that already prefer it (`plot-topic` does
+    // the same object `senna topic` writes, so consumers that already prefer it (`lupin plot-topic` does
     // `dictionary_empirical.or(dictionary)`) behave the same across every topic-family run instead
     // of silently falling back here.
     {
