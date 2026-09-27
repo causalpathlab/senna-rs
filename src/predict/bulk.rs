@@ -61,10 +61,12 @@ pub(crate) fn model_gene_names(kind: RunKind, model: &str) -> anyhow::Result<Vec
         | RunKind::MaskedVae
         | RunKind::JointTopic
         | RunKind::Vae => Ok(crate::topic::model_metadata::load_dictionary(model)?.0),
-        RunKind::JointSvd | RunKind::Fne | RunKind::ResolveEmbeddingSpace => anyhow::bail!(
-            "predict: a {kind} run has no gene dictionary to align a query against, and \
+        RunKind::JointSvd | RunKind::Fne | RunKind::ResolveEmbeddingSpace | RunKind::Foreign => {
+            anyhow::bail!(
+                "predict: a {kind} run has no gene dictionary to align a query against, and \
              predict does not score this family"
-        ),
+            )
+        }
     }
 }
 
