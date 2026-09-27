@@ -166,6 +166,8 @@ struct App {
     lupin: String,
     /// A decision lupin is applying.
     relabeling: Option<Relabeling>,
+    /// A short popup over the map (lupin answered), and when it goes.
+    toast: Option<(String, std::time::Instant)>,
     /// A decision being typed.
     prompt: Option<Prompt>,
     quit: bool,
@@ -190,6 +192,7 @@ impl App {
             watcher: Watcher::find(&from),
             lupin,
             relabeling: None,
+            toast: None,
             prompt: None,
             stamp: modified(&from),
             from,
@@ -224,6 +227,8 @@ impl App {
                 terminal.draw(|f| self.draw(f))?;
             }
             if self.finish_zoom() || self.finish_relabel() {
+                // Show the answer now, not at the next key press.
+                terminal.draw(|f| self.draw(f))?;
                 continue;
             }
             if self.job.is_none() && self.checked.elapsed() >= Duration::from_secs(1) {
@@ -237,9 +242,17 @@ impl App {
                     continue;
                 }
             }
+            if self
+                .toast
+                .as_ref()
+                .is_some_and(|(_, until)| std::time::Instant::now() >= *until)
+            {
+                self.toast = None;
+                terminal.draw(|f| self.draw(f))?;
+            }
             let wait = if self.job.is_some() {
                 Duration::ZERO
-            } else if self.zooming.is_some() || self.relabeling.is_some() {
+            } else if self.zooming.is_some() || self.relabeling.is_some() || self.toast.is_some() {
                 Duration::from_millis(50)
             } else {
                 Duration::from_millis(250)
