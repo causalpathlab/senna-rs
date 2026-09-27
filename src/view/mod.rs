@@ -10,7 +10,9 @@ mod color;
 mod data;
 mod decide;
 mod files;
+mod relabel;
 mod render;
+mod review;
 mod rounds;
 mod style;
 mod sublayout;
@@ -119,6 +121,12 @@ pub struct ViewArgs {
 
     #[arg(
         long,
+        help = "Print relabel mode's panel for the first cluster to visit, and exit"
+    )]
+    pub relabel: bool,
+
+    #[arg(
+        long,
         help = "lupin binary that applies annotation decisions (default: $SENNA_LUPIN, else `lupin`)"
     )]
     pub lupin: Option<Box<str>>,
@@ -193,6 +201,11 @@ pub(crate) struct Scene {
     medians: std::cell::RefCell<Option<((usize, usize), render::Medians)>>,
     /// The run's geometry table, read on the first zoom into a group.
     geometry: Option<std::sync::Arc<sublayout::Geometry>>,
+    /// Relabel mode, when on.
+    pub review: Option<relabel::Review>,
+    /// Features near the last clicked cell, and sets locked on screen.
+    pub near: Option<relabel::Near>,
+    pub locked: Vec<relabel::Near>,
     /// A message for the status line, taken by the front end.
     pub note: Option<String>,
 }
@@ -217,6 +230,9 @@ impl Scene {
             ramp: color::activity_ramp(256),
             geometry: None,
             suggestions: None,
+            review: None,
+            near: None,
+            locked: Vec::new(),
             orders: std::cell::RefCell::new(Vec::new()),
             shown_ids: 0,
             feature_index: std::cell::RefCell::new(None),
@@ -445,6 +461,8 @@ impl Scene {
             _ => false,
         };
         self.data = data;
+        self.near = None;
+        self.locked.clear();
         self.orders.borrow_mut().clear();
         self.feature_index.borrow_mut().take();
         self.medians.borrow_mut().take();
@@ -1030,6 +1048,32 @@ impl Scene {
                 font,
             });
         }
+        // Features near a clicked cell (and locked sets), at their places on
+        // the cell map.
+        if let Some(pos) = self
+            .feature_positions()
+            .filter(|_| self.current().axis() == Axis::Cells)
+        {
+            let font = Font::for_cell_height(cell_px * 0.85, true);
+            let ink = color::highlight_ink();
+            for near in self.locked.iter().chain(&self.near) {
+                for (rank, (f, _)) in near.features.iter().enumerate() {
+                    let Some(i) = pos.names.iter().position(|n| n == f) else {
+                        continue;
+                    };
+                    let (x, y) = vp.to_px(pos.xy[i]);
+                    render::draw_ring(frame, x, y, 0.25 * cell_px, ink);
+                    labels.push(Label {
+                        text: f.to_string(),
+                        x,
+                        y: y - 0.25 * cell_px - font.line_height() as f32 * 0.6,
+                        ink,
+                        priority: 1e6 - rank as f32,
+                        font,
+                    });
+                }
+            }
+        }
         let font = Font::for_cell_height(cell_px * 0.8, false);
         if let Some(s) = self.shown.as_ref().filter(|s| s.space == self.space) {
             reserved.push(render::draw_ramp_key(frame, &s.title, &self.ramp, font));
@@ -1093,6 +1137,18 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     let data = Dataset::load(&args.from)?;
     let mut scene = Scene::new(data, args);
 
+    if args.relabel {
+        match scene.enter_review() {
+            Ok(()) => scene
+                .review_lines()
+                .unwrap_or_default()
+                .iter()
+                .for_each(|l| println!("{l}")),
+            Err(e) => println!("{e}"),
+        }
+        scene.leave_review();
+        return Ok(());
+    }
     if args.suggest {
         scene.suggest();
         match scene.suggestion_lines() {
@@ -1188,6 +1244,7 @@ mod tests {
             focus: None,
             zoom_into: None,
             suggest: false,
+            relabel: false,
             lupin: None,
         };
         Scene::new(data, &args)

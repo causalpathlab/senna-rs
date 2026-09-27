@@ -2,7 +2,7 @@
 //! lupin and following the rounds it writes.
 
 use super::*;
-use crate::view::decide::{relabel_next, Reply};
+use crate::view::decide::{relabel, Mode, Reply};
 
 impl App {
     pub(super) fn prompt_key(&mut self, k: KeyEvent) {
@@ -31,11 +31,15 @@ impl App {
                 if p.why {
                     p.decision.rationale = text;
                     let p = self.prompt.take().expect("checked above");
-                    self.send(&p.decision);
+                    if p.stage {
+                        self.stage(p.decision);
+                    } else {
+                        self.send(&p.decision);
+                    }
                 } else {
                     p.decision.label = text;
                     p.why = true;
-                    p.input.clear();
+                    p.input = std::mem::take(&mut p.why_prefill);
                 }
             }
             KeyCode::Char(c) => p.input.push(c),
@@ -130,6 +134,8 @@ impl App {
             why,
             input: if why { String::new() } else { input },
             known: self.scene.known_labels(),
+            stage: false,
+            why_prefill: String::new(),
         });
     }
 
@@ -144,10 +150,12 @@ impl App {
         let lupin = self.lupin.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(relabel_next(&lupin, &round, &json));
+            let _ = tx.send(relabel(&lupin, &round, &[json], Mode::Next));
         });
         self.relabeling = Some(Relabeling {
-            merge: d.action == Action::Merge,
+            job: RelabelJob::One {
+                merge: d.action == Action::Merge,
+            },
             done: rx,
         });
         self.message = Some(format!(
@@ -174,10 +182,22 @@ impl App {
         let r = self.relabeling.take().expect("checked above");
         match reply {
             Ok(Reply::Round(path)) => {
-                if r.merge {
-                    self.marked.clear();
+                match r.job {
+                    RelabelJob::One { merge: true } => self.marked.clear(),
+                    RelabelJob::Submit => {
+                        if let Some(review) = self.scene.review.take() {
+                            review.draft.discard();
+                        }
+                    }
+                    _ => {}
                 }
                 self.open_round(&path, "new round");
+            }
+            Ok(Reply::Preview(v)) => {
+                if let Some(review) = self.scene.review.as_mut() {
+                    review.preview = Some(crate::view::relabel::preview_lines(&v));
+                }
+                self.message = Some("preview from lupin in the sidebar".into());
             }
             Ok(Reply::Refused { reason, latest }) => {
                 if let Some(l) = latest.filter(|l| !same_file(l, &self.from)) {
@@ -216,12 +236,16 @@ impl App {
 /// A decision being typed in the status line: first the label (unless the
 /// action keeps the current one), then the rationale.
 pub(super) struct Prompt {
-    decision: Decision,
+    pub(super) decision: Decision,
     /// Typing the rationale (after the label).
-    why: bool,
-    input: String,
+    pub(super) why: bool,
+    pub(super) input: String,
     /// Label completions offered for the current input.
-    known: Vec<Box<str>>,
+    pub(super) known: Vec<Box<str>>,
+    /// Relabel mode: stage the decision in the draft instead of sending it.
+    pub(super) stage: bool,
+    /// What the rationale starts as, once the label is in.
+    pub(super) why_prefill: String,
 }
 
 impl Prompt {

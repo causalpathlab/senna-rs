@@ -48,7 +48,12 @@ impl App {
         if side.width > 0 {
             if let Some(menu) = &self.menu {
                 self.draw_menu(f, side, menu, page);
-            } else if let Some(lines) = self.info.clone().or_else(|| self.scene.suggestion_lines())
+            } else if let Some(lines) = self
+                .scene
+                .review_lines()
+                .or_else(|| self.info.clone())
+                .or_else(|| self.scene.suggestion_lines())
+                .or_else(|| self.scene.near_lines())
             {
                 let text: Vec<Line> = lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
                 f.render_widget(

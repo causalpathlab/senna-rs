@@ -94,6 +94,31 @@ impl Round {
         (label, top)
     }
 
+    /// Cell types worth considering for cluster `id`: its current label,
+    /// then lupin's top calls, without repeats.
+    #[must_use]
+    pub fn candidates(&self, id: &str) -> Vec<String> {
+        let Some(s) = self.summary.get(id) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        let label = s.get("label").and_then(Value::as_str);
+        let calls = s
+            .get("calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for l in label
+            .into_iter()
+            .chain(calls.filter_map(|c| c.get("label")?.as_str()).take(3))
+        {
+            if l != UNASSIGNED && !out.iter().any(|x| x == l) {
+                out.push(l.to_string());
+            }
+        }
+        out
+    }
+
     /// Text for the panel shown when a cell of cluster `id` is clicked: the
     /// summary lupin wrote for it, then its decision history, newest first.
     #[must_use]

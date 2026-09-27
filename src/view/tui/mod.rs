@@ -8,6 +8,7 @@
 mod decisions;
 mod draw;
 mod input;
+mod relabel;
 
 use decisions::Prompt;
 
@@ -81,7 +82,10 @@ const HELP: &[(&str, &str)] = &[
     ("A  D", "decide: add / drop the feature on screen in a cell type's markers"),
     ("t", "text labels on / off"),
     ("+  -  scroll", "zoom"),
-    ("hjkl  arrows  drag", "pan"),
+    ("arrows  drag", "pan"),
+    ("click a cell", "its cluster's summary, and the features nearest it on the map"),
+    ("k  l", "keep those features as markers (relabel mode) / lock them on screen"),
+    ("R", "relabel mode: visit clusters, stage decisions, preview and submit to lupin"),
     ("0", "reset: top-level layout, whole map in view"),
     ("s", "save this view as PNG"),
     ("q", "quit"),
@@ -129,8 +133,18 @@ type ZoomResult = Result<super::sublayout::Laid, String>;
 
 /// A decision lupin is applying on a worker thread.
 struct Relabeling {
-    merge: bool,
+    job: RelabelJob,
     done: std::sync::mpsc::Receiver<Result<crate::view::decide::Reply, String>>,
+}
+
+/// What a lupin call was for.
+enum RelabelJob {
+    /// One decision typed outside relabel mode.
+    One { merge: bool },
+    /// The whole relabel draft, as the next round.
+    Submit,
+    /// The whole relabel draft, previewed.
+    Preview,
 }
 
 /// A zoom into one group, running on a worker thread.
@@ -288,7 +302,11 @@ impl App {
 
     /// Whether the sidebar has something to show.
     fn side_content(&self) -> bool {
-        self.menu.is_some() || self.info.is_some() || self.scene.has_suggestions()
+        self.menu.is_some()
+            || self.info.is_some()
+            || self.scene.has_suggestions()
+            || self.scene.review.is_some()
+            || self.scene.near.is_some()
     }
 
     /// Map and sidebar areas and the viewport for the current terminal size.
