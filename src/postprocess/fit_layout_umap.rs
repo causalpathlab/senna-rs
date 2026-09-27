@@ -13,6 +13,7 @@ use super::fit_layout_common::{
     write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep, PbLayoutPrep,
     ResolvedViz,
 };
+use super::fit_layout_features::{load_feature_layout_input, write_feature_layout, LayoutTarget};
 use legume_numeric::matrix::pca::{init_2d_from_scores, pc_scores, random_init_2d};
 use legume_numeric::matrix::umap::Umap;
 use rayon::prelude::*;
@@ -106,6 +107,9 @@ fn pca_init_2d(feat_kn: &Mat, seed: u64) -> Mat {
 }
 
 pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
+    if args.common.target == LayoutTarget::Features {
+        return fit_feature_layout_umap(args);
+    }
     let mut resolved = resolve_inputs(&args.common)?;
     let prep = preprocess_layout_data(&args.common, &resolved, /*allow_direct_cells=*/ true)?;
 
@@ -170,7 +174,14 @@ fn fit_layout_umap_pb(
         );
     }
 
-    write_viz_outputs_pb(&args.common, resolved, prep, &pb_coords, &cell_coords)
+    write_viz_outputs_pb(
+        &args.common,
+        resolved,
+        prep,
+        &pb_coords,
+        &cell_coords,
+        "umap",
+    )
 }
 
 /// Direct cell-level UMAP for `RunKind::Bge` / `RunKind::Fne` (and any
@@ -206,7 +217,28 @@ fn fit_layout_umap_direct(
         args.common.seed,
     );
 
-    write_viz_outputs_direct(&args.common, resolved, prep, &cell_coords)
+    write_viz_outputs_direct(&args.common, resolved, prep, &cell_coords, "umap")
+}
+
+/// `--target features`: t-UMAP of the feature embedding on its own, over a
+/// cosine fuzzy kNN graph with a PCA(2) init. Same SGD as the direct cell path.
+fn fit_feature_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
+    let mut input = load_feature_layout_input(&args.common)?;
+    let edges = build_cell_cell_fuzzy_edges(
+        &input.feat_kn,
+        args.umap_finetune_knn,
+        args.common.block_size.unwrap_or(1000),
+    )?;
+    let mut coords = pca_init_2d(&input.feat_kn, args.common.seed);
+    run_cell_level_umap_in_place(
+        &mut coords,
+        &edges,
+        args.umap_epochs,
+        args.umap_negative_rate,
+        args.umap_lr,
+        args.common.seed,
+    );
+    write_feature_layout(&mut input, "umap", &coords)
 }
 
 /// Build the undirected cell-cell fuzzy kNN edge list used by both the

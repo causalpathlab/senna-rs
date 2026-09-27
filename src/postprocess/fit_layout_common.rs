@@ -9,6 +9,7 @@
 //! Both layout subcommands delegate here for everything except the
 //! actual 2D layout algorithm.
 
+use super::fit_layout_features::{place_features_on_cells, record_cell_layout, LayoutTarget};
 use super::viz_prep::{aggregate_features_by_group, select_pb_coverage};
 use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::similarity::{
@@ -21,7 +22,7 @@ use data_beans::alg::random_projection::binary_sort_columns;
 use rand::{rngs::SmallRng, SeedableRng};
 use rayon::prelude::*;
 use senna::embed_common::*;
-use senna::run_manifest::{self, load_cell_to_pb_raw, rel_to_manifest, RunManifest};
+use senna::run_manifest::{self, load_cell_to_pb_raw, RunManifest};
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use std::path::{Path, PathBuf};
 
@@ -71,6 +72,21 @@ pub struct LayoutCommonArgs {
     pub from: Option<Box<str>>,
 
     #[arg(
+        long,
+        value_enum,
+        default_value = "cells",
+        help = "What to lay out: cells, or the feature embedding on its own",
+        long_help = "cells    (default): lay out cells. On an embedding run with a co-embed,\n\
+                     \x20 features are also placed on the new cell map.\n\
+                     features: lay out the feature embedding ρ by itself (cosine kNN).\n\
+                     \x20 Needs --from; reads no count data.\n\
+                     \n\
+                     Each method keeps its own files, `{out}.{method}.*.parquet`,\n\
+                     recorded under `manifest.layout.methods`."
+    )]
+    pub target: LayoutTarget,
+
+    #[arg(
         value_delimiter = ',',
         help = "Data files (required unless --from supplies them)",
         long_help = "Sparse backends in `.zarr` or `.h5`. Multiple paths are allowed,\n\
@@ -85,9 +101,9 @@ pub struct LayoutCommonArgs {
         help = "Output prefix (defaults to the manifest's `prefix` when --from is used)",
         long_help = "Output header for results.\n\
                      \n\
-                     {out}.pb_coords.parquet: Pseudobulk sample coordinates (n_pb × 2)\n\
+                     {out}.{method}.pb_coords.parquet: Pseudobulk sample coordinates (n_pb × 2)\n\
                      \n\
-                     {out}.cell_coords.parquet:\n\
+                     {out}.{method}.cell_coords.parquet:\n\
                      Cell coordinates (n_cells × 2 or 3) with optional pb_id / cluster columns\n\
                      \n\
                      {out}.pb_gene_mean.parquet:\n\
@@ -331,6 +347,7 @@ impl Default for LayoutCommonArgs {
     fn default() -> Self {
         Self {
             from: None,
+            target: LayoutTarget::Cells,
             data_files: Vec::new(),
             out: None,
             batch_files: None,
@@ -1311,9 +1328,10 @@ pub(crate) fn finalize_viz(
     resolved: &mut ResolvedViz,
     prep: &PbLayoutPrep,
     pb_coords: &Mat,
+    method: &str,
 ) -> anyhow::Result<()> {
     let cell_coords = nystrom_cell_coords(args, prep, pb_coords);
-    write_viz_outputs_pb(args, resolved, prep, pb_coords, &cell_coords)
+    write_viz_outputs_pb(args, resolved, prep, pb_coords, &cell_coords, method)
 }
 
 pub(crate) fn write_viz_outputs_pb(
@@ -1322,6 +1340,7 @@ pub(crate) fn write_viz_outputs_pb(
     prep: &PbLayoutPrep,
     pb_coords: &Mat,
     cell_coords: &Mat,
+    method: &str,
 ) -> anyhow::Result<()> {
     let pb_names: Vec<Box<str>> = (0..pb_coords.nrows())
         .map(|i| format!("PB_{i}").into_boxed_str())
@@ -1329,8 +1348,8 @@ pub(crate) fn write_viz_outputs_pb(
     let cell_names = prep.data_vec.column_names()?;
 
     let out = &resolved.out;
-    let pb_coords_path = format!("{out}.pb_coords.parquet");
-    let cell_coords_path = format!("{out}.cell_coords.parquet");
+    let pb_coords_path = format!("{out}.{method}.pb_coords.parquet");
+    let cell_coords_path = format!("{out}.{method}.cell_coords.parquet");
 
     let coord_cols: Vec<Box<str>> = vec!["x".into(), "y".into()];
     pb_coords.to_parquet_with_names(
@@ -1397,11 +1416,23 @@ pub(crate) fn write_viz_outputs_pb(
 
     info!("Saved {pb_coords_path}, {pb_feat_path}, {cell_coords_path}");
 
+    let feature_path = place_features_on_cells(
+        args,
+        resolved.manifest.as_ref(),
+        resolved.manifest_path.as_ref(),
+        out,
+        method,
+        &prep.cell_proj_kn,
+        cell_coords,
+    )?;
+
     update_manifest_viz(
         resolved,
+        method,
         &cell_coords_path,
         Some(&pb_coords_path),
         pb_feat_is_gene.then_some(pb_feat_path.as_str()),
+        feature_path.as_deref(),
     )?;
 
     Ok(())
@@ -1412,6 +1443,7 @@ pub(crate) fn write_viz_outputs_direct(
     resolved: &mut ResolvedViz,
     prep: &DirectLayoutPrep,
     cell_coords: &Mat,
+    method: &str,
 ) -> anyhow::Result<()> {
     let cell_names = prep.data_vec.column_names()?;
     let n_cells = cell_coords.nrows();
@@ -1422,7 +1454,7 @@ pub(crate) fn write_viz_outputs_direct(
     );
 
     let out = &resolved.out;
-    let cell_coords_path = format!("{out}.cell_coords.parquet");
+    let cell_coords_path = format!("{out}.{method}.cell_coords.parquet");
 
     let cluster_ids = match &args.clusters {
         Some(path) => Some(load_cluster_assignments(path, n_cells)?),
@@ -1450,39 +1482,51 @@ pub(crate) fn write_viz_outputs_direct(
 
     info!("Saved {cell_coords_path} (DirectCells; no pb_coords)");
 
-    update_manifest_viz(resolved, &cell_coords_path, None, None)?;
+    let feature_path = place_features_on_cells(
+        args,
+        resolved.manifest.as_ref(),
+        resolved.manifest_path.as_ref(),
+        out,
+        method,
+        &prep.cell_proj_kn,
+        cell_coords,
+    )?;
+
+    update_manifest_viz(
+        resolved,
+        method,
+        &cell_coords_path,
+        None,
+        None,
+        feature_path.as_deref(),
+    )?;
 
     Ok(())
 }
 
-/// When `--from` was used, update the loaded manifest's `viz{}` section
-/// to point at the files we just wrote, then save it back. Stores each
-/// path as a *basename relative to the manifest's directory* so it
-/// resolves correctly when the run directory is moved.
+/// When `--from` was used, record the files just written under
+/// `manifest.layout` (paths relative to the manifest's directory, so the run
+/// directory can move) and save it back.
 fn update_manifest_viz(
     resolved: &mut ResolvedViz,
+    method: &str,
     cell_coords_path: &str,
     pb_coords_path: Option<&str>,
     pb_gene_mean_path: Option<&str>,
+    feature_on_cell_path: Option<&str>,
 ) -> anyhow::Result<()> {
     let (Some(manifest), Some(manifest_path)) =
         (resolved.manifest.as_mut(), resolved.manifest_path.as_ref())
     else {
         return Ok(());
     };
-    let manifest_dir = manifest_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-
-    manifest.layout.cell_coords = Some(rel_to_manifest(manifest_dir, cell_coords_path));
-    // DirectCells mode emits no pb_coords, so the manifest field stays
-    // None — callers that need PB-level coords must branch on `kind`.
-    manifest.layout.pb_coords = pb_coords_path.map(|p| rel_to_manifest(manifest_dir, p));
-    // Only the gene-space recompute path produces a proper pb_gene_mean;
-    // the fast path writes a proj-space file that `senna annotate-by-enrichment`
-    // would misread, so don't advertise it.
-    manifest.layout.pb_gene_mean = pb_gene_mean_path.map(|p| rel_to_manifest(manifest_dir, p));
-
-    manifest.save(manifest_path)
+    record_cell_layout(
+        manifest,
+        manifest_path,
+        method,
+        cell_coords_path,
+        pb_coords_path,
+        pb_gene_mean_path,
+        feature_on_cell_path,
+    )
 }

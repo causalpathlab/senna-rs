@@ -1,4 +1,5 @@
 mod fit_layout_common;
+mod fit_layout_features;
 mod fit_layout_phate;
 mod fit_layout_tree;
 mod fit_layout_tsne;

@@ -744,7 +744,11 @@ enum Commands {
                       The chosen method lays those out.\n\
                       Every cell is then projected via Nyström.\n\
                       \n\
-                      Updates `manifest.layout.{cell_coords, pb_coords, pb_gene_mean}`.\n\
+                      Each method writes `{out}.{method}.*.parquet` and is kept under\n\
+                      `manifest.layout.methods`, so umap / phate / tsne sit side by side;\n\
+                      `manifest.layout.{cell_coords, pb_coords}` point at the latest.\n\
+                      On embedding runs, features are also placed on the cell map, and\n\
+                      `--target features` lays out the feature embedding on its own.\n\
                       \n\
                       Pick a method: `senna layout {phate|tsne|umap} --from run.senna.json`.",
         visible_alias = "lay",
