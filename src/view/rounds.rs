@@ -292,9 +292,8 @@ impl Round {
 /// assigned shows as `unassigned`).
 pub fn comparisons(
     current: &HashMap<Box<str>, Box<str>>,
-    source_argmax: &Path,
-) -> anyhow::Result<[Labels; 2]> {
-    let previous = read_argmax(source_argmax)?;
+    previous: &HashMap<Box<str>, Box<str>>,
+) -> [Labels; 2] {
     let before = Labels::new(
         LabelKind::Previous,
         previous.iter().map(|(c, l)| (c.clone(), l.clone())),
@@ -310,7 +309,7 @@ pub fn comparisons(
         (now != was).then(|| (c.clone(), now.clone()))
     });
     let changed = Labels::new(LabelKind::Changed, changed_pairs, &[]);
-    Ok([before, changed])
+    [before, changed]
 }
 
 #[cfg(test)]
@@ -335,7 +334,7 @@ mod tests {
             .map(|(a, b)| (a.into(), b.into()))
             .into_iter()
             .collect();
-        let [previous, changed] = comparisons(&now, &before).unwrap();
+        let [previous, changed] = comparisons(&now, &read_argmax(&before).unwrap());
         assert_eq!(previous.by_name.len(), 3);
         assert!(!changed.by_name.contains_key("c1"));
         let level = |c: &str| changed.levels[changed.by_name[c] as usize].to_string();
