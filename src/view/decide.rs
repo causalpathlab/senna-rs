@@ -207,6 +207,83 @@ pub fn relabel(
     Ok(Reply::Refused { reason, latest })
 }
 
+/// Run `lupin annotate -f <run> -m <markers> -o <out>`: the run's first
+/// annotation round, written as `{out}.senna.json`. Each line lupin logs is
+/// put in `progress` as it comes. A failure lupin explains comes back as
+/// `Refused`; `Err` means lupin could not be run at all.
+pub fn annotate(
+    lupin: &str,
+    run: &Path,
+    markers: &Path,
+    out: &Path,
+    progress: &std::sync::Mutex<String>,
+) -> Result<Reply, String> {
+    use std::io::BufRead;
+    let mut child = Command::new(lupin)
+        .args(["annotate", "-f"])
+        .arg(run)
+        .arg("-m")
+        .arg(markers)
+        .arg("-o")
+        .arg(out)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!("cannot run `{lupin}` ({e}); pass --lupin <path> or set SENNA_LUPIN")
+        })?;
+    let mut last = String::new();
+    if let Some(err) = child.stderr.take() {
+        for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+            // Log lines start with "[time LEVEL module] "; the message is
+            // what matters on a status line.
+            let line = match line.trim().split_once("] ") {
+                Some((head, msg)) if head.starts_with('[') => msg.to_string(),
+                _ => line.trim().to_string(),
+            };
+            if !line.is_empty() {
+                if let Ok(mut p) = progress.lock() {
+                    p.clone_from(&line);
+                }
+                last = line;
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let written = PathBuf::from(format!("{}.senna.json", out.display()));
+    if status.success() && written.exists() {
+        return Ok(Reply::Round(written));
+    }
+    let reason = if status.success() {
+        format!("lupin finished but wrote no {}", written.display())
+    } else if last.is_empty() {
+        "lupin failed without a reason".into()
+    } else {
+        last.strip_prefix("Error: ").unwrap_or(&last).to_string()
+    };
+    Ok(Reply::Refused {
+        reason,
+        latest: None,
+    })
+}
+
+/// Where a first annotation of `run` goes: beside it, as `{stem}.L0` (or
+/// `L1`, … when that is taken), `stem` being the run's name without
+/// `.senna.json`.
+#[must_use]
+pub fn annotate_out(run: &Path) -> PathBuf {
+    let name = run
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let stem = name.strip_suffix(".senna.json").unwrap_or(&name);
+    let dir = run.parent().unwrap_or(Path::new(""));
+    (0..)
+        .map(|k| dir.join(format!("{stem}.L{k}")))
+        .find(|o| !PathBuf::from(format!("{}.senna.json", o.display())).exists())
+        .expect("some name is free")
+}
+
 /// What a decision does. Label, merge and keep act on clusters; the marker
 /// actions edit the marker table the next round starts from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

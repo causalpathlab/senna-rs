@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::view::decide::Reply;
+use crate::view::LabelKind;
 
 /// How long a popup stays.
 const TOAST_FOR: std::time::Duration = std::time::Duration::from_millis(2500);
@@ -62,6 +63,30 @@ impl App {
         };
         let r = self.relabeling.take().expect("checked above");
         match reply {
+            Ok(Reply::Round(path)) if matches!(r.job, RelabelJob::Annotate) => {
+                self.open_round(&path, "annotated");
+                self.scene.colour_by(LabelKind::Annotation);
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                self.info = Some(vec![
+                    format!("lupin annotated this run: {name}"),
+                    String::new(),
+                    "coloured by annotation; click a cell for its cluster's calls".into(),
+                    "R relabels cluster by cluster".into(),
+                    String::new(),
+                    "x closes this".into(),
+                ]);
+                self.message = Some(format!(
+                    "lupin annotated in {:.0} s",
+                    r.started.elapsed().as_secs_f32()
+                ));
+                self.pop(format!("✓ lupin wrote {name}"));
+                self.restart();
+            }
+            Ok(Reply::Refused { reason, .. }) if matches!(r.job, RelabelJob::Annotate) => {
+                self.message = Some(format!("lupin could not annotate: {reason}"));
+            }
             Ok(Reply::Round(path)) => {
                 if matches!(r.job, RelabelJob::Submit) {
                     if let Some(review) = self.scene.review.take() {

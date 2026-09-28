@@ -5,6 +5,7 @@
 //! picture appears at once and fills in; any key or mouse event in between
 //! simply replaces the job.
 
+mod annotate;
 mod decisions;
 mod draw;
 mod help;
@@ -85,6 +86,8 @@ struct Relabeling {
     started: std::time::Instant,
     /// What was sent, one line per decision.
     sent: Vec<String>,
+    /// The latest line lupin logged, for the status line.
+    progress: std::sync::Arc<std::sync::Mutex<String>>,
     done: std::sync::mpsc::Receiver<Result<crate::view::decide::Reply, String>>,
 }
 
@@ -94,6 +97,8 @@ enum RelabelJob {
     Submit,
     /// The whole relabel draft, previewed.
     Preview,
+    /// A first annotation of the run (`lupin annotate`).
+    Annotate,
 }
 
 /// A zoom into one group, running on a worker thread.
@@ -168,6 +173,8 @@ struct App {
     relabeling: Option<Relabeling>,
     /// A short popup over the map (lupin answered), and when it goes.
     toast: Option<(String, std::time::Instant)>,
+    /// The markers file being typed for `lupin annotate`.
+    markers_input: Option<String>,
     /// A decision being typed.
     prompt: Option<Prompt>,
     quit: bool,
@@ -193,6 +200,7 @@ impl App {
             lupin,
             relabeling: None,
             toast: None,
+            markers_input: None,
             prompt: None,
             stamp: modified(&from),
             from,

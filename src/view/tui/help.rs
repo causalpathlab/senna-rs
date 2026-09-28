@@ -14,6 +14,8 @@ pub(super) enum Context {
     Merge,
     /// Typing a label or rationale.
     Prompt,
+    /// Typing the markers file for `lupin annotate`.
+    MarkersFile,
     Search,
     StyleMenu,
 }
@@ -68,6 +70,10 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "relabel mode: go cluster by cluster, then hand lupin one round",
             ),
             (",  .", "previous (source) / next annotation round"),
+            (
+                "A",
+                "annotate this run with lupin (asks for a markers file; tab completes)",
+            ),
         ],
     ),
     (
@@ -157,6 +163,8 @@ impl App {
             Context::Search
         } else if self.prompt.is_some() {
             Context::Prompt
+        } else if self.markers_input.is_some() {
+            Context::MarkersFile
         } else if self.menu.is_some() {
             Context::StyleMenu
         } else if let Some(r) = &self.scene.review {
@@ -178,7 +186,7 @@ impl App {
         match self.context() {
             Context::Browse => [
                 "click a cell: its cluster and the features nearest it (k pins their names)   [ ] focus a group   c change the colouring   n suggest features",
-                "R relabel clusters   , . annotation rounds   tab / m other layouts   z zoom into a group   e style   ? all keys   q quit",
+                "R relabel clusters   A annotate with lupin   , . rounds   tab / m other layouts   z zoom into a group   e style   ? all keys   q quit",
             ],
             Context::Feature => [
                 "g / G next or previous feature   o switch between counts and model   a the group's whole marker set   x back to group colours",
@@ -195,6 +203,10 @@ impl App {
             Context::Prompt => [
                 "type, or keep what is filled in   enter accepts   esc cancels",
                 "tab completes a known cell type (while typing the label)",
+            ],
+            Context::MarkersFile => [
+                "type the path of a markers file (type, then its markers; TSV, or one comma per line)",
+                "tab completes the path   enter runs lupin annotate   esc cancels",
             ],
             Context::Search => [
                 "type part of a feature name   enter shows the first match   esc cancels",
