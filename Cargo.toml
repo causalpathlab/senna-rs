@@ -1,6 +1,6 @@
 [package]
 name = "senna-rs"
-version = "0.18.1"
+version = "0.19.1"
 edition = "2021"
 rust-version = "1.91"
 license = "MIT"
@@ -15,6 +15,7 @@ exclude = [
     "**/.claude/**",
     "**/.DS_Store",
     "temp*/**",
+    "docs/text-anchored-gene-space-plan.md",
 ]
 
 [lib]
