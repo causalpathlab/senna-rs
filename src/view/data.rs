@@ -448,19 +448,23 @@ fn load_labels(m: &RunManifest, dir: &Path, round: &super::rounds::Round) -> Vec
                         &[super::rounds::UNASSIGNED],
                     )),
                 );
-                // Against the round this one was made from, when there is one.
-                let source_argmax = round.source.as_deref().and_then(|src| {
+                // Against the round this one was made from, when there is one;
+                // a source without annotation counts as all unassigned.
+                let previous = round.source.as_deref().and_then(|src| {
                     let (sm, sdir) = RunManifest::load(src).ok()?;
-                    Some(run_manifest::resolve(&sdir, sm.annotate.argmax.as_deref()?))
+                    Some(match sm.annotate.argmax.as_deref() {
+                        Some(p) => super::rounds::read_argmax(&run_manifest::resolve(&sdir, p)),
+                        None => Ok(Default::default()),
+                    })
                 });
-                if let Some(sp) = source_argmax {
-                    match super::rounds::comparisons(&current, &sp) {
-                        Ok([before, changed]) => {
-                            keep("changed", Ok(changed));
-                            keep("previous annotation", Ok(before));
-                        }
-                        Err(e) => log::warn!("view: skipping round comparison: {e}"),
+                match previous {
+                    Some(Ok(previous)) => {
+                        let [before, changed] = super::rounds::comparisons(&current, &previous);
+                        keep("changed", Ok(changed));
+                        keep("previous annotation", Ok(before));
                     }
+                    Some(Err(e)) => log::warn!("view: skipping round comparison: {e}"),
+                    None => {}
                 }
             }
             Err(e) => log::warn!("view: skipping annotation: {e}"),
