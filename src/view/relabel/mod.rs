@@ -185,7 +185,7 @@ impl Scene {
                 self.data
                     .round
                     .as_ref()
-                    .and_then(|r| r.call(&id.to_string()).0)
+                    .and_then(|r| r.label(&id.to_string()))
             })
             .collect();
         let per = match self.review_sums() {
@@ -275,7 +275,7 @@ impl Scene {
         let mut candidates: Vec<String> = called.into_iter().map(spell).collect();
         candidates.dedup();
         // A coarse call is refined to one of its members.
-        let (current, _) = self.cluster_call(id);
+        let current = self.cluster_label(id);
         let members: Vec<String> = current
             .as_deref()
             .and_then(|l| self.data.round.as_ref()?.members_of(l))

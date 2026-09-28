@@ -80,8 +80,6 @@ impl Watcher {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Next,
-    /// The next round, with lupin's bootstrap support refreshed (slower).
-    NextWithSupport,
     Preview,
 }
 
@@ -108,7 +106,6 @@ pub fn relabel(
 ) -> Result<Reply, String> {
     let flags: &[&str] = match mode {
         Mode::Next => &["--next"],
-        Mode::NextWithSupport => &["--next", "--support"],
         Mode::Preview => &["--preview"],
     };
     let flag = flags.join(" ");
@@ -140,7 +137,7 @@ pub fn relabel(
             Mode::Preview => serde_json::from_str(&stdout)
                 .map(Reply::Preview)
                 .map_err(|e| format!("lupin's preview is not JSON: {e}")),
-            Mode::Next | Mode::NextWithSupport => stdout
+            Mode::Next => stdout
                 .lines()
                 .rev()
                 .find(|l| !l.trim().is_empty())

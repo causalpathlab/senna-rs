@@ -50,7 +50,6 @@ impl App {
             KeyCode::Char('M') => self.change(Scene::begin_merge),
             KeyCode::Char('p') => self.send_draft(Mode::Preview),
             KeyCode::Char('S') => self.send_draft(Mode::Next),
-            KeyCode::Char('U') => self.send_draft(Mode::NextWithSupport),
             KeyCode::Esc | KeyCode::Char('R') => self.toggle_review(),
             _ => return false,
         }
@@ -103,7 +102,7 @@ impl App {
         } else {
             (vec![id], r.target.clone().unwrap_or_default())
         };
-        let current = self.scene.cluster_call(id).0;
+        let current = self.scene.cluster_label(id);
         let label = if action == Action::Keep {
             match current {
                 Some(l) => l,
@@ -173,9 +172,8 @@ impl App {
         let Some(r) = self.scene.review.as_ref() else {
             return;
         };
-        // With nothing staged, U still asks lupin to refresh support alone.
-        if r.draft.is_empty() && !matches!(mode, Mode::NextWithSupport) {
-            self.message = Some("nothing staged yet (U alone refreshes support)".into());
+        if r.draft.is_empty() {
+            self.message = Some("nothing staged yet".into());
             return;
         }
         let _ = r.draft.save();

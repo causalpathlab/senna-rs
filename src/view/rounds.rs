@@ -45,6 +45,40 @@ fn read_json_object(path: &Path) -> HashMap<String, Value> {
     }
 }
 
+/// A cluster × cell type table (`K{id}` rows, one column per type), as
+/// lupin writes `cluster_celltype_nes` and `cluster_celltype_p`: per
+/// cluster id, the value of each type by its `label_key`. Empty when absent
+/// or unreadable, as a round from an older lupin has neither.
+fn read_cluster_table(path: &Path) -> HashMap<String, HashMap<String, f64>> {
+    use senna::embed_common::*;
+    let Ok(MatWithNames { rows, cols, mat }) =
+        Mat::from_parquet_with_row_names(&path.to_string_lossy(), Some(0))
+    else {
+        return HashMap::default();
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let id = r.strip_prefix('K').unwrap_or(r).to_string();
+            let row = cols
+                .iter()
+                .enumerate()
+                .map(|(j, c)| (label_key(c), f64::from(mat[(i, j)])))
+                .collect();
+            (id, row)
+        })
+        .collect()
+}
+
+/// lupin's FDR level when a round does not record one.
+pub(super) const FDR_ALPHA: f64 = 0.1;
+
+/// Whether a call's q passes `alpha`. A call without q (an older round's
+/// label-only call) is kept.
+fn passes(c: &Value, alpha: f64) -> bool {
+    c.get("q").and_then(Value::as_f64).is_none_or(|q| q < alpha)
+}
+
 /// `{"groups": [{"name", "members": [...]}, ...]}`, as lupin's
 /// `celltype_tree` holds it. Groups of one member are not coarse.
 fn read_tree(v: &Value) -> Vec<(String, Vec<String>)> {
@@ -66,10 +100,10 @@ fn read_tree(v: &Value) -> Vec<(String, Vec<String>)> {
 }
 
 /// lupin's rescored top call for a cluster, beside the label it carries.
+/// `top` is `None` when no cell type passes FDR.
 pub struct Evidence {
     pub top: Option<String>,
     pub q: Option<f64>,
-    pub support: Option<f64>,
     pub agrees: bool,
 }
 
@@ -86,8 +120,11 @@ pub struct Round {
     /// Curation rounds behind this round's statistics, when lupin rescored
     /// it after decisions made on the same data (post-selection).
     curated: Option<u64>,
-    /// Bootstrap support was not refreshed with this round.
-    support_stale: bool,
+    /// lupin's FDR level: calls at or above it are not calls.
+    alpha: f64,
+    /// Per cluster id and cell type: enrichment effect size (NES) and p.
+    nes: HashMap<String, HashMap<String, f64>>,
+    p: HashMap<String, HashMap<String, f64>>,
     /// Its q values come from the gene-set null alone (too few batches for
     /// the sample-permutation null).
     gene_set_null_only: bool,
@@ -118,10 +155,19 @@ impl Round {
                         .and_then(Value::as_u64)
                         .unwrap_or(1)
                 }),
-            support_stale: stats
-                .and_then(|s| s.get("support_stale"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            alpha: m
+                .annotate
+                .unknown
+                .get("settings")
+                .and_then(|s| s.pointer("/enrichment/fdr_alpha"))
+                .and_then(Value::as_f64)
+                .unwrap_or(FDR_ALPHA),
+            nes: at("cluster_celltype_nes")
+                .map(|p| read_cluster_table(&p))
+                .unwrap_or_default(),
+            p: at("cluster_celltype_p")
+                .map(|p| read_cluster_table(&p))
+                .unwrap_or_default(),
             gene_set_null_only: m
                 .annotate
                 .unknown
@@ -151,12 +197,20 @@ impl Round {
             .map(|(_, m)| m.as_slice())
     }
 
-    /// lupin's evidence for cluster `id` beside its label: the top call,
-    /// its q and support, and whether the label agrees with it.
+    /// lupin's evidence for cluster `id` beside its label: the top call and
+    /// its q, and whether the label agrees with it. A top call that does not
+    /// pass FDR is no call, and nothing to disagree with.
     #[must_use]
     pub fn evidence(&self, id: &str) -> Option<Evidence> {
         let s = self.summary.get(id)?;
         let e = s.get("evidence")?;
+        if !passes(e, self.alpha) {
+            return Some(Evidence {
+                top: None,
+                q: e.get("q").and_then(Value::as_f64),
+                agrees: true,
+            });
+        }
         let top = e.get("top").and_then(Value::as_str).map(String::from);
         let label = s
             .get("label")
@@ -174,12 +228,11 @@ impl Round {
         Some(Evidence {
             top,
             q: e.get("q").and_then(Value::as_f64),
-            support: e.get("support").and_then(Value::as_f64),
             agrees: within_group || e.get("agrees").and_then(Value::as_bool).unwrap_or(true),
         })
     }
 
-    /// How to read this round's q and support, for a panel heading.
+    /// How to read this round's q, for a panel heading.
     fn stats_note(&self) -> Option<String> {
         let mut notes = Vec::new();
         if let Some(n) = self.curated {
@@ -215,23 +268,29 @@ impl Round {
         })
     }
 
-    /// The label the round gives cluster `id`, and its top marker call with
-    /// that call's bootstrap support, from the summary.
+    /// lupin's FDR level for this round.
     #[must_use]
-    pub fn call(&self, id: &str) -> (Option<String>, Option<(String, Option<f64>)>) {
-        let Some(s) = self.summary.get(id) else {
-            return (None, None);
-        };
-        let label = s.get("label").and_then(Value::as_str).map(String::from);
-        let top = s
-            .get("calls")
+    pub fn alpha(&self) -> f64 {
+        self.alpha
+    }
+
+    /// The label the round gives cluster `id`, from the summary.
+    #[must_use]
+    pub fn label(&self, id: &str) -> Option<String> {
+        let s = self.summary.get(id)?;
+        s.get("label").and_then(Value::as_str).map(String::from)
+    }
+
+    /// Cluster `id`'s calls that pass FDR, best first.
+    fn calls(&self, id: &str) -> Vec<&Value> {
+        self.summary
+            .get(id)
+            .and_then(|s| s.get("calls"))
             .and_then(Value::as_array)
-            .and_then(|c| c.first())
-            .and_then(|c| {
-                let l = c.get("label")?.as_str()?.to_string();
-                Some((l, c.get("support").and_then(Value::as_f64)))
-            });
-        (label, top)
+            .into_iter()
+            .flatten()
+            .filter(|c| passes(c, self.alpha))
+            .collect()
     }
 
     /// Cell types worth considering for cluster `id`: its current label,
@@ -243,15 +302,13 @@ impl Round {
         };
         let mut out: Vec<String> = Vec::new();
         let label = s.get("label").and_then(Value::as_str);
-        let calls = s
-            .get("calls")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten();
-        for l in label
-            .into_iter()
-            .chain(calls.filter_map(|c| c.get("label")?.as_str()).take(3))
-        {
+        let calls = self.calls(id);
+        for l in label.into_iter().chain(
+            calls
+                .iter()
+                .filter_map(|c| c.get("label")?.as_str())
+                .take(3),
+        ) {
             if l != UNASSIGNED && !out.iter().any(|x| x == l) {
                 out.push(l.to_string());
             }
@@ -286,36 +343,40 @@ impl Round {
                     .cloned()
                     .unwrap_or_default()
             };
-            let calls = list("calls");
-            let support = |c: &Value| match c.get("support").and_then(Value::as_f64) {
-                Some(x) => format!("{x:.3}"),
-                None if self.support_stale => "not refreshed".into(),
-                None => "-".into(),
+            // NES and p of one type in this cluster, from lupin's tables.
+            let table = |t: &HashMap<String, HashMap<String, f64>>, l: &str| {
+                t.get(id)
+                    .and_then(|row| row.get(&label_key(l)))
+                    .map(|x| format!("{x:.3}"))
+            };
+            let stats = |l: &str, q: Option<f64>| {
+                let mut parts = vec![format!("q {}", q.map_or("-".into(), |x| format!("{x:.3}")))];
+                parts.extend(table(&self.p, l).map(|x| format!("p {x}")));
+                parts.extend(table(&self.nes, l).map(|x| format!("NES {x}")));
+                parts.join("  ")
             };
             if let Some(e) = self.evidence(id).filter(|e| !e.agrees) {
+                let top = e.top.as_deref().unwrap_or(UNASSIGNED);
                 out.push(format!(
-                    "≠ the evidence calls it {} (q {}, support {})",
-                    e.top.as_deref().unwrap_or(UNASSIGNED),
-                    e.q.map_or("-".into(), |x| format!("{x:.3}")),
-                    e.support.map_or_else(
-                        || if self.support_stale {
-                            "not refreshed".into()
-                        } else {
-                            "-".into()
-                        },
-                        |x| format!("{x:.3}")
-                    )
+                    "≠ the evidence calls it {top} ({})",
+                    stats(top, e.q)
                 ));
             }
+            let calls = self.calls(id);
+            let heading = match self.stats_note() {
+                Some(n) => format!("calls ({n})"),
+                None => "calls".into(),
+            };
             if !calls.is_empty() {
-                out.push(match self.stats_note() {
-                    Some(n) => format!("calls ({n})"),
-                    None => "calls".into(),
-                });
+                out.push(heading);
                 for c in calls.iter().take(3) {
                     let l = c.get("label").and_then(Value::as_str).unwrap_or("-");
-                    out.push(format!("  {l}  q {}  support {}", num(c, "q"), support(c)));
+                    let q = c.get("q").and_then(Value::as_f64);
+                    out.push(format!("  {l}  {}", stats(l, q)));
                 }
+            } else if !list("calls").is_empty() {
+                out.push(heading);
+                out.push(format!("  no cell type passes FDR (q < {})", self.alpha));
             }
             let terms = list("terms");
             if !terms.is_empty() {
@@ -470,8 +531,8 @@ mod tests {
             dir.path(),
             "s.json",
             r#"{"4":{"size":10,"label":"G1","calls":[{"label":"CT1","q":0.01}]},
-                "5":{"size":3,"label":"G1","evidence":{"top":"CT2","q":0.01,"support":null,"agrees":false}},
-                "6":{"size":3,"label":null,"evidence":{"top":"CT2","q":0.01,"support":null,"agrees":false}}}"#,
+                "5":{"size":3,"label":"G1","evidence":{"top":"CT2","q":0.01,"agrees":false}},
+                "6":{"size":3,"label":null,"evidence":{"top":"CT2","q":0.01,"agrees":false}}}"#,
         );
         write(
             dir.path(),
@@ -494,16 +555,34 @@ mod tests {
         assert_eq!(lines[2], "  CT1, CT2");
         assert_eq!(lines[3], "calls");
 
-        // After curation: a group named after one of its members labels
-        // that member, the calls carry the post-selection caveat, support
-        // not refreshed says so, and a label the evidence disagrees with is
-        // flagged.
+        // After curation (lupin 0.2): a group named after one of its members
+        // labels that member, the calls carry the post-selection caveat with
+        // NES and p beside q, and a label the evidence disagrees with is
+        // flagged. A cluster where no type passes FDR has no call and no
+        // dispute; q = 1 ties are not shown as calls.
         write(
             dir.path(),
             "s2.json",
-            r#"{"4":{"size":10,"label":"CT1","calls":[{"label":"CT2","q":0.02,"support":null}],
-                "evidence":{"top":"CT2","q":0.02,"support":null,"agrees":false}}}"#,
+            r#"{"4":{"size":10,"label":"CT1","calls":[{"label":"CT2","q":0.02},{"label":"ASDC","q":1.0}],
+                "evidence":{"top":"CT2","q":0.02,"agrees":false}},
+                "5":{"size":4,"label":"CT1","calls":[{"label":"ASDC","q":1.0},{"label":"CT2","q":1.0}],
+                "evidence":{"top":"ASDC","q":1.0,"agrees":false}}}"#,
         );
+        {
+            use senna::embed_common::*;
+            let rows: Vec<Box<str>> = vec!["K4".into(), "K5".into()];
+            let cols: Vec<Box<str>> = vec!["CT1".into(), "CT2".into()];
+            for (name, vals) in [("nes", [0.1, 2.5, 0.0, 0.3]), ("p", [0.9, 0.001, 1.0, 0.8])] {
+                let m = Mat::from_row_slice(2, 2, &vals.map(|v: f64| v as f32));
+                let path = dir.path().join(format!("{name}.parquet"));
+                m.to_parquet_with_names(
+                    &path.to_string_lossy(),
+                    (Some(&rows), Some("cluster")),
+                    Some(&cols),
+                )
+                .unwrap();
+            }
+        }
         write(
             dir.path(),
             "t2.json",
@@ -513,8 +592,9 @@ mod tests {
             dir.path(),
             "r2.senna.json",
             r#"{"version":2,"kind":"bge","prefix":"r2","annotate":{"cluster_summary":"s2.json","celltype_tree":"t2.json",
-                "stats":{"kind":"post_selection","rounds_of_curation":2,"support_stale":true},
-                "settings":{"enrichment":{"null":{"gene_set_randomization":1000,"sample_permutation":0,"batches":1}}}}}"#,
+                "cluster_celltype_nes":"nes.parquet","cluster_celltype_p":"p.parquet",
+                "stats":{"kind":"post_selection","rounds_of_curation":2},
+                "settings":{"enrichment":{"fdr_alpha":0.1,"null":{"gene_set_randomization":10000,"sample_permutation":0,"batches":1}}}}}"#,
         );
         let (m, d) = RunManifest::load(&path).unwrap();
         let round = Round::load(&m, &d, &path);
@@ -523,13 +603,21 @@ mod tests {
         let lines = round.cluster_lines("4");
         assert_eq!(
             lines[1],
-            "≠ the evidence calls it CT2 (q 0.020, support not refreshed)"
+            "≠ the evidence calls it CT2 (q 0.020  p 0.001  NES 2.500)"
         );
         assert_eq!(
             lines[2],
             "calls (post-selection, after 2 rounds of curation; q from the gene-set null only)"
         );
-        assert_eq!(lines[3], "  CT2  q 0.020  support not refreshed");
+        assert_eq!(lines[3], "  CT2  q 0.020  p 0.001  NES 2.500");
+        assert_eq!(lines.len(), 4, "the q = 1 call is not shown: {lines:?}");
+        assert_eq!(round.candidates("4"), ["CT1", "CT2"]);
+
+        let e = round.evidence("5").unwrap();
+        assert!(e.agrees && e.top.is_none());
+        let lines = round.cluster_lines("5");
+        assert_eq!(lines[2], "  no cell type passes FDR (q < 0.1)");
+        assert_eq!(round.candidates("5"), ["CT1"]);
     }
 
     #[test]
@@ -538,7 +626,7 @@ mod tests {
         write(
             dir.path(),
             "s.json",
-            r#"{"4":{"size":10,"label":"CT1","calls":[{"label":"CT1","q":0.01,"support":null}],"terms":[],"cl":{"id":"X","name":"N","abstained":true}}}"#,
+            r#"{"4":{"size":10,"label":"CT1","calls":[{"label":"CT1","q":0.01}],"terms":[],"cl":{"id":"X","name":"N","abstained":true}}}"#,
         );
         write(
             dir.path(),
@@ -553,7 +641,7 @@ mod tests {
         let (m, d) = RunManifest::load(&path).unwrap();
         let lines = Round::load(&m, &d, &path).cluster_lines("4");
         assert_eq!(lines[0], "C4 · 10 cells · CT1");
-        assert!(lines.iter().any(|l| l.contains("support -")));
+        assert!(lines.contains(&"  CT1  q 0.010".to_string()));
         assert!(lines.iter().any(|l| l.contains("(abstained)")));
         assert!(lines
             .iter()
