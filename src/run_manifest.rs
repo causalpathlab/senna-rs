@@ -455,6 +455,27 @@ impl RunKind {
         }
     }
 
+    /// Whether the run has cells at all: every kind embeds or decomposes a
+    /// cell × feature table except `fne`, which embeds a graph of features
+    /// alone. A full `match`, so a new kind must answer.
+    #[must_use]
+    pub fn has_cells(self) -> bool {
+        match self {
+            RunKind::Fne => false,
+            RunKind::Topic
+            | RunKind::Itopic
+            | RunKind::MaskedVae
+            | RunKind::JointTopic
+            | RunKind::Vae
+            | RunKind::Svd
+            | RunKind::JointSvd
+            | RunKind::Bge
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Gem
+            | RunKind::Simba => true,
+        }
+    }
+
     /// True when `{out}.latent.parquet` holds `log θ` on the probability
     /// simplex — i.e. `exp()` of it gives per-cell topic proportions that sum
     /// to 1.

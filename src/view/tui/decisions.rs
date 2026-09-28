@@ -114,12 +114,7 @@ impl App {
             }
             Ok(Reply::Preview(v)) => {
                 if let Some(review) = self.scene.review.as_mut() {
-                    let alpha = self
-                        .scene
-                        .data
-                        .round
-                        .as_ref()
-                        .map_or(crate::view::rounds::FDR_ALPHA, |r| r.alpha());
+                    let alpha = crate::view::rounds::fdr_alpha(self.scene.data.round.as_ref());
                     review.preview = Some(crate::view::relabel::preview_lines(&v, alpha));
                 }
                 self.message = Some("preview from lupin in the sidebar".into());

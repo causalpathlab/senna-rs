@@ -71,11 +71,16 @@ fn read_cluster_table(path: &Path) -> HashMap<String, HashMap<String, f64>> {
 }
 
 /// lupin's FDR level when a round does not record one.
-pub(super) const FDR_ALPHA: f64 = 0.1;
+const FDR_ALPHA: f64 = 0.1;
+
+/// The FDR level of `round`, else lupin's default.
+pub(super) fn fdr_alpha(round: Option<&Round>) -> f64 {
+    round.map_or(FDR_ALPHA, |r| r.alpha)
+}
 
 /// Whether a call's q passes `alpha`. A call without q (an older round's
 /// label-only call) is kept.
-fn passes(c: &Value, alpha: f64) -> bool {
+pub(super) fn passes(c: &Value, alpha: f64) -> bool {
     c.get("q").and_then(Value::as_f64).is_none_or(|q| q < alpha)
 }
 
@@ -135,6 +140,7 @@ impl Round {
     pub fn load(m: &RunManifest, dir: &Path, path: &Path) -> Self {
         let at = |key: &str| annotate_str(m, key).map(|rel| run_manifest::resolve(dir, rel));
         let stats = m.annotate.unknown.get("stats");
+        let settings = m.annotate.unknown.get("settings");
         Self {
             path: path.to_path_buf(),
             source: at("source"),
@@ -155,10 +161,7 @@ impl Round {
                         .and_then(Value::as_u64)
                         .unwrap_or(1)
                 }),
-            alpha: m
-                .annotate
-                .unknown
-                .get("settings")
+            alpha: settings
                 .and_then(|s| s.pointer("/enrichment/fdr_alpha"))
                 .and_then(Value::as_f64)
                 .unwrap_or(FDR_ALPHA),
@@ -168,10 +171,7 @@ impl Round {
             p: at("cluster_celltype_p")
                 .map(|p| read_cluster_table(&p))
                 .unwrap_or_default(),
-            gene_set_null_only: m
-                .annotate
-                .unknown
-                .get("settings")
+            gene_set_null_only: settings
                 .and_then(|s| s.pointer("/enrichment/null/sample_permutation"))
                 .and_then(Value::as_u64)
                 == Some(0),
@@ -204,10 +204,11 @@ impl Round {
     pub fn evidence(&self, id: &str) -> Option<Evidence> {
         let s = self.summary.get(id)?;
         let e = s.get("evidence")?;
+        let q = e.get("q").and_then(Value::as_f64);
         if !passes(e, self.alpha) {
             return Some(Evidence {
                 top: None,
-                q: e.get("q").and_then(Value::as_f64),
+                q,
                 agrees: true,
             });
         }
@@ -227,7 +228,7 @@ impl Round {
             };
         Some(Evidence {
             top,
-            q: e.get("q").and_then(Value::as_f64),
+            q,
             agrees: within_group || e.get("agrees").and_then(Value::as_bool).unwrap_or(true),
         })
     }
@@ -266,12 +267,6 @@ impl Round {
                     )
                 })
         })
-    }
-
-    /// lupin's FDR level for this round.
-    #[must_use]
-    pub fn alpha(&self) -> f64 {
-        self.alpha
     }
 
     /// The label the round gives cluster `id`, from the summary.
@@ -332,11 +327,8 @@ impl Round {
                 ));
                 out.push(format!("  {}", members.join(", ")));
             }
-            let num = |v: &Value, k: &str| {
-                v.get(k)
-                    .and_then(Value::as_f64)
-                    .map_or("-".to_string(), |x| format!("{x:.3}"))
-            };
+            let fmt = |x: Option<f64>| x.map_or("-".to_string(), |x| format!("{x:.3}"));
+            let num = |v: &Value, k: &str| fmt(v.get(k).and_then(Value::as_f64));
             let list = |k: &str| {
                 s.get(k)
                     .and_then(Value::as_array)
@@ -345,14 +337,12 @@ impl Round {
             };
             // NES and p of one type in this cluster, from lupin's tables.
             let table = |t: &HashMap<String, HashMap<String, f64>>, l: &str| {
-                t.get(id)
-                    .and_then(|row| row.get(&label_key(l)))
-                    .map(|x| format!("{x:.3}"))
+                t.get(id).and_then(|row| row.get(&label_key(l))).copied()
             };
             let stats = |l: &str, q: Option<f64>| {
-                let mut parts = vec![format!("q {}", q.map_or("-".into(), |x| format!("{x:.3}")))];
-                parts.extend(table(&self.p, l).map(|x| format!("p {x}")));
-                parts.extend(table(&self.nes, l).map(|x| format!("NES {x}")));
+                let mut parts = vec![format!("q {}", fmt(q))];
+                parts.extend(table(&self.p, l).map(|x| format!("p {}", fmt(Some(x)))));
+                parts.extend(table(&self.nes, l).map(|x| format!("NES {}", fmt(Some(x)))));
                 parts.join("  ")
             };
             if let Some(e) = self.evidence(id).filter(|e| !e.agrees) {
@@ -371,8 +361,10 @@ impl Round {
                 out.push(heading);
                 for c in calls.iter().take(3) {
                     let l = c.get("label").and_then(Value::as_str).unwrap_or("-");
-                    let q = c.get("q").and_then(Value::as_f64);
-                    out.push(format!("  {l}  {}", stats(l, q)));
+                    out.push(format!(
+                        "  {l}  {}",
+                        stats(l, c.get("q").and_then(Value::as_f64))
+                    ));
                 }
             } else if !list("calls").is_empty() {
                 out.push(heading);

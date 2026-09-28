@@ -531,13 +531,7 @@ impl App {
     /// Cells, features on cells, features: the next view of this layout.
     fn step_view(&mut self, step: isize) {
         let Some(i) = self.scene.next_view(step) else {
-            let has_features = self
-                .scene
-                .data
-                .spaces
-                .iter()
-                .any(|s| s.axis() == Axis::Features);
-            self.message = Some(if has_features {
+            self.message = Some(if self.scene.data.has_axis(Axis::Features) {
                 "only one view in this run".into()
             } else {
                 format!(

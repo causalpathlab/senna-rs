@@ -55,13 +55,13 @@ impl Source {
 
 /// A feature axis with the shared name matcher (exact, then symbol, then
 /// flexible), so a marker named `GENE1` finds a row named `ENSG…_GENE1`.
-struct Axis {
-    names: Vec<Box<str>>,
-    index: GeneIndex,
+pub(super) struct Axis {
+    pub(super) names: Vec<Box<str>>,
+    pub(super) index: GeneIndex,
 }
 
 impl Axis {
-    fn new(names: Vec<Box<str>>) -> Self {
+    pub(super) fn new(names: Vec<Box<str>>) -> Self {
         let index = GeneIndex::build(&names);
         Self { names, index }
     }
@@ -108,6 +108,12 @@ impl Expected {
             z_mean: OnceCell::new(),
             cell_index: OnceCell::new(),
         }
+    }
+
+    /// Mean of `z` (this model's cell embedding) over all cells.
+    fn z_mean(&self, z: &Mat) -> &Vector {
+        self.z_mean
+            .get_or_init(|| row_mean(z, &(0..z.nrows()).collect::<Vec<_>>()))
     }
 
     fn cell_index(&self) -> &HashMap<Box<str>, u32> {
@@ -761,13 +767,7 @@ impl Activity {
             .cell_index()
             .get(cell)
             .ok_or_else(|| format!("{cell} is not in the model"))? as usize;
-        let mean = e.z_mean.get_or_init(|| {
-            let mut acc = Vector::zeros(z.ncols());
-            for row in z.row_iter() {
-                acc += row.transpose();
-            }
-            acc / z.nrows().max(1) as f32
-        });
+        let mean = e.z_mean(z);
         let d = z.row(n).transpose() - mean;
         let mut scores: Vec<f32> = (rho * d).iter().copied().collect();
         drop_below_median(&mut scores, e.baseline());
@@ -792,31 +792,30 @@ impl Activity {
             .match_gene(feature)
             .ok_or_else(|| format!("no feature {feature} in the model"))?;
         let r = rho.row(g).transpose();
-        let mean = e.z_mean.get_or_init(|| {
-            let mut acc = Vector::zeros(z.ncols());
-            for row in z.row_iter() {
-                acc += row.transpose();
-            }
-            acc / z.nrows().max(1) as f32
-        });
-        let offset = mean.dot(&r);
-        let scores: Vec<f32> = (z * &r).iter().map(|v| v - offset).collect();
-        Ok(best(&scores, &e.cells, top))
+        let mean = e.z_mean(z);
+        let mut scores = z * &r;
+        scores.add_scalar_mut(-mean.dot(&r));
+        Ok(best(scores.as_slice(), &e.cells, top))
     }
 }
 
 /// The `top` finite scores, best first, with their names.
-fn best(scores: &[f32], names: &[Box<str>], top: usize) -> Vec<(Box<str>, f32)> {
+pub(super) fn best(scores: &[f32], names: &[Box<str>], top: usize) -> Vec<(Box<str>, f32)> {
     let mut ranked: Vec<(usize, f32)> = scores
         .iter()
         .copied()
         .enumerate()
         .filter(|(_, v)| v.is_finite())
         .collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // Only the top few are wanted: select them, then sort just those.
+    let by_score = |a: &(usize, f32), b: &(usize, f32)| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0));
+    if top < ranked.len() {
+        ranked.select_nth_unstable_by(top, by_score);
+        ranked.truncate(top);
+    }
+    ranked.sort_by(by_score);
     ranked
         .into_iter()
-        .take(top)
         .map(|(g, v)| (names[g].clone(), v))
         .collect()
 }

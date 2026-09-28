@@ -104,6 +104,7 @@ impl Scene {
                     x,
                     y,
                     ink: self.styles[g].ink,
+                    tier: Tier::Map,
                     priority: size as f32,
                     font,
                 });
@@ -150,6 +151,7 @@ impl Scene {
                 x,
                 y: y - font.line_height() as f32 * 0.7,
                 ink,
+                tier: Tier::Map,
                 priority: (n - rank) as f32,
                 font,
             });
@@ -207,35 +209,37 @@ impl Scene {
         // to what was just asked for.
         let mut reserved = Vec::new();
         let mut labels = Vec::new();
-        if let Some(i) = self.picked_point() {
-            let (x, y) = vp.to_px(self.current().points.xy[i]);
-            let ink = color::highlight_ink();
-            render::draw_ring(frame, x, y, 0.45 * cell_px, ink);
+        let ink = color::highlight_ink();
+        let picked = self.picked_point();
+        if let Some(i) = picked {
             let font = Font::for_cell_height(cell_px * self.text_scale, true);
-            labels.push(Label {
-                text: self.current().points.names[i].to_string(),
-                x,
-                y: y - 0.45 * cell_px - font.line_height() as f32 * 0.6,
+            let at = vp.to_px(self.current().points.xy[i]);
+            let text = self.current().points.names[i].to_string();
+            let r = 0.45 * cell_px;
+            mark(
+                frame,
+                &mut labels,
+                at,
+                r,
                 ink,
-                priority: f32::INFINITY,
                 font,
-            });
+                (Tier::Picked, 0.0),
+                text,
+            );
         }
-        // A clicked cell (and pinned sets): the cell itself, named, with an
-        // edge to each feature near it at the feature's place.
+        // A clicked cell or feature (and pinned sets): the centre, named,
+        // with an edge to each neighbour at its place.
         let (cells, features) = self.near_spaces();
         let font = Font::for_cell_height(cell_px * 0.85 * self.text_scale, true);
-        let ink = color::highlight_ink();
-        let (cell_r, feature_r) = (0.4 * cell_px, 0.25 * cell_px);
+        let (centre_r, near_r) = (0.4 * cell_px, 0.25 * cell_px);
         for near in self.locked.iter().chain(&self.near) {
-            let centre = if near.of_feature { features } else { cells };
-            let cell = centre.and_then(|k| {
-                let i = self.point_of(k, &near.cell)?;
-                Some(vp.to_px(self.data.spaces[k].points.xy[i]))
-            });
-            // The neighbours at their places, with a label priority each:
-            // features above cells, whose names are the first to give way.
-            let place = |space: Option<usize>, list: &'_ [(Box<str>, f32)], base: f32| {
+            let centre_space = match near.centre {
+                Centre::Cell => cells,
+                Centre::Feature => features,
+                Centre::None => None,
+            };
+            let centre = centre_space.and_then(|k| Some((k, self.point_of(k, &near.name)?)));
+            let place = |space: Option<usize>, list: &'_ [(Box<str>, f32)], tier: Tier| {
                 let Some(k) = space else {
                     return Vec::new();
                 };
@@ -244,42 +248,34 @@ impl Scene {
                     .filter_map(|(rank, (n, _))| {
                         let i = self.point_of(k, n)?;
                         let xy = vp.to_px(self.data.spaces[k].points.xy[i]);
-                        Some((base - rank as f32, n.to_string(), xy))
+                        Some(((tier, -(rank as f32)), n.to_string(), xy))
                     })
                     .collect::<Vec<_>>()
             };
-            let mut placed = place(features, &near.features, 1e6);
-            placed.extend(place(cells, &near.cells, 5e5));
-            if let Some((cx, cy)) = cell {
-                for &(_, _, (x, y)) in &placed {
-                    render::draw_edge(frame, (cx, cy), (x, y), cell_r, feature_r, ink, 0.7);
+            let mut placed = place(features, &near.features, Tier::NearFeature);
+            placed.extend(place(cells, &near.cells, Tier::NearCell));
+            if let Some((k, i)) = centre {
+                let at = vp.to_px(self.data.spaces[k].points.xy[i]);
+                for &(_, _, to) in &placed {
+                    render::draw_edge(frame, at, to, centre_r, near_r, ink, 0.7);
+                }
+                // A centre that is the picked point is marked already.
+                if !(k == self.space && picked == Some(i)) {
+                    let text = near.name.to_string();
+                    mark(
+                        frame,
+                        &mut labels,
+                        at,
+                        centre_r,
+                        ink,
+                        font,
+                        (Tier::Centre, 0.0),
+                        text,
+                    );
                 }
             }
-            // The picked feature is marked already, above.
-            let marked = near.of_feature
-                && self.picked_point().is_some()
-                && matches!(&self.pick, Some(Pick::One(p)) if *p == near.cell);
-            if let (Some((cx, cy)), false) = (cell, marked) {
-                render::draw_ring(frame, cx, cy, cell_r, ink);
-                labels.push(Label {
-                    text: near.cell.to_string(),
-                    x: cx,
-                    y: cy - cell_r - font.line_height() as f32 * 0.6,
-                    ink,
-                    priority: 2e6,
-                    font,
-                });
-            }
-            for (priority, text, (x, y)) in placed {
-                render::draw_ring(frame, x, y, feature_r, ink);
-                labels.push(Label {
-                    text,
-                    x,
-                    y: y - feature_r - font.line_height() as f32 * 0.6,
-                    ink,
-                    priority,
-                    font,
-                });
+            for (rank, text, at) in placed {
+                mark(frame, &mut labels, at, near_r, ink, font, rank, text);
             }
         }
         let font = Font::for_cell_height(cell_px * 0.8 * self.text_scale, false);
@@ -293,6 +289,30 @@ impl Scene {
         }
         draw_labels(frame, labels, &reserved);
     }
+}
+
+/// Ring the point at `at` (radius `r`) and name it just above the ring.
+#[allow(clippy::too_many_arguments)]
+fn mark(
+    frame: &mut render::Frame,
+    labels: &mut Vec<Label>,
+    (x, y): (f32, f32),
+    r: f32,
+    ink: Rgb,
+    font: Font,
+    (tier, priority): (Tier, f32),
+    text: String,
+) {
+    render::draw_ring(frame, x, y, r, ink);
+    labels.push(Label {
+        text,
+        x,
+        y: y - r - font.line_height() as f32 * 0.6,
+        ink,
+        tier,
+        priority,
+        font,
+    });
 }
 
 /// Render the whole scene once, labels included.

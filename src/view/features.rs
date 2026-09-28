@@ -5,12 +5,22 @@ use super::*;
 
 const NEAR: usize = 12;
 
+/// What a set of neighbours is drawn around.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Centre {
+    /// A clicked cell, placed where the cells are.
+    Cell,
+    /// A clicked feature, placed where the features are.
+    Feature,
+    /// Nothing: a pinned feature name on its own.
+    None,
+}
+
 /// Features shown around one clicked cell, or features and cells around one
 /// clicked feature.
 pub(crate) struct Near {
-    pub cell: Box<str>,
-    /// `cell` names a feature, placed where the features are.
-    pub of_feature: bool,
+    pub name: Box<str>,
+    pub centre: Centre,
     pub features: Vec<(Box<str>, f32)>,
     /// Cells nearest a clicked feature (runs with cells in an embedding).
     pub cells: Vec<(Box<str>, f32)>,
@@ -19,7 +29,7 @@ pub(crate) struct Near {
 /// The run's feature embedding with every row L2-normalized, so a product of
 /// rows is their cosine.
 pub(crate) struct FeatureEmbedding {
-    index: NameIndex,
+    axis: activity::Axis,
     rows: Mat,
 }
 
@@ -28,41 +38,24 @@ impl FeatureEmbedding {
         run: Option<&(senna::run_manifest::RunManifest, std::path::PathBuf)>,
     ) -> Result<Self, String> {
         let (m, dir) = run.ok_or("no run to read a feature embedding from")?;
-        let (path, _bias) = senna::run_manifest::resolve_feature_embedding_for(m, dir)
+        let (names, rows) = crate::postprocess::fit_layout_features::read_feature_rows(m, dir)
             .map_err(|e| format!("no feature embedding: {e}"))?;
-        let MatWithNames {
-            rows: names,
-            mut mat,
-            ..
-        } = Mat::from_parquet_with_row_names(&path, Some(0)).map_err(|e| e.to_string())?;
-        l2_normalize_rows_inplace(&mut mat);
-        let mut index = NameIndex::new();
-        for (i, n) in names.into_iter().enumerate() {
-            index.entry(n).or_insert(i);
-        }
-        Ok(Self { index, rows: mat })
+        Ok(Self {
+            axis: activity::Axis::new(names),
+            rows,
+        })
     }
 
     /// The `top` features of highest cosine to `feature`, itself left out.
     fn near(&self, feature: &str, top: usize) -> Result<Vec<(Box<str>, f32)>, String> {
-        let &i = self
+        let i = self
+            .axis
             .index
-            .get(feature)
+            .match_gene(feature)
             .ok_or_else(|| format!("{feature} is not in the feature embedding"))?;
-        let cos = &self.rows * self.rows.row(i).transpose();
-        let mut ranked: Vec<(&Box<str>, f32)> = self
-            .index
-            .iter()
-            .filter(|&(_, &j)| j != i)
-            .map(|(n, &j)| (n, cos[j]))
-            .filter(|(_, v)| v.is_finite())
-            .collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-        Ok(ranked
-            .into_iter()
-            .take(top)
-            .map(|(n, v)| (n.clone(), v))
-            .collect())
+        let mut cos = &self.rows * self.rows.row(i).transpose();
+        cos[i] = f32::NAN;
+        Ok(activity::best(cos.as_slice(), &self.axis.names, top))
     }
 }
 
@@ -314,7 +307,7 @@ impl Scene {
         };
         match activity.near_cell(cell, NEAR) {
             Ok(features) => {
-                if self.near_spaces().1.is_none() {
+                if self.feature_space().is_none() {
                     self.note = Some(if self.root() == self.space {
                         format!(
                             "no features placed on this {} map; `senna layout {}` places them",
@@ -326,8 +319,8 @@ impl Scene {
                     });
                 }
                 self.near = Some(Near {
-                    cell: cell.into(),
-                    of_feature: false,
+                    name: cell.into(),
+                    centre: Centre::Cell,
                     features,
                     cells: Vec::new(),
                 });
@@ -349,7 +342,7 @@ impl Scene {
             .as_ref()
             .map_err(Clone::clone)
             .and_then(|e| e.near(feature, NEAR));
-        let has_cells = self.data.spaces.iter().any(|s| s.axis() == Axis::Cells);
+        let has_cells = self.data.has_axis(Axis::Cells);
         let cells = match self.activity().filter(|_| has_cells) {
             Some(a) => a.near_feature(feature, NEAR),
             None => Ok(Vec::new()),
@@ -361,8 +354,8 @@ impl Scene {
             }
             (features, cells) => {
                 self.near = Some(Near {
-                    cell: feature.into(),
-                    of_feature: true,
+                    name: feature.into(),
+                    centre: Centre::Feature,
                     features: features.unwrap_or_default(),
                     cells: cells.unwrap_or_default(),
                 });
@@ -401,8 +394,8 @@ impl Scene {
                 });
                 if placed {
                     self.locked.push(Near {
-                        cell: f.clone(),
-                        of_feature: false,
+                        name: f.clone(),
+                        centre: Centre::None,
                         features: vec![(f.clone(), f32::NAN)],
                         cells: Vec::new(),
                     });
@@ -419,55 +412,49 @@ impl Scene {
     }
 
     /// Where features sit on the current cell map: the features-on-cells
-    /// layout of the same method, if the run has one.
+    /// layout of the same method, if the run has one. A zoomed layout is laid
+    /// out afresh, so features placed on the full map do not belong on it.
     pub fn feature_positions(&self) -> Option<&super::data::Points> {
         Some(&self.data.spaces[self.feature_space()?].points)
     }
 
     /// The space `feature_positions` are the points of.
     pub(super) fn feature_space(&self) -> Option<usize> {
-        let root = &self.data.spaces[self.root()];
+        if self.root() != self.space {
+            return None;
+        }
+        let method = &self.current().method;
         self.data
             .spaces
             .iter()
-            .position(|s| s.kind == SpaceKind::FeaturesOnCells && s.method == root.method)
+            .position(|s| s.kind == SpaceKind::FeaturesOnCells && s.method == *method)
     }
 
     /// Where a clicked cell and the features near it are drawn on the view
     /// on screen: `(cell space, feature space)`, either absent when the view
-    /// has no place for it. A zoomed layout is laid out afresh, so the
-    /// features placed on the full map do not belong on it.
+    /// has no place for it.
     pub(super) fn near_spaces(&self) -> (Option<usize>, Option<usize>) {
         let space = self.current();
         match space.kind {
-            SpaceKind::Cells => (
-                Some(self.space),
-                self.feature_space().filter(|_| self.root() == self.space),
-            ),
+            SpaceKind::Cells => (Some(self.space), self.feature_space()),
             SpaceKind::FeaturesOnCells => (space.backdrop, Some(self.space)),
             SpaceKind::Features => (None, Some(self.space)),
         }
     }
 
-    /// The point named `name` in space `k` (its first, when repeated).
+    /// The point named `name` in space `k` (its first, when repeated). Each
+    /// space's index is built once and kept: rebuilding a cell map's on every
+    /// view switch would stall the redraw.
     pub(super) fn point_of(&self, k: usize, name: &str) -> Option<usize> {
         let mut cache = self.name_index.borrow_mut();
-        let at = match cache.iter().position(|(s, _)| *s == k) {
-            Some(at) => at,
-            None => {
-                let mut first = NameIndex::new();
-                for (i, n) in self.data.spaces[k].points.names.iter().enumerate() {
-                    first.entry(n.clone()).or_insert(i);
-                }
-                // A cell map and a feature map are all one view needs.
-                if cache.len() >= 2 {
-                    cache.remove(0);
-                }
-                cache.push((k, first));
-                cache.len() - 1
+        let index = cache.entry(k).or_insert_with(|| {
+            let mut first = NameIndex::new();
+            for (i, n) in self.data.spaces[k].points.names.iter().enumerate() {
+                first.entry(n.clone()).or_insert(i);
             }
-        };
-        cache[at].1.get(name).copied()
+            first
+        });
+        index.get(name).copied()
     }
 
     /// Sidebar text for the features near the clicked cell or feature.
@@ -478,7 +465,7 @@ impl Scene {
             if list.is_empty() {
                 continue;
             }
-            out.push(format!("{what} nearest {}", near.cell));
+            out.push(format!("{what} nearest {}", near.name));
             out.extend(list.iter().map(|(f, v)| format!("  {f:<14} {v:+.2}")));
             out.push(String::new());
         }
@@ -498,11 +485,7 @@ mod tests {
         let mut rows = Mat::from_row_slice(4, 2, &[1.0, 0.0, 5.0, 0.5, 0.0, 1.0, -2.0, 0.0]);
         l2_normalize_rows_inplace(&mut rows);
         let e = FeatureEmbedding {
-            index: names
-                .iter()
-                .enumerate()
-                .map(|(i, &n)| (n.into(), i))
-                .collect(),
+            axis: activity::Axis::new(names.map(Into::into).to_vec()),
             rows,
         };
         let near = e.near("a", 2).unwrap();
