@@ -22,8 +22,9 @@ use activity::{Activity, Levels, Source};
 use color::Rgb;
 use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
+use features::Centre;
 use paint::render_full;
-use render::{draw_labels, group_medians, Job, Label, Paint, Viewport};
+use render::{draw_labels, group_medians, Job, Label, Paint, Tier, Viewport};
 use senna::embed_common::*;
 use text::Font;
 
@@ -217,7 +218,7 @@ pub(crate) struct Scene {
     feature_index: std::cell::RefCell<Option<(usize, GeneIndex)>>,
     /// Point of each name in a space, for placing a clicked cell and the
     /// names near it; one per space, for the cell map and the feature map.
-    name_index: std::cell::RefCell<Vec<(usize, NameIndex)>>,
+    name_index: std::cell::RefCell<std::collections::HashMap<usize, NameIndex>>,
     /// Group label anchors for a (space, grouping).
     medians: std::cell::RefCell<Option<((usize, usize), render::Medians)>>,
     /// The run's geometry table, read on the first zoom into a group.
@@ -260,7 +261,7 @@ impl Scene {
             orders: std::cell::RefCell::new(Vec::new()),
             shown_ids: 0,
             feature_index: std::cell::RefCell::new(None),
-            name_index: std::cell::RefCell::new(Vec::new()),
+            name_index: std::cell::RefCell::default(),
             medians: std::cell::RefCell::new(None),
             note: None,
         };
@@ -332,46 +333,49 @@ fn run_senna(why: &str, argv: &[&str]) -> anyhow::Result<()> {
 /// once. Only a missing cell layout is an error; the rest warn and the view
 /// opens without them.
 fn prepare_run(args: &ViewArgs) -> anyhow::Result<()> {
-    use senna::run_manifest::{RunKind, RunManifest};
+    use senna::run_manifest::RunManifest;
     let from: &str = &args.from;
     let load = || RunManifest::load(std::path::Path::new(from));
     let (m, dir) = load()?;
     let out = senna::run_manifest::derive_out_prefix(from);
-    let has_cells = m.kind != RunKind::Fne;
     let has_features = m.outputs.feature_embedding.is_some();
-    // A feature map alone is no layout of the cells.
-    let has_cell_map = m.layout.cell_coords.is_some()
-        || m.layout.methods.values().any(|e| e.cell_coords.is_some());
     let method = args
         .method
         .as_deref()
         .or(m.layout.current.as_deref())
         .unwrap_or("umap")
         .to_string();
-    let lacks_method = m
-        .layout
-        .methods
-        .get(&method)
-        .is_none_or(|e| e.cell_coords.is_none());
+    // The method asked for, else any: a feature map alone is no cell layout.
+    let no_cells = |e: &senna::run_manifest::LayoutEntry| e.cell_coords.is_none();
+    let wants_cell_layout = m.kind.has_cells()
+        && match &args.method {
+            Some(w) => m.layout.methods.get(w.as_ref()).is_none_or(no_cells),
+            None => m.layout.cell_coords.is_none() && m.layout.methods.values().all(no_cells),
+        };
     let warn = |r: anyhow::Result<()>| {
         if let Err(e) = r {
             log::warn!("view: {e}; opening without it");
         }
     };
+    let cluster = |why: &str, extra: &[&str]| {
+        let mut argv = vec!["clustering", "--from", from, "-m", "leiden", "-o", &out];
+        argv.extend(extra);
+        warn(run_senna(&format!("{from} has no {why} yet"), &argv));
+    };
 
-    if has_cells && (!has_cell_map || (args.method.is_some() && lacks_method)) {
+    if wants_cell_layout {
         run_senna(
             &format!("{from} has no {method} layout of its cells yet"),
             &["layout", &method, "--from", from, "--out", &out],
         )?;
     }
     let (m, _) = load()?;
-    let feature_map = m
-        .layout
-        .methods
-        .values()
-        .any(|e| e.feature_coords.is_some());
-    if has_features && !feature_map {
+    if has_features
+        && m.layout
+            .methods
+            .values()
+            .all(|e| e.feature_coords.is_none())
+    {
         warn(run_senna(
             &format!("{from} has no layout of its feature embedding yet"),
             &[
@@ -379,41 +383,13 @@ fn prepare_run(args: &ViewArgs) -> anyhow::Result<()> {
             ],
         ));
     }
-    if has_cells && m.cluster.clusters.is_none() {
-        if let Some(latent) = m.outputs.geometry_latent() {
-            let latent = senna::run_manifest::resolve(&dir, latent);
-            let latent = latent.to_string_lossy();
-            warn(run_senna(
-                &format!("{from} has no cell clusters yet"),
-                &[
-                    "clustering",
-                    "--from",
-                    from,
-                    "--latent",
-                    &latent,
-                    "-m",
-                    "leiden",
-                    "-o",
-                    &out,
-                ],
-            ));
-        }
+    let latent = m.outputs.geometry_latent().filter(|_| m.kind.has_cells());
+    if let (Some(latent), None) = (latent, &m.cluster.clusters) {
+        let latent = senna::run_manifest::resolve(&dir, latent);
+        cluster("cell clusters", &["--latent", &latent.to_string_lossy()]);
     }
     if has_features && m.cluster.feature_clusters.is_none() {
-        warn(run_senna(
-            &format!("{from} has no feature clusters yet"),
-            &[
-                "clustering",
-                "--target",
-                "features",
-                "--from",
-                from,
-                "-m",
-                "leiden",
-                "-o",
-                &out,
-            ],
-        ));
+        cluster("feature clusters", &["--target", "features"]);
     }
     Ok(())
 }
@@ -505,7 +481,10 @@ mod tests {
             run: None,
             round: None,
             labels: vec![
-                Labels::clusters([("c2", 1), ("c1", 0), ("c3", 1)].map(|(a, b)| (a.into(), b))),
+                Labels::clusters(
+                    LabelKind::Cluster,
+                    [("c2", 1), ("c1", 0), ("c3", 1)].map(|(a, b)| (a.into(), b)),
+                ),
                 Labels::new(
                     LabelKind::Annotation,
                     [("c1", "CT1"), ("c4", "unassigned")].map(|(a, b)| (a.into(), b.into())),
@@ -695,8 +674,8 @@ mod tests {
         let vp = Viewport::fit(s.current().points.bounds, 200, 200);
         let before = render_full(&s, vp, 16.0);
         s.near = Some(features::Near {
-            cell: "c1".into(),
-            of_feature: false,
+            name: "c1".into(),
+            centre: features::Centre::Cell,
             features: vec![("g1".into(), 1.0), ("nowhere".into(), 0.5)],
             cells: Vec::new(),
         });

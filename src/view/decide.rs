@@ -104,16 +104,14 @@ pub fn relabel(
     decisions: &[Value],
     mode: Mode,
 ) -> Result<Reply, String> {
-    let flags: &[&str] = match mode {
-        Mode::Next => &["--next"],
-        Mode::Preview => &["--preview"],
+    let flag = match mode {
+        Mode::Next => "--next",
+        Mode::Preview => "--preview",
     };
-    let flag = flags.join(" ");
     let mut child = Command::new(lupin)
         .args(["relabel", "-f"])
         .arg(round)
-        .args(["-d", "-"])
-        .args(flags)
+        .args(["-d", "-", flag])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

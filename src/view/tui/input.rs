@@ -313,14 +313,8 @@ impl App {
         // back.
         if on_features {
             self.scene.show_near_feature(&name);
-            let has_cells = self
-                .scene
-                .data
-                .spaces
-                .iter()
-                .any(|s| s.axis() == crate::view::Axis::Cells);
-            if has_cells {
-                self.scene.set_pick(Pick::One(name.into()));
+            self.scene.set_pick(Pick::One(name.into()));
+            if self.scene.data.has_axis(crate::view::Axis::Cells) {
                 msg.push_str(" · tab to a cell view for its activity");
             }
         }

@@ -232,11 +232,15 @@ impl Labels {
         labels
     }
 
-    /// Clusters from `(point, id)` pairs, named `C{id}` and ordered by id.
-    pub(crate) fn clusters<I: IntoIterator<Item = (Box<str>, i64)>>(pairs: I) -> Self {
+    /// Clusters of `kind` from `(point, id)` pairs, named `C{id}` and
+    /// ordered by id.
+    pub(crate) fn clusters<I: IntoIterator<Item = (Box<str>, i64)>>(
+        kind: LabelKind,
+        pairs: I,
+    ) -> Self {
         let pairs: Vec<(Box<str>, i64)> = pairs.into_iter().collect();
         let mut labels = Self::new(
-            LabelKind::Cluster,
+            kind,
             pairs
                 .iter()
                 .map(|(n, id)| (n.clone(), format!("C{id}").into_boxed_str())),
@@ -341,15 +345,16 @@ fn row_argmax(m: &Mat, i: usize) -> usize {
 }
 
 /// Integer ids from a one-column parquet (NaN = unassigned).
-fn read_cluster_labels(path: &Path) -> anyhow::Result<Labels> {
+fn read_cluster_labels(path: &Path, kind: LabelKind) -> anyhow::Result<Labels> {
     let MatWithNames { rows, mat, .. } =
         Mat::from_parquet_with_row_names(&path.to_string_lossy(), Some(0))?;
-    Ok(Labels::clusters(rows.into_iter().enumerate().filter_map(
-        |(i, n)| {
+    Ok(Labels::clusters(
+        kind,
+        rows.into_iter().enumerate().filter_map(|(i, n)| {
             let v = mat[(i, 0)];
             (v.is_finite() && v >= 0.0).then_some((n, v as i64))
-        },
-    )))
+        }),
+    ))
 }
 
 /// Topic argmax per cell from log θ (`cells × K`), as `T{k}`.
@@ -503,7 +508,7 @@ fn load_labels(m: &RunManifest, dir: &Path, round: &super::rounds::Round) -> Vec
         );
     }
     if let Some(p) = &m.cluster.clusters {
-        keep("clusters", read_cluster_labels(&at(p)));
+        keep("clusters", read_cluster_labels(&at(p), LabelKind::Cluster));
     }
     // An embedding run's `latent` is log θ only when Z went to
     // `cell_embedding`; older manifests kept Z there instead.
@@ -520,10 +525,7 @@ fn load_labels(m: &RunManifest, dir: &Path, round: &super::rounds::Round) -> Vec
     if let Some(p) = &m.cluster.feature_clusters {
         keep(
             "feature clusters",
-            read_cluster_labels(&at(p)).map(|mut l| {
-                l.kind = LabelKind::FeatureCluster;
-                l
-            }),
+            read_cluster_labels(&at(p), LabelKind::FeatureCluster),
         );
     }
     // Only worth a colouring when the embedding mixes types.
@@ -537,6 +539,12 @@ fn load_labels(m: &RunManifest, dir: &Path, round: &super::rounds::Round) -> Vec
 }
 
 impl Dataset {
+    /// Whether any layout shows points of `axis`.
+    #[must_use]
+    pub fn has_axis(&self, axis: Axis) -> bool {
+        self.spaces.iter().any(|s| s.axis() == axis)
+    }
+
     pub fn load(from: &str) -> anyhow::Result<Self> {
         let manifest_path = PathBuf::from(from);
         let (m, dir) = RunManifest::load(&manifest_path)?;

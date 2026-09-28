@@ -207,7 +207,7 @@ impl Scene {
         }
         if let Some(near) = &self.near {
             out.push(String::new());
-            out.push(format!("near {} (k pins their names)", near.cell));
+            out.push(format!("near {} (k pins their names)", near.name));
             let names: Vec<&str> = near.features.iter().map(|(f, _)| f.as_ref()).collect();
             out.push(format!("  {}", names.join(" ")));
         }
@@ -238,12 +238,14 @@ pub fn preview_lines(v: &serde_json::Value, alpha: f64) -> Vec<String> {
         for (id, c) in cs {
             let s = |k: &str| c[k].as_str().unwrap_or("unassigned").to_string();
             let call = &c["calls"][0];
-            let q = call["q"].as_f64();
-            let top = match (call["label"].as_str(), q) {
-                (_, Some(q)) if q >= alpha => format!("no call passes FDR (q < {alpha})"),
-                (Some(l), Some(q)) => format!("top call {l} q {q:.3}"),
-                (Some(l), None) => format!("top call {l}"),
-                (None, _) => "top call -".into(),
+            let top = if !crate::view::rounds::passes(call, alpha) {
+                format!("no call passes FDR (q < {alpha})")
+            } else {
+                let l = call["label"].as_str().unwrap_or("-");
+                let q = call["q"]
+                    .as_f64()
+                    .map_or(String::new(), |q| format!(" q {q:.3}"));
+                format!("top call {l}{q}")
             };
             out.push(format!(
                 "  C{id}: {} → {}   {top}",

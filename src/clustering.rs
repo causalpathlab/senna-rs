@@ -4,11 +4,13 @@
 //! embeddings), or, with `--target features`, the run's feature embedding.
 
 use crate::cluster_bhc::{run_cluster_bhc, ClusterBhcConfig};
+use crate::postprocess::fit_layout_features::read_feature_rows;
 use senna::cluster::{
-    hsblock_clustering, kmeans_clustering, leiden_clustering, ClusterMethod, ClusterResult,
+    hsblock_clustering, kmeans_clustering, leiden_clustering_with_metric, ClusterMethod,
+    ClusterResult, LatentMetric,
 };
 use senna::embed_common::*;
-use senna::run_manifest::{self, RunManifest};
+use senna::run_manifest::{RunCluster, RunManifest};
 use senna::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
 use std::path::Path;
 
@@ -44,6 +46,33 @@ pub enum ClusterTarget {
     Cells,
     /// The run's feature embedding ρ, by cosine; needs --from.
     Features,
+}
+
+impl ClusterTarget {
+    /// Output file suffix and the name of its row column.
+    fn output(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Cells => ("clusters", "cell"),
+            Self::Features => ("feature_clusters", "feature"),
+        }
+    }
+
+    /// The kNN metric for leiden: cells as ever; features by angle, as
+    /// their layout compares them.
+    fn metric(self) -> LatentMetric {
+        match self {
+            Self::Cells => LatentMetric::ZScoreEuclidean,
+            Self::Features => LatentMetric::Cosine,
+        }
+    }
+
+    /// The manifest slot the output is recorded in.
+    fn slot(self, cluster: &mut RunCluster) -> &mut Option<String> {
+        match self {
+            Self::Cells => &mut cluster.clusters,
+            Self::Features => &mut cluster.feature_clusters,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -226,6 +255,7 @@ pub struct ClusteringArgs {
 
     #[arg(
         long = "from",
+        required_if_eq("target", "features"),
         help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
         long_help = "When given, the manifest is updated in place with the cluster output path,\n\
                      under `cluster.clusters`,\n\
@@ -234,48 +264,29 @@ pub struct ClusteringArgs {
     from: Option<Box<str>>,
 }
 
-/// The feature embedding of the `--from` run, one L2-normalized row per
-/// feature, so Euclidean distances rank as cosine.
-fn read_feature_embedding(from: Option<&str>) -> anyhow::Result<(Vec<Box<str>>, Mat)> {
-    let from = from.ok_or_else(|| {
-        anyhow::anyhow!(
-            "--target features needs --from <run.senna.json> to find the feature embedding"
-        )
-    })?;
-    let (manifest, dir) = RunManifest::load(Path::new(from))?;
-    let (rho, _bias) = run_manifest::resolve_feature_embedding_for(&manifest, &dir)?;
-    let MatWithNames { rows, mut mat, .. } = Mat::from_parquet_with_row_names(&rho, Some(0))?;
-    l2_normalize_rows_inplace(&mut mat);
-    info!(
-        "Clustering {} features × {} dims from {rho} (cosine)",
-        mat.nrows(),
-        mat.ncols()
-    );
-    Ok((rows, mat))
-}
-
 pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
-    let features = args.target == ClusterTarget::Features;
-    anyhow::ensure!(
-        !(features && args.data_files.is_some()),
-        "--data (BHC over cell counts) does not apply to --target features"
-    );
-
-    let (cell_names, latent) = if features {
-        read_feature_embedding(args.from.as_deref())?
-    } else {
-        let latent = args
-            .latent
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("--latent is required to cluster cells"))?;
-        let MatWithNames { rows, mat, .. } = read_mat(latent)?;
-        info!(
-            "Loaded latent representation: {} cells × {} features",
-            mat.nrows(),
-            mat.ncols()
-        );
-        (rows, mat)
+    let (cell_names, latent) = match (args.target, args.latent.as_deref(), args.from.as_deref()) {
+        (ClusterTarget::Cells, Some(latent), _) => {
+            let MatWithNames { rows, mat, .. } = read_mat(latent)?;
+            info!(
+                "Loaded latent representation: {} cells × {} features",
+                mat.nrows(),
+                mat.ncols()
+            );
+            (rows, mat)
+        }
+        (ClusterTarget::Features, _, Some(from)) => {
+            anyhow::ensure!(
+                args.data_files.is_none(),
+                "--data (BHC over cell counts) does not apply to --target features"
+            );
+            let (manifest, dir) = RunManifest::load(Path::new(from))?;
+            read_feature_rows(&manifest, &dir)?
+        }
+        // clap requires --from for an explicit --target features; the
+        // default target is not seen by its conditions.
+        _ => anyhow::bail!("--latent is required to cluster cells"),
     };
 
     // Determine number of clusters
@@ -299,12 +310,13 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
                 "Running Leiden clustering with knn={}, resolution={:.2}, target_k={:?}",
                 args.knn, args.resolution, args.num_clusters
             );
-            leiden_clustering(
+            leiden_clustering_with_metric(
                 &latent,
                 args.knn,
                 args.resolution,
                 args.num_clusters,
                 args.seed,
+                args.target.metric(),
             )?
         }
         ClusterMethodCli::Hsblock => {
@@ -344,11 +356,8 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
     }
 
     // Output cluster assignments as parquet
-    let (output_file, row_label) = if features {
-        (format!("{}.feature_clusters.parquet", args.out), "feature")
-    } else {
-        (format!("{}.clusters.parquet", args.out), "cell")
-    };
+    let (suffix, row_label) = args.target.output();
+    let output_file = format!("{}.{suffix}.parquet", args.out);
     write_cluster_assignments(&result, &cell_names, &output_file, row_label)?;
 
     info!("Wrote cluster assignments to {output_file}");
@@ -379,10 +388,7 @@ fn update_manifest_cluster_path(
             |_| cluster_path.to_string(),
             |p| p.to_string_lossy().into_owned(),
         );
-    match target {
-        ClusterTarget::Cells => manifest.cluster.clusters = Some(rel),
-        ClusterTarget::Features => manifest.cluster.feature_clusters = Some(rel),
-    }
+    *target.slot(&mut manifest.cluster) = Some(rel);
     manifest.save(path)?;
     info!("Updated manifest {manifest_path} with cluster path");
     Ok(())

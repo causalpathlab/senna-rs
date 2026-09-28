@@ -117,26 +117,21 @@ impl Scene {
     /// of the layout method on screen, zoomed layouts left out; when that
     /// method has one view only, of every method. `None` with nowhere to go.
     pub fn next_view(&self, step: isize) -> Option<usize> {
+        // A zoomed layout steps from the map it was zoomed from.
         let root = self.root();
         let method = &self.data.spaces[root].method;
         let tops = |same: bool| -> Vec<usize> {
-            (0..self.data.spaces.len())
-                .filter(|&i| {
-                    let s = &self.data.spaces[i];
-                    s.parent.is_none() && (!same || s.method == *method)
-                })
+            let spaces = self.data.spaces.iter().enumerate();
+            spaces
+                .filter(|(_, s)| s.parent.is_none() && (!same || s.method == *method))
+                .map(|(i, _)| i)
                 .collect()
         };
-        let mut views = tops(true);
-        if views.len() < 2 {
-            views = tops(false);
-        }
-        if views.len() < 2 {
-            return None;
-        }
-        // A zoomed layout steps from the map it was zoomed from.
-        let at = views.iter().position(|&i| i == root).unwrap_or(0) as isize;
-        Some(views[(at + step).rem_euclid(views.len() as isize) as usize])
+        let views = Some(tops(true))
+            .filter(|v| v.len() > 1)
+            .unwrap_or_else(|| tops(false));
+        let at = views.iter().position(|&i| i == root)? as isize;
+        (views.len() > 1).then(|| views[(at + step).rem_euclid(views.len() as isize) as usize])
     }
 
     /// Swap in a reloaded or different round, keeping layout, grouping and

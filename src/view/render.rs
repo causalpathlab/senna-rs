@@ -378,13 +378,30 @@ impl Canvas for Frame {
     }
 }
 
+/// Which labels win a collision, before `priority` is compared: whatever
+/// was just asked for over the map's own labels.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Tier {
+    /// Group and point names.
+    Map,
+    /// Cells near a clicked feature.
+    NearCell,
+    /// Features near a clicked cell or feature.
+    NearFeature,
+    /// The clicked cell or feature.
+    Centre,
+    /// The picked feature.
+    Picked,
+}
+
 /// A label candidate in pixel space.
 pub struct Label {
     pub text: String,
     pub x: f32,
     pub y: f32,
     pub ink: Rgb,
-    /// Larger goes first when labels collide.
+    pub tier: Tier,
+    /// Within a tier, larger goes first when labels collide.
     pub priority: f32,
     pub font: Font,
 }
@@ -392,7 +409,7 @@ pub struct Label {
 /// Place labels centred on their anchors, dropping any that would overlap one
 /// already placed or a `reserved` rectangle. Higher priority wins.
 pub fn draw_labels(frame: &mut Frame, mut labels: Vec<Label>, reserved: &[[f32; 4]]) {
-    labels.sort_by(|a, b| b.priority.total_cmp(&a.priority));
+    labels.sort_by(|a, b| b.tier.cmp(&a.tier).then(b.priority.total_cmp(&a.priority)));
     let bg = frame.background();
     let mut placed: Vec<[f32; 4]> = reserved.to_vec();
     for l in labels {
@@ -508,28 +525,28 @@ pub fn draw_edge(
         return;
     }
     let (ux, uy) = (dx / len, dy / len);
+    // Pixel centres at integer coordinates, the major axis first.
     let steep = dy.abs() > dx.abs();
-    // One step per pixel along the major axis; the line's minor coordinate
-    // is shared between the two pixels it falls between.
-    let n = (len - trim_a - trim_b).ceil() as usize;
-    let step = (len - trim_a - trim_b) / n as f32;
-    let mut last = None;
-    for s in 0..=n {
-        let t = trim_a + s as f32 * step;
-        let (x, y) = (a.0 + ux * t - 0.5, a.1 + uy * t - 0.5);
-        let (major, minor) = if steep { (y, x) } else { (x, y) };
-        let m = major.round() as i64;
-        // Steps are a pixel along the line, at most one along the major axis.
-        if last == Some(m) {
-            continue;
-        }
-        last = Some(m);
+    let ends = [
+        (a.0 + ux * trim_a - 0.5, a.1 + uy * trim_a - 0.5),
+        (b.0 - ux * trim_b - 0.5, b.1 - uy * trim_b - 0.5),
+    ]
+    .map(|(x, y)| if steep { (y, x) } else { (x, y) });
+    let [p, q] = if ends[0].0 <= ends[1].0 {
+        ends
+    } else {
+        [ends[1], ends[0]]
+    };
+    let slope = (q.1 - p.1) / (q.0 - p.0);
+    // One pixel column per step; the line's minor coordinate is shared
+    // between the two pixels it falls between.
+    for m in p.0.ceil() as i64..=q.0.floor() as i64 {
+        let minor = p.1 + (m as f32 - p.0) * slope;
         let lo = minor.floor();
-        let f = minor - lo;
-        for (o, w) in [(lo as i64, 1.0 - f), (lo as i64 + 1, f)] {
-            let (px, py) = if steep { (o, m) } else { (m, o) };
-            if px >= 0 && py >= 0 && (px as usize) < frame.w && (py as usize) < frame.h {
-                frame.blend(px as usize, py as usize, ink, alpha * w);
+        for (o, w) in [(lo as i64, 1.0 - (minor - lo)), (lo as i64 + 1, minor - lo)] {
+            let (x, y) = if steep { (o, m) } else { (m, o) };
+            if x >= 0 && y >= 0 && (x as usize) < frame.w && (y as usize) < frame.h {
+                frame.blend(x as usize, y as usize, ink, alpha * w);
             }
         }
     }

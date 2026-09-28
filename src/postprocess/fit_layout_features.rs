@@ -135,6 +135,24 @@ pub(crate) struct FeatureLayoutInput {
     pub feat_kn: Mat,
 }
 
+/// A run's feature embedding ρ, one L2-normalized row per feature, so dot
+/// products are cosines: what feature layouts, feature clusters and the
+/// viewer's nearest features all compare.
+pub(crate) fn read_feature_rows(
+    manifest: &RunManifest,
+    dir: &Path,
+) -> anyhow::Result<(Vec<Box<str>>, Mat)> {
+    let (path, _bias) = run_manifest::resolve_feature_embedding_for(manifest, dir)?;
+    let MatWithNames { rows, mut mat, .. } = Mat::from_parquet_with_row_names(&path, Some(0))?;
+    l2_normalize_rows_inplace(&mut mat);
+    info!(
+        "Feature embedding: {} features × {} dims from {path} (cosine)",
+        mat.nrows(),
+        mat.ncols()
+    );
+    Ok((rows, mat))
+}
+
 pub(crate) fn load_feature_layout_input(
     args: &LayoutCommonArgs,
 ) -> anyhow::Result<FeatureLayoutInput> {
@@ -145,7 +163,7 @@ pub(crate) fn load_feature_layout_input(
     })?;
     let manifest_path = PathBuf::from(from);
     let (manifest, dir) = RunManifest::load(&manifest_path)?;
-    let (rho_path, _bias) = run_manifest::resolve_feature_embedding_for(&manifest, &dir)?;
+    let (names, rows) = read_feature_rows(&manifest, &dir)?;
 
     let out: String = args
         .out
@@ -153,18 +171,7 @@ pub(crate) fn load_feature_layout_input(
         .map_or_else(|| manifest.prefix.clone(), String::from);
     mkdir_parent(&out)?;
 
-    let MatWithNames {
-        rows: names,
-        mat: rho_dh,
-        ..
-    } = Mat::from_parquet_with_row_names(&rho_path, Some(0))?;
-    let mut feat_kn = rho_dh.transpose();
-    feat_kn.normalize_columns_inplace();
-    info!(
-        "Feature layout input: {} features × {} dims from {rho_path} (cosine)",
-        feat_kn.ncols(),
-        feat_kn.nrows()
-    );
+    let feat_kn = rows.transpose();
 
     Ok(FeatureLayoutInput {
         manifest,
