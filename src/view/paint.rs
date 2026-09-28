@@ -1,0 +1,275 @@
+//! Turning the scene into layers, labels and a finished frame.
+
+use super::*;
+
+impl Scene {
+    /// Layers for the renderer: the backdrop (if any) under the points.
+    pub fn layers(&self) -> Vec<Paint<'_>> {
+        let space = self.current();
+        let mut layers = Vec::new();
+        let mut keys = Vec::new();
+        if let Some(b) = space.backdrop {
+            layers.push(Paint {
+                points: &self.data.spaces[b].points,
+                groups: None,
+                styles: &[],
+                focus: None,
+                selected: None,
+                muted: true,
+                size: 0.8,
+                levels: None,
+                order: None,
+            });
+            keys.push((b, None, None, 0, 0, true));
+        }
+        let shown = self.current_shown();
+        let merge = self.review.as_ref().and_then(|r| r.merge.as_ref());
+        let selected = merge.map(|m| m.levels.as_slice());
+        layers.push(Paint {
+            points: &space.points,
+            groups: self.groups(),
+            styles: &self.styles,
+            focus: self.focus,
+            selected,
+            muted: false,
+            size: if space.backdrop.is_some() { 1.5 } else { 1.0 },
+            levels: shown.map(|s| (&s.levels, self.ramp.as_slice())),
+            order: None,
+        });
+        keys.push((
+            self.space,
+            self.colour,
+            self.focus,
+            shown.map_or(0, |s| s.id),
+            merge.map_or(0, |m| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                m.chosen.hash(&mut h);
+                h.finish() | 1
+            }),
+            false,
+        ));
+        // The order only changes with these keys, not with the camera: reuse
+        // it across pans and zooms instead of re-ranking every point.
+        let mut cache = self.orders.borrow_mut();
+        for (paint, key) in layers.iter_mut().zip(keys) {
+            let order = match cache.iter().find(|(k, _)| *k == key) {
+                Some((_, o)) => o.clone(),
+                None => {
+                    let o = std::rc::Rc::new(paint.draw_order());
+                    cache.insert(0, (key, o.clone()));
+                    cache.truncate(4);
+                    o
+                }
+            };
+            paint.order = Some(order);
+        }
+        layers
+    }
+
+    /// Labels for a finished frame. Cells: each group's name at its median.
+    /// Features: the features' own names (a group of features, such as one
+    /// type's markers, is often scattered, so a median would point at
+    /// nothing); labelled ones first, and every visible one when few remain.
+    pub fn labels(&self, vp: &Viewport, cell_px: f32) -> Vec<Label> {
+        let mut out = Vec::new();
+        if !self.show_labels {
+            return out;
+        }
+        let space = self.current();
+        let groups = self.groups();
+        let visible = |i: usize| {
+            let (x, y) = vp.to_px(space.points.xy[i]);
+            x >= 0.0 && y >= 0.0 && x < vp.w as f32 && y < vp.h as f32
+        };
+
+        if space.axis() == Axis::Cells {
+            let Some(groups) = groups else { return out };
+            let font = Font::for_cell_height(cell_px * self.text_scale, true);
+            let n = self.levels().len();
+            let key = (self.space, self.colour.unwrap_or(usize::MAX));
+            let mut cached = self.medians.borrow_mut();
+            if cached.as_ref().is_none_or(|(k, _)| *k != key) {
+                *cached = Some((key, group_medians(&space.points, groups, n)));
+            }
+            let medians = cached.as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
+            drop(cached);
+            for (g, m) in medians.into_iter().enumerate() {
+                let Some((xy, size)) = m else { continue };
+                if self.focus.is_some_and(|f| f as usize != g) || self.styles[g].hidden {
+                    continue;
+                }
+                let (x, y) = vp.to_px(xy);
+                out.push(Label {
+                    text: self.levels()[g].to_string(),
+                    x,
+                    y,
+                    ink: self.styles[g].ink,
+                    priority: size as f32,
+                    font,
+                });
+            }
+            return out;
+        }
+
+        const MAX_NAMED: usize = 400;
+        const NAME_ALL_BELOW: usize = 120;
+        let font = Font::for_cell_height(cell_px * 0.8 * self.text_scale, false);
+        let group_of = |i: usize| groups.map_or(NONE, |g| g[i]);
+        let wanted = |g: u32| match self.focus {
+            Some(f) => g == f,
+            None => g != NONE,
+        };
+        let order = space.points.order.iter().map(|&i| i as usize);
+        let mut named: Vec<usize> = order
+            .clone()
+            .filter(|&i| wanted(group_of(i)) && visible(i))
+            .take(MAX_NAMED)
+            .collect();
+        let n_visible = order
+            .clone()
+            .filter(|&i| visible(i))
+            .take(NAME_ALL_BELOW + 1)
+            .count();
+        if n_visible <= NAME_ALL_BELOW {
+            named.extend(order.filter(|&i| !wanted(group_of(i)) && visible(i)));
+        }
+        let n = named.len();
+        for (rank, i) in named.into_iter().enumerate() {
+            let g = group_of(i);
+            let (x, y) = vp.to_px(space.points.xy[i]);
+            if g != NONE && self.styles[g as usize].hidden {
+                continue;
+            }
+            let ink = if g == NONE {
+                color::linear_rgb(color::INK)
+            } else {
+                self.styles[g as usize].ink
+            };
+            out.push(Label {
+                text: space.points.names[i].to_string(),
+                x,
+                y: y - font.line_height() as f32 * 0.7,
+                ink,
+                priority: (n - rank) as f32,
+                font,
+            });
+        }
+        out
+    }
+
+    /// A colour key, for feature views only: their labels are feature names,
+    /// so the group a colour stands for has to be spelled out once. Groups
+    /// with the most points first.
+    pub fn legend(&self) -> Vec<(String, Rgb, Rgb)> {
+        const MAX_ENTRIES: usize = 24;
+        let (Some(groups), Axis::Features) = (self.groups(), self.current().axis()) else {
+            return Vec::new();
+        };
+        let count = data::group_counts(groups.iter().copied(), self.levels().len());
+        let mut ids: Vec<usize> = (0..count.len())
+            .filter(|&g| {
+                count[g] > 0 && !self.styles[g].hidden && self.focus.is_none_or(|f| f as usize == g)
+            })
+            .collect();
+        ids.sort_by_key(|&g| std::cmp::Reverse(count[g]));
+        ids.truncate(MAX_ENTRIES);
+        ids.into_iter()
+            .map(|g| {
+                (
+                    self.levels()[g].to_string(),
+                    self.styles[g].colour,
+                    self.styles[g].ink,
+                )
+            })
+            .collect()
+    }
+
+    /// Where the picked feature sits in a feature space, if it is one there.
+    pub(super) fn picked_point(&self) -> Option<usize> {
+        let Some(Pick::One(name)) = &self.pick else {
+            return None;
+        };
+        let space = self.current();
+        if space.axis() != Axis::Features {
+            return None;
+        }
+        let mut cached = self.feature_index.borrow_mut();
+        if cached.as_ref().is_none_or(|(s, _)| *s != self.space) {
+            *cached = Some((self.space, GeneIndex::build(&space.points.names)));
+        }
+        cached
+            .as_ref()
+            .and_then(|(_, index)| index.match_gene(name))
+    }
+
+    /// Labels, key and marks over a composited frame.
+    pub fn decorate(&self, frame: &mut render::Frame, vp: &Viewport, cell_px: f32) {
+        // The picked feature is marked even with labels off: it is the answer
+        // to what was just asked for.
+        let mut reserved = Vec::new();
+        let mut labels = Vec::new();
+        if let Some(i) = self.picked_point() {
+            let (x, y) = vp.to_px(self.current().points.xy[i]);
+            let ink = color::highlight_ink();
+            render::draw_ring(frame, x, y, 0.45 * cell_px, ink);
+            let font = Font::for_cell_height(cell_px * self.text_scale, true);
+            labels.push(Label {
+                text: self.current().points.names[i].to_string(),
+                x,
+                y: y - 0.45 * cell_px - font.line_height() as f32 * 0.6,
+                ink,
+                priority: f32::INFINITY,
+                font,
+            });
+        }
+        // Features near a clicked cell (and pinned names), at their places:
+        // on a cell map, where the features sit among the cells; on a
+        // feature map, the features' own points.
+        let pos = match self.current().axis() {
+            Axis::Cells => self.feature_positions(),
+            Axis::Features => Some(&self.current().points),
+        };
+        if let Some(pos) = pos {
+            let font = Font::for_cell_height(cell_px * 0.85 * self.text_scale, true);
+            let ink = color::highlight_ink();
+            for near in self.locked.iter().chain(&self.near) {
+                for (rank, (f, _)) in near.features.iter().enumerate() {
+                    let Some(i) = pos.names.iter().position(|n| n == f) else {
+                        continue;
+                    };
+                    let (x, y) = vp.to_px(pos.xy[i]);
+                    render::draw_ring(frame, x, y, 0.25 * cell_px, ink);
+                    labels.push(Label {
+                        text: f.to_string(),
+                        x,
+                        y: y - 0.25 * cell_px - font.line_height() as f32 * 0.6,
+                        ink,
+                        priority: 1e6 - rank as f32,
+                        font,
+                    });
+                }
+            }
+        }
+        let font = Font::for_cell_height(cell_px * 0.8 * self.text_scale, false);
+        if let Some(s) = self.current_shown() {
+            reserved.push(render::draw_ramp_key(frame, &s.title, &self.ramp, font));
+        } else if self.show_labels {
+            reserved.extend(render::draw_legend(frame, &self.legend(), font));
+        }
+        if self.show_labels {
+            labels.extend(self.labels(vp, cell_px));
+        }
+        draw_labels(frame, labels, &reserved);
+    }
+}
+
+/// Render the whole scene once, labels included.
+pub(crate) fn render_full(scene: &Scene, vp: Viewport, cell_px: f32) -> image::RgbaImage {
+    let layers = scene.layers();
+    let mut job = Job::new(vp, &layers);
+    while !job.step(&layers) {}
+    let mut frame = job.finish();
+    scene.decorate(&mut frame, &vp, cell_px);
+    frame.to_image()
+}

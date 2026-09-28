@@ -8,7 +8,7 @@
 //! senna's schema does not carry them.
 
 use super::data::{read_pairs, LabelKind, Labels};
-use super::files::{read_json, same_file, siblings};
+use super::files::{self, read_json, same_file, siblings};
 use rustc_hash::FxHashMap as HashMap;
 use senna::run_manifest::{self, RunManifest};
 use serde_json::Value;
@@ -39,7 +39,7 @@ pub(super) fn annotate_str<'a>(m: &'a RunManifest, key: &str) -> Option<&'a str>
 }
 
 fn read_json_object(path: &Path) -> HashMap<String, Value> {
-    match read_json(path) {
+    match read_json::<Value>(path) {
         Some(Value::Object(m)) => m.into_iter().collect(),
         _ => HashMap::default(),
     }
@@ -98,7 +98,7 @@ impl Round {
             // otherwise its tree is a record, not what its labels are.
             tree: at("celltype_tree")
                 .filter(|_| annotate_str(m, "fine_argmax").is_some())
-                .and_then(|p| read_json(&p))
+                .and_then(|p| read_json::<Value>(&p))
                 .map(|v| read_tree(&v))
                 .unwrap_or_default(),
             gene_set_null_only: m
@@ -126,25 +126,11 @@ impl Round {
     pub fn newer(&self) -> Option<PathBuf> {
         // lupin names a round's successor `{stem}.r{N}.senna.json`; prefer
         // that chain over any other round made from this one.
-        let stem = self
-            .path
-            .file_name()
-            .map(|n| {
-                n.to_string_lossy()
-                    .trim_end_matches(".senna.json")
-                    .to_string()
-            })
-            .unwrap_or_default();
+        let stem = run_manifest::derive_out_prefix(&files::name(&self.path));
         let mut found = siblings(&self.path, ".senna.json");
-        found.sort_by_key(|p| {
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            !name.starts_with(&format!("{stem}.r"))
-        });
+        found.sort_by_key(|p| !files::name(p).starts_with(&format!("{stem}.r")));
         found.into_iter().find(|p| {
-            read_json(p)
+            read_json::<Value>(p)
                 .and_then(|v| v.pointer("/annotate/source")?.as_str().map(String::from))
                 .is_some_and(|src| {
                     same_file(

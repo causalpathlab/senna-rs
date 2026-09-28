@@ -180,6 +180,17 @@ pub struct Labels {
 /// Group id per point, `NONE` where the point has no label.
 pub const NONE: u32 = u32::MAX;
 
+/// Points per group id, for ids below `n` (so `NONE` is skipped).
+pub fn group_counts(groups: impl IntoIterator<Item = u32>, n: usize) -> Vec<usize> {
+    let mut count = vec![0usize; n];
+    for g in groups {
+        if let Some(c) = count.get_mut(g as usize) {
+            *c += 1;
+        }
+    }
+    count
+}
+
 impl Labels {
     /// Group `(point, level)` pairs, leaving out levels in `skip`. A point
     /// listed twice keeps its first level. Levels are numbered in natural

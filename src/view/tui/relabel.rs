@@ -2,7 +2,7 @@
 //! merges, preview with lupin, and submit the draft as one round.
 
 use super::*;
-use crate::view::decide::{relabel, Mode};
+use crate::view::decide::relabel;
 use crate::view::review::Verdict;
 
 impl App {
@@ -26,7 +26,7 @@ impl App {
             return self.merge_key(k);
         }
         let n_rows = r.rows.len();
-        let n_clusters = r.order.len().max(1);
+        let n_clusters = r.overview.len().max(1);
         match k.code {
             KeyCode::Char(']') => {
                 let next = (r.at + 1) % n_clusters;
@@ -165,10 +165,6 @@ impl App {
 
     /// Send the whole draft to lupin: a preview, or the next round.
     fn send_draft(&mut self, mode: Mode) {
-        if self.relabeling.is_some() {
-            self.message = Some("lupin is still busy with the last request".into());
-            return;
-        }
         let Some(r) = self.scene.review.as_ref() else {
             return;
         };
@@ -189,10 +185,7 @@ impl App {
             let _ = tx.send(relabel(&lupin, &round, &lines, mode));
         });
         self.relabeling = Some(Relabeling {
-            job: match mode {
-                Mode::Next => RelabelJob::Submit,
-                Mode::Preview => RelabelJob::Preview,
-            },
+            job: RelabelJob::Draft(mode),
             started: std::time::Instant::now(),
             sent,
             progress: Default::default(),

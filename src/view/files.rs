@@ -1,9 +1,15 @@
 //! Small filesystem helpers shared by the view's reload, round and decision
 //! code.
 
-use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+/// The last component of `path`, or an empty string.
+#[must_use]
+pub fn name(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
 
 /// Modification time of `path`, if it can be read.
 #[must_use]
@@ -38,6 +44,6 @@ pub fn siblings(path: &Path, suffix: &str) -> Vec<PathBuf> {
 
 /// The JSON document at `path`, if it reads and parses.
 #[must_use]
-pub fn read_json(path: &Path) -> Option<Value> {
+pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }

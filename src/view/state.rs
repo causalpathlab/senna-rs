@@ -1,0 +1,317 @@
+//! The scene's space, grouping, focus and round, and moving between them.
+
+use super::*;
+
+impl Scene {
+    pub(super) fn label_index(&self, kind: LabelKind) -> Option<usize> {
+        self.data.labels.iter().position(|l| l.kind == kind)
+    }
+
+    /// Colour by grouping `li`, unfocused. A feature's activity would hide
+    /// the groups, so it is cleared; returns whether there was one.
+    pub(super) fn set_colour(&mut self, li: Option<usize>) -> bool {
+        let cleared = self.clear_pick();
+        self.colour = li;
+        self.focus = None;
+        self.refresh_groups();
+        cleared
+    }
+
+    pub fn current(&self) -> &data::Space {
+        &self.data.spaces[self.space]
+    }
+
+    /// Groupings that apply to the current axis.
+    pub fn colour_choices(&self) -> Vec<usize> {
+        let axis = self.current().axis();
+        (0..self.data.labels.len())
+            .filter(|&i| self.data.labels[i].axis() == axis)
+            .collect()
+    }
+
+    pub(super) fn default_colour(&self, want: Option<&str>) -> Option<usize> {
+        let choices = self.colour_choices();
+        if let Some(w) = want {
+            if let Some(&i) = choices
+                .iter()
+                .find(|&&i| self.data.labels[i].title().eq_ignore_ascii_case(w))
+            {
+                return Some(i);
+            }
+            log::warn!("view: no `{w}` grouping for {}", self.current().title());
+        }
+        choices.first().copied()
+    }
+
+    pub(super) fn refresh_groups(&mut self) {
+        let Some(li) = self.colour else {
+            self.groups = None;
+            self.styles.clear();
+            return;
+        };
+        let labels = &self.data.labels[li];
+        self.styles = self.book.resolve(labels.title(), &labels.levels);
+        if matches!(&self.groups, Some((s, l, _)) if *s == self.space && *l == li) {
+            return;
+        }
+        let g = labels.align(&self.current().points);
+        self.groups = Some((self.space, li, g));
+    }
+
+    /// Change group `g`'s style in the current grouping and save the book.
+    pub fn restyle(&mut self, g: usize, f: impl FnOnce(&mut style::Style)) {
+        let Some(li) = self.colour else { return };
+        let labels = &self.data.labels[li];
+        let (grouping, name) = (labels.title().to_string(), labels.levels[g].to_string());
+        let mut st = self.book.get(&grouping, &name);
+        f(&mut st);
+        self.book.set(&grouping, &name, st);
+        self.refresh_groups();
+    }
+
+    /// Write the style book beside the run (when the style menu closes).
+    pub fn save_styles(&mut self) {
+        if let Err(e) = self.book.save(&self.data.prefix) {
+            self.note = Some(format!("could not save styles: {e}"));
+        }
+    }
+
+    pub fn style_of(&self, g: usize) -> style::Style {
+        self.colour.map_or_else(style::Style::plain, |li| {
+            let l = &self.data.labels[li];
+            self.book.get(l.title(), &l.levels[g])
+        })
+    }
+
+    pub fn resolved(&self, g: usize) -> Option<&style::Resolved> {
+        self.styles.get(g)
+    }
+
+    pub fn groups(&self) -> Option<&[u32]> {
+        self.groups.as_ref().map(|(_, _, g)| g.as_slice())
+    }
+
+    pub fn levels(&self) -> &[Box<str>] {
+        self.colour
+            .map_or(&[], |i| self.data.labels[i].levels.as_slice())
+    }
+
+    pub fn set_space(&mut self, space: usize) {
+        let axis = self.current().axis();
+        self.space = space;
+        if self.current().axis() != axis {
+            self.colour = self.default_colour(None);
+            self.focus = None;
+        }
+        self.refresh_groups();
+        self.refresh_activity();
+    }
+
+    /// Swap in a reloaded or different round, keeping layout, grouping and
+    /// focus by name; a zoomed layout falls back to its root.
+    pub fn replace_data(&mut self, data: Dataset) {
+        // A relabel draft uses the ids of the round it was made on; it must
+        // never be applied to another round. Keep it with its own round.
+        let left = self.review.as_ref().map(|r| r.draft.round.clone());
+        if let Some(round) = left {
+            self.leave_review();
+            let name = files::name(&round);
+            self.note = Some(format!(
+                "a different round is open: relabel mode left, the draft stays with {name}"
+            ));
+        }
+        let (method, kind) = {
+            let s = &self.data.spaces[self.root()];
+            (s.method.clone(), s.kind)
+        };
+        let colour = self.colour.map(|i| self.data.labels[i].kind);
+        let focus = self.focused_name();
+        // A new annotation round of the same run points at the same model
+        // and data files; keep what was read from them.
+        let same_run = match (&self.data.run, &data.run) {
+            (Some((a, ad)), Some((b, bd))) => {
+                ad == bd
+                    && serde_json::to_value(&a.outputs).ok()
+                        == serde_json::to_value(&b.outputs).ok()
+                    && serde_json::to_value(&a.data).ok() == serde_json::to_value(&b.data).ok()
+            }
+            _ => false,
+        };
+        self.data = data;
+        self.near = None;
+        self.locked.clear();
+        self.orders.borrow_mut().clear();
+        self.feature_index.borrow_mut().take();
+        self.medians.borrow_mut().take();
+        self.space = self
+            .data
+            .spaces
+            .iter()
+            .position(|s| s.method == method && s.kind == kind)
+            .unwrap_or(0);
+        self.colour = colour
+            .and_then(|t| {
+                self.colour_choices()
+                    .into_iter()
+                    .find(|&i| self.data.labels[i].kind == t)
+            })
+            .or_else(|| self.default_colour(None));
+        self.groups = None;
+        self.refresh_groups();
+        self.focus =
+            focus.and_then(|f| self.levels().iter().position(|l| *l == f).map(|i| i as u32));
+        self.shown = None;
+        if same_run {
+            if let Some(a) = self.activity.as_mut() {
+                a.forget_views();
+            }
+        } else {
+            self.activity = None;
+            self.geometry = None;
+        }
+        self.suggestions = None;
+        self.refresh_activity();
+    }
+
+    /// Colour by what the round changed against its source, and describe
+    /// it: how many cells now carry each label.
+    pub fn show_changes(&mut self) -> Vec<String> {
+        let Some(li) = self.label_index(LabelKind::Changed) else {
+            return vec!["no cell changed label".into()];
+        };
+        let labels = &self.data.labels[li];
+        let count = data::group_counts(labels.by_name.values().copied(), labels.levels.len());
+        let mut out = vec![format!("{} cells changed label:", labels.by_name.len())];
+        let mut rows: Vec<(usize, &str)> = count
+            .iter()
+            .zip(&labels.levels)
+            .map(|(&n, l)| (n, l.as_ref()))
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.0));
+        out.extend(rows.iter().map(|(n, l)| format!("  {n:>6}  now {l}")));
+        self.set_colour(Some(li));
+        out
+    }
+
+    pub(super) fn cluster_labels(&self) -> Option<&data::Labels> {
+        Some(&self.data.labels[self.label_index(LabelKind::Cluster)?])
+    }
+
+    /// What the round records about the cluster of cell `cell`, as panel lines.
+    pub fn cluster_info(&self, cell: &str) -> Option<Vec<String>> {
+        let id = self.cluster_id_of(cell)?;
+        Some(self.data.round.as_ref()?.cluster_lines(&id.to_string()))
+    }
+
+    pub fn cluster_id_of(&self, cell: &str) -> Option<i64> {
+        let c = self.cluster_labels()?;
+        Some(c.ids[*c.by_name.get(cell)? as usize])
+    }
+
+    /// The label the current round gives cluster `id`, and its top call.
+    pub fn cluster_call(&self, id: i64) -> (Option<String>, Option<(String, Option<f64>)>) {
+        self.data
+            .round
+            .as_ref()
+            .map_or((None, None), |r| r.call(&id.to_string()))
+    }
+
+    /// Annotation and marker names, for label completion.
+    pub fn known_labels(&self) -> Vec<Box<str>> {
+        let mut out: Vec<Box<str>> = self
+            .data
+            .labels
+            .iter()
+            .filter(|l| matches!(l.kind, LabelKind::Annotation | LabelKind::Markers))
+            .flat_map(|l| l.levels.iter().cloned())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    pub fn focused_name(&self) -> Option<Box<str>> {
+        self.focus.map(|f| self.levels()[f as usize].clone())
+    }
+
+    pub fn cycle_text_size(&mut self) {
+        let at = TEXT_SCALES
+            .iter()
+            .position(|&t| t >= self.text_scale)
+            .unwrap_or(0);
+        let next = (at + 1) % TEXT_SCALES.len();
+        self.text_scale = TEXT_SCALES[next];
+        self.note = Some(format!(
+            "text size {} of {} · T for the next",
+            next + 1,
+            TEXT_SCALES.len()
+        ));
+    }
+
+    /// Colour by the grouping of `kind`, when the run has one.
+    pub fn colour_by(&mut self, kind: LabelKind) {
+        if let Some(li) = self.label_index(kind) {
+            self.set_colour(Some(li));
+        }
+    }
+
+    /// Next grouping. The feature shown is cleared, its suggestions stay.
+    pub fn cycle_colour(&mut self) {
+        let choices = self.colour_choices();
+        let next = match self
+            .colour
+            .and_then(|c| choices.iter().position(|&i| i == c))
+        {
+            Some(p) if p + 1 < choices.len() => Some(choices[p + 1]),
+            Some(_) => None,
+            None => choices.first().copied(),
+        };
+        if self.set_colour(next) {
+            self.note = Some("back to group colours · g brings the features back".into());
+        }
+    }
+
+    /// Focus the next or previous group. Activity and suggestions shown for
+    /// the previous group no longer apply, so they are cleared.
+    pub fn step_focus(&mut self, delta: i64) {
+        let n = self.levels().len() as i64;
+        if n == 0 {
+            return;
+        }
+        let had_pick = self.clear_pick();
+        if self.clear_suggestions() || had_pick {
+            self.note = Some("n suggests features for this group".into());
+        }
+        self.focus = Some(match self.focus {
+            None if delta > 0 => 0,
+            None => (n - 1) as u32,
+            Some(f) => ((f as i64 + delta).rem_euclid(n)) as u32,
+        });
+    }
+
+    /// One-line description of the view.
+    pub fn caption(&self) -> String {
+        let s = self.current();
+        let colour = self.colour.map_or("none".to_string(), |i| {
+            self.data.labels[i].title().to_string()
+        });
+        let focus = self
+            .focus
+            .map(|f| format!(" · focus {}", self.levels()[f as usize]))
+            .unwrap_or_default();
+        let pick = match &self.pick {
+            Some(Pick::One(f)) => format!(" · feature {f} ({}) · x clears", self.source.name()),
+            Some(Pick::Markers(g)) => format!(" · {g} markers ({}) · x clears", self.source.name()),
+            None => String::new(),
+        };
+        format!(
+            "{} · {} · {} pts · colour {}{}{}",
+            s.method,
+            s.title(),
+            s.points.order.len(),
+            colour,
+            focus,
+            pick
+        )
+    }
+}

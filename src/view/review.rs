@@ -64,21 +64,17 @@ impl Draft {
     /// `{round}` with `.senna.json` replaced by `.relabel_draft.json`.
     #[must_use]
     pub fn path_for(round: &Path) -> PathBuf {
-        let s = round.to_string_lossy();
-        let stem = s.strip_suffix(".senna.json").unwrap_or(&s);
+        let stem = senna::run_manifest::derive_out_prefix(&round.to_string_lossy());
         PathBuf::from(format!("{stem}.relabel_draft.json"))
     }
 
     /// The saved draft for `round`, or an empty one.
     #[must_use]
     pub fn load(round: &Path) -> Self {
-        std::fs::read_to_string(Self::path_for(round))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| Self {
-                round: round.to_path_buf(),
-                ..Default::default()
-            })
+        super::files::read_json(&Self::path_for(round)).unwrap_or_else(|| Self {
+            round: round.to_path_buf(),
+            ..Default::default()
+        })
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
