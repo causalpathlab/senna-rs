@@ -155,7 +155,7 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
             ("S", "hand lupin everything as one round"),
             (
                 "U",
-                "the same, with lupin's bootstrap support refreshed (slower)",
+                "the same, with lupin's bootstrap support refreshed (slower); alone, only refreshes support",
             ),
             ("R  esc", "leave; the draft is kept for later"),
         ],

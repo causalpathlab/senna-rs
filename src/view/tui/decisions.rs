@@ -96,22 +96,27 @@ impl App {
                 // Show what the round changed: the changed cells coloured,
                 // and what was applied, in the sidebar.
                 let name = files::name(&path);
-                let mut lines = vec![
-                    format!("lupin wrote {name}"),
-                    String::new(),
-                    "applied:".into(),
-                ];
-                lines.extend(r.sent.iter().map(|l| format!("  {l}")));
+                let mut lines = vec![format!("lupin wrote {name}"), String::new()];
+                if r.sent.is_empty() {
+                    lines.push("labels unchanged; support refreshed".into());
+                } else {
+                    lines.push("applied:".into());
+                    lines.extend(r.sent.iter().map(|l| format!("  {l}")));
+                }
                 lines.push(String::new());
                 lines.extend(self.scene.show_changes());
                 lines.push(String::new());
                 lines.push("x closes this · , goes back to the round before".into());
                 self.info = Some(lines);
-                self.message = Some(format!(
-                    "lupin applied {} decisions in {:.1} s · coloured by what changed",
-                    r.sent.len(),
-                    r.started.elapsed().as_secs_f32()
-                ));
+                let secs = r.started.elapsed().as_secs_f32();
+                self.message = Some(if r.sent.is_empty() {
+                    format!("lupin refreshed support in {secs:.1} s")
+                } else {
+                    format!(
+                        "lupin applied {} decisions in {secs:.1} s · coloured by what changed",
+                        r.sent.len()
+                    )
+                });
                 self.pop(format!("✓ lupin wrote {name}"));
                 self.restart();
             }
