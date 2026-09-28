@@ -24,6 +24,11 @@ impl App {
             }
             (None, Some(p)) => p.line(),
             (None, None) => match &self.relabeling {
+                Some(r) if matches!(r.job, RelabelJob::Annotate) => format!(
+                    "lupin is annotating this run… {:.0} s · {}",
+                    r.started.elapsed().as_secs_f32(),
+                    r.progress.lock().map(|p| p.clone()).unwrap_or_default()
+                ),
                 Some(r) => format!(
                     "lupin is {} {} decision(s)… {:.1} s · editing is locked until it answers",
                     if matches!(r.job, RelabelJob::Preview) {
@@ -34,7 +39,10 @@ impl App {
                     r.sent.len(),
                     r.started.elapsed().as_secs_f32()
                 ),
-                None => self.message.clone().unwrap_or_else(|| self.scene.caption()),
+                None => self
+                    .markers_line()
+                    .or_else(|| self.message.clone())
+                    .unwrap_or_else(|| self.scene.caption()),
             },
         };
         if self.job.is_some() {

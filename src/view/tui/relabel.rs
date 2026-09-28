@@ -195,6 +195,7 @@ impl App {
             },
             started: std::time::Instant::now(),
             sent,
+            progress: Default::default(),
             done: rx,
         });
     }

@@ -835,6 +835,16 @@ impl Scene {
         }
     }
 
+    /// Colour by the grouping of `kind`, when the run has one.
+    pub fn colour_by(&mut self, kind: LabelKind) {
+        if let Some(li) = self.data.labels.iter().position(|l| l.kind == kind) {
+            self.clear_pick();
+            self.colour = Some(li);
+            self.focus = None;
+            self.refresh_groups();
+        }
+    }
+
     /// Next grouping. A feature's activity would hide the groups, so it is
     /// cleared (its suggestions stay; `g` brings them back).
     pub fn cycle_colour(&mut self) {

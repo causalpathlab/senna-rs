@@ -13,6 +13,10 @@ impl App {
             self.prompt_key(k);
             return;
         }
+        if self.markers_input.is_some() {
+            self.markers_key(k);
+            return;
+        }
         if self.scene.review.is_some() && !self.help && self.menu.is_none() {
             self.message = None;
             if self.review_key(k) {
@@ -85,7 +89,7 @@ impl App {
             }
             KeyCode::Char('z') => self.start_zoom(),
             KeyCode::Char('n') => self.change(Scene::suggest),
-            KeyCode::Char('v' | 'L' | 'M' | 'K' | 'A' | 'D') => {
+            KeyCode::Char('v' | 'L' | 'M' | 'K' | 'D') => {
                 self.message = Some("decisions are made in relabel mode: press R".into());
             }
             KeyCode::Char('b') => {
@@ -115,6 +119,7 @@ impl App {
             }
             KeyCode::Char('s') => self.save(),
             KeyCode::Char('R') => self.toggle_review(),
+            KeyCode::Char('A') => self.ask_markers(),
             KeyCode::Char('k' | 'l') => self.change(Scene::pin),
             _ => {}
         }
