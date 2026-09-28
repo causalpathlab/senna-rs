@@ -26,8 +26,7 @@ const FIT_TOP: usize = 5;
 /// Type names compare as lupin compares them: case-insensitive, with spaces
 /// and underscores the same.
 fn same_type(a: &str, b: &str) -> bool {
-    let norm = |s: &str| s.to_lowercase().replace(' ', "_");
-    norm(a) == norm(b)
+    super::rounds::label_key(a) == super::rounds::label_key(b)
 }
 /// A listed marker this low in the cluster is proposed for dropping.
 const PROPOSE_DROP: f32 = 0.1;
@@ -1077,8 +1076,9 @@ mod tests {
     }
 
     #[test]
-    fn type_names_match_across_spaces_and_underscores() {
-        assert!(same_type("B_cells", "b cells"));
-        assert!(!same_type("B cells", "B cells memory"));
+    fn type_names_match_across_spaces_commas_and_underscores() {
+        assert!(same_type("CT_1", "ct 1"));
+        assert!(same_type("CT 1, a", "CT_1_a"));
+        assert!(!same_type("CT 1", "CT 1 a"));
     }
 }

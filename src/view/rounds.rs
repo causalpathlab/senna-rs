@@ -14,6 +14,18 @@ use senna::run_manifest::{self, RunManifest};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// A cell type label in one canonical form for comparing: lower case, with
+/// spaces, commas and underscores all read as one separator (lupin writes
+/// `CT_1_a` for `CT 1, a`).
+#[must_use]
+pub(crate) fn label_key(s: &str) -> String {
+    s.split([' ', ',', '_'])
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+        .to_lowercase()
+}
+
 /// Label a round gives a cell it did not assign.
 pub(super) const UNASSIGNED: &str = "unassigned";
 
@@ -89,10 +101,9 @@ impl Round {
     /// The member types of `label` when it names a coarse group.
     #[must_use]
     pub fn members_of(&self, label: &str) -> Option<&[String]> {
-        let norm = |s: &str| s.to_lowercase().replace(' ', "_");
         self.tree
             .iter()
-            .find(|(g, _)| norm(g) == norm(label))
+            .find(|(g, _)| label_key(g) == label_key(label))
             .map(|(_, m)| m.as_slice())
     }
 
