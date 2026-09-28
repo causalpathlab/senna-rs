@@ -51,7 +51,10 @@ pub struct ViewArgs {
     )]
     pub from: Box<str>,
 
-    #[arg(long, help = "Start on this layout method (umap, phate, tsne); computed first when the run lacks it")]
+    #[arg(
+        long,
+        help = "Start on this layout method (umap, phate, tsne); computed first when the run lacks it"
+    )]
     pub method: Option<Box<str>>,
 
     #[arg(
