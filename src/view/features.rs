@@ -347,20 +347,20 @@ impl Scene {
             Some(a) => a.near_feature(feature, NEAR),
             None => Ok(Vec::new()),
         };
-        match (features, cells) {
-            (Err(e), Err(_)) => {
-                self.near = None;
-                self.note = Some(e);
-            }
-            (features, cells) => {
-                self.near = Some(Near {
-                    name: feature.into(),
-                    centre: Centre::Feature,
-                    features: features.unwrap_or_default(),
-                    cells: cells.unwrap_or_default(),
-                });
-            }
-        }
+        // Whatever failed is said, even when the other half has neighbours.
+        let (features, cells, why) = match (features, cells) {
+            (Ok(f), Ok(c)) => (f, c, None),
+            (Err(e), Ok(c)) => (Vec::new(), c, Some(e)),
+            (Ok(f), Err(e)) => (f, Vec::new(), Some(e)),
+            (Err(e), Err(_)) => (Vec::new(), Vec::new(), Some(e)),
+        };
+        self.note = why;
+        self.near = (!features.is_empty() || !cells.is_empty()).then(|| Near {
+            name: feature.into(),
+            centre: Centre::Feature,
+            features,
+            cells,
+        });
     }
 
     /// Pin the names near the clicked cell, else the feature shown; with
@@ -369,7 +369,7 @@ impl Scene {
         if let Some(n) = self.near.take() {
             self.note = Some(format!(
                 "pinned {} names · k or l again clears",
-                n.features.len()
+                n.features.len() + n.cells.len()
             ));
             self.locked.push(n);
             return;

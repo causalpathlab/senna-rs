@@ -376,10 +376,12 @@ fn prepare_run(args: &ViewArgs) -> anyhow::Result<()> {
             .values()
             .all(|e| e.feature_coords.is_none())
     {
+        // Only umap and phate lay out features; t-SNE and tree refuse.
+        let method = if method == "phate" { "phate" } else { "umap" };
         warn(run_senna(
             &format!("{from} has no layout of its feature embedding yet"),
             &[
-                "layout", &method, "--target", "features", "--from", from, "--out", &out,
+                "layout", method, "--target", "features", "--from", from, "--out", &out,
             ],
         ));
     }
