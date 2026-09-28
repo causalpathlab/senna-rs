@@ -21,7 +21,7 @@ use super::decide::{Action, Decision, Mode, Watcher};
 use super::files::{self, modified, same_file};
 use super::render::{Frame, Job, Viewport};
 use super::style::{swatches, Shape};
-use super::{Graphics, Pick, Scene};
+use super::{Axis, Graphics, Pick, Scene};
 use image::DynamicImage;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -526,6 +526,30 @@ impl App {
     fn switch_space(&mut self, i: usize) {
         self.scene.set_space(i);
         self.vp = None;
+    }
+
+    /// Cells, features on cells, features: the next view of this layout.
+    fn step_view(&mut self, step: isize) {
+        let Some(i) = self.scene.next_view(step) else {
+            let has_features = self
+                .scene
+                .data
+                .spaces
+                .iter()
+                .any(|s| s.axis() == Axis::Features);
+            self.message = Some(if has_features {
+                "only one view in this run".into()
+            } else {
+                format!(
+                    "no feature map; `senna layout {} --target features --from <run>` adds one",
+                    self.scene.current().method
+                )
+            });
+            return;
+        };
+        self.switch_space(i);
+        let s = self.scene.current();
+        self.message = Some(format!("{} · {}", s.method, s.title()));
     }
 
     /// Same axis and title on the next method, if that method has it.

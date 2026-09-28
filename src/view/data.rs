@@ -138,6 +138,10 @@ pub enum LabelKind {
     Topic,
     Markers,
     FeatureTopic,
+    /// Node type of a feature embedding with several (gene, term, region).
+    FeatureType,
+    /// Clusters of the feature embedding.
+    FeatureCluster,
     /// Cells whose label differs from the source round's.
     Changed,
     /// The source round's annotation.
@@ -154,6 +158,8 @@ impl LabelKind {
             LabelKind::Topic => "topic",
             LabelKind::Markers => "markers",
             LabelKind::FeatureTopic => "feature topics",
+            LabelKind::FeatureType => "feature type",
+            LabelKind::FeatureCluster => "feature cluster",
             LabelKind::Changed => "changed",
             LabelKind::Previous => "previous annotation",
         }
@@ -162,7 +168,10 @@ impl LabelKind {
     #[must_use]
     pub fn axis(self) -> Axis {
         match self {
-            LabelKind::Markers | LabelKind::FeatureTopic => Axis::Features,
+            LabelKind::Markers
+            | LabelKind::FeatureTopic
+            | LabelKind::FeatureType
+            | LabelKind::FeatureCluster => Axis::Features,
             _ => Axis::Cells,
         }
     }
@@ -507,6 +516,22 @@ fn load_labels(m: &RunManifest, dir: &Path, round: &super::rounds::Round) -> Vec
     }
     if let Some(p) = &m.outputs.softmax_dictionary {
         keep("feature topics", read_dictionary_labels(&at(p)));
+    }
+    if let Some(p) = &m.cluster.feature_clusters {
+        keep(
+            "feature clusters",
+            read_cluster_labels(&at(p)).map(|mut l| {
+                l.kind = LabelKind::FeatureCluster;
+                l
+            }),
+        );
+    }
+    // Only worth a colouring when the embedding mixes types.
+    let prefix = at(&m.prefix).to_string_lossy().into_owned();
+    let types = data_beans::aux::feature_types::read_feature_types(&prefix)
+        .map(|rows| Labels::new(LabelKind::FeatureType, rows.unwrap_or_default(), &[]));
+    if types.as_ref().map_or(true, |l| l.levels.len() > 1) {
+        keep("feature types", types);
     }
     labels
 }

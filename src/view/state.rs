@@ -113,6 +113,32 @@ impl Scene {
         self.refresh_activity();
     }
 
+    /// The next view `step` places along (cells, features on cells, features)
+    /// of the layout method on screen, zoomed layouts left out; when that
+    /// method has one view only, of every method. `None` with nowhere to go.
+    pub fn next_view(&self, step: isize) -> Option<usize> {
+        let root = self.root();
+        let method = &self.data.spaces[root].method;
+        let tops = |same: bool| -> Vec<usize> {
+            (0..self.data.spaces.len())
+                .filter(|&i| {
+                    let s = &self.data.spaces[i];
+                    s.parent.is_none() && (!same || s.method == *method)
+                })
+                .collect()
+        };
+        let mut views = tops(true);
+        if views.len() < 2 {
+            views = tops(false);
+        }
+        if views.len() < 2 {
+            return None;
+        }
+        // A zoomed layout steps from the map it was zoomed from.
+        let at = views.iter().position(|&i| i == root).unwrap_or(0) as isize;
+        Some(views[(at + step).rem_euclid(views.len() as isize) as usize])
+    }
+
     /// Swap in a reloaded or different round, keeping layout, grouping and
     /// focus by name; a zoomed layout falls back to its root.
     pub fn replace_data(&mut self, data: Dataset) {
@@ -148,7 +174,7 @@ impl Scene {
         self.locked.clear();
         self.orders.borrow_mut().clear();
         self.feature_index.borrow_mut().take();
-        self.name_index.borrow_mut().take();
+        self.name_index.borrow_mut().clear();
         self.medians.borrow_mut().take();
         self.space = self
             .data
@@ -175,6 +201,7 @@ impl Scene {
         } else {
             self.activity = None;
             self.geometry = None;
+            self.feature_embedding = None;
         }
         self.suggestions = None;
         self.refresh_activity();

@@ -27,14 +27,18 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "click a cell",
-                "its cluster's summary, and the features nearest it",
+                "its cluster's summary, and the features nearest it, with edges to them",
+            ),
+            (
+                "click a feature",
+                "on a feature map: the features nearest it (cosine), and the cells nearest it",
             ),
             ("[  ]", "focus the previous / next group (drawn on top)"),
             (
                 "c",
                 "colour by the next grouping (annotation, cluster, topic, …)",
             ),
-            ("tab  shift-tab", "cells, features on cells, features"),
+            ("tab  shift-tab", "cells, features on cells, features, of this layout"),
             ("m", "next layout method (umap, phate, …)"),
             (
                 "z  Z  0",
@@ -58,7 +62,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("/", "search a feature by name"),
             ("a", "activity of the focused group's whole marker set"),
             ("o", "expected (model) or observed (counts)"),
-            ("k  l", "pin names on the map: those nearest the clicked cell, or the feature on screen (again clears)"),
+            ("k  l", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
             ("x  esc", "back to group colours"),
         ],
     ),

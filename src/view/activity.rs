@@ -773,6 +773,36 @@ impl Activity {
         drop_below_median(&mut scores, e.baseline());
         Ok(best(&scores, &e.features.names, top))
     }
+
+    /// Cells whose expected level of `feature` is highest relative to the
+    /// average cell (`ρ_g · (z_cell − mean z)`): the cells nearest that
+    /// feature in the embedding, the mirror of `near_cell`.
+    pub fn near_feature(
+        &mut self,
+        feature: &str,
+        top: usize,
+    ) -> Result<Vec<(Box<str>, f32)>, String> {
+        let e = self.expected()?;
+        let Model::Embedding { z, rho, .. } = &e.model else {
+            return Err("neighbouring cells need an embedding run".into());
+        };
+        let g = e
+            .features
+            .index
+            .match_gene(feature)
+            .ok_or_else(|| format!("no feature {feature} in the model"))?;
+        let r = rho.row(g).transpose();
+        let mean = e.z_mean.get_or_init(|| {
+            let mut acc = Vector::zeros(z.ncols());
+            for row in z.row_iter() {
+                acc += row.transpose();
+            }
+            acc / z.nrows().max(1) as f32
+        });
+        let offset = mean.dot(&r);
+        let scores: Vec<f32> = (z * &r).iter().map(|v| v - offset).collect();
+        Ok(best(&scores, &e.cells, top))
+    }
 }
 
 /// The `top` finite scores, best first, with their names.
@@ -935,6 +965,18 @@ mod tests {
             assert!(close(&direct, &per[0]));
             assert!(per[2].is_empty());
         }
+    }
+
+    #[test]
+    fn cells_near_a_feature_rank_by_its_loading_against_the_average_cell() {
+        // GENE0 is ρ = (1, -0.5); z · ρ per cell is -0.4, 0.3, 0.75, -0.2,
+        // 0.45, and the average cell scores 0.18.
+        let near = tiny(false).near_feature("GENE0", 3).unwrap();
+        let got: Vec<&str> = near.iter().map(|(n, _)| n.as_ref()).collect();
+        assert_eq!(got, ["c2", "c4", "c1"]);
+        assert!((near[0].1 - 0.57).abs() < 1e-5);
+        assert!(tiny(false).near_feature("NOPE", 3).is_err());
+        assert!(tiny(true).near_feature("GENE0", 3).is_err());
     }
 
     #[test]

@@ -133,6 +133,17 @@ pub struct ViewArgs {
         help = "lupin binary that applies annotation decisions (default: $SENNA_LUPIN, else `lupin`)"
     )]
     pub lupin: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Open the run as it is: never compute a missing layout or clustering first",
+        long_help = "Open the run as it is.\n\
+                     By default a run missing a cell layout, a feature layout\n\
+                     (runs with a feature embedding), or clusters of either gets\n\
+                     them first, with `senna layout` and `senna clustering -m leiden`,\n\
+                     recorded in the manifest so it happens once."
+    )]
+    pub no_compute: bool,
 }
 
 /// Features suggested for one view, best first.
@@ -204,12 +215,15 @@ pub(crate) struct Scene {
     shown_ids: u64,
     /// Name index of a feature space, for marking the picked feature.
     feature_index: std::cell::RefCell<Option<(usize, GeneIndex)>>,
-    /// Point of each name in a space, for placing names near a cell.
-    name_index: std::cell::RefCell<Option<(usize, NameIndex)>>,
+    /// Point of each name in a space, for placing a clicked cell and the
+    /// names near it; one per space, for the cell map and the feature map.
+    name_index: std::cell::RefCell<Vec<(usize, NameIndex)>>,
     /// Group label anchors for a (space, grouping).
     medians: std::cell::RefCell<Option<((usize, usize), render::Medians)>>,
     /// The run's geometry table, read on the first zoom into a group.
     geometry: Option<std::sync::Arc<sublayout::Geometry>>,
+    /// The run's feature embedding, read on the first click on a feature.
+    feature_embedding: Option<Result<features::FeatureEmbedding, String>>,
     pub review: Option<relabel::Review>,
     /// Features near the last clicked cell, and sets locked on screen.
     pub near: Option<features::Near>,
@@ -238,6 +252,7 @@ impl Scene {
             shown: None,
             ramp: color::activity_ramp(256),
             geometry: None,
+            feature_embedding: None,
             suggestions: None,
             review: None,
             near: None,
@@ -245,7 +260,7 @@ impl Scene {
             orders: std::cell::RefCell::new(Vec::new()),
             shown_ids: 0,
             feature_index: std::cell::RefCell::new(None),
-            name_index: std::cell::RefCell::new(None),
+            name_index: std::cell::RefCell::new(Vec::new()),
             medians: std::cell::RefCell::new(None),
             note: None,
         };
@@ -296,36 +311,117 @@ fn pick_space(data: &Dataset, method: Option<&str>, space: Option<&str>) -> usiz
         .unwrap_or(0)
 }
 
-/// Run `senna layout` when the run has no layout yet, or not the method
-/// asked for: the view shows layouts, and would otherwise only refuse.
-/// Outputs go beside the manifest; progress shows before the view opens.
-fn ensure_layout(args: &ViewArgs) -> anyhow::Result<()> {
-    let (m, _) = senna::run_manifest::RunManifest::load(std::path::Path::new(args.from.as_ref()))?;
-    let has_any = !m.layout.methods.is_empty() || m.layout.cell_coords.is_some();
-    let want = match args.method.as_deref() {
-        Some(w) if !m.layout.methods.contains_key(w) => w,
-        Some(_) => return Ok(()),
-        None if has_any => return Ok(()),
-        None => "umap",
-    };
-    let out = senna::run_manifest::derive_out_prefix(&args.from);
-    eprintln!(
-        "senna view: {} has no {want} layout yet; running `senna layout {want}` first",
-        args.from
-    );
+/// Run `senna` itself with `argv` on the way into the view, its progress
+/// showing before the view opens.
+fn run_senna(why: &str, argv: &[&str]) -> anyhow::Result<()> {
+    eprintln!("senna view: {why}; running `senna {}`", argv.join(" "));
     let status = std::process::Command::new(std::env::current_exe()?)
-        .args(["layout", want, "--from", &args.from, "--out", &out])
+        .args(argv)
         .status()?;
     anyhow::ensure!(
         status.success(),
-        "`senna layout {want} --from {}` failed; see its messages above",
-        args.from
+        "`senna {}` failed; see its messages above",
+        argv.join(" ")
     );
     Ok(())
 }
 
+/// Compute what the view shows and the run lacks: a layout of the cells
+/// (not for fne, which has none), of the feature embedding, and clusters of
+/// each. Outputs go beside the manifest and are recorded in it, so this runs
+/// once. Only a missing cell layout is an error; the rest warn and the view
+/// opens without them.
+fn prepare_run(args: &ViewArgs) -> anyhow::Result<()> {
+    use senna::run_manifest::{RunKind, RunManifest};
+    let from: &str = &args.from;
+    let load = || RunManifest::load(std::path::Path::new(from));
+    let (m, dir) = load()?;
+    let out = senna::run_manifest::derive_out_prefix(from);
+    let has_cells = m.kind != RunKind::Fne;
+    let has_features = m.outputs.feature_embedding.is_some();
+    // A feature map alone is no layout of the cells.
+    let has_cell_map = m.layout.cell_coords.is_some()
+        || m.layout.methods.values().any(|e| e.cell_coords.is_some());
+    let method = args
+        .method
+        .as_deref()
+        .or(m.layout.current.as_deref())
+        .unwrap_or("umap")
+        .to_string();
+    let lacks_method = m
+        .layout
+        .methods
+        .get(&method)
+        .is_none_or(|e| e.cell_coords.is_none());
+    let warn = |r: anyhow::Result<()>| {
+        if let Err(e) = r {
+            log::warn!("view: {e}; opening without it");
+        }
+    };
+
+    if has_cells && (!has_cell_map || (args.method.is_some() && lacks_method)) {
+        run_senna(
+            &format!("{from} has no {method} layout of its cells yet"),
+            &["layout", &method, "--from", from, "--out", &out],
+        )?;
+    }
+    let (m, _) = load()?;
+    let feature_map = m
+        .layout
+        .methods
+        .values()
+        .any(|e| e.feature_coords.is_some());
+    if has_features && !feature_map {
+        warn(run_senna(
+            &format!("{from} has no layout of its feature embedding yet"),
+            &[
+                "layout", &method, "--target", "features", "--from", from, "--out", &out,
+            ],
+        ));
+    }
+    if has_cells && m.cluster.clusters.is_none() {
+        if let Some(latent) = m.outputs.geometry_latent() {
+            let latent = senna::run_manifest::resolve(&dir, latent);
+            let latent = latent.to_string_lossy();
+            warn(run_senna(
+                &format!("{from} has no cell clusters yet"),
+                &[
+                    "clustering",
+                    "--from",
+                    from,
+                    "--latent",
+                    &latent,
+                    "-m",
+                    "leiden",
+                    "-o",
+                    &out,
+                ],
+            ));
+        }
+    }
+    if has_features && m.cluster.feature_clusters.is_none() {
+        warn(run_senna(
+            &format!("{from} has no feature clusters yet"),
+            &[
+                "clustering",
+                "--target",
+                "features",
+                "--from",
+                from,
+                "-m",
+                "leiden",
+                "-o",
+                &out,
+            ],
+        ));
+    }
+    Ok(())
+}
+
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
-    ensure_layout(args)?;
+    if !args.no_compute {
+        prepare_run(args)?;
+    }
     let data = Dataset::load(&args.from)?;
     let mut scene = Scene::new(data, args);
 
@@ -438,6 +534,7 @@ mod tests {
             suggest: false,
             relabel: false,
             lupin: None,
+            no_compute: true,
         };
         Scene::new(data, &args)
     }
@@ -555,10 +652,64 @@ mod tests {
     }
 
     #[test]
+    fn tab_steps_through_the_views_of_one_method_and_skips_zooms() {
+        // umap cells (0), umap features (1), phate cells (2).
+        let mut s = scene();
+        assert_eq!(s.next_view(1), Some(1));
+        assert_eq!(s.next_view(-1), Some(1));
+        s.set_space(1);
+        assert_eq!(s.next_view(1), Some(0));
+        // phate has one view only: step through every method's views.
+        s.set_space(2);
+        assert_eq!(s.next_view(1), Some(0));
+        assert_eq!(s.next_view(-1), Some(1));
+        // A zoom steps from the map it came from, never into another zoom.
+        s.set_space(0);
+        let names: Vec<Box<str>> = vec!["c2".into(), "c3".into()];
+        s.add_zoomed(0, "C1", names, vec![[0.0, 0.0], [1.0, 1.0]]);
+        assert_eq!(s.next_view(1), Some(1));
+        s.set_space(1);
+        assert_eq!(s.next_view(1), Some(0));
+    }
+
+    #[test]
     fn start_options_pick_the_space() {
         let s = scene();
         assert_eq!(pick_space(&s.data, Some("phate"), None), 2);
         assert_eq!(pick_space(&s.data, Some("umap"), Some("features")), 1);
         assert_eq!(pick_space(&s.data, Some("tsne"), None), 0);
+    }
+
+    #[test]
+    fn a_clicked_cell_is_drawn_with_edges_to_its_features() {
+        let mut s = scene();
+        let mut placed = space("umap", SpaceKind::FeaturesOnCells, &["g1", "g2", "g3"]);
+        placed.points = Points::new(
+            ["g1", "g2", "g3"].map(Into::into).to_vec(),
+            vec![[3.0, 0.0], [3.0, 2.0], [0.0, 2.0]],
+        );
+        placed.backdrop = Some(0);
+        s.data.spaces.push(placed);
+        s.show_labels = false;
+        assert_eq!(s.near_spaces(), (Some(0), Some(3)));
+        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let before = render_full(&s, vp, 16.0);
+        s.near = Some(features::Near {
+            cell: "c1".into(),
+            of_feature: false,
+            features: vec![("g1".into(), 1.0), ("nowhere".into(), 0.5)],
+            cells: Vec::new(),
+        });
+        let after = render_full(&s, vp, 16.0);
+        // Halfway between c1 at (0, 0) and g1 at (3, 0): only the edge is there.
+        let (x, y) = vp.to_px([1.5, 0.0]);
+        let (x, y) = (x as u32, y as u32);
+        assert_ne!(before.get_pixel(x, y), after.get_pixel(x, y));
+        // Nothing is drawn towards the feature with no place.
+        let (x, y) = vp.to_px([0.0, 1.5]);
+        assert_eq!(
+            before.get_pixel(x as u32, y as u32),
+            after.get_pixel(x as u32, y as u32)
+        );
     }
 }

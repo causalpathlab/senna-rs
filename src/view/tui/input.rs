@@ -24,7 +24,6 @@ impl App {
             self.help = false;
             return true;
         }
-        let n_spaces = self.scene.data.spaces.len();
         let step = |app: &App| app.vp.map_or(0.0, |v| 0.1 * v.w.min(v.h) as f32);
         match k.code {
             KeyCode::Char('q') => self.quit = true,
@@ -62,8 +61,8 @@ impl App {
                 }
             }
             KeyCode::Char('?') => self.help = true,
-            KeyCode::Tab => self.switch_space((self.scene.space + 1) % n_spaces),
-            KeyCode::BackTab => self.switch_space((self.scene.space + n_spaces - 1) % n_spaces),
+            KeyCode::Tab => self.step_view(1),
+            KeyCode::BackTab => self.step_view(-1),
             KeyCode::Char('m') => self.next_method(),
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
             KeyCode::Char(']') => self.change(|s| s.step_focus(1)),
@@ -309,11 +308,21 @@ impl App {
             }
             None => name.clone(),
         };
-        // A feature clicked on a feature map becomes the pick, so the cell map
-        // shows its activity on the way back.
+        // A feature clicked on a feature map shows the features nearest it,
+        // and becomes the pick, so a cell map shows its activity on the way
+        // back.
         if on_features {
-            self.scene.set_pick(Pick::One(name.into()));
-            msg.push_str(" · tab to a cell view for its activity");
+            self.scene.show_near_feature(&name);
+            let has_cells = self
+                .scene
+                .data
+                .spaces
+                .iter()
+                .any(|s| s.axis() == crate::view::Axis::Cells);
+            if has_cells {
+                self.scene.set_pick(Pick::One(name.into()));
+                msg.push_str(" · tab to a cell view for its activity");
+            }
         }
         self.message = Some(msg);
         self.restart();
