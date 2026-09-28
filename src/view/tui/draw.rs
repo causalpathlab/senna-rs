@@ -25,6 +25,10 @@ impl App {
                     r.started.elapsed().as_secs_f32(),
                     r.progress.lock().map(|p| p.clone()).unwrap_or_default()
                 ),
+                Some(r) if r.sent.is_empty() => format!(
+                    "lupin is refreshing support (a bootstrap; can take a minute)… {:.0} s · editing is locked until it answers",
+                    r.started.elapsed().as_secs_f32()
+                ),
                 Some(r) => format!(
                     "lupin is {} {} decision(s)… {:.1} s · editing is locked until it answers",
                     if matches!(r.job, RelabelJob::Draft(Mode::Preview)) {
