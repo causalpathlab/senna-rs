@@ -173,8 +173,9 @@ impl App {
         let Some(r) = self.scene.review.as_ref() else {
             return;
         };
-        if r.draft.is_empty() {
-            self.message = Some("nothing staged yet".into());
+        // With nothing staged, U still asks lupin to refresh support alone.
+        if r.draft.is_empty() && !matches!(mode, Mode::NextWithSupport) {
+            self.message = Some("nothing staged yet (U alone refreshes support)".into());
             return;
         }
         let _ = r.draft.save();
