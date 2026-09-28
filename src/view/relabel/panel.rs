@@ -55,7 +55,7 @@ impl Scene {
         let mut out = vec![
             format!("clusters · {} decided", r.draft.decided()),
             "? unassigned  → markers suggest".into(),
-            "↓ a group to refine  ≠ evidence disagrees".into(),
+            "↓ refine a group  ≠ evidence differs".into(),
             "✓ decided".into(),
             String::new(),
         ];
