@@ -170,6 +170,9 @@ struct Shown {
     levels: Levels,
 }
 
+/// Text sizes on the map, as multiples of the terminal's cell height.
+const TEXT_SCALES: [f32; 4] = [1.0, 1.4, 1.8, 2.4];
+
 /// What is on screen: which space, which grouping, what is focused, and
 /// which feature's activity (if any) is drawn over the cells.
 pub(crate) struct Scene {
@@ -179,6 +182,8 @@ pub(crate) struct Scene {
     pub colour: Option<usize>,
     pub focus: Option<u32>,
     pub show_labels: bool,
+    /// Text size on the map, relative to the terminal's cell height.
+    pub text_scale: f32,
     /// Group id per point, cached per (space, labels).
     groups: Option<(usize, usize, Vec<u32>)>,
     /// Resolved style per group of the current grouping.
@@ -221,6 +226,7 @@ impl Scene {
             colour: None,
             focus: None,
             show_labels: true,
+            text_scale: TEXT_SCALES[1],
             groups: None,
             styles: Vec::new(),
             book,
@@ -835,6 +841,21 @@ impl Scene {
         }
     }
 
+    /// Step to the next text size on the map.
+    pub fn cycle_text_size(&mut self) {
+        let at = TEXT_SCALES
+            .iter()
+            .position(|&t| t >= self.text_scale)
+            .unwrap_or(0);
+        let next = (at + 1) % TEXT_SCALES.len();
+        self.text_scale = TEXT_SCALES[next];
+        self.note = Some(format!(
+            "text size {} of {} · T for the next",
+            next + 1,
+            TEXT_SCALES.len()
+        ));
+    }
+
     /// Colour by the grouping of `kind`, when the run has one.
     pub fn colour_by(&mut self, kind: LabelKind) {
         if let Some(li) = self.data.labels.iter().position(|l| l.kind == kind) {
@@ -964,7 +985,7 @@ impl Scene {
 
         if space.axis() == Axis::Cells {
             let Some(groups) = groups else { return out };
-            let font = Font::for_cell_height(cell_px, true);
+            let font = Font::for_cell_height(cell_px * self.text_scale, true);
             let n = self.levels().len();
             let key = (self.space, self.colour.unwrap_or(usize::MAX));
             let mut cached = self.medians.borrow_mut();
@@ -993,7 +1014,7 @@ impl Scene {
 
         const MAX_NAMED: usize = 400;
         const NAME_ALL_BELOW: usize = 120;
-        let font = Font::for_cell_height(cell_px * 0.8, false);
+        let font = Font::for_cell_height(cell_px * 0.8 * self.text_scale, false);
         let group_of = |i: usize| groups.map_or(NONE, |g| g[i]);
         let wanted = |g: u32| match self.focus {
             Some(f) => g == f,
@@ -1097,7 +1118,7 @@ impl Scene {
             let (x, y) = vp.to_px(self.current().points.xy[i]);
             let ink = color::highlight_ink();
             render::draw_ring(frame, x, y, 0.45 * cell_px, ink);
-            let font = Font::for_cell_height(cell_px, true);
+            let font = Font::for_cell_height(cell_px * self.text_scale, true);
             labels.push(Label {
                 text: self.current().points.names[i].to_string(),
                 x,
@@ -1115,7 +1136,7 @@ impl Scene {
             Axis::Features => Some(&self.current().points),
         };
         if let Some(pos) = pos {
-            let font = Font::for_cell_height(cell_px * 0.85, true);
+            let font = Font::for_cell_height(cell_px * 0.85 * self.text_scale, true);
             let ink = color::highlight_ink();
             for near in self.locked.iter().chain(&self.near) {
                 for (rank, (f, _)) in near.features.iter().enumerate() {
@@ -1135,7 +1156,7 @@ impl Scene {
                 }
             }
         }
-        let font = Font::for_cell_height(cell_px * 0.8, false);
+        let font = Font::for_cell_height(cell_px * 0.8 * self.text_scale, false);
         if let Some(s) = self.shown.as_ref().filter(|s| s.space == self.space) {
             reserved.push(render::draw_ramp_key(frame, &s.title, &self.ramp, font));
         } else if self.show_labels {
