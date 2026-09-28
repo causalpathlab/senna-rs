@@ -11,7 +11,7 @@ fn strings(v: &[&str]) -> Vec<String> {
 fn citeseq_record() -> RunMultiome {
     RunMultiome {
         modality: strings(&["scRNA", "scADT", "scRNA", "scADT"]),
-        group: strings(&["BMMC_D1T1", "BMMC_D1T1", "PBMC_D4T1", "PBMC_D4T1"]),
+        group: strings(&["S1", "S1", "S2", "S2"]),
         barcode_tagged: true,
     }
 }
@@ -48,8 +48,8 @@ fn recorded_layout_replays_alignment_and_both_suffixes() {
         boxed(&["scRNA", "scADT", "scRNA", "scADT"]).as_slice()
     );
     let bs = out.per_file_barcode_suffix.unwrap();
-    assert_eq!(bs[0].as_deref(), Some("BMMC_D1T1"));
-    assert_eq!(bs[3].as_deref(), Some("PBMC_D4T1"));
+    assert_eq!(bs[0].as_deref(), Some("S1"));
+    assert_eq!(bs[3].as_deref(), Some("S2"));
 }
 
 /// One group needs no barcode tag; replaying one would rename every cell.

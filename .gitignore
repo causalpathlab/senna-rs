@@ -10,3 +10,6 @@ temp*/
 *.parquet
 *.safetensors
 /target-cuda/
+
+# Local working notes, not published
+docs/text-anchored-gene-space-plan.md

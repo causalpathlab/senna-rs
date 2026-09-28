@@ -15,12 +15,6 @@ Cell-type annotation and lineage live in [`lupin`](https://github.com/causalpath
 and so do their write-ups: `lupin docs annotation`, `lupin docs grouping`,
 `lupin docs ontology-plan` and `lupin docs rooting-plan`.
 
-## Plans — design notes for code that does **not** exist
-
-| doc | what it is |
-|---|---|
-| [`text-anchored-gene-space-plan.md`](text-anchored-gene-space-plan.md) | Anchoring the gene space to text descriptions of genes. Design only; no code. |
-
 ---
 
 **Before trusting any annotation output**, check that the marker panel is on the embedding's
