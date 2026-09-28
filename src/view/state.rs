@@ -51,11 +51,12 @@ impl Scene {
         };
         let labels = &self.data.labels[li];
         self.styles = self.book.resolve(labels.title(), &labels.levels);
-        if matches!(&self.groups, Some((s, l, _)) if *s == self.space && *l == li) {
+        if matches!(&self.groups, Some((s, l, ..)) if *s == self.space && *l == li) {
             return;
         }
         let g = labels.align(&self.current().points);
-        self.groups = Some((self.space, li, g));
+        let sizes = data::group_counts(g.iter().copied(), labels.levels.len());
+        self.groups = Some((self.space, li, g, sizes));
     }
 
     /// Change group `g`'s style in the current grouping and save the book.
@@ -88,7 +89,12 @@ impl Scene {
     }
 
     pub fn groups(&self) -> Option<&[u32]> {
-        self.groups.as_ref().map(|(_, _, g)| g.as_slice())
+        self.groups.as_ref().map(|(_, _, g, _)| g.as_slice())
+    }
+
+    /// Points per group of the grouping on screen.
+    pub fn group_sizes(&self) -> Option<&[usize]> {
+        self.groups.as_ref().map(|(.., n)| n.as_slice())
     }
 
     pub fn levels(&self) -> &[Box<str>] {
@@ -142,6 +148,7 @@ impl Scene {
         self.locked.clear();
         self.orders.borrow_mut().clear();
         self.feature_index.borrow_mut().take();
+        self.name_index.borrow_mut().take();
         self.medians.borrow_mut().take();
         self.space = self
             .data

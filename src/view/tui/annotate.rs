@@ -14,7 +14,7 @@ impl App {
             return;
         }
         let guess = self.markers_guess().map_or_else(String::new, |p| shown(&p));
-        self.markers_input = Some(guess);
+        self.modal = Some(Modal::markers_file(guess));
     }
 
     fn markers_guess(&self) -> Option<PathBuf> {
@@ -58,48 +58,40 @@ impl App {
             .min_by_key(|p| (p.file_name().map_or(usize::MAX, |n| n.len()), p.clone()))
     }
 
-    pub(super) fn markers_key(&mut self, k: KeyEvent) {
-        let Some(input) = self.markers_input.as_mut() else {
-            return;
+    /// A key while typing the markers file. Returns whether anything changed.
+    pub(super) fn markers_key(&mut self, k: KeyEvent) -> bool {
+        let Some(Modal::MarkersFile(input, _)) = self.modal.as_mut() else {
+            return false;
         };
         match k.code {
             KeyCode::Esc => {
-                self.markers_input = None;
+                self.modal = None;
                 self.message = Some("annotation cancelled".into());
+                return true;
             }
             KeyCode::Backspace => {
                 input.pop();
             }
-            KeyCode::Tab => {
-                if let Some(done) = complete_path(input) {
-                    *input = done;
-                }
-            }
+            KeyCode::Tab => match complete_path(input) {
+                Some(done) => *input = done,
+                None => return false,
+            },
             KeyCode::Enter => {
                 let path = PathBuf::from(expand_home(input.trim()));
                 if !path.is_file() {
                     self.message = Some(format!("no file at {}", path.display()));
-                    return;
+                    return true;
                 }
-                self.markers_input = None;
+                self.modal = None;
                 self.run_annotate(path);
+                return true;
             }
             KeyCode::Char(c) => input.push(c),
-            _ => {}
+            _ => return false,
         }
-    }
-
-    /// The status line while typing the markers file.
-    pub(super) fn markers_line(&self) -> Option<String> {
-        let input = self.markers_input.as_ref()?;
-        let options = path_options(input);
-        let hint = if options.len() > 1 {
-            let names: Vec<&str> = options.iter().take(4).map(|(n, _)| n.as_str()).collect();
-            format!("   tab: {}", names.join(" · "))
-        } else {
-            String::new()
-        };
-        Some(format!("markers file for lupin annotate: {input}▏{hint}"))
+        let input = std::mem::take(input);
+        self.modal = Some(Modal::markers_file(input));
+        true
     }
 
     fn run_annotate(&mut self, markers: PathBuf) {
@@ -111,16 +103,13 @@ impl App {
         let lupin = self.lupin.clone();
         let progress: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
         let shared = progress.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(decide::annotate(&lupin, &run, &markers, &out, &shared));
-        });
+        let done = Pending::spawn(move || decide::annotate(&lupin, &run, &markers, &out, &shared));
         self.relabeling = Some(Relabeling {
             job: RelabelJob::Annotate,
             started: std::time::Instant::now(),
             sent: Vec::new(),
             progress,
-            done: rx,
+            done,
         });
     }
 }
@@ -145,7 +134,7 @@ fn shown(p: &Path) -> String {
 
 /// Entries of the typed path's directory that start with its last part:
 /// (name, is a directory).
-fn path_options(input: &str) -> Vec<(String, bool)> {
+pub(super) fn path_options(input: &str) -> Vec<(String, bool)> {
     let (dir, prefix) = match input.rfind('/') {
         Some(i) => (&input[..=i], &input[i + 1..]),
         None => ("", input),

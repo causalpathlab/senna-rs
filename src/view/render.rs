@@ -183,8 +183,9 @@ impl Paint<'_> {
     pub fn draw_order(&self) -> Vec<u32> {
         let order = &self.points.order;
         if let Some((levels, _)) = self.levels {
+            let t: Vec<f32> = (0..levels.values.len()).map(|i| levels.t(i)).collect();
             let mut o = order.clone();
-            o.sort_by(|&a, &b| levels.t(a as usize).total_cmp(&levels.t(b as usize)));
+            o.sort_by(|&a, &b| t[a as usize].total_cmp(&t[b as usize]));
             return o;
         }
         let mut buckets: [Vec<u32>; 3] = Default::default();
@@ -334,6 +335,7 @@ impl Job {
 }
 
 /// A composited linear-light image, ready for labels and encoding.
+#[derive(Clone)]
 pub struct Frame {
     pub w: usize,
     pub h: usize,

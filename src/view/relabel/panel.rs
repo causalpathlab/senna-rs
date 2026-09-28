@@ -110,10 +110,9 @@ impl Scene {
         let id = r.cluster();
         let (label, _) = self.cluster_call(id);
         let staged = r.draft.clusters.get(&id);
-        let size = self.focus.and_then(|f| {
-            let g = self.groups()?;
-            Some(g.iter().filter(|&&x| x == f && x != NONE).count())
-        });
+        let size = self
+            .focus
+            .and_then(|f| self.group_sizes()?.get(f as usize).copied());
         let marks = staged.map_or(0, |c| c.marks.len());
         let verdict = staged.and_then(|c| c.verdict.as_ref());
         let merged = r.draft.merges.iter().find(|m| m.clusters.contains(&id));

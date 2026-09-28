@@ -26,6 +26,8 @@ use std::sync::Arc;
 /// Per group, a score per feature; and the features, in column order.
 type GroupContrasts<'a> = (Vec<Vec<f32>>, &'a [Box<str>]);
 
+type Vector = nalgebra::DVector<f32>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Source {
@@ -86,10 +88,108 @@ struct Expected {
     variance_everywhere: OnceCell<Vec<f32>>,
     /// θ and β out of log space (topic runs); computed on first use.
     topic_linear: OnceCell<(Mat, Mat)>,
+    /// Median of the finite baselines (`None`: no usable baseline).
+    bias_median: OnceCell<Option<f32>>,
+    /// Mean of `z` over all cells (embedding runs).
+    z_mean: OnceCell<Vector>,
+    /// Row of each cell name.
+    cell_index: OnceCell<HashMap<Box<str>, u32>>,
+}
+
+impl Expected {
+    fn new(features: Axis, cells: Vec<Box<str>>, model: Model) -> Self {
+        Self {
+            features,
+            cells,
+            model,
+            variance_everywhere: OnceCell::new(),
+            topic_linear: OnceCell::new(),
+            bias_median: OnceCell::new(),
+            z_mean: OnceCell::new(),
+            cell_index: OnceCell::new(),
+        }
+    }
+
+    fn cell_index(&self) -> &HashMap<Box<str>, u32> {
+        self.cell_index.get_or_init(|| {
+            self.cells
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.clone(), i as u32))
+                .collect()
+        })
+    }
+
+    /// The per-feature baseline and its median, when the run has one.
+    fn baseline(&self) -> Option<(&[f32], f32)> {
+        let Model::Embedding { bias: Some(b), .. } = &self.model else {
+            return None;
+        };
+        let median = self.bias_median.get_or_init(|| median_of(b));
+        Some((b, (*median)?))
+    }
+
+    /// θ and β out of log space (topic runs).
+    fn linear(&self) -> Option<&(Mat, Mat)> {
+        let Model::Topic {
+            log_theta,
+            log_beta,
+        } = &self.model
+        else {
+            return None;
+        };
+        Some(
+            self.topic_linear
+                .get_or_init(|| (log_theta.map(f32::exp), log_beta.map(f32::exp))),
+        )
+    }
+
+    /// The per-cell table a group contrast is linear in: `z`, or θ.
+    fn table(&self) -> &Mat {
+        match (&self.model, self.linear()) {
+            (Model::Embedding { z, .. }, _) => z,
+            (_, Some((theta, _))) => theta,
+            _ => unreachable!("a topic run has linear tables"),
+        }
+    }
+
+    /// Each feature's score, cells summing to `inside` (`n_in` of them) over
+    /// cells summing to `rest`: the expected log fold change.
+    fn score(&self, inside: &Vector, n_in: usize, rest: &Vector, n_rest: usize) -> Vec<f32> {
+        let a = inside / n_in.max(1) as f32;
+        let b = rest / n_rest.max(1) as f32;
+        match (&self.model, self.linear()) {
+            (Model::Embedding { rho, .. }, _) => {
+                let mut v: Vec<f32> = (rho * (a - b)).iter().copied().collect();
+                drop_below_median(&mut v, self.baseline());
+                v
+            }
+            (_, Some((_, beta))) => {
+                let (x, y) = (beta * a, beta * b);
+                x.iter()
+                    .zip(y.iter())
+                    .map(|(&x, &y)| (x.max(1e-12) / y.max(1e-12)).ln())
+                    .collect()
+            }
+            _ => unreachable!("a topic run has linear tables"),
+        }
+    }
+}
+
+/// Per-group sums of the per-cell table a group contrast is linear in, so
+/// any union of groups scores without another pass over the cells.
+pub struct GroupSums {
+    sums: Vec<Vector>,
+    counts: Vec<usize>,
+    /// Cells in view with no group; they count as the rest of the view.
+    none: Vector,
+    none_count: usize,
 }
 
 /// A point with no row in a source's cell table.
 const NO_ROW: u32 = u32::MAX;
+
+const NO_CONTRAST: &str = "the focused group has no cells, or no other cells are in view";
 
 struct Observed {
     data: SparseIoVec,
@@ -202,21 +302,26 @@ impl Activity {
         {
             return Ok(r.clone());
         }
-        let cells: &[Box<str>] = match source {
-            Source::Expected => &self.expected()?.cells,
-            Source::Observed => &self.observed()?.cells,
+        let lookup = |index: &HashMap<Box<str>, u32>| -> Arc<Vec<u32>> {
+            Arc::new(
+                names
+                    .iter()
+                    .map(|n| index.get(n.as_ref()).copied().unwrap_or(NO_ROW))
+                    .collect(),
+            )
         };
-        let index: HashMap<&str, u32> = cells
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.as_ref(), i as u32))
-            .collect();
-        let rows: Arc<Vec<u32>> = Arc::new(
-            names
-                .iter()
-                .map(|n| index.get(n.as_ref()).copied().unwrap_or(NO_ROW))
-                .collect(),
-        );
+        let rows = match source {
+            Source::Expected => lookup(self.expected()?.cell_index()),
+            Source::Observed => {
+                let cells = &self.observed()?.cells;
+                let index: HashMap<Box<str>, u32> = cells
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.clone(), i as u32))
+                    .collect();
+                lookup(&index)
+            }
+        };
         self.rows.insert((source, key), rows.clone());
         Ok(rows)
     }
@@ -241,17 +346,15 @@ impl Activity {
                 .and_then(|p| Mat::from_parquet_with_row_names(&p, Some(0)).ok())
                 .filter(|b| b.rows == rho.rows && b.mat.ncols() >= 1)
                 .map(|b| b.mat.column(0).iter().copied().collect());
-            return Ok(Expected {
-                features: Axis::new(rho.rows),
-                cells: z.rows,
-                model: Model::Embedding {
+            return Ok(Expected::new(
+                Axis::new(rho.rows),
+                z.rows,
+                Model::Embedding {
                     z: z.mat,
                     rho: rho.mat,
                     bias,
                 },
-                variance_everywhere: OnceCell::new(),
-                topic_linear: OnceCell::new(),
-            });
+            ));
         }
         if let (true, Some(theta_rel), Some(beta_rel)) = (
             m.kind.latent_is_log_simplex(),
@@ -266,16 +369,14 @@ impl Activity {
                 theta.mat.ncols(),
                 beta.mat.ncols()
             );
-            return Ok(Expected {
-                features: Axis::new(beta.rows),
-                cells: theta.rows,
-                model: Model::Topic {
+            return Ok(Expected::new(
+                Axis::new(beta.rows),
+                theta.rows,
+                Model::Topic {
                     log_theta: theta.mat,
                     log_beta: beta.mat,
                 },
-                variance_everywhere: OnceCell::new(),
-                topic_linear: OnceCell::new(),
-            });
+            ));
         }
         anyhow::bail!("this run has no model tables to predict a feature from")
     }
@@ -498,20 +599,26 @@ impl Activity {
                 .collect()
         };
         let scores: Vec<f32> = match (&e.model, group) {
-            (Model::Embedding { z, rho, bias }, Some(_)) => {
+            (_, Some(_)) => {
                 let (inside, rest) = (pick(Some(true)), pick(Some(false)));
                 if inside.is_empty() || rest.is_empty() {
-                    return Err(
-                        "the focused group has no cells, or no other cells are in view".into(),
-                    );
+                    return Err(NO_CONTRAST.into());
                 }
-                let delta = row_mean(z, &inside) - row_mean(z, &rest);
-                let mut lfc: Vec<f32> = (rho * delta).iter().copied().collect();
-                drop_below_median(&mut lfc, bias.as_deref());
-                lfc
+                let table = e.table();
+                e.score(
+                    &row_sum(table, &inside),
+                    inside.len(),
+                    &row_sum(table, &rest),
+                    rest.len(),
+                )
             }
-            (Model::Embedding { z, rho, bias }, None) => {
-                let here = quadratic_forms(rho, &row_cov(z, &pick(None)));
+            (Model::Embedding { z, rho, .. }, None) => {
+                let cells = pick(None);
+                // A view of every cell has nothing to compare against, so
+                // its variance ranks alone; a zoomed view ranks by how much
+                // more a feature varies there than everywhere.
+                let whole = cells.len() == z.nrows();
+                let here = quadratic_forms(rho, &row_cov(z, &cells));
                 let everywhere = e.variance_everywhere.get_or_init(|| {
                     let all: Vec<usize> = (0..z.nrows()).collect();
                     quadratic_forms(rho, &row_cov(z, &all))
@@ -524,39 +631,18 @@ impl Activity {
                     .zip(everywhere)
                     .map(|(&h, &a)| {
                         if a >= floor && a > 0.0 {
-                            h / a
+                            if whole {
+                                h
+                            } else {
+                                h / a
+                            }
                         } else {
                             f32::NEG_INFINITY
                         }
                     })
                     .collect();
-                drop_below_median(&mut ratio, bias.as_deref());
+                drop_below_median(&mut ratio, e.baseline());
                 ratio
-            }
-            (
-                Model::Topic {
-                    log_theta,
-                    log_beta,
-                },
-                Some(_),
-            ) => {
-                let (inside, rest) = (pick(Some(true)), pick(Some(false)));
-                if inside.is_empty() || rest.is_empty() {
-                    return Err(
-                        "the focused group has no cells, or no other cells are in view".into(),
-                    );
-                }
-                let (theta, beta) = e
-                    .topic_linear
-                    .get_or_init(|| (log_theta.map(f32::exp), log_beta.map(f32::exp)));
-                let (g, r) = (
-                    beta * row_mean(theta, &inside),
-                    beta * row_mean(theta, &rest),
-                );
-                g.iter()
-                    .zip(r.iter())
-                    .map(|(&a, &b)| (a.max(1e-12) / b.max(1e-12)).ln())
-                    .collect()
             }
             (Model::Topic { .. }, None) => {
                 return Err("on a topic run, focus a group first to get suggestions".into());
@@ -565,82 +651,89 @@ impl Activity {
         Ok((scores, &e.features.names))
     }
 
-    /// `contrast` for every group at once: each group over the rest of the
-    /// view. `groups` gives each point of `universe` its group (`u32::MAX`
-    /// for none). One pass over the cells: each group's rest is the total
-    /// minus the group. Returns one score vector per group (empty for an
-    /// empty group), in the model's feature order, and the feature names.
-    pub fn cluster_contrasts(
+    /// Per-group sums for `contrast` of groups: `groups` gives each point
+    /// of `universe` (the view `key`) its group (`>= n_groups` for none).
+    /// The one pass over the cells; the contrasts below are cheap after it.
+    pub fn group_sums(
         &mut self,
         key: usize,
         universe: &[Box<str>],
         groups: &[u32],
         n_groups: usize,
-    ) -> Result<GroupContrasts<'_>, String> {
+    ) -> Result<GroupSums, String> {
         let rows = self.rows(Source::Expected, key, universe)?;
+        let table = self.expected()?.table();
+        let zero = Vector::zeros(table.ncols());
+        let mut out = GroupSums {
+            sums: vec![zero.clone(); n_groups],
+            counts: vec![0; n_groups],
+            none: zero,
+            none_count: 0,
+        };
+        for (&r, &g) in rows.iter().zip(groups) {
+            if r == NO_ROW {
+                continue;
+            }
+            let (sum, count) = match out.sums.get_mut(g as usize) {
+                Some(s) => (s, &mut out.counts[g as usize]),
+                None => (&mut out.none, &mut out.none_count),
+            };
+            for (a, &b) in sum.iter_mut().zip(table.row(r as usize).iter()) {
+                *a += b;
+            }
+            *count += 1;
+        }
+        Ok(out)
+    }
+
+    /// `contrast` for every group at once, each over the other groups'
+    /// cells (cells with no group left out). One score vector per group
+    /// (empty for an empty group), and the feature names.
+    pub fn cluster_contrasts(&mut self, sums: &GroupSums) -> Result<GroupContrasts<'_>, String> {
         let e = self.expected()?;
-        // Per-group sums of the per-cell table the scores are linear in.
-        let sums = |m: &Mat| -> (Vec<nalgebra::DVector<f32>>, Vec<usize>) {
-            let mut s = vec![nalgebra::DVector::<f32>::zeros(m.ncols()); n_groups];
-            let mut n = vec![0usize; n_groups];
-            for (k, &r) in rows.iter().enumerate() {
-                let g = groups[k];
-                if r == NO_ROW || g as usize >= n_groups {
-                    continue;
+        let total = sums
+            .sums
+            .iter()
+            .fold(Vector::zeros(sums.none.len()), |a, b| a + b);
+        let all: usize = sums.counts.iter().sum();
+        let out = sums
+            .sums
+            .iter()
+            .zip(&sums.counts)
+            .map(|(s, &n)| {
+                if n == 0 {
+                    return Vec::new();
                 }
-                s[g as usize] += m.row(r as usize).transpose();
-                n[g as usize] += 1;
-            }
-            (s, n)
-        };
-        let split = |s: &[nalgebra::DVector<f32>], n: &[usize], g: usize| {
-            let total: nalgebra::DVector<f32> = s
-                .iter()
-                .fold(nalgebra::DVector::<f32>::zeros(s[g].len()), |a, b| a + b);
-            let all: usize = n.iter().sum();
-            let inside = &s[g] / n[g].max(1) as f32;
-            let rest = (total - &s[g]) / (all - n[g]).max(1) as f32;
-            (inside, rest)
-        };
-        let out = match &e.model {
-            Model::Embedding { z, rho, bias } => {
-                let (s, n) = sums(z);
-                (0..n_groups)
-                    .map(|g| {
-                        if n[g] == 0 {
-                            return Vec::new();
-                        }
-                        let (inside, rest) = split(&s, &n, g);
-                        let mut v: Vec<f32> = (rho * (inside - rest)).iter().copied().collect();
-                        drop_below_median(&mut v, bias.as_deref());
-                        v
-                    })
-                    .collect()
-            }
-            Model::Topic {
-                log_theta,
-                log_beta,
-            } => {
-                let (theta, beta) = e
-                    .topic_linear
-                    .get_or_init(|| (log_theta.map(f32::exp), log_beta.map(f32::exp)));
-                let (s, n) = sums(theta);
-                (0..n_groups)
-                    .map(|g| {
-                        if n[g] == 0 {
-                            return Vec::new();
-                        }
-                        let (inside, rest) = split(&s, &n, g);
-                        let (a, b) = (beta * inside, beta * rest);
-                        a.iter()
-                            .zip(b.iter())
-                            .map(|(&x, &y)| (x.max(1e-12) / y.max(1e-12)).ln())
-                            .collect()
-                    })
-                    .collect()
-            }
-        };
+                e.score(s, n, &(&total - s), all - n)
+            })
+            .collect();
         Ok((out, &e.features.names))
+    }
+
+    /// `contrast` of the union of the groups `chosen` picks, over every
+    /// other cell in view (cells with no group included), from `sums`.
+    pub fn union_contrast(
+        &mut self,
+        sums: &GroupSums,
+        chosen: impl Fn(usize) -> bool,
+    ) -> Result<(Vec<f32>, &[Box<str>]), String> {
+        let e = self.expected()?;
+        let mut inside = Vector::zeros(sums.none.len());
+        let mut rest = sums.none.clone();
+        let (mut n_in, mut n_rest) = (0, sums.none_count);
+        for (g, (s, &n)) in sums.sums.iter().zip(&sums.counts).enumerate() {
+            if chosen(g) {
+                inside += s;
+                n_in += n;
+            } else {
+                rest += s;
+                n_rest += n;
+            }
+        }
+        if n_in == 0 || n_rest == 0 {
+            return Err(NO_CONTRAST.into());
+        }
+        Ok((e.score(&inside, n_in, &rest, n_rest), &e.features.names))
     }
 
     /// The `top` best-scoring features of `contrast`, best first.
@@ -661,18 +754,23 @@ impl Activity {
     /// features are left out as in `contrast`.
     pub fn near_cell(&mut self, cell: &str, top: usize) -> Result<Vec<(Box<str>, f32)>, String> {
         let e = self.expected()?;
-        let Model::Embedding { z, rho, bias } = &e.model else {
+        let Model::Embedding { z, rho, .. } = &e.model else {
             return Err("neighbouring features need an embedding run".into());
         };
-        let n = e
-            .cells
-            .iter()
-            .position(|c| c.as_ref() == cell)
-            .ok_or_else(|| format!("{cell} is not in the model"))?;
-        let all: Vec<usize> = (0..z.nrows()).collect();
-        let d = z.row(n).transpose() - row_mean(z, &all);
+        let n = *e
+            .cell_index()
+            .get(cell)
+            .ok_or_else(|| format!("{cell} is not in the model"))? as usize;
+        let mean = e.z_mean.get_or_init(|| {
+            let mut acc = Vector::zeros(z.ncols());
+            for row in z.row_iter() {
+                acc += row.transpose();
+            }
+            acc / z.nrows().max(1) as f32
+        });
+        let d = z.row(n).transpose() - mean;
         let mut scores: Vec<f32> = (rho * d).iter().copied().collect();
-        drop_below_median(&mut scores, bias.as_deref());
+        drop_below_median(&mut scores, e.baseline());
         Ok(best(&scores, &e.features.names, top))
     }
 }
@@ -693,17 +791,21 @@ fn best(scores: &[f32], names: &[Box<str>], top: usize) -> Vec<(Box<str>, f32)> 
         .collect()
 }
 
-/// Set scores of features whose baseline is below the median to -inf.
-fn drop_below_median(scores: &mut [f32], baseline: Option<&[f32]>) {
-    let Some(b) = baseline.filter(|b| b.len() == scores.len()) else {
+/// The upper median of the finite values.
+fn median_of(v: &[f32]) -> Option<f32> {
+    let mut finite: Vec<f32> = v.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return None;
+    }
+    let k = finite.len() / 2;
+    Some(*finite.select_nth_unstable_by(k, f32::total_cmp).1)
+}
+
+/// Set scores of features whose baseline is below its median to -inf.
+fn drop_below_median(scores: &mut [f32], baseline: Option<(&[f32], f32)>) {
+    let Some((b, median)) = baseline.filter(|(b, _)| b.len() == scores.len()) else {
         return;
     };
-    let mut sorted: Vec<f32> = b.iter().copied().filter(|v| v.is_finite()).collect();
-    if sorted.is_empty() {
-        return;
-    }
-    sorted.sort_unstable_by(f32::total_cmp);
-    let median = sorted[sorted.len() / 2];
     for (s, &v) in scores.iter_mut().zip(b) {
         if v.is_nan() || v < median {
             *s = f32::NEG_INFINITY;
@@ -711,13 +813,18 @@ fn drop_below_median(scores: &mut [f32], baseline: Option<&[f32]>) {
     }
 }
 
-/// Mean of the given rows of `m`, as a column vector.
-fn row_mean(m: &Mat, rows: &[usize]) -> nalgebra::DVector<f32> {
-    let mut acc = nalgebra::DVector::<f32>::zeros(m.ncols());
+/// Sum of the given rows of `m`, as a column vector.
+fn row_sum(m: &Mat, rows: &[usize]) -> Vector {
+    let mut acc = Vector::zeros(m.ncols());
     for &i in rows {
         acc += m.row(i).transpose();
     }
-    acc / rows.len().max(1) as f32
+    acc
+}
+
+/// Mean of the given rows of `m`, as a column vector.
+fn row_mean(m: &Mat, rows: &[usize]) -> Vector {
+    row_sum(m, rows) / rows.len().max(1) as f32
 }
 
 /// Covariance of the given rows of `m` (columns are variables), summed over
@@ -755,7 +862,9 @@ mod tests {
     #[test]
     fn below_median_baselines_are_dropped_and_others_kept() {
         let mut scores = vec![1.0, 2.0, 3.0, 4.0];
-        drop_below_median(&mut scores, Some(&[0.1, 5.0, 3.0, f32::NAN]));
+        let b = [0.1, 5.0, 3.0, f32::NAN];
+        assert_eq!(median_of(&b), Some(3.0));
+        drop_below_median(&mut scores, Some((&b, 3.0)));
         assert_eq!(scores[0], f32::NEG_INFINITY);
         assert_eq!(scores[1], 2.0);
         assert_eq!(scores[2], 3.0);
@@ -763,6 +872,69 @@ mod tests {
         let mut untouched = vec![1.0, 2.0];
         drop_below_median(&mut untouched, None);
         assert_eq!(untouched, vec![1.0, 2.0]);
+    }
+
+    /// An activity over a tiny model: five cells, three features.
+    fn tiny(topic: bool) -> Activity {
+        let names = |p: &str, n: usize| (0..n).map(|i| format!("{p}{i}").into()).collect();
+        let cells: Vec<Box<str>> = names("c", 5);
+        let z = Mat::from_row_slice(5, 2, &[0.1, 1.0, 0.4, 0.2, 0.9, 0.3, 0.2, 0.8, 0.7, 0.5]);
+        let rho = Mat::from_row_slice(3, 2, &[1.0, -0.5, 0.3, 2.0, -1.0, 0.4]);
+        let model = if topic {
+            Model::Topic {
+                log_theta: z.map(f32::ln),
+                log_beta: rho.map(|v| v.abs().ln()),
+            }
+        } else {
+            Model::Embedding {
+                z,
+                rho,
+                bias: Some(vec![0.5, 0.1, 0.9]),
+            }
+        };
+        let mut a = Activity::new(
+            RunManifest::new(senna::run_manifest::RunKind::Topic, "r"),
+            PathBuf::new(),
+        );
+        a.expected = Some(Ok(Expected::new(Axis::new(names("GENE", 3)), cells, model)));
+        a
+    }
+
+    #[test]
+    fn cached_group_contrasts_equal_the_direct_ones() {
+        for topic in [false, true] {
+            let mut a = tiny(topic);
+            // View order differs from the model's; one cell has no group,
+            // one is not in the model.
+            let view: Vec<Box<str>> = ["c3", "c0", "c4", "c1", "c2", "cx"]
+                .map(Into::into)
+                .to_vec();
+            let groups = [1, 0, NO_ROW, 1, 0, 0];
+            let sums = a.group_sums(0, &view, &groups, 3).unwrap();
+            let close = |x: &[f32], y: &[f32]| {
+                x.len() == y.len() && x.iter().zip(y).all(|(a, b)| a == b || (a - b).abs() < 1e-5)
+            };
+            for chosen in [vec![0], vec![1], vec![0, 1]] {
+                let mask: Vec<bool> = groups.iter().map(|g| chosen.contains(g)).collect();
+                let (direct, _) = a.contrast(0, &view, Some(&mask)).unwrap();
+                let direct = direct.clone();
+                let (cached, _) = a
+                    .union_contrast(&sums, |g| chosen.contains(&(g as u32)))
+                    .unwrap();
+                assert!(close(&direct, &cached), "{direct:?} vs {cached:?}");
+            }
+            // An empty group has no contrast, as before.
+            assert!(a.union_contrast(&sums, |g| g == 2).is_err());
+            // Per cluster, the rest is the other groups only.
+            let (per, _) = a.cluster_contrasts(&sums).unwrap();
+            let per = per.clone();
+            let grouped: Vec<Box<str>> = ["c3", "c0", "c1", "c2"].map(Into::into).to_vec();
+            let (direct, _) = a
+                .contrast(1, &grouped, Some(&[false, true, false, true]))
+                .unwrap();
+            assert!(close(&direct, &per[0]));
+            assert!(per[2].is_empty());
+        }
     }
 
     #[test]

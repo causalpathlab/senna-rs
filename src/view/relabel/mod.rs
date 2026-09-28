@@ -1,10 +1,14 @@
 //! Relabel mode: visit clusters, stage decisions in a draft; lupin applies it.
 
-use super::data::{group_counts, LabelKind, NONE};
+use super::activity::{Activity, GroupSums, Source};
+use super::data::LabelKind;
 use super::review::{Draft, Mark, Merge, Verdict};
 use super::{Axis, Pick, Scene};
+use fit::Evidence;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
+mod fit;
 mod merge;
 mod panel;
 
@@ -36,6 +40,9 @@ fn same_type(a: &str, b: &str) -> bool {
     super::rounds::label_key(a) == super::rounds::label_key(b)
 }
 
+/// The space and grouping per-group sums were taken on.
+type SumsKey = (usize, Option<usize>);
+
 /// One feature in the review list.
 pub(crate) struct Row {
     pub feature: Box<str>,
@@ -63,6 +70,9 @@ pub(crate) struct Review {
     pub merge: Option<MergeSel>,
     /// The last answer from lupin's preview, as text.
     pub preview: Option<Vec<String>>,
+    evidence: Rc<Evidence>,
+    /// Per-group sums for the (space, grouping) on screen, taken once.
+    sums: Option<(SumsKey, Result<GroupSums, String>)>,
 }
 
 /// One cluster in the overview.
@@ -114,6 +124,8 @@ impl Review {
             overview,
             merge: None,
             preview: None,
+            evidence: Rc::default(),
+            sums: None,
         }
     }
 
@@ -141,21 +153,30 @@ impl Scene {
         self.colour = Some(li);
         self.focus = None;
         self.refresh_groups();
+        let markers = self.markers_by_type();
+        let features = self
+            .activity()
+            .and_then(|a| a.feature_names(Source::Expected).ok().map(<[_]>::to_vec))
+            .unwrap_or_default();
+        let mut review = Review::new(Vec::new(), draft);
+        review.evidence = Rc::new(Evidence::new(markers, features));
+        self.review = Some(review);
         let overview = self.cluster_overview(li);
-        self.review = Some(Review::new(overview, draft));
+        if let Some(r) = self.review.as_mut() {
+            r.overview = overview;
+        }
         self.visit(0);
         Ok(())
     }
 
-    /// Every cluster of grouping `li`, in visiting order.
+    /// Every cluster of grouping `li` (the one on screen), in visiting order.
     fn cluster_overview(&mut self, li: usize) -> Vec<Overview> {
-        let space = self.space;
-        let markers = self.markers_by_type();
         let clusters = &self.data.labels[li];
         let ids = clusters.ids.clone();
         let n = ids.len();
-        let groups = clusters.align(&self.data.spaces[space].points);
-        let size = group_counts(groups.iter().copied(), n);
+        let size = self
+            .group_sizes()
+            .map_or_else(|| vec![0; n], <[usize]>::to_vec);
         let labels: Vec<Option<String>> = ids
             .iter()
             .map(|id| {
@@ -165,17 +186,17 @@ impl Scene {
                     .and_then(|r| r.call(&id.to_string()).0)
             })
             .collect();
-        let mut best: Vec<Option<(String, f32)>> = vec![None; n];
-        if let Some((activity, data)) = self.activity_and_data() {
-            let names = &data.spaces[space].points.names;
-            if let Ok((per, features)) = activity.cluster_contrasts(space, names, &groups, n) {
-                for (g, scores) in per.iter().enumerate() {
-                    if !scores.is_empty() {
-                        best[g] = best_fit(features, scores, &markers);
-                    }
-                }
-            }
-        }
+        let per = match self.review_sums() {
+            Some((activity, Ok(sums))) => activity.cluster_contrasts(sums).ok().map(|(p, _)| p),
+            _ => None,
+        };
+        let evidence = self.evidence();
+        let best: Vec<Option<(String, f32)>> = (0..n)
+            .map(|g| {
+                let scores = per.as_ref()?.get(g).filter(|s| !s.is_empty())?;
+                evidence.best_fit(scores)
+            })
+            .collect();
         let mut out: Vec<Overview> = (0..n)
             .map(|g| Overview {
                 id: ids[g],
@@ -232,11 +253,9 @@ impl Scene {
             c.ids.iter().position(|&x| x == id).map(|g| g as u32)
         });
         let scores = self.cluster_scores();
-        let markers = self.markers_by_type();
-        let fits = type_fits(
-            &scores.iter().map(|(f, &v)| (f.as_ref(), v)).collect(),
-            &markers,
-        );
+        let evidence = self.evidence();
+        let markers = &evidence.markers;
+        let fits = evidence.type_fits(&scores);
         let spell = |x: String| {
             markers
                 .keys()
@@ -283,13 +302,7 @@ impl Scene {
             .max_by(|a, b| fit(a).total_cmp(&fit(b)))
             .cloned();
         let listed: Vec<String> = target.iter().cloned().chain(alternative).collect();
-        let rows = review_rows(
-            &scores,
-            &markers,
-            &listed,
-            target.as_deref(),
-            staged.as_deref(),
-        );
+        let rows = evidence.review_rows(&scores, &listed, target.as_deref(), staged.as_deref());
         candidates.sort_by(|a, b| fit(b).total_cmp(&fit(a)));
         let r = self.review.as_mut().expect("checked above");
         r.fits = candidates
@@ -304,27 +317,44 @@ impl Scene {
     }
 
     /// Every feature's expected log fold change, the focused cluster over the
-    /// rest of the view.
-    fn cluster_scores(&mut self) -> BTreeMap<Box<str>, f32> {
-        let space = self.space;
-        let (Some(f), Some(groups)) = (self.focus, self.groups()) else {
-            return BTreeMap::new();
+    /// rest of the view, in the model's feature order (empty: none).
+    fn cluster_scores(&mut self) -> Vec<f32> {
+        let Some(f) = self.focus else {
+            return Vec::new();
         };
-        let mask: Vec<bool> = groups.iter().map(|&g| g == f).collect();
-        let Some((activity, data)) = self.activity_and_data() else {
-            return BTreeMap::new();
+        let scores = match self.review_sums() {
+            Some((activity, Ok(sums))) => activity
+                .union_contrast(sums, |g| g == f as usize)
+                .map(|(v, _)| v),
+            Some((_, Err(e))) => Err(e.clone()),
+            None => return Vec::new(),
         };
-        let names = &data.spaces[space].points.names;
-        let scores = activity
-            .contrast(space, names, Some(&mask))
-            .map(|(scores, features)| features.iter().cloned().zip(scores).collect());
-        match scores {
-            Ok(scores) => scores,
-            Err(e) => {
-                self.note = Some(e);
-                BTreeMap::new()
-            }
+        scores.unwrap_or_else(|e| {
+            self.note = Some(e);
+            Vec::new()
+        })
+    }
+
+    fn evidence(&self) -> Rc<Evidence> {
+        self.review
+            .as_ref()
+            .map_or_else(Rc::default, |r| r.evidence.clone())
+    }
+
+    /// The activity, and the review's per-group sums for the space and
+    /// grouping on screen (taken on first use for each).
+    fn review_sums(&mut self) -> Option<(&mut Activity, &Result<GroupSums, String>)> {
+        let key = (self.space, self.colour);
+        let n = self.levels().len();
+        self.activity()?;
+        let (_, _, groups, _) = self.groups.as_ref()?;
+        let r = self.review.as_mut()?;
+        let activity = self.activity.as_mut()?;
+        if r.sums.as_ref().is_none_or(|(k, _)| *k != key) {
+            let names = &self.data.spaces[key.0].points.names;
+            r.sums = Some((key, activity.group_sums(key.0, names, groups, n)));
         }
+        Some((activity, &r.sums.as_ref()?.1))
     }
 
     /// The marker table, as the features listed under each type.
@@ -471,127 +501,6 @@ impl Scene {
             self.set_pick(Pick::One(f));
         }
     }
-}
-
-/// How well each type's markers fit, best first: the mean of its best
-/// `FIT_TOP` marker scores (missing ones as zero), with how many it has.
-fn type_fits(
-    score_of: &BTreeMap<&str, f32>,
-    markers: &BTreeMap<String, Vec<Box<str>>>,
-) -> Vec<(String, f32, usize)> {
-    let mut fits: Vec<(String, f32, usize)> = markers
-        .iter()
-        .filter_map(|(t, ms)| {
-            let mut v: Vec<f32> = ms
-                .iter()
-                .filter_map(|m| score_of.get(m.as_ref()).copied())
-                .filter(|v| v.is_finite())
-                .collect();
-            if v.is_empty() {
-                return None;
-            }
-            v.sort_by(|a, b| b.total_cmp(a));
-            let fit = v.iter().take(FIT_TOP).sum::<f32>() / FIT_TOP as f32;
-            Some((t.clone(), fit, v.len()))
-        })
-        .collect();
-    fits.sort_by(|a, b| b.1.total_cmp(&a.1));
-    fits
-}
-
-/// The type whose markers fit best, given each feature's score.
-fn best_fit(
-    features: &[Box<str>],
-    scores: &[f32],
-    markers: &BTreeMap<String, Vec<Box<str>>>,
-) -> Option<(String, f32)> {
-    let score_of: BTreeMap<&str, f32> = features
-        .iter()
-        .zip(scores)
-        .map(|(f, &v)| (f.as_ref(), v))
-        .collect();
-    type_fits(&score_of, markers)
-        .into_iter()
-        .next()
-        .map(|(t, fit, _)| (t, fit))
-}
-
-/// Top DE features, then each candidate's best markers, with proposals. `−`
-/// only for the labelled type: a low marker of another type faults the type.
-fn review_rows(
-    scores: &BTreeMap<Box<str>, f32>,
-    markers: &BTreeMap<String, Vec<Box<str>>>,
-    candidates: &[String],
-    target: Option<&str>,
-    labelled: Option<&str>,
-) -> Vec<Row> {
-    let marker_of = |f: &str| -> Vec<String> {
-        candidates
-            .iter()
-            .filter(|t| {
-                markers
-                    .get(*t)
-                    .is_some_and(|ms| ms.iter().any(|m| m.as_ref() == f))
-            })
-            .cloned()
-            .collect()
-    };
-    let target_lists = |f: &str| {
-        target.is_some_and(|t| {
-            markers
-                .get(t)
-                .is_some_and(|ms| ms.iter().any(|m| m.as_ref() == f))
-        })
-    };
-    let mut ranked: Vec<(&Box<str>, f32)> = scores
-        .iter()
-        .map(|(f, &v)| (f, v))
-        .filter(|(_, v)| v.is_finite())
-        .collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let mut rows: Vec<Row> = ranked
-        .into_iter()
-        .take(TOP_DE)
-        .map(|(f, v)| Row {
-            feature: f.clone(),
-            score: v,
-            marker_of: marker_of(f),
-            proposal: (v >= PROPOSE_ADD && !target_lists(f))
-                .then(|| {
-                    target.map(|t| Mark::Include {
-                        cell_type: t.to_string(),
-                    })
-                })
-                .flatten(),
-        })
-        .collect();
-    for t in candidates {
-        let Some(ms) = markers.get(t) else { continue };
-        let mut listed: Vec<(&Box<str>, f32)> = ms
-            .iter()
-            .map(|m| (m, scores.get(m).copied().unwrap_or(f32::NAN)))
-            .collect();
-        listed.sort_by(|a, b| {
-            let key = |v: f32| if v.is_finite() { v } else { f32::NEG_INFINITY };
-            key(b.1).total_cmp(&key(a.1))
-        });
-        for (m, v) in listed.into_iter().take(MARKERS_PER_TYPE) {
-            if rows.iter().any(|r| r.feature == *m) {
-                continue;
-            }
-            let proposal =
-                (labelled == Some(t.as_str()) && v < PROPOSE_DROP).then(|| Mark::Exclude {
-                    cell_type: t.clone(),
-                });
-            rows.push(Row {
-                feature: m.clone(),
-                score: v,
-                marker_of: marker_of(m),
-                proposal,
-            });
-        }
-    }
-    rows
 }
 
 #[cfg(test)]

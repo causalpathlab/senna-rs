@@ -4,33 +4,25 @@ use super::*;
 use rayon::prelude::*;
 
 impl App {
-    pub(super) fn key(&mut self, k: KeyEvent) {
-        if self.search.is_some() {
-            self.search_key(k);
-            return;
-        }
-        if self.prompt.is_some() {
-            self.prompt_key(k);
-            return;
-        }
-        if self.markers_input.is_some() {
-            self.markers_key(k);
-            return;
+    /// A key press. Returns whether anything on screen may have changed
+    /// (a cleared message counts).
+    pub(super) fn key(&mut self, k: KeyEvent) -> bool {
+        if self.modal.is_some() {
+            return self.modal_key(k);
         }
         if self.scene.review.is_some() && !self.help && self.menu.is_none() {
             self.message = None;
             if self.review_key(k) {
-                return;
+                return true;
             }
         }
         if self.menu.is_some() {
-            self.menu_key(k);
-            return;
+            return self.menu_key(k);
         }
         self.message = None;
         if self.help {
             self.help = false;
-            return;
+            return true;
         }
         let n_spaces = self.scene.data.spaces.len();
         let step = |app: &App| app.vp.map_or(0.0, |v| 0.1 * v.w.min(v.h) as f32);
@@ -66,7 +58,7 @@ impl App {
                     self.names = None;
                     self.message = Some("no feature names to search in this run".into());
                 } else {
-                    self.search = Some((String::new(), Vec::new()));
+                    self.modal = Some(Modal::Search(String::new(), Vec::new()));
                 }
             }
             KeyCode::Char('?') => self.help = true,
@@ -76,7 +68,10 @@ impl App {
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
             KeyCode::Char(']') => self.change(|s| s.step_focus(1)),
             KeyCode::Char('[') => self.change(|s| s.step_focus(-1)),
-            KeyCode::Char('t') => self.change(|s| s.show_labels = !s.show_labels),
+            KeyCode::Char('t') => {
+                self.scene.show_labels = !self.scene.show_labels;
+                self.redecorate();
+            }
             KeyCode::Char('+' | '=') => {
                 self.with_vp(|v| v.zoom_at(1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
             }
@@ -120,54 +115,64 @@ impl App {
             KeyCode::Char('s') => self.save(),
             KeyCode::Char('R') => self.toggle_review(),
             KeyCode::Char('A') => self.ask_markers(),
-            KeyCode::Char('T') => self.change(Scene::cycle_text_size),
-            KeyCode::Char('k' | 'l') => self.change(Scene::pin),
-            _ => {}
+            KeyCode::Char('T') => {
+                self.change_text(Scene::cycle_text_size);
+                self.redecorate();
+            }
+            KeyCode::Char('k' | 'l') => {
+                self.change_text(Scene::pin);
+                self.redecorate();
+            }
+            _ => return false,
         }
+        true
     }
 
-    pub(super) fn search_key(&mut self, k: KeyEvent) {
-        let Some((query, _)) = self.search.as_mut() else {
-            return;
+    /// A key while searching. Returns whether anything changed.
+    pub(super) fn search_key(&mut self, k: KeyEvent) -> bool {
+        let Some(Modal::Search(query, _)) = self.modal.as_mut() else {
+            return false;
         };
         match k.code {
             KeyCode::Esc => {
-                self.search = None;
-                return;
+                self.modal = None;
+                return true;
             }
             KeyCode::Enter => {
-                let pick = self
-                    .search
-                    .take()
-                    .and_then(|(_, hits)| hits.into_iter().next());
+                let pick = match self.modal.take() {
+                    Some(Modal::Search(_, hits)) => hits.into_iter().next(),
+                    _ => None,
+                };
                 match pick {
                     Some(name) => self.change(|s| s.set_pick(Pick::One(name))),
                     None => self.message = Some("no matching feature".into()),
                 }
-                return;
+                return true;
             }
             KeyCode::Backspace => {
                 query.pop();
             }
             KeyCode::Char(c) => query.push(c),
-            _ => return,
+            _ => return false,
         }
-        let query = query.clone();
+        let query = std::mem::take(query);
         let hits = self
             .names
             .as_ref()
             .map_or_else(Vec::new, |n| search(&n.names, &n.lower, &query));
-        self.search = Some((query, hits));
+        self.modal = Some(Modal::Search(query, hits));
+        true
     }
 
-    pub(super) fn menu_key(&mut self, k: KeyEvent) {
+    /// A key in the style menu. Returns whether anything changed.
+    pub(super) fn menu_key(&mut self, k: KeyEvent) -> bool {
         let n = self.scene.levels().len();
         let Some(menu) = self.menu.as_mut() else {
-            return;
+            return false;
         };
         if n == 0 {
             self.menu = None;
-            return;
+            return true;
         }
         let row = menu.row;
         let step: i64 = match k.code {
@@ -194,12 +199,13 @@ impl App {
                 self.scene
                     .restyle(row, |st| adjust(st, field, step, current));
             }
-            _ => return,
+            _ => return false,
         }
         if let Some(m) = &self.menu {
             self.scene.focus = Some(m.row as u32);
         }
         self.settle();
+        true
     }
 
     pub(super) fn open_menu(&mut self) {
@@ -214,9 +220,10 @@ impl App {
         self.restart();
     }
 
-    pub(super) fn mouse(&mut self, m: MouseEvent) {
+    /// A mouse event. Returns whether anything changed.
+    pub(super) fn mouse(&mut self, m: MouseEvent) -> bool {
         let Some((px, py)) = self.cell_to_px(m.column, m.row) else {
-            return;
+            return false;
         };
         match m.kind {
             MouseEventKind::ScrollUp => self.with_vp(|v| v.zoom_at(1.25, px, py)),
@@ -227,6 +234,7 @@ impl App {
                     row: m.row,
                     moved: false,
                 });
+                return false;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some(d) = self.drag.as_mut() {
@@ -238,14 +246,17 @@ impl App {
                         moved: true,
                     };
                     self.with_vp(|v| v.pan_px(dx, dy));
+                } else {
+                    return false;
                 }
             }
             // Releasing ends the drag; a press that never moved is a click.
             MouseEventKind::Up(MouseButton::Left) if self.drag.take().is_some_and(|d| !d.moved) => {
                 self.click(px, py);
             }
-            _ => {}
+            _ => return false,
         }
+        true
     }
 
     /// Focus the group of the point nearest the click, and name the point.
@@ -331,15 +342,23 @@ impl App {
         self.settle();
     }
 
-    /// After the scene changed: show its note, if any, and redraw.
-    pub(super) fn settle(&mut self) {
+    /// Run a scene change that leaves the map as it is (only text changes),
+    /// and surface its note.
+    pub(super) fn change_text(&mut self, f: impl FnOnce(&mut Scene)) {
+        f(&mut self.scene);
         if let Some(note) = self.scene.note.take() {
             self.message = Some(note);
         }
+    }
+
+    /// After the scene changed: show its note, if any, and redraw.
+    pub(super) fn settle(&mut self) {
+        self.change_text(|_| {});
         self.restart();
     }
 
-    pub(super) fn handle(&mut self, ev: Event) {
+    /// One terminal event. Returns whether the screen needs drawing.
+    pub(super) fn handle(&mut self, ev: Event) -> bool {
         // While lupin works on a request, nothing may change underneath it.
         if self.relabeling.is_some() {
             if let Event::Key(k) = &ev {
@@ -351,15 +370,21 @@ impl App {
             }
             if let Event::Resize(..) = ev {
                 self.vp = None;
+                return true;
             }
-            return;
+            return false;
         }
-        match ev {
+        let before = self.message.clone();
+        let changed = match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
             Event::Mouse(m) => self.mouse(m),
-            Event::Resize(..) => self.vp = None,
-            _ => {}
-        }
+            Event::Resize(..) => {
+                self.vp = None;
+                true
+            }
+            _ => false,
+        };
+        changed || self.message != before
     }
 }
 
