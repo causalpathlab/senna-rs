@@ -65,6 +65,14 @@ fn read_tree(v: &Value) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// lupin's rescored top call for a cluster, beside the label it carries.
+pub struct Evidence {
+    pub top: Option<String>,
+    pub q: Option<f64>,
+    pub support: Option<f64>,
+    pub agrees: bool,
+}
+
 /// Where a round sits, and what lupin recorded about its clusters.
 pub struct Round {
     /// This manifest.
@@ -73,9 +81,13 @@ pub struct Round {
     pub source: Option<PathBuf>,
     summary: HashMap<String, Value>,
     history: HashMap<String, Value>,
-    /// Coarse groups of cell types and their members, when lupin called
-    /// this round at a coarse level.
+    /// Groups of cell types and their members.
     tree: Vec<(String, Vec<String>)>,
+    /// Curation rounds behind this round's statistics, when lupin rescored
+    /// it after decisions made on the same data (post-selection).
+    curated: Option<u64>,
+    /// Bootstrap support was not refreshed with this round.
+    support_stale: bool,
     /// Its q values come from the gene-set null alone (too few batches for
     /// the sample-permutation null).
     gene_set_null_only: bool,
@@ -85,6 +97,7 @@ impl Round {
     #[must_use]
     pub fn load(m: &RunManifest, dir: &Path, path: &Path) -> Self {
         let at = |key: &str| annotate_str(m, key).map(|rel| run_manifest::resolve(dir, rel));
+        let stats = m.annotate.unknown.get("stats");
         Self {
             path: path.to_path_buf(),
             source: at("source"),
@@ -94,13 +107,21 @@ impl Round {
             history: at("history")
                 .map(|p| read_json_object(&p))
                 .unwrap_or_default(),
-            // A round is coarse only when lupin kept the fine calls apart;
-            // otherwise its tree is a record, not what its labels are.
             tree: at("celltype_tree")
-                .filter(|_| annotate_str(m, "fine_argmax").is_some())
                 .and_then(|p| read_json::<Value>(&p))
                 .map(|v| read_tree(&v))
                 .unwrap_or_default(),
+            curated: stats
+                .filter(|s| s.get("kind").and_then(Value::as_str) == Some("post_selection"))
+                .map(|s| {
+                    s.get("rounds_of_curation")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1)
+                }),
+            support_stale: stats
+                .and_then(|s| s.get("support_stale"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             gene_set_null_only: m
                 .annotate
                 .unknown
@@ -111,13 +132,51 @@ impl Round {
         }
     }
 
-    /// The member types of `label` when it names a coarse group.
+    /// The member types of `label` when it names a coarse group: a group
+    /// name that is not itself a member type (later rounds keep the tree,
+    /// and a refined cluster's label may share a group's name).
     #[must_use]
     pub fn members_of(&self, label: &str) -> Option<&[String]> {
+        let key = label_key(label);
+        let is_member = self
+            .tree
+            .iter()
+            .any(|(_, ms)| ms.iter().any(|m| label_key(m) == key));
+        if is_member {
+            return None;
+        }
         self.tree
             .iter()
-            .find(|(g, _)| label_key(g) == label_key(label))
+            .find(|(g, _)| label_key(g) == key)
             .map(|(_, m)| m.as_slice())
+    }
+
+    /// lupin's evidence for cluster `id` beside its label: the top call,
+    /// its q and support, and whether the label agrees with it.
+    #[must_use]
+    pub fn evidence(&self, id: &str) -> Option<Evidence> {
+        let e = self.summary.get(id)?.get("evidence")?;
+        Some(Evidence {
+            top: e.get("top").and_then(Value::as_str).map(String::from),
+            q: e.get("q").and_then(Value::as_f64),
+            support: e.get("support").and_then(Value::as_f64),
+            agrees: e.get("agrees").and_then(Value::as_bool).unwrap_or(true),
+        })
+    }
+
+    /// How to read this round's q and support, for a panel heading.
+    fn stats_note(&self) -> Option<String> {
+        let mut notes = Vec::new();
+        if let Some(n) = self.curated {
+            notes.push(format!(
+                "post-selection, after {n} round{} of curation",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
+        if self.gene_set_null_only {
+            notes.push("q from the gene-set null only".into());
+        }
+        (!notes.is_empty()).then(|| notes.join("; "))
     }
 
     /// The round made from this one, found next to it: a manifest in the same
@@ -213,19 +272,34 @@ impl Round {
                     .unwrap_or_default()
             };
             let calls = list("calls");
+            let support = |c: &Value| match c.get("support").and_then(Value::as_f64) {
+                Some(x) => format!("{x:.3}"),
+                None if self.support_stale => "not refreshed".into(),
+                None => "-".into(),
+            };
+            if let Some(e) = self.evidence(id).filter(|e| !e.agrees) {
+                out.push(format!(
+                    "≠ the evidence calls it {} (q {}, support {})",
+                    e.top.as_deref().unwrap_or(UNASSIGNED),
+                    e.q.map_or("-".into(), |x| format!("{x:.3}")),
+                    e.support.map_or_else(
+                        || if self.support_stale {
+                            "not refreshed".into()
+                        } else {
+                            "-".into()
+                        },
+                        |x| format!("{x:.3}")
+                    )
+                ));
+            }
             if !calls.is_empty() {
-                out.push(if self.gene_set_null_only {
-                    "calls (q from the gene-set null only)".into()
-                } else {
-                    "calls".into()
+                out.push(match self.stats_note() {
+                    Some(n) => format!("calls ({n})"),
+                    None => "calls".into(),
                 });
                 for c in calls.iter().take(3) {
                     let l = c.get("label").and_then(Value::as_str).unwrap_or("-");
-                    out.push(format!(
-                        "  {l}  q {}  support {}",
-                        num(c, "q"),
-                        num(c, "support")
-                    ));
+                    out.push(format!("  {l}  q {}  support {}", num(c, "q"), support(c)));
                 }
             }
             let terms = list("terms");
@@ -401,18 +475,42 @@ mod tests {
         assert_eq!(lines[2], "  CT1, CT2");
         assert_eq!(lines[3], "calls");
 
-        // A re-annotated round records its tree but is not coarse, and says
-        // when its q values rest on the gene-set null alone.
+        // After curation: a group named after one of its members labels
+        // that member, the calls carry the post-selection caveat, support
+        // not refreshed says so, and a label the evidence disagrees with is
+        // flagged.
+        write(
+            dir.path(),
+            "s2.json",
+            r#"{"4":{"size":10,"label":"CT1","calls":[{"label":"CT2","q":0.02,"support":null}],
+                "evidence":{"top":"CT2","q":0.02,"support":null,"agrees":false}}}"#,
+        );
+        write(
+            dir.path(),
+            "t2.json",
+            r#"{"groups":[{"name":"CT1","members":["CT1","CT2"]}]}"#,
+        );
         let path = write(
             dir.path(),
             "r2.senna.json",
-            r#"{"version":2,"kind":"bge","prefix":"r2","annotate":{"cluster_summary":"s.json","celltype_tree":"t.json","settings":{"enrichment":{"null":{"gene_set_randomization":1000,"sample_permutation":0,"batches":1}}}}}"#,
+            r#"{"version":2,"kind":"bge","prefix":"r2","annotate":{"cluster_summary":"s2.json","celltype_tree":"t2.json",
+                "stats":{"kind":"post_selection","rounds_of_curation":2,"support_stale":true},
+                "settings":{"enrichment":{"null":{"gene_set_randomization":1000,"sample_permutation":0,"batches":1}}}}}"#,
         );
         let (m, d) = RunManifest::load(&path).unwrap();
         let round = Round::load(&m, &d, &path);
-        assert!(round.members_of("G1").is_none());
+        assert!(round.members_of("CT1").is_none());
+        assert!(!round.evidence("4").unwrap().agrees);
         let lines = round.cluster_lines("4");
-        assert_eq!(lines[1], "calls (q from the gene-set null only)");
+        assert_eq!(
+            lines[1],
+            "≠ the evidence calls it CT2 (q 0.020, support not refreshed)"
+        );
+        assert_eq!(
+            lines[2],
+            "calls (post-selection, after 2 rounds of curation; q from the gene-set null only)"
+        );
+        assert_eq!(lines[3], "  CT2  q 0.020  support not refreshed");
     }
 
     #[test]

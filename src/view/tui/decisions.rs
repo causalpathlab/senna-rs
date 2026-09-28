@@ -87,7 +87,7 @@ impl App {
                 self.message = Some(format!("lupin could not annotate: {reason}"));
             }
             Ok(Reply::Round(path)) => {
-                if matches!(r.job, RelabelJob::Draft(Mode::Next)) {
+                if matches!(r.job, RelabelJob::Draft(Mode::Next | Mode::NextWithSupport)) {
                     if let Some(review) = self.scene.review.take() {
                         review.draft.discard();
                     }

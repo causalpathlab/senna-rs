@@ -50,6 +50,7 @@ impl App {
             KeyCode::Char('M') => self.change(Scene::begin_merge),
             KeyCode::Char('p') => self.send_draft(Mode::Preview),
             KeyCode::Char('S') => self.send_draft(Mode::Next),
+            KeyCode::Char('U') => self.send_draft(Mode::NextWithSupport),
             KeyCode::Esc | KeyCode::Char('R') => self.toggle_review(),
             _ => return false,
         }
