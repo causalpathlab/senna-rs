@@ -111,7 +111,7 @@ impl Scene {
     pub fn review_lines(&self) -> Option<Vec<String>> {
         let r = self.review.as_ref()?;
         let id = r.cluster();
-        let (label, _) = self.cluster_call(id);
+        let label = self.cluster_label(id);
         let staged = r.draft.clusters.get(&id);
         let size = self
             .focus
@@ -219,9 +219,10 @@ impl Scene {
     }
 }
 
-/// Lupin's preview, as sidebar lines.
+/// Lupin's preview, as sidebar lines; a top call at or above FDR level
+/// `alpha` is no call.
 #[must_use]
-pub fn preview_lines(v: &serde_json::Value) -> Vec<String> {
+pub fn preview_lines(v: &serde_json::Value, alpha: f64) -> Vec<String> {
     let how = match v["stats"].as_str() {
         Some("recalibrated") => " (calls rescored; q post-selection)",
         Some("approximate") => " (calls approximated by marker scores)",
@@ -233,19 +234,19 @@ pub fn preview_lines(v: &serde_json::Value) -> Vec<String> {
         "preview · {} cells would change{how}",
         v["cells_changed"].as_u64().unwrap_or(0),
     )];
-    if v["support_stale"].as_bool() == Some(true) {
-        out.push("  support not refreshed (U submits with a fresh bootstrap)".into());
-    }
     if let Some(cs) = v["clusters"].as_object() {
         for (id, c) in cs {
             let s = |k: &str| c[k].as_str().unwrap_or("unassigned").to_string();
             let call = &c["calls"][0];
-            let top = call["label"].as_str().unwrap_or("-");
-            let q = call["q"]
-                .as_f64()
-                .map_or(String::new(), |q| format!(" q {q:.3}"));
+            let q = call["q"].as_f64();
+            let top = match (call["label"].as_str(), q) {
+                (_, Some(q)) if q >= alpha => format!("no call passes FDR (q < {alpha})"),
+                (Some(l), Some(q)) => format!("top call {l} q {q:.3}"),
+                (Some(l), None) => format!("top call {l}"),
+                (None, _) => "top call -".into(),
+            };
             out.push(format!(
-                "  C{id}: {} → {}   top call {top}{q}",
+                "  C{id}: {} → {}   {top}",
                 s("label_before"),
                 s("label_after")
             ));
@@ -272,7 +273,7 @@ mod tests {
                 "cells_changed":388,"markers":{"CT2":{"added":["GENE1","GENE2"],"dropped":[]}}}"#,
         )
         .unwrap();
-        let lines = preview_lines(&v);
+        let lines = preview_lines(&v, 0.1);
         assert_eq!(
             lines[0],
             "preview · 388 cells would change (calls not rescored)"
@@ -280,18 +281,21 @@ mod tests {
         assert!(lines[1].contains("C7: CT1 → CT2"));
         assert!(lines[2].contains("markers CT2: +2 −0"));
 
+        // lupin 0.2: calls are {label, q}; a top call at q = 1 is no call.
         let v: serde_json::Value = serde_json::from_str(
-            r#"{"rescored":true,"stats":"recalibrated","support_stale":true,"cells_changed":5,
+            r#"{"rescored":true,"stats":"recalibrated","cells_changed":5,
                 "clusters":{"7":{"label_before":"CT1","label_after":"CT2",
-                "calls":[{"label":"CT2","q":0.01,"support":null}]}}}"#,
+                "calls":[{"label":"CT2","q":0.01}]},
+                "8":{"label_before":"CT1","label_after":"CT1",
+                "calls":[{"label":"ASDC","q":1.0}]}}}"#,
         )
         .unwrap();
-        let lines = preview_lines(&v);
+        let lines = preview_lines(&v, 0.1);
         assert_eq!(
             lines[0],
             "preview · 5 cells would change (calls rescored; q post-selection)"
         );
-        assert!(lines[1].contains("support not refreshed"));
-        assert!(lines[2].ends_with("top call CT2 q 0.010"));
+        assert!(lines[1].ends_with("top call CT2 q 0.010"));
+        assert!(lines[2].ends_with("no call passes FDR (q < 0.1)"));
     }
 }

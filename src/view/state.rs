@@ -242,12 +242,9 @@ impl Scene {
         Some(c.ids[*c.by_name.get(cell)? as usize])
     }
 
-    /// The label the current round gives cluster `id`, and its top call.
-    pub fn cluster_call(&self, id: i64) -> (Option<String>, Option<(String, Option<f64>)>) {
-        self.data
-            .round
-            .as_ref()
-            .map_or((None, None), |r| r.call(&id.to_string()))
+    /// The label the current round gives cluster `id`.
+    pub fn cluster_label(&self, id: i64) -> Option<String> {
+        self.data.round.as_ref()?.label(&id.to_string())
     }
 
     /// Annotation and marker names, for label completion.

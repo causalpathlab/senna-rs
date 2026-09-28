@@ -87,7 +87,7 @@ impl App {
                 self.message = Some(format!("lupin could not annotate: {reason}"));
             }
             Ok(Reply::Round(path)) => {
-                if matches!(r.job, RelabelJob::Draft(Mode::Next | Mode::NextWithSupport)) {
+                if matches!(r.job, RelabelJob::Draft(Mode::Next)) {
                     if let Some(review) = self.scene.review.take() {
                         review.draft.discard();
                     }
@@ -97,32 +97,30 @@ impl App {
                 // and what was applied, in the sidebar.
                 let name = files::name(&path);
                 let mut lines = vec![format!("lupin wrote {name}"), String::new()];
-                if r.sent.is_empty() {
-                    lines.push("labels unchanged; support refreshed".into());
-                } else {
-                    lines.push("applied:".into());
-                    lines.extend(r.sent.iter().map(|l| format!("  {l}")));
-                }
+                lines.push("applied:".into());
+                lines.extend(r.sent.iter().map(|l| format!("  {l}")));
                 lines.push(String::new());
                 lines.extend(self.scene.show_changes());
                 lines.push(String::new());
                 lines.push("x closes this · , goes back to the round before".into());
                 self.info = Some(lines);
                 let secs = r.started.elapsed().as_secs_f32();
-                self.message = Some(if r.sent.is_empty() {
-                    format!("lupin refreshed support in {secs:.1} s")
-                } else {
-                    format!(
-                        "lupin applied {} decisions in {secs:.1} s · coloured by what changed",
-                        r.sent.len()
-                    )
-                });
+                self.message = Some(format!(
+                    "lupin applied {} decisions in {secs:.1} s · coloured by what changed",
+                    r.sent.len()
+                ));
                 self.pop(format!("✓ lupin wrote {name}"));
                 self.restart();
             }
             Ok(Reply::Preview(v)) => {
                 if let Some(review) = self.scene.review.as_mut() {
-                    review.preview = Some(crate::view::relabel::preview_lines(&v));
+                    let alpha = self
+                        .scene
+                        .data
+                        .round
+                        .as_ref()
+                        .map_or(crate::view::rounds::FDR_ALPHA, |r| r.alpha());
+                    review.preview = Some(crate::view::relabel::preview_lines(&v, alpha));
                 }
                 self.message = Some("preview from lupin in the sidebar".into());
                 self.pop("✓ lupin answered: preview in the sidebar".into());
