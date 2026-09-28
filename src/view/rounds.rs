@@ -76,6 +76,9 @@ pub struct Round {
     /// Coarse groups of cell types and their members, when lupin called
     /// this round at a coarse level.
     tree: Vec<(String, Vec<String>)>,
+    /// Its q values come from the gene-set null alone (too few batches for
+    /// the sample-permutation null).
+    gene_set_null_only: bool,
 }
 
 impl Round {
@@ -91,10 +94,20 @@ impl Round {
             history: at("history")
                 .map(|p| read_json_object(&p))
                 .unwrap_or_default(),
+            // A round is coarse only when lupin kept the fine calls apart;
+            // otherwise its tree is a record, not what its labels are.
             tree: at("celltype_tree")
+                .filter(|_| annotate_str(m, "fine_argmax").is_some())
                 .and_then(|p| read_json(&p))
                 .map(|v| read_tree(&v))
                 .unwrap_or_default(),
+            gene_set_null_only: m
+                .annotate
+                .unknown
+                .get("settings")
+                .and_then(|s| s.pointer("/enrichment/null/sample_permutation"))
+                .and_then(Value::as_u64)
+                == Some(0),
         }
     }
 
@@ -215,7 +228,11 @@ impl Round {
             };
             let calls = list("calls");
             if !calls.is_empty() {
-                out.push("calls".into());
+                out.push(if self.gene_set_null_only {
+                    "calls (q from the gene-set null only)".into()
+                } else {
+                    "calls".into()
+                });
                 for c in calls.iter().take(3) {
                     let l = c.get("label").and_then(Value::as_str).unwrap_or("-");
                     out.push(format!(
@@ -387,7 +404,7 @@ mod tests {
         let path = write(
             dir.path(),
             "r.senna.json",
-            r#"{"version":2,"kind":"bge","prefix":"r","annotate":{"cluster_summary":"s.json","celltype_tree":"t.json"}}"#,
+            r#"{"version":2,"kind":"bge","prefix":"r","annotate":{"cluster_summary":"s.json","celltype_tree":"t.json","fine_argmax":"f.tsv"}}"#,
         );
         let (m, d) = RunManifest::load(&path).unwrap();
         let round = Round::load(&m, &d, &path);
@@ -396,6 +413,20 @@ mod tests {
         let lines = round.cluster_lines("4");
         assert!(lines[1].starts_with("a group of 2 types"));
         assert_eq!(lines[2], "  CT1, CT2");
+        assert_eq!(lines[3], "calls");
+
+        // A re-annotated round records its tree but is not coarse, and says
+        // when its q values rest on the gene-set null alone.
+        let path = write(
+            dir.path(),
+            "r2.senna.json",
+            r#"{"version":2,"kind":"bge","prefix":"r2","annotate":{"cluster_summary":"s.json","celltype_tree":"t.json","settings":{"enrichment":{"null":{"gene_set_randomization":1000,"sample_permutation":0,"batches":1}}}}}"#,
+        );
+        let (m, d) = RunManifest::load(&path).unwrap();
+        let round = Round::load(&m, &d, &path);
+        assert!(round.members_of("G1").is_none());
+        let lines = round.cluster_lines("4");
+        assert_eq!(lines[1], "calls (q from the gene-set null only)");
     }
 
     #[test]
