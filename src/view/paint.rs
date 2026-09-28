@@ -221,43 +221,65 @@ impl Scene {
                 font,
             });
         }
-        // Features near a clicked cell (and pinned names), at their places:
-        // on a cell map, where the features sit among the cells; on a
-        // feature map, the features' own points.
-        let pos = match self.current().axis() {
-            Axis::Cells => self.feature_space(),
-            Axis::Features => Some(self.space),
-        };
-        let naming = !self.locked.is_empty() || self.near.is_some();
-        if let (Some(k), true) = (pos, naming) {
-            let pos = &self.data.spaces[k].points;
-            let mut index = self.name_index.borrow_mut();
-            if index.as_ref().is_none_or(|(s, _)| *s != k) {
-                let mut first = std::collections::HashMap::new();
-                for (i, n) in pos.names.iter().enumerate() {
-                    first.entry(n.clone()).or_insert(i);
+        // A clicked cell (and pinned sets): the cell itself, named, with an
+        // edge to each feature near it at the feature's place.
+        let (cells, features) = self.near_spaces();
+        let font = Font::for_cell_height(cell_px * 0.85 * self.text_scale, true);
+        let ink = color::highlight_ink();
+        let (cell_r, feature_r) = (0.4 * cell_px, 0.25 * cell_px);
+        for near in self.locked.iter().chain(&self.near) {
+            let centre = if near.of_feature { features } else { cells };
+            let cell = centre.and_then(|k| {
+                let i = self.point_of(k, &near.cell)?;
+                Some(vp.to_px(self.data.spaces[k].points.xy[i]))
+            });
+            // The neighbours at their places, with a label priority each:
+            // features above cells, whose names are the first to give way.
+            let place = |space: Option<usize>, list: &'_ [(Box<str>, f32)], base: f32| {
+                let Some(k) = space else {
+                    return Vec::new();
+                };
+                list.iter()
+                    .enumerate()
+                    .filter_map(|(rank, (n, _))| {
+                        let i = self.point_of(k, n)?;
+                        let xy = vp.to_px(self.data.spaces[k].points.xy[i]);
+                        Some((base - rank as f32, n.to_string(), xy))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut placed = place(features, &near.features, 1e6);
+            placed.extend(place(cells, &near.cells, 5e5));
+            if let Some((cx, cy)) = cell {
+                for &(_, _, (x, y)) in &placed {
+                    render::draw_edge(frame, (cx, cy), (x, y), cell_r, feature_r, ink, 0.7);
                 }
-                *index = Some((k, first));
             }
-            let index = &index.as_ref().expect("just set").1;
-            let font = Font::for_cell_height(cell_px * 0.85 * self.text_scale, true);
-            let ink = color::highlight_ink();
-            for near in self.locked.iter().chain(&self.near) {
-                for (rank, (f, _)) in near.features.iter().enumerate() {
-                    let Some(&i) = index.get(f) else {
-                        continue;
-                    };
-                    let (x, y) = vp.to_px(pos.xy[i]);
-                    render::draw_ring(frame, x, y, 0.25 * cell_px, ink);
-                    labels.push(Label {
-                        text: f.to_string(),
-                        x,
-                        y: y - 0.25 * cell_px - font.line_height() as f32 * 0.6,
-                        ink,
-                        priority: 1e6 - rank as f32,
-                        font,
-                    });
-                }
+            // The picked feature is marked already, above.
+            let marked = near.of_feature
+                && self.picked_point().is_some()
+                && matches!(&self.pick, Some(Pick::One(p)) if *p == near.cell);
+            if let (Some((cx, cy)), false) = (cell, marked) {
+                render::draw_ring(frame, cx, cy, cell_r, ink);
+                labels.push(Label {
+                    text: near.cell.to_string(),
+                    x: cx,
+                    y: cy - cell_r - font.line_height() as f32 * 0.6,
+                    ink,
+                    priority: 2e6,
+                    font,
+                });
+            }
+            for (priority, text, (x, y)) in placed {
+                render::draw_ring(frame, x, y, feature_r, ink);
+                labels.push(Label {
+                    text,
+                    x,
+                    y: y - feature_r - font.line_height() as f32 * 0.6,
+                    ink,
+                    priority,
+                    font,
+                });
             }
         }
         let font = Font::for_cell_height(cell_px * 0.8 * self.text_scale, false);

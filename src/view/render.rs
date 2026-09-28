@@ -491,6 +491,50 @@ pub fn draw_ring(frame: &mut Frame, x: f32, y: f32, r: f32, ink: Rgb) {
     blend_round(frame, x, y, r + 2.0, ink, |d| 1.2 - (d - r).abs());
 }
 
+/// A thin line from `a` to `b` at opacity `alpha`, stopping `trim_a` and
+/// `trim_b` short of its ends so it meets the rings drawn there.
+pub fn draw_edge(
+    frame: &mut Frame,
+    a: (f32, f32),
+    b: (f32, f32),
+    trim_a: f32,
+    trim_b: f32,
+    ink: Rgb,
+    alpha: f32,
+) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = dx.hypot(dy);
+    if len <= trim_a + trim_b + 1.0 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let steep = dy.abs() > dx.abs();
+    // One step per pixel along the major axis; the line's minor coordinate
+    // is shared between the two pixels it falls between.
+    let n = (len - trim_a - trim_b).ceil() as usize;
+    let step = (len - trim_a - trim_b) / n as f32;
+    let mut last = None;
+    for s in 0..=n {
+        let t = trim_a + s as f32 * step;
+        let (x, y) = (a.0 + ux * t - 0.5, a.1 + uy * t - 0.5);
+        let (major, minor) = if steep { (y, x) } else { (x, y) };
+        let m = major.round() as i64;
+        // Steps are a pixel along the line, at most one along the major axis.
+        if last == Some(m) {
+            continue;
+        }
+        last = Some(m);
+        let lo = minor.floor();
+        let f = minor - lo;
+        for (o, w) in [(lo as i64, 1.0 - f), (lo as i64 + 1, f)] {
+            let (px, py) = if steep { (o, m) } else { (m, o) };
+            if px >= 0 && py >= 0 && (px as usize) < frame.w && (py as usize) < frame.h {
+                frame.blend(px as usize, py as usize, ink, alpha * w);
+            }
+        }
+    }
+}
+
 /// Blend `c` over the pixels within `reach` of `(x, y)`, each at the opacity
 /// `cov(distance)` clamped to `[0, 1]`: a disc, a ring, whatever `cov` draws.
 fn blend_round(frame: &mut Frame, x: f32, y: f32, reach: f32, c: Rgb, cov: impl Fn(f32) -> f32) {
