@@ -120,6 +120,7 @@ impl App {
             KeyCode::Char('s') => self.save(),
             KeyCode::Char('R') => self.toggle_review(),
             KeyCode::Char('A') => self.ask_markers(),
+            KeyCode::Char('T') => self.change(Scene::cycle_text_size),
             KeyCode::Char('k' | 'l') => self.change(Scene::pin),
             _ => {}
         }

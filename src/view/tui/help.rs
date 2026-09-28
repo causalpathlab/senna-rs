@@ -84,6 +84,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "style of a group: colour, shape, opacity, size, hidden",
             ),
             ("b  t", "sidebar / text labels on or off"),
+            ("T", "text size on the map (four steps)"),
             ("s", "save this view as PNG"),
             ("q", "quit"),
         ],
@@ -186,7 +187,7 @@ impl App {
         match self.context() {
             Context::Browse => [
                 "click a cell: its cluster and the features nearest it (k pins their names)   [ ] focus a group   c change the colouring   n suggest features",
-                "R relabel clusters   A annotate with lupin   , . rounds   tab / m other layouts   z zoom into a group   e style   ? all keys   q quit",
+                "R relabel clusters   A annotate with lupin   , . rounds   tab / m other layouts   z zoom into a group   e style   T text size   ? all keys   q quit",
             ],
             Context::Feature => [
                 "g / G next or previous feature   o switch between counts and model   a the group's whole marker set   x back to group colours",
