@@ -9,10 +9,6 @@ impl App {
     /// Start asking for the markers file, filled in with the run's own when
     /// it records one, else a file nearby whose name mentions markers.
     pub(super) fn ask_markers(&mut self) {
-        if self.relabeling.is_some() {
-            self.message = Some("lupin is still busy with the last request".into());
-            return;
-        }
         if self.scene.review.is_some() {
             self.message = Some("leave relabel mode first (R)".into());
             return;
@@ -54,9 +50,7 @@ impl App {
             .flatten()
             .filter_map(|e| Some(e.ok()?.path()))
             .filter(|p| {
-                let name = p
-                    .file_name()
-                    .map_or_else(String::new, |n| n.to_string_lossy().to_lowercase());
+                let name = files::name(p).to_lowercase();
                 p.is_file()
                     && name.contains("marker")
                     && [".tsv", ".txt", ".csv"].iter().any(|x| name.ends_with(x))

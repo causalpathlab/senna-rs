@@ -15,8 +15,8 @@ mod relabel;
 use decisions::Prompt;
 
 use super::color;
-use super::decide::{Action, Decision, Watcher};
-use super::files::{modified, same_file};
+use super::decide::{Action, Decision, Mode, Watcher};
+use super::files::{self, modified, same_file};
 use super::render::{Job, Viewport};
 use super::style::{swatches, Shape};
 use super::{Graphics, Pick, Scene};
@@ -91,13 +91,10 @@ struct Relabeling {
     done: std::sync::mpsc::Receiver<Result<crate::view::decide::Reply, String>>,
 }
 
-/// What a lupin call was for.
+/// What a lupin call was for: the whole relabel draft, or a first
+/// annotation of the run.
 enum RelabelJob {
-    /// The whole relabel draft, as the next round.
-    Submit,
-    /// The whole relabel draft, previewed.
-    Preview,
-    /// A first annotation of the run (`lupin annotate`).
+    Draft(Mode),
     Annotate,
 }
 
@@ -147,9 +144,7 @@ struct App {
     search: Option<(String, Vec<Box<str>>)>,
     /// Searchable feature names, loaded on the first `/`.
     names: Option<SearchNames>,
-    /// Style menu: selected group and field.
     menu: Option<Menu>,
-    /// A group being laid out on a worker thread.
     zooming: Option<Zooming>,
     /// The manifest on screen, its last-seen modification time, and when
     /// that was last checked.
@@ -164,18 +159,14 @@ struct App {
     left: Rect,
     /// Whether the sidebar may open (`b` toggles).
     sidebar: bool,
-    /// A `lupin relabel --watch` on this chain, if one runs; its latest
-    /// round is followed.
+    /// A `lupin relabel --watch` on this chain, whose latest round is followed.
     watcher: Option<Watcher>,
-    /// The lupin binary decisions are handed to.
     lupin: String,
-    /// A decision lupin is applying.
     relabeling: Option<Relabeling>,
     /// A short popup over the map (lupin answered), and when it goes.
     toast: Option<(String, std::time::Instant)>,
     /// The markers file being typed for `lupin annotate`.
     markers_input: Option<String>,
-    /// A decision being typed.
     prompt: Option<Prompt>,
     quit: bool,
 }
@@ -190,9 +181,7 @@ impl App {
             .as_ref()
             .and_then(crate::view::rounds::Round::newer)
             .map(|n| {
-                let name = n
-                    .file_name()
-                    .map_or_else(String::new, |x| x.to_string_lossy().into_owned());
+                let name = files::name(&n);
                 format!("a newer round exists ({name}) · . opens it")
             });
         Self {
@@ -454,9 +443,7 @@ impl App {
                 if self.scene.current().points.bounds != before {
                     self.vp = None;
                 }
-                let name = path
-                    .file_name()
-                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                let name = files::name(path);
                 self.message = Some(format!("{what} {name}"));
                 self.restart();
             }

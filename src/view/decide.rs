@@ -1,13 +1,8 @@
-//! Decisions typed in the view, applied by lupin. For each one the view runs
-//! `lupin relabel -f <round on screen> -d - --next` with the decision as one
-//! JSON line on stdin; lupin writes the next round and prints its path, and
-//! the view opens it. The view applies nothing itself.
-//!
-//! A `lupin relabel --watch` may also be running on the same chain (for
-//! decisions made elsewhere); its `{prefix}.relabel_status.json` names the
-//! latest round, which the view follows. Paths in it are relative to it.
+//! Decisions made in the view are applied by lupin, never by the view: it
+//! runs `lupin relabel` or `lupin annotate` and opens the round written. A
+//! `lupin relabel --watch` on the same chain is followed via its status file.
 
-use super::files::{modified, read_json, same_file, siblings};
+use super::files::{self, modified, read_json, same_file, siblings};
 use senna::run_manifest;
 use serde_json::Value;
 use std::io::Write;
@@ -17,14 +12,10 @@ use std::time::SystemTime;
 
 /// A running `lupin relabel --watch`, as seen through its status file.
 pub struct Watcher {
-    status: Option<PathBuf>,
-    pub decisions: PathBuf,
+    status: PathBuf,
     pub latest: Option<PathBuf>,
     pub error: Option<String>,
     stamp: Option<SystemTime>,
-    /// The decisions directory's modification time at the last search for a
-    /// status file, so the search reruns only when files come or go.
-    dir_stamp: Option<SystemTime>,
 }
 
 impl Watcher {
@@ -33,14 +24,13 @@ impl Watcher {
     #[must_use]
     pub fn find(open: &Path) -> Option<Self> {
         for status in siblings(open, ".relabel_status.json") {
-            let Some(v) = read_json(&status) else {
+            let Some(v) = read_json::<Value>(&status) else {
                 continue;
             };
+            if v.get("decisions").and_then(Value::as_str).is_none() {
+                continue;
+            }
             let base = run_manifest::manifest_dir(&status);
-            let at = |s: &str| run_manifest::resolve(base, s);
-            let Some(dec) = v.get("decisions").and_then(Value::as_str).map(at) else {
-                continue;
-            };
             let covers = v
                 .get("rounds")
                 .and_then(Value::as_array)
@@ -48,15 +38,13 @@ impl Watcher {
                 .flatten()
                 .chain(v.get("base"))
                 .filter_map(Value::as_str)
-                .any(|r| same_file(&at(r), open));
+                .any(|r| same_file(&run_manifest::resolve(base, r), open));
             if covers {
                 let mut w = Self {
-                    status: Some(status),
-                    decisions: dec,
+                    status,
                     latest: None,
                     error: None,
                     stamp: None,
-                    dir_stamp: None,
                 };
                 w.refresh();
                 return Some(w);
@@ -65,44 +53,17 @@ impl Watcher {
         None
     }
 
-    /// The status file beside the decisions file that names it, once the
-    /// watcher has written one.
-    fn locate_status(&self) -> Option<PathBuf> {
-        siblings(&self.decisions, ".relabel_status.json")
-            .into_iter()
-            .find(|p| {
-                let base = run_manifest::manifest_dir(p);
-                read_json(p)
-                    .and_then(|v| {
-                        v.get("decisions")?
-                            .as_str()
-                            .map(|d| run_manifest::resolve(base, d))
-                    })
-                    .is_some_and(|d| same_file(&d, &self.decisions))
-            })
-    }
-
     /// Re-read the status file if it changed. Returns whether it did.
     pub fn refresh(&mut self) -> bool {
-        if self.status.is_none() {
-            let dir = modified(run_manifest::manifest_dir(&self.decisions));
-            if dir != self.dir_stamp {
-                self.dir_stamp = dir;
-                self.status = self.locate_status();
-            }
-        }
-        let Some(status) = &self.status else {
-            return false;
-        };
-        let stamp = modified(status);
+        let stamp = modified(&self.status);
         if stamp == self.stamp {
             return false;
         }
         self.stamp = stamp;
-        let Some(v) = read_json(status) else {
+        let Some(v) = read_json::<Value>(&self.status) else {
             return false;
         };
-        let base = run_manifest::manifest_dir(status);
+        let base = run_manifest::manifest_dir(&self.status);
         self.latest = v
             .get("latest")
             .and_then(Value::as_str)
@@ -135,10 +96,8 @@ pub enum Reply {
     },
 }
 
-/// Run `lupin relabel -f <round> -d - --next|--preview` with `decisions` on
-/// stdin, one line each; lupin applies them together as one round (or
-/// previews them). `Err` means lupin could not be run at all (or cannot
-/// relabel).
+/// Run `lupin relabel -f <round> -d - --next|--preview` with `decisions` as
+/// JSON lines on stdin. `Err`: lupin could not be run, or cannot relabel.
 pub fn relabel(
     lupin: &str,
     round: &Path,
@@ -251,7 +210,7 @@ pub fn annotate(
         }
     }
     let status = child.wait().map_err(|e| e.to_string())?;
-    let written = PathBuf::from(format!("{}.senna.json", out.display()));
+    let written = PathBuf::from(run_manifest::default_path(&out.to_string_lossy()));
     if status.success() && written.exists() {
         return Ok(Reply::Round(written));
     }
@@ -268,19 +227,15 @@ pub fn annotate(
     })
 }
 
-/// Where a first annotation of `run` goes: beside it, as `{stem}.L0` (or
-/// `L1`, … when that is taken), `stem` being the run's name without
-/// `.senna.json`.
+/// Where a first annotation of `run` goes: `{stem}.L{k}` beside it, for the
+/// first `k` not yet taken.
 #[must_use]
 pub fn annotate_out(run: &Path) -> PathBuf {
-    let name = run
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let stem = name.strip_suffix(".senna.json").unwrap_or(&name);
+    let stem = run_manifest::derive_out_prefix(&files::name(run));
     let dir = run.parent().unwrap_or(Path::new(""));
     (0..)
         .map(|k| dir.join(format!("{stem}.L{k}")))
-        .find(|o| !PathBuf::from(format!("{}.senna.json", o.display())).exists())
+        .find(|o| !Path::new(&run_manifest::default_path(&o.to_string_lossy())).exists())
         .expect("some name is free")
 }
 

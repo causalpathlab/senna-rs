@@ -66,9 +66,7 @@ impl App {
             Ok(Reply::Round(path)) if matches!(r.job, RelabelJob::Annotate) => {
                 self.open_round(&path, "annotated");
                 self.scene.colour_by(LabelKind::Annotation);
-                let name = path
-                    .file_name()
-                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                let name = files::name(&path);
                 self.info = Some(vec![
                     format!("lupin annotated this run: {name}"),
                     String::new(),
@@ -88,7 +86,7 @@ impl App {
                 self.message = Some(format!("lupin could not annotate: {reason}"));
             }
             Ok(Reply::Round(path)) => {
-                if matches!(r.job, RelabelJob::Submit) {
+                if matches!(r.job, RelabelJob::Draft(Mode::Next)) {
                     if let Some(review) = self.scene.review.take() {
                         review.draft.discard();
                     }
@@ -96,9 +94,7 @@ impl App {
                 self.open_round(&path, "new round");
                 // Show what the round changed: the changed cells coloured,
                 // and what was applied, in the sidebar.
-                let name = path
-                    .file_name()
-                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                let name = files::name(&path);
                 let mut lines = vec![
                     format!("lupin wrote {name}"),
                     String::new(),
@@ -129,9 +125,7 @@ impl App {
                 if let Some(l) = latest.filter(|l| !same_file(l, &self.from)) {
                     // A newer round exists: say so, and leave it to the user
                     // to open it (`.`) and decide again there.
-                    let name = l
-                        .file_name()
-                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    let name = files::name(&l);
                     self.message = Some(format!(
                         "lupin refused: this is not the latest round ({name} is) · . opens it; decide again there"
                     ));

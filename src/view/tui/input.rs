@@ -279,7 +279,7 @@ impl App {
             self.scene.show_near(&name);
             let clicked = self.scene.cluster_id_of(&name);
             if let (Some(id), Some(r)) = (clicked, self.scene.review.as_ref()) {
-                if let Some(i) = r.order.iter().position(|&c| c == id) {
+                if let Some(i) = r.overview.iter().position(|o| o.id == id) {
                     if i != r.at {
                         self.scene.visit(i);
                     }

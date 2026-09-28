@@ -165,10 +165,7 @@ impl Book {
     /// The saved book, or an empty one when there is none or it is unreadable.
     #[must_use]
     pub fn load(prefix: &str) -> Self {
-        std::fs::read_to_string(Self::path(prefix))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        super::files::read_json(std::path::Path::new(&Self::path(prefix))).unwrap_or_default()
     }
 
     pub fn save(&self, prefix: &str) -> anyhow::Result<()> {

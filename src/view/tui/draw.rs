@@ -31,7 +31,7 @@ impl App {
                 ),
                 Some(r) => format!(
                     "lupin is {} {} decision(s)… {:.1} s · editing is locked until it answers",
-                    if matches!(r.job, RelabelJob::Preview) {
+                    if matches!(r.job, RelabelJob::Draft(Mode::Preview)) {
                         "previewing"
                     } else {
                         "applying"
