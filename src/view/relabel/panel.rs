@@ -55,7 +55,8 @@ impl Scene {
         let mut out = vec![
             format!("clusters · {} decided", r.draft.decided()),
             "? unassigned  → markers suggest".into(),
-            "↓ a group to refine  ✓ decided".into(),
+            "↓ a group to refine  ≠ evidence disagrees".into(),
+            "✓ decided".into(),
             String::new(),
         ];
         for (k, o) in r.overview.iter().enumerate() {
@@ -79,6 +80,8 @@ impl Scene {
                     Some((b, _)) => format!("? → {b}"),
                     None => "?".into(),
                 }
+            } else if let Some(top) = &o.disputed {
+                format!("≠ {top}")
             } else if o.coarse {
                 // The group's name is on the map; the panel says where to go.
                 match &o.best {
@@ -219,21 +222,30 @@ impl Scene {
 /// Lupin's preview, as sidebar lines.
 #[must_use]
 pub fn preview_lines(v: &serde_json::Value) -> Vec<String> {
+    let how = match v["stats"].as_str() {
+        Some("recalibrated") => " (calls rescored; q post-selection)",
+        Some("approximate") => " (calls approximated by marker scores)",
+        Some("recorded") => " (calls as recorded, not rescored)",
+        _ if v["rescored"].as_bool() == Some(false) => " (calls not rescored)",
+        _ => "",
+    };
     let mut out = vec![format!(
-        "preview · {} cells would change{}",
+        "preview · {} cells would change{how}",
         v["cells_changed"].as_u64().unwrap_or(0),
-        if v["rescored"].as_bool() == Some(false) {
-            " (calls not rescored)"
-        } else {
-            ""
-        }
     )];
+    if v["support_stale"].as_bool() == Some(true) {
+        out.push("  support not refreshed (U submits with a fresh bootstrap)".into());
+    }
     if let Some(cs) = v["clusters"].as_object() {
         for (id, c) in cs {
             let s = |k: &str| c[k].as_str().unwrap_or("unassigned").to_string();
-            let top = c["calls"][0]["label"].as_str().unwrap_or("-");
+            let call = &c["calls"][0];
+            let top = call["label"].as_str().unwrap_or("-");
+            let q = call["q"]
+                .as_f64()
+                .map_or(String::new(), |q| format!(" q {q:.3}"));
             out.push(format!(
-                "  C{id}: {} → {}   top call {top}",
+                "  C{id}: {} → {}   top call {top}{q}",
                 s("label_before"),
                 s("label_after")
             ));
@@ -267,5 +279,19 @@ mod tests {
         );
         assert!(lines[1].contains("C7: CT1 → CT2"));
         assert!(lines[2].contains("markers CT2: +2 −0"));
+
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"rescored":true,"stats":"recalibrated","support_stale":true,"cells_changed":5,
+                "clusters":{"7":{"label_before":"CT1","label_after":"CT2",
+                "calls":[{"label":"CT2","q":0.01,"support":null}]}}}"#,
+        )
+        .unwrap();
+        let lines = preview_lines(&v);
+        assert_eq!(
+            lines[0],
+            "preview · 5 cells would change (calls rescored; q post-selection)"
+        );
+        assert!(lines[1].contains("support not refreshed"));
+        assert!(lines[2].ends_with("top call CT2 q 0.010"));
     }
 }

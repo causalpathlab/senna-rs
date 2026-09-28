@@ -80,6 +80,8 @@ impl Watcher {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Next,
+    /// The next round, with lupin's bootstrap support refreshed (slower).
+    NextWithSupport,
     Preview,
 }
 
@@ -104,14 +106,17 @@ pub fn relabel(
     decisions: &[Value],
     mode: Mode,
 ) -> Result<Reply, String> {
-    let flag = match mode {
-        Mode::Next => "--next",
-        Mode::Preview => "--preview",
+    let flags: &[&str] = match mode {
+        Mode::Next => &["--next"],
+        Mode::NextWithSupport => &["--next", "--support"],
+        Mode::Preview => &["--preview"],
     };
+    let flag = flags.join(" ");
     let mut child = Command::new(lupin)
         .args(["relabel", "-f"])
         .arg(round)
-        .args(["-d", "-", flag])
+        .args(["-d", "-"])
+        .args(flags)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -135,7 +140,7 @@ pub fn relabel(
             Mode::Preview => serde_json::from_str(&stdout)
                 .map(Reply::Preview)
                 .map_err(|e| format!("lupin's preview is not JSON: {e}")),
-            Mode::Next => stdout
+            Mode::Next | Mode::NextWithSupport => stdout
                 .lines()
                 .rev()
                 .find(|l| !l.trim().is_empty())
