@@ -153,6 +153,10 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
             ("]  [", "next / previous cluster (or click one)"),
             ("p", "ask lupin what everything staged would change"),
             ("S", "hand lupin everything as one round"),
+            (
+                "U",
+                "the same, with lupin's bootstrap support refreshed (slower)",
+            ),
             ("R  esc", "leave; the draft is kept for later"),
         ],
     ),
@@ -195,7 +199,7 @@ impl App {
             ],
             Context::Relabel => [
                 "] / [ next or previous cluster   ↑ ↓ choose a feature   enter show it   + / - include or exclude   a accept all ? proposals",
-                "tab target type   L label   K keep   M merge clusters   k pin names   p preview with lupin   S submit all   R leave   ? the steps",
+                "tab target type   L label   K keep   M merge clusters   k pin names   p preview   S submit all (U: refresh support too)   R leave   ? the steps",
             ],
             Context::Prompt => [
                 "type, or keep what is filled in   enter accepts   esc cancels",

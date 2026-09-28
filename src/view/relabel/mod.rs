@@ -85,6 +85,8 @@ pub(crate) struct Overview {
     pub best: Option<(String, f32)>,
     /// Its label is a coarse group, to be refined to one of its members.
     pub coarse: bool,
+    /// lupin's rescored top call, when it disagrees with the label.
+    pub disputed: Option<String>,
 }
 
 impl Overview {
@@ -209,12 +211,19 @@ impl Scene {
                         .as_ref()
                         .is_some_and(|r| r.members_of(l).is_some())
                 }),
+                disputed: self
+                    .data
+                    .round
+                    .as_ref()
+                    .and_then(|r| r.evidence(&ids[g].to_string()))
+                    .filter(|e| !e.agrees)
+                    .map(|e| e.top.unwrap_or_else(|| super::rounds::UNASSIGNED.into())),
             })
             .collect();
         out.sort_by_key(|o| {
             (
                 o.label.is_some(),
-                !(o.suggests_change() || o.coarse),
+                !(o.suggests_change() || o.coarse || o.disputed.is_some()),
                 usize::MAX - o.size,
             )
         });
