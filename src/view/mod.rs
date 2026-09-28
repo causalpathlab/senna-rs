@@ -614,10 +614,10 @@ impl Scene {
         self.focus.map(|f| self.levels()[f as usize].clone())
     }
 
-    /// Marker features of `group`, matched loosely (case, and spaces versus
-    /// underscores, which annotation tools rewrite).
+    /// Marker features of `group`, matched loosely (case, and spaces, commas
+    /// and underscores, which annotation tools rewrite).
     fn marker_features(&self, group: &str) -> Vec<Box<str>> {
-        let norm = |s: &str| s.to_lowercase().replace(' ', "_");
+        let norm = rounds::label_key;
         let Some(m) = self.markers() else {
             return Vec::new();
         };
