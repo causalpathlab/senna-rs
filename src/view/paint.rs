@@ -92,10 +92,9 @@ impl Scene {
             if cached.as_ref().is_none_or(|(k, _)| *k != key) {
                 *cached = Some((key, group_medians(&space.points, groups, n)));
             }
-            let medians = cached.as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
-            drop(cached);
-            for (g, m) in medians.into_iter().enumerate() {
-                let Some((xy, size)) = m else { continue };
+            let medians = cached.as_ref().map_or(&[][..], |(_, m)| &m[..]);
+            for (g, m) in medians.iter().enumerate() {
+                let &Some((xy, size)) = m else { continue };
                 if self.focus.is_some_and(|f| f as usize != g) || self.styles[g].hidden {
                     continue;
                 }
@@ -163,10 +162,9 @@ impl Scene {
     /// with the most points first.
     pub fn legend(&self) -> Vec<(String, Rgb, Rgb)> {
         const MAX_ENTRIES: usize = 24;
-        let (Some(groups), Axis::Features) = (self.groups(), self.current().axis()) else {
+        let (Some(count), Axis::Features) = (self.group_sizes(), self.current().axis()) else {
             return Vec::new();
         };
-        let count = data::group_counts(groups.iter().copied(), self.levels().len());
         let mut ids: Vec<usize> = (0..count.len())
             .filter(|&g| {
                 count[g] > 0 && !self.styles[g].hidden && self.focus.is_none_or(|f| f as usize == g)
@@ -227,15 +225,26 @@ impl Scene {
         // on a cell map, where the features sit among the cells; on a
         // feature map, the features' own points.
         let pos = match self.current().axis() {
-            Axis::Cells => self.feature_positions(),
-            Axis::Features => Some(&self.current().points),
+            Axis::Cells => self.feature_space(),
+            Axis::Features => Some(self.space),
         };
-        if let Some(pos) = pos {
+        let naming = !self.locked.is_empty() || self.near.is_some();
+        if let (Some(k), true) = (pos, naming) {
+            let pos = &self.data.spaces[k].points;
+            let mut index = self.name_index.borrow_mut();
+            if index.as_ref().is_none_or(|(s, _)| *s != k) {
+                let mut first = std::collections::HashMap::new();
+                for (i, n) in pos.names.iter().enumerate() {
+                    first.entry(n.clone()).or_insert(i);
+                }
+                *index = Some((k, first));
+            }
+            let index = &index.as_ref().expect("just set").1;
             let font = Font::for_cell_height(cell_px * 0.85 * self.text_scale, true);
             let ink = color::highlight_ink();
             for near in self.locked.iter().chain(&self.near) {
                 for (rank, (f, _)) in near.features.iter().enumerate() {
-                    let Some(i) = pos.names.iter().position(|n| n == f) else {
+                    let Some(&i) = index.get(f) else {
                         continue;
                     };
                     let (x, y) = vp.to_px(pos.xy[i]);

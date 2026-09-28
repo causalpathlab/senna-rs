@@ -17,13 +17,9 @@ impl App {
 
         // Status area: what is on screen (or the latest message), then the
         // keys that act here.
-        let mut first = match (&self.search, &self.prompt) {
-            (Some((q, hits)), _) => {
-                let shown: Vec<&str> = hits.iter().take(6).map(AsRef::as_ref).collect();
-                format!("/{q}   {}", shown.join("  "))
-            }
-            (None, Some(p)) => p.line(),
-            (None, None) => match &self.relabeling {
+        let mut first = match &self.modal {
+            Some(m) => m.line(),
+            None => match &self.relabeling {
                 Some(r) if matches!(r.job, RelabelJob::Annotate) => format!(
                     "lupin is annotating this run… {:.0} s · {}",
                     r.started.elapsed().as_secs_f32(),
@@ -39,10 +35,7 @@ impl App {
                     r.sent.len(),
                     r.started.elapsed().as_secs_f32()
                 ),
-                None => self
-                    .markers_line()
-                    .or_else(|| self.message.clone())
-                    .unwrap_or_else(|| self.scene.caption()),
+                None => self.message.clone().unwrap_or_else(|| self.scene.caption()),
             },
         };
         if self.job.is_some() {
@@ -66,14 +59,7 @@ impl App {
         if side.width > 0 {
             if let Some(menu) = &self.menu {
                 self.draw_menu(f, side, menu, page);
-            } else if let Some(lines) = self
-                .scene
-                .merge_lines()
-                .or_else(|| self.scene.review_lines())
-                .or_else(|| self.info.clone())
-                .or_else(|| self.scene.suggestion_lines())
-                .or_else(|| self.scene.near_lines())
-            {
+            } else if let Some(lines) = self.side_lines() {
                 let text: Vec<Line> = lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
                 f.render_widget(
                     Paragraph::new(text)

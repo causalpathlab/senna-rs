@@ -160,12 +160,8 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
 
 impl App {
     pub(super) fn context(&self) -> Context {
-        if self.search.is_some() {
-            Context::Search
-        } else if self.prompt.is_some() {
-            Context::Prompt
-        } else if self.markers_input.is_some() {
-            Context::MarkersFile
+        if let Some(m) = &self.modal {
+            m.context()
         } else if self.menu.is_some() {
             Context::StyleMenu
         } else if let Some(r) = &self.scene.review {

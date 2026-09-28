@@ -3,39 +3,42 @@
 
 use super::*;
 use crate::view::decide::Reply;
+use crate::view::rounds::label_key;
 use crate::view::LabelKind;
 
 /// How long a popup stays.
 const TOAST_FOR: std::time::Duration = std::time::Duration::from_millis(2500);
 
 impl App {
-    pub(super) fn prompt_key(&mut self, k: KeyEvent) {
-        let Some(p) = self.prompt.as_mut() else {
-            return;
+    /// A key while typing a decision. Returns whether anything changed.
+    pub(super) fn prompt_key(&mut self, k: KeyEvent) -> bool {
+        let Some(Modal::Prompt(p)) = self.modal.as_mut() else {
+            return false;
         };
         match k.code {
             KeyCode::Esc => {
-                self.prompt = None;
+                self.modal = None;
                 self.message = Some("decision cancelled".into());
             }
             KeyCode::Backspace => {
                 p.input.pop();
             }
             KeyCode::Tab if !p.why => {
-                let low = p.input.to_lowercase();
-                if let Some(k) = p.known.iter().find(|k| k.to_lowercase().starts_with(&low)) {
-                    p.input = k.to_string();
-                }
+                let Some(k) = p.completions().next().map(String::from) else {
+                    return false;
+                };
+                p.input = k;
             }
             KeyCode::Enter => {
                 let text = p.input.trim().to_string();
                 if text.is_empty() {
-                    return;
+                    return false;
                 }
                 if p.why {
                     p.decision.rationale = text;
-                    let p = self.prompt.take().expect("checked above");
-                    self.stage(p.decision);
+                    if let Some(Modal::Prompt(p)) = self.modal.take() {
+                        self.stage(p.decision);
+                    }
                 } else {
                     p.decision.label = text;
                     p.why = true;
@@ -43,23 +46,21 @@ impl App {
                 }
             }
             KeyCode::Char(c) => p.input.push(c),
-            _ => {}
+            _ => return false,
         }
+        true
     }
 
     /// Take lupin's answer, if it has come: open the round it wrote, or say
     /// why it refused (opening the latest round when this one was stale).
     /// Returns whether it did anything.
     pub(super) fn finish_relabel(&mut self) -> bool {
-        let Some(r) = &self.relabeling else {
+        let Some(reply) = self
+            .relabeling
+            .as_ref()
+            .and_then(|r| r.done.poll("the lupin call stopped without an answer"))
+        else {
             return false;
-        };
-        let reply = match r.done.try_recv() {
-            Ok(reply) => reply,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Err("the lupin call stopped without an answer".into())
-            }
         };
         let r = self.relabeling.take().expect("checked above");
         match reply {
@@ -192,6 +193,16 @@ impl Prompt {
         }
     }
 
+    /// Known labels the typed label could complete to, matched as lupin
+    /// matches type names.
+    fn completions(&self) -> impl Iterator<Item = &str> {
+        let typed = label_key(&self.input);
+        self.known
+            .iter()
+            .filter(move |k| label_key(k).starts_with(&typed))
+            .map(AsRef::as_ref)
+    }
+
     pub(super) fn line(&self) -> String {
         if self.why {
             format!(
@@ -200,13 +211,7 @@ impl Prompt {
                 self.input
             )
         } else {
-            let hint: Vec<&str> = self
-                .known
-                .iter()
-                .filter(|k| k.to_lowercase().starts_with(&self.input.to_lowercase()))
-                .take(4)
-                .map(AsRef::as_ref)
-                .collect();
+            let hint: Vec<&str> = self.completions().take(4).collect();
             format!(
                 "{} as: {}▏  tab: {}",
                 self.subject(),

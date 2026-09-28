@@ -12,10 +12,6 @@ pub(crate) struct Near {
 }
 
 impl Scene {
-    pub fn has_suggestions(&self) -> bool {
-        self.current_suggestions().is_some()
-    }
-
     /// The suggestions, when they were made for the view on screen.
     fn current_suggestions(&self) -> Option<&Suggestions> {
         self.suggestions.as_ref().filter(|s| s.space == self.space)
@@ -324,12 +320,16 @@ impl Scene {
     /// Where features sit on the current cell map: the features-on-cells
     /// layout of the same method, if the run has one.
     pub fn feature_positions(&self) -> Option<&super::data::Points> {
+        Some(&self.data.spaces[self.feature_space()?].points)
+    }
+
+    /// The space `feature_positions` are the points of.
+    pub(super) fn feature_space(&self) -> Option<usize> {
         let root = &self.data.spaces[self.root()];
         self.data
             .spaces
             .iter()
-            .find(|s| s.kind == SpaceKind::FeaturesOnCells && s.method == root.method)
-            .map(|s| &s.points)
+            .position(|s| s.kind == SpaceKind::FeaturesOnCells && s.method == root.method)
     }
 
     /// Sidebar text for the features near the clicked cell.

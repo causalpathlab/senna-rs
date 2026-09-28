@@ -44,25 +44,14 @@ impl Scene {
         };
         let ids = &self.data.labels[li].ids;
         let levels: Vec<bool> = ids.iter().map(|id| chosen.contains(id)).collect();
-        let space = self.space;
-        let markers = self.markers_by_type();
-        let mask: Vec<bool> = self
-            .groups()
-            .map(|g| {
-                g.iter()
-                    .map(|&x| levels.get(x as usize).copied().unwrap_or(false))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let best = if mask.is_empty() {
-            None
-        } else {
-            self.activity_and_data().and_then(|(activity, data)| {
-                let names = &data.spaces[space].points.names;
-                let (scores, features) = activity.contrast(space, names, Some(&mask)).ok()?;
-                best_fit(features, &scores, &markers)
-            })
+        let scores = match self.review_sums() {
+            Some((activity, Ok(sums))) => activity
+                .union_contrast(sums, |g| levels.get(g).copied().unwrap_or(false))
+                .ok()
+                .map(|(v, _)| v),
+            _ => None,
         };
+        let best = scores.and_then(|v| self.evidence().best_fit(&v));
         if let Some(m) = self.review.as_mut().and_then(|r| r.merge.as_mut()) {
             m.levels = levels;
             m.best = best;

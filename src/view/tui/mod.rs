@@ -10,14 +10,16 @@ mod decisions;
 mod draw;
 mod help;
 mod input;
+mod modal;
 mod relabel;
 
 use decisions::Prompt;
+use modal::Modal;
 
 use super::color;
 use super::decide::{Action, Decision, Mode, Watcher};
 use super::files::{self, modified, same_file};
-use super::render::{Job, Viewport};
+use super::render::{Frame, Job, Viewport};
 use super::style::{swatches, Shape};
 use super::{Graphics, Pick, Scene};
 use image::DynamicImage;
@@ -75,10 +77,30 @@ pub fn run(
     result
 }
 
-type ZoomResult = Result<super::sublayout::Laid, String>;
-
 /// Lines at the bottom: what is on screen, then two lines of keys.
 const STATUS_LINES: u16 = 3;
+
+/// The answer of work running on a worker thread.
+struct Pending<T>(std::sync::mpsc::Receiver<Result<T, String>>);
+
+impl<T: Send + 'static> Pending<T> {
+    fn spawn(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        Self(rx)
+    }
+
+    /// The answer once it has come; `stopped` when the worker died first.
+    fn poll(&self, stopped: &str) -> Option<Result<T, String>> {
+        match self.0.try_recv() {
+            Ok(r) => Some(r),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(stopped.into())),
+        }
+    }
+}
 
 /// A decision lupin is applying on a worker thread.
 struct Relabeling {
@@ -88,7 +110,7 @@ struct Relabeling {
     sent: Vec<String>,
     /// The latest line lupin logged, for the status line.
     progress: std::sync::Arc<std::sync::Mutex<String>>,
-    done: std::sync::mpsc::Receiver<Result<crate::view::decide::Reply, String>>,
+    done: Pending<crate::view::decide::Reply>,
 }
 
 /// What a lupin call was for: the whole relabel draft, or a first
@@ -102,7 +124,7 @@ enum RelabelJob {
 struct Zooming {
     parent: usize,
     label: String,
-    done: std::sync::mpsc::Receiver<ZoomResult>,
+    done: Pending<super::sublayout::Laid>,
 }
 
 /// A left-button press: where the pointer last was, and whether it moved
@@ -136,12 +158,15 @@ struct App {
     map: Rect,
     vp: Option<Viewport>,
     job: Option<Job>,
+    /// The last finished frame before labels, and its viewport, so a
+    /// change of labels only redraws them.
+    base: Option<(Viewport, Frame)>,
     proto: Option<Protocol>,
     message: Option<String>,
     help: bool,
     drag: Option<Drag>,
-    /// Feature search in progress: the query and its current matches.
-    search: Option<(String, Vec<Box<str>>)>,
+    /// What is being typed in the status line, if anything.
+    modal: Option<Modal>,
     /// Searchable feature names, loaded on the first `/`.
     names: Option<SearchNames>,
     menu: Option<Menu>,
@@ -165,9 +190,6 @@ struct App {
     relabeling: Option<Relabeling>,
     /// A short popup over the map (lupin answered), and when it goes.
     toast: Option<(String, std::time::Instant)>,
-    /// The markers file being typed for `lupin annotate`.
-    markers_input: Option<String>,
-    prompt: Option<Prompt>,
     quit: bool,
 }
 
@@ -189,8 +211,7 @@ impl App {
             lupin,
             relabeling: None,
             toast: None,
-            markers_input: None,
-            prompt: None,
+            modal: None,
             stamp: modified(&from),
             from,
             checked: std::time::Instant::now(),
@@ -204,11 +225,11 @@ impl App {
             map: Rect::default(),
             vp: None,
             job: None,
+            base: None,
             proto: None,
             message: newer,
             help: false,
             drag: None,
-            search: None,
             names: None,
             menu: None,
             zooming: None,
@@ -257,13 +278,16 @@ impl App {
             if event::poll(wait)? {
                 // Drain everything queued so a burst of scroll events costs
                 // one re-render, not one per event.
+                let mut changed = false;
                 loop {
-                    self.handle(event::read()?);
+                    changed |= self.handle(event::read()?);
                     if !event::poll(Duration::ZERO)? {
                         break;
                     }
                 }
-                terminal.draw(|f| self.draw(f))?;
+                if changed || self.relabeling.is_some() {
+                    terminal.draw(|f| self.draw(f))?;
+                }
             } else if self.relabeling.is_some() {
                 // Keep the elapsed time ticking while lupin works.
                 terminal.draw(|f| self.draw(f))?;
@@ -272,13 +296,14 @@ impl App {
         Ok(())
     }
 
-    /// Whether the sidebar has something to show.
-    fn side_content(&self) -> bool {
-        self.menu.is_some()
-            || self.info.is_some()
-            || self.scene.has_suggestions()
-            || self.scene.review.is_some()
-            || self.scene.near.is_some()
+    /// The sidebar's text, when it shows text rather than the style menu.
+    fn side_lines(&self) -> Option<Vec<String>> {
+        self.scene
+            .merge_lines()
+            .or_else(|| self.scene.review_lines())
+            .or_else(|| self.info.clone())
+            .or_else(|| self.scene.suggestion_lines())
+            .or_else(|| self.scene.near_lines())
     }
 
     /// Map and sidebar areas and the viewport for the current terminal size.
@@ -288,7 +313,7 @@ impl App {
             ..area
         };
         // The sidebar takes its columns from the map rather than covering it.
-        let side_w = if self.sidebar && self.side_content() {
+        let side_w = if self.sidebar && (self.menu.is_some() || self.side_lines().is_some()) {
             (area.width / 3)
                 .clamp(30, 48)
                 .min(area.width.saturating_sub(20))
@@ -341,6 +366,7 @@ impl App {
 
     fn restart(&mut self) {
         self.job = None;
+        self.base = None;
         if let Some(vp) = self.vp {
             if vp.w > 0 && vp.h > 0 {
                 self.job = Some(Job::new(vp, &self.scene.layers()));
@@ -360,19 +386,45 @@ impl App {
         let img = if done {
             let job = self.job.take().expect("checked above");
             let vp = job.vp;
-            let mut frame = job.finish();
+            let base = job.finish();
+            let mut frame = base.clone();
             self.scene.decorate(&mut frame, &vp, self.cell.1);
+            self.base = Some((vp, base));
             frame.to_image()
         } else {
             job.image()
         };
+        self.show(img)?;
+        Ok(true)
+    }
+
+    fn show(&mut self, img: image::RgbaImage) -> anyhow::Result<()> {
         let size = Size::new(self.map.width, self.map.height);
         self.proto = Some(self.picker.new_protocol(
             DynamicImage::ImageRgba8(img),
             size,
             Resize::Fit(Some(image::imageops::FilterType::Triangle)),
         )?);
-        Ok(true)
+        Ok(())
+    }
+
+    /// Redraw labels and marks over the last finished frame, when only they
+    /// changed. A running job decorates when it finishes.
+    fn redecorate(&mut self) {
+        if self.job.is_some() {
+            return;
+        }
+        let img = match &self.base {
+            Some((vp, base)) if Some(*vp) == self.vp => {
+                let mut frame = base.clone();
+                self.scene.decorate(&mut frame, vp, self.cell.1);
+                frame.to_image()
+            }
+            _ => return self.restart(),
+        };
+        if self.show(img).is_err() {
+            self.restart();
+        }
     }
 
     /// Start laying out the focused group's cells on a worker thread.
@@ -386,16 +438,14 @@ impl App {
                 names,
                 geometry,
             }) => {
-                let (tx, rx) = std::sync::mpsc::channel();
                 let n = names.len();
-                std::thread::spawn(move || {
-                    let _ = tx.send(geometry.layout(&names).map_err(|e| e.to_string()));
-                });
+                let done =
+                    Pending::spawn(move || geometry.layout(&names).map_err(|e| e.to_string()));
                 self.message = Some(format!("laying out {n} cells of {label}…"));
                 self.zooming = Some(Zooming {
                     parent: self.scene.space,
                     label,
-                    done: rx,
+                    done,
                 });
             }
             Err(e) => self.message = Some(e),
@@ -404,15 +454,12 @@ impl App {
 
     /// Take a finished zoom, if any, and switch to it. Returns whether it did.
     fn finish_zoom(&mut self) -> bool {
-        let Some(z) = &self.zooming else {
+        let Some(result) = self
+            .zooming
+            .as_ref()
+            .and_then(|z| z.done.poll("the layout worker stopped"))
+        else {
             return false;
-        };
-        let result = match z.done.try_recv() {
-            Ok(r) => r,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Err("the layout worker stopped".into())
-            }
         };
         let z = self.zooming.take().expect("checked above");
         match result {

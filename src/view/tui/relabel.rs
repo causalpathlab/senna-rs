@@ -39,11 +39,12 @@ impl App {
             KeyCode::Down => r.row = (r.row + 1).min(n_rows.saturating_sub(1)),
             KeyCode::Up => r.row = r.row.saturating_sub(1),
             KeyCode::Enter => self.change(Scene::show_row),
-            KeyCode::Char('+' | '=') => self.change(|s| s.mark_row(Some(true))),
-            KeyCode::Char('-' | '_') => self.change(|s| s.mark_row(Some(false))),
-            KeyCode::Char(' ') => self.change(|s| s.mark_row(None)),
-            KeyCode::Char('a') => self.change(Scene::accept_proposals),
-            KeyCode::Tab => self.change(Scene::next_target),
+            // These change the draft and the panels, not the map.
+            KeyCode::Char('+' | '=') => self.change_text(|s| s.mark_row(Some(true))),
+            KeyCode::Char('-' | '_') => self.change_text(|s| s.mark_row(Some(false))),
+            KeyCode::Char(' ') => self.change_text(|s| s.mark_row(None)),
+            KeyCode::Char('a') => self.change_text(Scene::accept_proposals),
+            KeyCode::Tab => self.change_text(Scene::next_target),
             KeyCode::Char('L') => self.begin_staged(Action::Label),
             KeyCode::Char('K') => self.begin_staged(Action::Keep),
             KeyCode::Char('M') => self.change(Scene::begin_merge),
@@ -77,7 +78,6 @@ impl App {
             }
             _ => return false,
         }
-        self.restart();
         true
     }
 
@@ -127,7 +127,7 @@ impl App {
         } else {
             self.scene.drafted_rationale()
         };
-        self.prompt = Some(Prompt {
+        self.modal = Some(Modal::Prompt(Prompt {
             decision: Decision {
                 action,
                 clusters,
@@ -140,11 +140,13 @@ impl App {
             input: if why { prefill.clone() } else { target },
             known: self.scene.known_labels(),
             why_prefill: prefill,
-        });
+        }));
     }
 
     /// Put a typed decision into the draft.
     pub(super) fn stage(&mut self, d: Decision) {
+        // Only a merge changes the map (its clusters stop being marked).
+        let merge = d.action == Action::Merge;
         match d.action {
             Action::Merge => self.scene.stage_merge(d.label, d.rationale),
             Action::Keep => self.scene.stage_verdict(Verdict::Keep {
@@ -160,7 +162,9 @@ impl App {
             let _ = r.draft.save();
         }
         self.message = Some("staged · ] next cluster · S submits everything".into());
-        self.restart();
+        if merge {
+            self.restart();
+        }
     }
 
     /// Send the whole draft to lupin: a preview, or the next round.
@@ -180,16 +184,13 @@ impl App {
         let lines = r.draft.lines(&round.to_string_lossy());
         let sent: Vec<String> = r.draft.decisions().iter().map(Decision::summary).collect();
         let lupin = self.lupin.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(relabel(&lupin, &round, &lines, mode));
-        });
+        let done = Pending::spawn(move || relabel(&lupin, &round, &lines, mode));
         self.relabeling = Some(Relabeling {
             job: RelabelJob::Draft(mode),
             started: std::time::Instant::now(),
             sent,
             progress: Default::default(),
-            done: rx,
+            done,
         });
     }
 }

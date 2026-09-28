@@ -171,6 +171,9 @@ struct Shown {
     levels: Levels,
 }
 
+/// Point of each name (its first, for a repeated name).
+type NameIndex = std::collections::HashMap<Box<str>, usize>;
+
 /// Text sizes on the map, as multiples of the terminal's cell height.
 const TEXT_SCALES: [f32; 4] = [1.0, 1.4, 1.8, 2.4];
 
@@ -184,8 +187,8 @@ pub(crate) struct Scene {
     pub show_labels: bool,
     /// Text size on the map, relative to the terminal's cell height.
     pub text_scale: f32,
-    /// Group id per point, cached per (space, labels).
-    groups: Option<(usize, usize, Vec<u32>)>,
+    /// Group id per point, and points per group, cached per (space, labels).
+    groups: Option<(usize, usize, Vec<u32>, Vec<usize>)>,
     /// Resolved style per group of the current grouping.
     styles: Vec<style::Resolved>,
     /// Saved per-group styles for every grouping.
@@ -201,6 +204,8 @@ pub(crate) struct Scene {
     shown_ids: u64,
     /// Name index of a feature space, for marking the picked feature.
     feature_index: std::cell::RefCell<Option<(usize, GeneIndex)>>,
+    /// Point of each name in a space, for placing names near a cell.
+    name_index: std::cell::RefCell<Option<(usize, NameIndex)>>,
     /// Group label anchors for a (space, grouping).
     medians: std::cell::RefCell<Option<((usize, usize), render::Medians)>>,
     /// The run's geometry table, read on the first zoom into a group.
@@ -240,6 +245,7 @@ impl Scene {
             orders: std::cell::RefCell::new(Vec::new()),
             shown_ids: 0,
             feature_index: std::cell::RefCell::new(None),
+            name_index: std::cell::RefCell::new(None),
             medians: std::cell::RefCell::new(None),
             note: None,
         };

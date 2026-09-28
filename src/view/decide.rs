@@ -116,9 +116,7 @@ pub fn relabel(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| {
-            format!("cannot run `{lupin}` ({e}); pass --lupin <path> or set SENNA_LUPIN")
-        })?;
+        .map_err(|e| cannot_run(lupin, &e))?;
     let mut lines = String::new();
     for d in decisions {
         lines.push_str(&serde_json::to_string(d).map_err(|e| e.to_string())?);
@@ -151,13 +149,8 @@ pub fn relabel(
              pass --lupin <path> or set SENNA_LUPIN"
         ));
     }
-    let last = stderr
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("lupin failed without a reason")
-        .trim();
-    let reason = last.strip_prefix("Error: ").unwrap_or(last).to_string();
+    let last = stderr.lines().rev().find(|l| !l.trim().is_empty());
+    let reason = reason_of(last.map(str::trim));
     // "<round> is not the latest round (that is <path>); reload and decide again"
     let latest = reason
         .split_once("(that is ")
@@ -189,9 +182,7 @@ pub fn annotate(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| {
-            format!("cannot run `{lupin}` ({e}); pass --lupin <path> or set SENNA_LUPIN")
-        })?;
+        .map_err(|e| cannot_run(lupin, &e))?;
     let mut last = String::new();
     if let Some(err) = child.stderr.take() {
         for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
@@ -216,15 +207,23 @@ pub fn annotate(
     }
     let reason = if status.success() {
         format!("lupin finished but wrote no {}", written.display())
-    } else if last.is_empty() {
-        "lupin failed without a reason".into()
     } else {
-        last.strip_prefix("Error: ").unwrap_or(&last).to_string()
+        reason_of(Some(last.as_str()).filter(|l| !l.is_empty()))
     };
     Ok(Reply::Refused {
         reason,
         latest: None,
     })
+}
+
+fn cannot_run(lupin: &str, e: &std::io::Error) -> String {
+    format!("cannot run `{lupin}` ({e}); pass --lupin <path> or set SENNA_LUPIN")
+}
+
+/// Why lupin failed, from the last line it wrote to stderr.
+fn reason_of(last: Option<&str>) -> String {
+    let last = last.unwrap_or("lupin failed without a reason");
+    last.strip_prefix("Error: ").unwrap_or(last).to_string()
 }
 
 /// Where a first annotation of `run` goes: `{stem}.L{k}` beside it, for the
