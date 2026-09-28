@@ -971,6 +971,10 @@ pub struct RunCluster {
     /// `{cluster_out}.clusters.parquet` — cells × 1 cluster id (NaN for unassigned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clusters: Option<String>,
+    /// `{cluster_out}.feature_clusters.parquet` — features × 1 cluster id of
+    /// the feature embedding (`senna clustering --target features`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_clusters: Option<String>,
     /// Fields this version does not know, written by another tool or a
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]

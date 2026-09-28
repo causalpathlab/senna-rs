@@ -708,7 +708,8 @@ enum Commands {
                       leiden  — graph-based, auto-k.\n  \
                       hsblock — hierarchical SBM (2^(depth-1) clusters).\n\
                       \n\
-                      Writes {out}.clusters.parquet and updates `manifest.cluster.clusters`."
+                      Writes {out}.clusters.parquet and updates `manifest.cluster.clusters`.\n\
+                      --target features clusters the feature embedding instead."
     )]
     Clustering(ClusteringArgs),
 
