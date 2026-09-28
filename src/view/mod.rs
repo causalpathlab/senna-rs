@@ -51,7 +51,7 @@ pub struct ViewArgs {
     )]
     pub from: Box<str>,
 
-    #[arg(long, help = "Start on this layout method (umap, phate, tsne)")]
+    #[arg(long, help = "Start on this layout method (umap, phate, tsne); computed first when the run lacks it")]
     pub method: Option<Box<str>>,
 
     #[arg(
@@ -1215,7 +1215,36 @@ pub(crate) fn render_full(scene: &Scene, vp: Viewport, cell_px: f32) -> image::R
     frame.to_image()
 }
 
+/// Run `senna layout` when the run has no layout yet, or not the method
+/// asked for: the view shows layouts, and would otherwise only refuse.
+/// Outputs go beside the manifest; progress shows before the view opens.
+fn ensure_layout(args: &ViewArgs) -> anyhow::Result<()> {
+    let (m, _) = senna::run_manifest::RunManifest::load(std::path::Path::new(args.from.as_ref()))?;
+    let has_any = !m.layout.methods.is_empty() || m.layout.cell_coords.is_some();
+    let want = match args.method.as_deref() {
+        Some(w) if !m.layout.methods.contains_key(w) => w,
+        Some(_) => return Ok(()),
+        None if has_any => return Ok(()),
+        None => "umap",
+    };
+    let out = senna::run_manifest::derive_out_prefix(&args.from);
+    eprintln!(
+        "senna view: {} has no {want} layout yet; running `senna layout {want}` first",
+        args.from
+    );
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .args(["layout", want, "--from", &args.from, "--out", &out])
+        .status()?;
+    anyhow::ensure!(
+        status.success(),
+        "`senna layout {want} --from {}` failed; see its messages above",
+        args.from
+    );
+    Ok(())
+}
+
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
+    ensure_layout(args)?;
     let data = Dataset::load(&args.from)?;
     let mut scene = Scene::new(data, args);
 

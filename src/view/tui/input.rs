@@ -42,8 +42,8 @@ impl App {
                     || self.scene.clear_suggestions()
                     || self.scene.clear_pick()
                     || self.scene.focus.take().is_some();
-                if !cleared && k.code == KeyCode::Esc {
-                    self.quit = true;
+                if !cleared {
+                    self.message = Some("nothing to clear · q quits".into());
                 }
                 self.restart();
             }
