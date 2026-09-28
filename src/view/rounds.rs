@@ -155,12 +155,21 @@ impl Round {
     /// its q and support, and whether the label agrees with it.
     #[must_use]
     pub fn evidence(&self, id: &str) -> Option<Evidence> {
-        let e = self.summary.get(id)?.get("evidence")?;
+        let s = self.summary.get(id)?;
+        let e = s.get("evidence")?;
+        let top = e.get("top").and_then(Value::as_str).map(String::from);
+        // A coarse label and a fine top call inside its group agree.
+        let within_group = match (s.get("label").and_then(Value::as_str), &top) {
+            (Some(l), Some(t)) => self
+                .members_of(l)
+                .is_some_and(|ms| ms.iter().any(|m| label_key(m) == label_key(t))),
+            _ => false,
+        };
         Some(Evidence {
-            top: e.get("top").and_then(Value::as_str).map(String::from),
+            top,
             q: e.get("q").and_then(Value::as_f64),
             support: e.get("support").and_then(Value::as_f64),
-            agrees: e.get("agrees").and_then(Value::as_bool).unwrap_or(true),
+            agrees: within_group || e.get("agrees").and_then(Value::as_bool).unwrap_or(true),
         })
     }
 
@@ -454,7 +463,8 @@ mod tests {
         write(
             dir.path(),
             "s.json",
-            r#"{"4":{"size":10,"label":"G1","calls":[{"label":"CT1","q":0.01}]}}"#,
+            r#"{"4":{"size":10,"label":"G1","calls":[{"label":"CT1","q":0.01}]},
+                "5":{"size":3,"label":"G1","evidence":{"top":"CT2","q":0.01,"support":null,"agrees":false}}}"#,
         );
         write(
             dir.path(),
@@ -469,6 +479,7 @@ mod tests {
         let (m, d) = RunManifest::load(&path).unwrap();
         let round = Round::load(&m, &d, &path);
         assert_eq!(round.members_of("g1").unwrap(), ["CT1", "CT2"]);
+        assert!(round.evidence("5").unwrap().agrees);
         assert!(round.members_of("CT3").is_none());
         let lines = round.cluster_lines("4");
         assert!(lines[1].starts_with("a group of 2 types"));
