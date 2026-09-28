@@ -7,16 +7,19 @@ it were a description of the code is how people end up debugging things that wer
 
 | doc | what it is |
 |---|---|
-| [`annotation-methods.md`](annotation-methods.md) | The full marker-annotation method: type prototypes, over-representation with a permutation null, the stability bootstrap, set-valued ("mixed") annotation, and the marker-panel bias guard. Every default is the shipped default; every measurement is attributed. Drives `senna annotate-gem` and `senna lineage --markers`. |
-| [`annotation-grouping.md`](annotation-grouping.md) | **A negative result, kept deliberately.** Why the annotation pools cells into *coarse* clusters, and the measurements showing that a clustering-free per-cell-neighbourhood variant (the Milo device) is *worse than not testing at all*. Referenced from `graph-embedding-util/src/type_annotation/term_ora.rs` so the constraint is not quietly re-broken. |
 | [`deconvolve.md`](deconvolve.md) | The `senna deconvolve` model and its inputs. |
+
+## Moved to lupin
+
+Cell-type annotation and lineage live in [`lupin`](https://github.com/causalpathlab/lupin-rs),
+and so do their write-ups: `lupin docs annotation`, `lupin docs grouping`,
+`lupin docs ontology-plan` and `lupin docs rooting-plan`.
 
 ## Plans — design notes for code that does **not** exist
 
 | doc | what it is |
 |---|---|
-| [`annotation-ontology-plan.md`](annotation-ontology-plan.md) | Reference-free cluster annotation onto a gene-annotated Cell Ontology DAG. Design only; no code. |
-| [`lineage-rooting.md`](lineage-rooting.md) | Eliciting expert knowledge for `senna lineage` rooting. Design only; no code. |
+| [`text-anchored-gene-space-plan.md`](text-anchored-gene-space-plan.md) | Anchoring the gene space to text descriptions of genes. Design only; no code. |
 
 ---
 
@@ -26,7 +29,7 @@ line) should be near 100%. If it is not, the panel's genes were projected rather
 every downstream statistic is uninterpretable — including the ones designed to detect exactly
 that. At gem's default `--n-hvg 0` every gene is trained, so this holds by construction; if you
 run `--n-hvg > 0`, pass `senna gem --markers` pointing at *the same marker file* the annotation
-uses. See `annotation-methods.md` §1.
+uses. See `lupin docs annotation`, §1.
 
 The per-cell feature matrices these commands read are produced by
 [`faba`](https://github.com/causalpathlab/faba); see its docs for how they are built.

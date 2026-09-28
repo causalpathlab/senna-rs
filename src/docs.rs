@@ -12,15 +12,16 @@ use clap::{Args, ValueEnum};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Topic {
-    /// Marker cell-type annotation, end to end.
-    Annotation,
-    /// Why the annotation pools cells into coarse clusters.
-    Grouping,
     /// Reference-based deconvolution of pseudobulk profiles.
     Deconvolve,
-    /// PLAN, not implemented — annotation onto a Cell Ontology DAG.
+    // Moved to lupin; kept so the old names say where to look.
+    #[value(hide = true)]
+    Annotation,
+    #[value(hide = true)]
+    Grouping,
+    #[value(hide = true)]
     OntologyPlan,
-    /// PLAN, not implemented — expert knowledge for lineage rooting.
+    #[value(hide = true)]
     RootingPlan,
 }
 
@@ -29,33 +30,11 @@ pub enum Topic {
 /// The listing `senna docs` prints and the text `senna docs <TOPIC>` prints are both read from
 /// here, so the index can never advertise a topic the command cannot serve — which is exactly
 /// what happens when the two are maintained separately.
-const DOCS: &[(Topic, &str, &str)] = &[
-    (
-        Topic::Annotation,
-        "METHOD  marker cell-type annotation, end to end",
-        include_str!("../docs/annotation-methods.md"),
-    ),
-    (
-        Topic::Grouping,
-        "METHOD  why the annotation pools cells into coarse clusters",
-        include_str!("../docs/annotation-grouping.md"),
-    ),
-    (
-        Topic::Deconvolve,
-        "METHOD  reference-based deconvolution of pseudobulk profiles",
-        include_str!("../docs/deconvolve.md"),
-    ),
-    (
-        Topic::OntologyPlan,
-        "PLAN    (not implemented) annotation onto a Cell Ontology DAG",
-        include_str!("../docs/annotation-ontology-plan.md"),
-    ),
-    (
-        Topic::RootingPlan,
-        "PLAN    (not implemented) expert knowledge for lineage rooting",
-        include_str!("../docs/lineage-rooting.md"),
-    ),
-];
+const DOCS: &[(Topic, &str, &str)] = &[(
+    Topic::Deconvolve,
+    "METHOD  reference-based deconvolution of pseudobulk profiles",
+    include_str!("../docs/deconvolve.md"),
+)];
 
 #[derive(Args, Debug)]
 pub struct DocsArgs {
@@ -82,16 +61,29 @@ pub fn run_docs(args: &DocsArgs) -> Result<()> {
             println!("  {slug:<14} {blurb}");
         }
         println!(
+            "\nAnnotation and lineage write-ups moved to lupin: `lupin docs annotation`, \
+             `grouping`, `ontology-plan`, `rooting-plan`."
+        );
+        println!(
             "\nThe per-cell feature matrices these commands read are built by `faba`; \
              see `faba docs profiling`.\n"
         );
         return Ok(());
     };
-    let text = DOCS
+    let Some(text) = DOCS
         .iter()
         .find(|(t, _, _)| *t == want)
         .map(|(_, _, text)| *text)
-        .expect("every Topic variant has a row in DOCS");
+    else {
+        let slug = want
+            .to_possible_value()
+            .as_ref()
+            .map(PossibleValue::get_name)
+            .unwrap_or_default()
+            .to_string();
+        println!("This write-up moved to lupin: run `lupin docs {slug}`.");
+        return Ok(());
+    };
     println!("{text}");
     Ok(())
 }
