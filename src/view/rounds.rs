@@ -158,13 +158,19 @@ impl Round {
         let s = self.summary.get(id)?;
         let e = s.get("evidence")?;
         let top = e.get("top").and_then(Value::as_str).map(String::from);
-        // A coarse label and a fine top call inside its group agree.
-        let within_group = match (s.get("label").and_then(Value::as_str), &top) {
-            (Some(l), Some(t)) => self
-                .members_of(l)
-                .is_some_and(|ms| ms.iter().any(|m| label_key(m) == label_key(t))),
-            _ => false,
-        };
+        let label = s
+            .get("label")
+            .and_then(Value::as_str)
+            .filter(|l| *l != UNASSIGNED);
+        // No label yet is not a disagreement; a coarse label and a fine top
+        // call inside its group agree.
+        let within_group = label.is_none()
+            || match (label, &top) {
+                (Some(l), Some(t)) => self
+                    .members_of(l)
+                    .is_some_and(|ms| ms.iter().any(|m| label_key(m) == label_key(t))),
+                _ => false,
+            };
         Some(Evidence {
             top,
             q: e.get("q").and_then(Value::as_f64),
@@ -464,7 +470,8 @@ mod tests {
             dir.path(),
             "s.json",
             r#"{"4":{"size":10,"label":"G1","calls":[{"label":"CT1","q":0.01}]},
-                "5":{"size":3,"label":"G1","evidence":{"top":"CT2","q":0.01,"support":null,"agrees":false}}}"#,
+                "5":{"size":3,"label":"G1","evidence":{"top":"CT2","q":0.01,"support":null,"agrees":false}},
+                "6":{"size":3,"label":null,"evidence":{"top":"CT2","q":0.01,"support":null,"agrees":false}}}"#,
         );
         write(
             dir.path(),
@@ -480,6 +487,7 @@ mod tests {
         let round = Round::load(&m, &d, &path);
         assert_eq!(round.members_of("g1").unwrap(), ["CT1", "CT2"]);
         assert!(round.evidence("5").unwrap().agrees);
+        assert!(round.evidence("6").unwrap().agrees);
         assert!(round.members_of("CT3").is_none());
         let lines = round.cluster_lines("4");
         assert!(lines[1].starts_with("a group of 2 types"));
