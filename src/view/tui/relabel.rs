@@ -167,6 +167,67 @@ impl App {
         }
     }
 
+    /// Keep the scores on screen current with the staged marker edits: take
+    /// lupin's answer when it comes, and start it again on newer edits (the
+    /// running one is killed). With no edits the round's own scores return.
+    /// Returns whether anything on screen changed.
+    pub(super) fn keep_scores_current(&mut self) -> bool {
+        let Some(r) = self.scene.review.as_mut() else {
+            self.rescoring = None;
+            return false;
+        };
+        let want = r.draft.marker_edits();
+        if let Some(job) = &self.rescoring {
+            let live = r.live.as_mut().filter(|l| l.edits == want);
+            match live {
+                Some(live) => {
+                    let Some(reply) = job.poll() else {
+                        return false;
+                    };
+                    self.rescoring = None;
+                    let scores = reply.and_then(|v| crate::view::relabel::parse_scores(&v));
+                    self.message = Some(match &scores {
+                        Ok(_) => "lupin rescored the edited cell types".into(),
+                        Err(e) => format!("lupin could not rescore: {e}"),
+                    });
+                    live.scores = Some(scores);
+                    return true;
+                }
+                // The edits moved on: stop it.
+                None => self.rescoring = None,
+            }
+        }
+        if r.live.as_ref().map_or(want.is_empty(), |l| l.edits == want) {
+            return false;
+        }
+        if want.is_empty() {
+            r.live = None;
+            return true;
+        }
+        let round = self
+            .from
+            .canonicalize()
+            .unwrap_or_else(|_| self.from.clone());
+        let lines: Vec<_> = r
+            .draft
+            .marker_decisions()
+            .iter()
+            .map(|d| d.to_json(&round.to_string_lossy()))
+            .collect();
+        let scores = match Rescore::spawn(&self.lupin, &round, &lines) {
+            Ok(job) => {
+                self.rescoring = Some(job);
+                None
+            }
+            Err(e) => Some(Err(e)),
+        };
+        r.live = Some(crate::view::relabel::Live {
+            edits: want,
+            scores,
+        });
+        true
+    }
+
     /// Send the whole draft to lupin: a preview, or the next round.
     fn send_draft(&mut self, mode: Mode) {
         let Some(r) = self.scene.review.as_ref() else {

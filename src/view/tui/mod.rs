@@ -17,7 +17,7 @@ use decisions::Prompt;
 use modal::Modal;
 
 use super::color;
-use super::decide::{Action, Decision, Mode, Watcher};
+use super::decide::{Action, Decision, Mode, Rescore, Watcher};
 use super::files::{self, modified, same_file};
 use super::render::{Frame, Job, Viewport};
 use super::style::{swatches, Shape};
@@ -188,6 +188,8 @@ struct App {
     watcher: Option<Watcher>,
     lupin: String,
     relabeling: Option<Relabeling>,
+    /// lupin rescoring the round against the staged marker edits.
+    rescoring: Option<Rescore>,
     /// A short popup over the map (lupin answered), and when it goes.
     toast: Option<(String, std::time::Instant)>,
     quit: bool,
@@ -210,6 +212,7 @@ impl App {
             watcher: Watcher::find(&from),
             lupin,
             relabeling: None,
+            rescoring: None,
             toast: None,
             modal: None,
             stamp: modified(&from),
@@ -244,7 +247,7 @@ impl App {
             if self.advance()? {
                 terminal.draw(|f| self.draw(f))?;
             }
-            if self.finish_zoom() || self.finish_relabel() {
+            if self.finish_zoom() | self.finish_relabel() | self.keep_scores_current() {
                 // Show the answer now, not at the next key press.
                 terminal.draw(|f| self.draw(f))?;
                 continue;
@@ -270,7 +273,11 @@ impl App {
             }
             let wait = if self.job.is_some() {
                 Duration::ZERO
-            } else if self.zooming.is_some() || self.relabeling.is_some() || self.toast.is_some() {
+            } else if self.zooming.is_some()
+                || self.relabeling.is_some()
+                || self.rescoring.is_some()
+                || self.toast.is_some()
+            {
                 Duration::from_millis(50)
             } else {
                 Duration::from_millis(250)

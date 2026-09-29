@@ -135,6 +135,10 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
                 "include in / exclude from the markers; clear",
             ),
             ("a", "accept every proposal (?+ add, ?- drop)"),
+            (
+                "(live)",
+                "lupin rescores the edited types as you mark; its calls show under the fit",
+            ),
         ],
     ),
     (

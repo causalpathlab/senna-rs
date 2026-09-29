@@ -125,6 +125,58 @@ impl Draft {
     /// and direction), then merges, labels and keeps.
     #[must_use]
     pub fn decisions(&self) -> Vec<Decision> {
+        let mut out = self.marker_decisions();
+        for m in &self.merges {
+            out.push(Decision {
+                action: Action::Merge,
+                clusters: m.clusters.clone(),
+                features: Vec::new(),
+                label: m.label.clone(),
+                rationale: m.rationale.clone(),
+                evidence: Vec::new(),
+            });
+        }
+        for (&id, c) in &self.clusters {
+            let (action, label, rationale) = match &c.verdict {
+                Some(Verdict::Label { label, rationale }) => (Action::Label, label, rationale),
+                Some(Verdict::Keep { label, rationale }) => (Action::Keep, label, rationale),
+                None => continue,
+            };
+            let evidence = c
+                .marks
+                .iter()
+                .filter(|(_, (m, _))| matches!(m, Mark::Include { .. }))
+                .take(5)
+                .map(|(f, (_, v))| {
+                    serde_json::json!({"kind": "marker", "term": f, "stat": "expected_lfc", "value": v})
+                })
+                .collect();
+            out.push(Decision {
+                action,
+                clusters: vec![id],
+                features: Vec::new(),
+                label: label.clone(),
+                rationale: rationale.clone(),
+                evidence,
+            });
+        }
+        out
+    }
+
+    /// The staged marker edits, for telling two drafts' apart: per cell type
+    /// and direction, the features.
+    #[must_use]
+    pub fn marker_edits(&self) -> Vec<(Action, String, Vec<Box<str>>)> {
+        self.marker_decisions()
+            .into_iter()
+            .map(|d| (d.action, d.label, d.features))
+            .collect()
+    }
+
+    /// The marker edits alone, one decision per cell type and direction:
+    /// what lupin rescores the round against.
+    #[must_use]
+    pub fn marker_decisions(&self) -> Vec<Decision> {
         let mut out = Vec::new();
         let mut edits: BTreeMap<(String, bool), Vec<StagedEdit>> = BTreeMap::new();
         for (&id, c) in &self.clusters {
@@ -165,40 +217,6 @@ impl Draft {
                         serde_json::json!({"kind": "marker", "term": f, "stat": "expected_lfc", "value": v})
                     })
                     .collect(),
-            });
-        }
-        for m in &self.merges {
-            out.push(Decision {
-                action: Action::Merge,
-                clusters: m.clusters.clone(),
-                features: Vec::new(),
-                label: m.label.clone(),
-                rationale: m.rationale.clone(),
-                evidence: Vec::new(),
-            });
-        }
-        for (&id, c) in &self.clusters {
-            let (action, label, rationale) = match &c.verdict {
-                Some(Verdict::Label { label, rationale }) => (Action::Label, label, rationale),
-                Some(Verdict::Keep { label, rationale }) => (Action::Keep, label, rationale),
-                None => continue,
-            };
-            let evidence = c
-                .marks
-                .iter()
-                .filter(|(_, (m, _))| matches!(m, Mark::Include { .. }))
-                .take(5)
-                .map(|(f, (_, v))| {
-                    serde_json::json!({"kind": "marker", "term": f, "stat": "expected_lfc", "value": v})
-                })
-                .collect();
-            out.push(Decision {
-                action,
-                clusters: vec![id],
-                features: Vec::new(),
-                label: label.clone(),
-                rationale: rationale.clone(),
-                evidence,
             });
         }
         out
@@ -259,6 +277,15 @@ mod tests {
             rationale: "same program".into(),
         });
         assert_eq!(d.decided(), 3);
+        // Only the marker edits are rescored live; a verdict does not change them.
+        let edits = d.marker_edits();
+        assert_eq!(edits.len(), 2);
+        d.cluster(4).verdict = Some(Verdict::Keep {
+            label: "CT1".into(),
+            rationale: "clear".into(),
+        });
+        assert_eq!(d.marker_edits(), edits);
+        d.cluster(4).verdict = None;
         let lines = d.lines("r.senna.json");
         let actions: Vec<&str> = lines
             .iter()

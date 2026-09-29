@@ -80,7 +80,7 @@ impl Scene {
                     Some((b, _)) => format!("? → {b}"),
                     None => "?".into(),
                 }
-            } else if let Some(top) = &o.disputed {
+            } else if let Some(top) = self.disputed(o) {
                 format!("≠ {top}")
             } else if o.coarse {
                 // The group's name is on the map; the panel says where to go.
@@ -182,6 +182,7 @@ impl Scene {
                 None => format!(" {mark} {c:<22}     ·"),
             });
         }
+        out.extend(self.live_lines());
         out.push(String::new());
         out.push("   mark feature       here  marker of".into());
         for (k, row) in r.rows.iter().enumerate() {
