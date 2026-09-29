@@ -6,9 +6,6 @@ use crate::view::decide::Reply;
 use crate::view::rounds::label_key;
 use crate::view::LabelKind;
 
-/// How long a popup stays.
-const TOAST_FOR: std::time::Duration = std::time::Duration::from_millis(2500);
-
 impl App {
     /// A key while typing a decision. Returns whether anything changed.
     pub(super) fn prompt_key(&mut self, k: KeyEvent) -> bool {

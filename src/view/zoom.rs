@@ -48,7 +48,7 @@ impl Scene {
         self.data.spaces.push(data::Space {
             method,
             kind: SpaceKind::Cells,
-            points: data::Points::new(names, xy),
+            points: std::sync::Arc::new(data::Points::new(names, xy)),
             backdrop: None,
             parent: Some(parent),
         });

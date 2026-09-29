@@ -59,16 +59,66 @@ impl Font {
     }
 }
 
+/// A line of text kept as text rather than drawn: where its box is on the
+/// raster, and how it looks. A vector export sets it in a real font.
+#[derive(Clone, Debug)]
+pub struct TextRun {
+    pub text: String,
+    /// Top left of the box the raster font would fill, in pixels.
+    pub x: f32,
+    pub y: f32,
+    /// That box's width and line height, in pixels.
+    pub w: f32,
+    pub line: f32,
+    pub bold: bool,
+    /// Centred on its box (a map label) rather than starting at its left.
+    pub centred: bool,
+    pub ink: Rgb,
+    pub bg: Rgb,
+}
+
 /// A linear-light canvas the text is blended into.
 pub trait Canvas {
     fn size(&self) -> (usize, usize);
     /// Blend `c` over pixel `(x, y)` at opacity `a`.
     fn blend(&mut self, x: usize, y: usize, c: Rgb, a: f32);
+    /// Where text goes instead of the pixels, when it is kept as text.
+    fn text_sink(&mut self) -> Option<&mut Vec<TextRun>> {
+        None
+    }
 }
 
 /// Draw `s` with its top-left corner at `(x, y)`, over a `halo` of the page
 /// colour `bg`.
 pub fn draw<C: Canvas>(canvas: &mut C, font: Font, s: &str, x: i32, y: i32, ink: Rgb, bg: Rgb) {
+    draw_aligned(canvas, font, s, (x, y), false, ink, bg);
+}
+
+/// `draw`, saying whether the text is `centred` on its box: the pixels are
+/// the same, but kept text stays centred when set in a font of other widths.
+pub fn draw_aligned<C: Canvas>(
+    canvas: &mut C,
+    font: Font,
+    s: &str,
+    (x, y): (i32, i32),
+    centred: bool,
+    ink: Rgb,
+    bg: Rgb,
+) {
+    if let Some(sink) = canvas.text_sink() {
+        sink.push(TextRun {
+            text: s.to_string(),
+            x: x as f32,
+            y: y as f32,
+            w: font.width(s) as f32,
+            line: font.line_height() as f32,
+            bold: matches!(font.weight, FontWeight::Bold),
+            centred,
+            ink,
+            bg,
+        });
+        return;
+    }
     let (w, h) = canvas.size();
     let adv = font.advance() as i32;
     let glyphs: Vec<Option<Vec<Vec<u8>>>> = s

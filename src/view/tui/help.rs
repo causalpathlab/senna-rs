@@ -16,6 +16,8 @@ pub(super) enum Context {
     Prompt,
     /// Typing the markers file for `lupin annotate`.
     MarkersFile,
+    /// Confirming a relabel round before it goes to lupin.
+    Submit,
     Search,
     StyleMenu,
 }
@@ -44,7 +46,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "z  Z  0",
                 "lay out the focused group on its own / back up / back to the top",
             ),
-            ("scroll  + -", "zoom"),
+            ("scroll  + -", "zoom the camera in / out"),
             ("arrows  drag", "pan"),
         ],
     ),
@@ -62,7 +64,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("/", "search a feature by name"),
             ("a", "activity of the focused group's whole marker set"),
             ("o", "expected (model) or observed (counts)"),
-            ("k  l", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
+            ("k", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
             ("x  esc", "back to group colours"),
         ],
     ),
@@ -81,15 +83,33 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Several views (d, or several -f manifests)",
+        &[
+            (
+                "d",
+                "copy this view beside it (1×2, then 2×2, …) to compare colourings or features",
+            ),
+            (
+                "w",
+                "every open view in a grid: point or arrows choose, click or enter opens, 1-9 by number",
+            ),
+            ("{  }", "previous / next view"),
+            ("X  (grid)", "close the view under the pointer (shift: it cannot be undone)"),
+        ],
+    ),
+    (
         "Other",
         &[
             (
                 "e",
                 "style of a group: colour, shape, opacity, size, hidden",
             ),
-            ("b  t", "sidebar / text labels on or off"),
-            ("T", "text size on the map (four steps)"),
-            ("s", "save this view as PNG"),
+            ("t", "labels on the map: small, medium, large, largest, off, in turn"),
+            ("b", "sidebar on or off"),
+            (
+                "s",
+                "save as PDF: this view, or every run (one grid, or a page each); width, dpi, file name",
+            ),
             ("q", "quit"),
         ],
     ),
@@ -123,7 +143,7 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "click a cell",
-                "the features nearest it; k or l pins their names on the map",
+                "the features nearest it; k pins their names on the map",
             ),
         ],
     ),
@@ -191,7 +211,7 @@ impl App {
         match self.context() {
             Context::Browse => [
                 "click a cell: its cluster and the features nearest it (k pins their names)   [ ] focus a group   c change the colouring   n suggest features",
-                "R relabel clusters   A annotate with lupin   , . rounds   tab / m other layouts   z zoom into a group   e style   T text size   ? all keys   q quit",
+                "R relabel clusters   A annotate with lupin   , . rounds   tab / m other layouts   z lay out a group   d copy view   w all views   s save PDF   ? all keys   q quit",
             ],
             Context::Feature => [
                 "g / G next or previous feature   o switch between counts and model   a the group's whole marker set   x back to group colours",
@@ -213,6 +233,8 @@ impl App {
                 "type the path of a markers file (type, then its markers; TSV, or one comma per line)",
                 "tab completes the path   enter runs lupin annotate   esc cancels",
             ],
+            // The popup says what the keys do.
+            Context::Submit => ["", ""],
             Context::Search => [
                 "type part of a feature name   enter shows the first match   esc cancels",
                 "",
@@ -226,7 +248,10 @@ impl App {
 
     /// The `?` overlay for the current context.
     pub(super) fn help_lines(&self) -> Vec<Line<'static>> {
-        let sections = if matches!(self.context(), Context::Relabel | Context::Merge) {
+        let sections = if matches!(
+            self.context(),
+            Context::Relabel | Context::Merge | Context::Submit
+        ) {
             RELABEL_HELP
         } else {
             BROWSE_HELP

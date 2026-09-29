@@ -375,7 +375,7 @@ impl Scene {
     fn markers_by_type(&self) -> BTreeMap<String, Vec<Box<str>>> {
         let mut out: BTreeMap<String, Vec<Box<str>>> = BTreeMap::new();
         if let Some(m) = self.markers() {
-            for (f, &g) in &m.by_name {
+            for (f, &g) in m.by_name.iter() {
                 out.entry(m.levels[g as usize].to_string())
                     .or_default()
                     .push(f.clone());

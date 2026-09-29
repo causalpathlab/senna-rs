@@ -19,7 +19,7 @@ use super::style::{Resolved, Shape};
 use super::text::{self, Canvas, Font};
 use image::RgbaImage;
 use rayon::prelude::*;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// First progressive chunk; each later chunk doubles.
 const FIRST_CHUNK: usize = 1 << 15;
@@ -102,7 +102,7 @@ pub struct Paint<'a> {
     /// Feature activity per point, drawn on `ramp` instead of group colours.
     pub levels: Option<(&'a Levels, &'a [Rgb])>,
     /// The draw order, when the caller has it cached; else it is computed.
-    pub order: Option<Rc<Vec<u32>>>,
+    pub order: Option<Arc<Vec<u32>>>,
 }
 
 /// One point's mark.
@@ -226,7 +226,7 @@ pub fn visible_count(points: &Points, vp: &Viewport) -> usize {
 pub struct Job {
     pub vp: Viewport,
     canvas: Vec<Rgb>,
-    orders: Vec<Rc<Vec<u32>>>,
+    orders: Vec<Arc<Vec<u32>>>,
     radius: Vec<f32>,
     /// Layer being drawn and position within its order.
     layer: usize,
@@ -246,7 +246,7 @@ impl Job {
             canvas: vec![color::linear_rgb(color::BACKGROUND); vp.w * vp.h],
             orders: layers
                 .iter()
-                .map(|l| l.order.clone().unwrap_or_else(|| Rc::new(l.draw_order())))
+                .map(|l| l.order.clone().unwrap_or_else(|| Arc::new(l.draw_order())))
                 .collect(),
             radius,
             layer: 0,
@@ -330,6 +330,7 @@ impl Job {
             h: self.vp.h,
             px: self.canvas,
             bg: color::linear_rgb(color::BACKGROUND),
+            text: None,
         }
     }
 }
@@ -341,12 +342,25 @@ pub struct Frame {
     pub h: usize,
     px: Vec<Rgb>,
     bg: Rgb,
+    /// Text kept as text, when recording; see `keep_text`.
+    text: Option<Vec<text::TextRun>>,
 }
 
 impl Frame {
     #[must_use]
     pub fn background(&self) -> Rgb {
         self.bg
+    }
+
+    /// From now on keep text as runs instead of drawing it, for a vector
+    /// export that sets it in a real font over the raster.
+    pub fn keep_text(&mut self) {
+        self.text.get_or_insert_with(Vec::new);
+    }
+
+    /// The text kept so far.
+    pub fn take_text(&mut self) -> Vec<text::TextRun> {
+        self.text.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     #[must_use]
@@ -375,6 +389,9 @@ impl Canvas for Frame {
         for k in 0..3 {
             p[k] += (c[k] - p[k]) * a;
         }
+    }
+    fn text_sink(&mut self) -> Option<&mut Vec<text::TextRun>> {
+        self.text.as_mut()
     }
 }
 
@@ -426,7 +443,15 @@ pub fn draw_labels(frame: &mut Frame, mut labels: Vec<Label>, reserved: &[[f32; 
             continue;
         }
         placed.push(rect);
-        text::draw(frame, l.font, &l.text, x0 as i32, y0 as i32, l.ink, bg);
+        text::draw_aligned(
+            frame,
+            l.font,
+            &l.text,
+            (x0 as i32, y0 as i32),
+            true,
+            l.ink,
+            bg,
+        );
     }
 }
 

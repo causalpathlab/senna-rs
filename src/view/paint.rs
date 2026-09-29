@@ -56,7 +56,7 @@ impl Scene {
             let order = match cache.iter().find(|(k, _)| *k == key) {
                 Some((_, o)) => o.clone(),
                 None => {
-                    let o = std::rc::Rc::new(paint.draw_order());
+                    let o = std::sync::Arc::new(paint.draw_order());
                     cache.insert(0, (key, o.clone()));
                     cache.truncate(4);
                     o
@@ -313,14 +313,4 @@ fn mark(
         priority,
         font,
     });
-}
-
-/// Render the whole scene once, labels included.
-pub(crate) fn render_full(scene: &Scene, vp: Viewport, cell_px: f32) -> image::RgbaImage {
-    let layers = scene.layers();
-    let mut job = Job::new(vp, &layers);
-    while !job.step(&layers) {}
-    let mut frame = job.finish();
-    scene.decorate(&mut frame, &vp, cell_px);
-    frame.to_image()
 }

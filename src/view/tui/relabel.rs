@@ -49,7 +49,7 @@ impl App {
             KeyCode::Char('K') => self.begin_staged(Action::Keep),
             KeyCode::Char('M') => self.change(Scene::begin_merge),
             KeyCode::Char('p') => self.send_draft(Mode::Preview),
-            KeyCode::Char('S') => self.send_draft(Mode::Next),
+            KeyCode::Char('S') => self.confirm_submit(),
             KeyCode::Esc | KeyCode::Char('R') => self.toggle_review(),
             _ => return false,
         }
@@ -229,7 +229,20 @@ impl App {
     }
 
     /// Send the whole draft to lupin: a preview, or the next round.
-    fn send_draft(&mut self, mode: Mode) {
+    /// Ask before `S` hands lupin the draft: it makes a new round.
+    fn confirm_submit(&mut self) {
+        let Some(r) = self.scene.review.as_ref() else {
+            return;
+        };
+        if r.draft.is_empty() {
+            self.message = Some("nothing staged yet".into());
+            return;
+        }
+        let lines = r.draft.decisions().iter().map(Decision::summary).collect();
+        self.modal = Some(Modal::Submit(lines));
+    }
+
+    pub(super) fn send_draft(&mut self, mode: Mode) {
         let Some(r) = self.scene.review.as_ref() else {
             return;
         };

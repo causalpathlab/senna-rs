@@ -205,6 +205,7 @@ struct Observed {
 
 /// Values of one feature (or feature set) per point, `NaN` where the point
 /// has no value, and the range the colour ramp spans.
+#[derive(Clone)]
 pub struct Levels {
     pub values: Vec<f32>,
     pub lo: f32,
