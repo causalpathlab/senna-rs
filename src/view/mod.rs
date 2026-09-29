@@ -4,9 +4,11 @@ mod activity;
 mod color;
 mod data;
 mod decide;
+mod deck;
 mod features;
 mod files;
 mod paint;
+mod pdf;
 mod relabel;
 mod render;
 mod review;
@@ -23,8 +25,7 @@ use color::Rgb;
 use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
 use features::Centre;
-use paint::render_full;
-use render::{draw_labels, group_medians, Job, Label, Paint, Tier, Viewport};
+use render::{draw_labels, group_medians, Label, Paint, Tier, Viewport};
 use senna::embed_common::*;
 use text::Font;
 
@@ -45,12 +46,18 @@ pub struct ViewArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Run manifest (`{out}.senna.json`) with at least one layout",
-        long_help = "Run manifest (`{out}.senna.json`).\n\
+        num_args = 1..,
+        required = true,
+        help = "Run manifest(s) (`{out}.senna.json`); several open side by side (w shows the grid)",
+        long_help = "Run manifest(s) (`{out}.senna.json`).\n\
                      Every layout under `manifest.layout.methods` is available,\n\
-                     together with clusters, annotation and topics the run carries."
+                     together with clusters, annotation and topics the run carries.\n\
+                     Several manifests (`-f a.senna.json b.senna.json`, or a glob)\n\
+                     open as separate sessions: `w` shows them all in a grid, where\n\
+                     hovering or the arrows choose one and a click or enter opens it.\n\
+                     With --pdf, several manifests render as one grid page."
     )]
-    pub from: Box<str>,
+    pub from: Vec<Box<str>>,
 
     #[arg(
         long,
@@ -69,11 +76,12 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        help = "Render one frame to this PNG and exit (no terminal needed)",
-        long_help = "Render the starting view to a PNG and exit.\n\
-                     Combine with --method / --space / --colour-by and --size."
+        help = "Save the starting view to this PDF and exit (no terminal needed)",
+        long_help = "Save the starting view to a PDF and exit: the points as an image\n\
+                     at --dpi, the labels as text. Combine with --method / --space /\n\
+                     --colour-by and --width; several manifests make one grid page."
     )]
-    pub png: Option<Box<str>>,
+    pub pdf: Option<Box<str>>,
 
     #[arg(
         long,
@@ -83,10 +91,17 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        default_value = "1600x1200",
-        help = "PNG size as WIDTHxHEIGHT (with --png)"
+        default_value_t = 7.0,
+        help = "Page width in inches (with --pdf); the height follows the view"
     )]
-    pub size: Box<str>,
+    pub width: f32,
+
+    #[arg(
+        long,
+        default_value_t = 300,
+        help = "Resolution of the points in dots per inch (with --pdf); text stays text"
+    )]
+    pub dpi: u32,
 
     #[arg(long, help = "Start showing this feature's activity on the cells")]
     pub feature: Option<Box<str>>,
@@ -119,7 +134,7 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        help = "Print suggested features for the starting view (with --png, show the top one)"
+        help = "Print suggested features for the starting view (with --pdf, show the top one)"
     )]
     pub suggest: bool,
 
@@ -173,6 +188,7 @@ pub(crate) enum Pick {
 }
 
 /// Activity currently drawn: what it is of, where, and its levels.
+#[derive(Clone)]
 struct Shown {
     /// Distinguishes one computed activity from the next, for caches.
     id: u64,
@@ -212,7 +228,7 @@ pub(crate) struct Scene {
     ramp: Vec<Rgb>,
     suggestions: Option<Suggestions>,
     /// Draw orders computed for recent layer states; see `layers`.
-    orders: std::cell::RefCell<Vec<(OrderKey, std::rc::Rc<Vec<u32>>)>>,
+    orders: std::cell::RefCell<Vec<(OrderKey, std::sync::Arc<Vec<u32>>)>>,
     shown_ids: u64,
     /// Name index of a feature space, for marking the picked feature.
     feature_index: std::cell::RefCell<Option<(usize, GeneIndex)>>,
@@ -302,6 +318,45 @@ impl Scene {
     }
 }
 
+impl Scene {
+    /// A second scene on the same run showing what this one shows: the same
+    /// map (zooms included), grouping, focus, feature and pinned names. Its
+    /// caches start empty, and a relabel session stays with this one.
+    pub(crate) fn duplicate(&self) -> Self {
+        let mut s = Self {
+            data: self.data.clone(),
+            space: self.space,
+            colour: self.colour,
+            focus: self.focus,
+            show_labels: self.show_labels,
+            text_scale: self.text_scale,
+            groups: None,
+            styles: Vec::new(),
+            book: self.book.clone(),
+            // The activity on screen comes along, so nothing is read again.
+            pick: self.pick.clone(),
+            source: self.source,
+            activity: None,
+            shown: self.shown.clone(),
+            ramp: self.ramp.clone(),
+            suggestions: None,
+            orders: std::cell::RefCell::default(),
+            shown_ids: self.shown_ids,
+            feature_index: std::cell::RefCell::new(None),
+            name_index: std::cell::RefCell::default(),
+            medians: std::cell::RefCell::new(None),
+            geometry: self.geometry.clone(),
+            feature_embedding: None,
+            review: None,
+            near: self.near.clone(),
+            locked: self.locked.clone(),
+            note: None,
+        };
+        s.refresh_groups();
+        s
+    }
+}
+
 fn pick_space(data: &Dataset, method: Option<&str>, space: Option<&str>) -> usize {
     data.spaces
         .iter()
@@ -332,9 +387,8 @@ fn run_senna(why: &str, argv: &[&str]) -> anyhow::Result<()> {
 /// each. Outputs go beside the manifest and are recorded in it, so this runs
 /// once. Only a missing cell layout is an error; the rest warn and the view
 /// opens without them.
-fn prepare_run(args: &ViewArgs) -> anyhow::Result<()> {
+fn prepare_run(args: &ViewArgs, from: &str) -> anyhow::Result<()> {
     use senna::run_manifest::RunManifest;
-    let from: &str = &args.from;
     let load = || RunManifest::load(std::path::Path::new(from));
     let (m, dir) = load()?;
     let out = senna::run_manifest::derive_out_prefix(from);
@@ -397,13 +451,27 @@ fn prepare_run(args: &ViewArgs) -> anyhow::Result<()> {
 }
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
+    use rayon::prelude::*;
+    anyhow::ensure!(
+        !(args.relabel && args.from.len() > 1),
+        "--relabel reads one run; got {} manifests",
+        args.from.len()
+    );
     if !args.no_compute {
-        prepare_run(args)?;
+        for from in &args.from {
+            prepare_run(args, from)?;
+        }
     }
-    let data = Dataset::load(&args.from)?;
-    let mut scene = Scene::new(data, args);
+    // Reading runs is independent work; the scenes are built in order.
+    let data = args
+        .from
+        .par_iter()
+        .map(|f| Dataset::load(f))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut scenes: Vec<Scene> = data.into_iter().map(|d| Scene::new(d, args)).collect();
 
     if args.relabel {
+        let scene = &mut scenes[0];
         match scene.enter_review() {
             Ok(()) => scene
                 .review_lines()
@@ -416,30 +484,65 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         return Ok(());
     }
     if args.suggest {
-        scene.suggest();
-        match scene.suggestion_lines() {
-            Some(lines) => lines.iter().for_each(|l| println!("{l}")),
-            None => println!("{}", scene.note.take().unwrap_or_default()),
+        let several = scenes.len() > 1;
+        for (scene, from) in scenes.iter_mut().zip(&args.from) {
+            if several {
+                println!("== {from}");
+            }
+            scene.suggest();
+            match scene.suggestion_lines() {
+                Some(lines) => lines.iter().for_each(|l| println!("{l}")),
+                None => println!("{}", scene.note.take().unwrap_or_default()),
+            }
         }
     }
 
-    if let Some(png) = &args.png {
-        let (w, h) = args
-            .size
-            .split_once('x')
-            .and_then(|(w, h)| Some((w.parse::<usize>().ok()?, h.parse::<usize>().ok()?)))
-            .ok_or_else(|| anyhow::anyhow!("--size wants WIDTHxHEIGHT, got {}", args.size))?;
-        let vp = Viewport::fit(scene.current().points.bounds, w, h);
-        let img = render_full(&scene, vp, (h as f32 / 36.0).max(16.0));
-        img.save(png.as_ref())?;
-        info!("Saved {png} ({})", scene.caption());
+    if let Some(path) = &args.pdf {
+        anyhow::ensure!(
+            args.width > 0.0 && args.dpi > 0,
+            "--width and --dpi must be positive"
+        );
+        let dpi = args.dpi as f32;
+        let w = (args.width * dpi).round() as usize;
+        // A roughly 4:3 page, its tiles 4:3 too.
+        let (cols, rows) = deck::shape(scenes.len(), 4.0, 3.0);
+        let h = (w as f32 * 0.75 * rows as f32 / cols as f32).round() as usize;
+        anyhow::ensure!(
+            w * h <= deck::MAX_PIXELS,
+            "{w} × {h} px is too large; lower --width or --dpi"
+        );
+        // Labels about 8 pt on the page, whatever its size.
+        let cell_px = dpi * 11.0 / 72.0;
+        let page = if let [scene] = &scenes[..] {
+            let vp = Viewport::fit(scene.current().points.bounds, w, h);
+            deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
+        } else {
+            let titles: Vec<String> = args
+                .from
+                .iter()
+                .map(|f| files::name(std::path::Path::new(f.as_ref())))
+                .collect();
+            let refs: Vec<&Scene> = scenes.iter().collect();
+            let cams = vec![None; scenes.len()];
+            deck::render_grid(&refs, &cams, &titles, (w, h), cell_px)
+        };
+        pdf::write(&[page], dpi, std::path::Path::new(path.as_ref()))?;
+        info!(
+            "Saved {path} ({w} × {h} px at {} dpi, {} run(s))",
+            args.dpi,
+            scenes.len()
+        );
         return Ok(());
     }
 
+    let sessions = scenes
+        .into_iter()
+        .zip(&args.from)
+        .map(|(s, f)| (s, std::path::PathBuf::from(f.as_ref())))
+        .collect();
     tui::run(
-        scene,
+        sessions,
         args.graphics,
-        std::path::PathBuf::from(args.from.as_ref()),
         args.lupin
             .as_deref()
             .map(String::from)
@@ -451,6 +554,12 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::data::{Labels, Points, Space};
+
+    fn render_full(s: &Scene, vp: Viewport, cell_px: f32) -> image::RgbaImage {
+        deck::frames(&[(s, vp, cell_px)], false)
+            .remove(0)
+            .to_image()
+    }
     use super::*;
 
     fn pts(names: &[&str]) -> Points {
@@ -464,7 +573,7 @@ mod tests {
         Space {
             method: method.into(),
             kind,
-            points: pts(names),
+            points: std::sync::Arc::new(pts(names)),
             backdrop: None,
             parent: None,
         }
@@ -500,13 +609,14 @@ mod tests {
             ],
         };
         let args = ViewArgs {
-            from: "r.senna.json".into(),
+            from: vec!["r.senna.json".into()],
             method: None,
             colour_by: None,
             graphics: Graphics::Blocks,
-            png: None,
+            pdf: None,
             space: None,
-            size: "10x10".into(),
+            width: 7.0,
+            dpi: 300,
             feature: None,
             markers_of: None,
             observed: false,
@@ -602,6 +712,40 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_shows_the_same_view_then_goes_its_own_way() {
+        let mut s = scene();
+        s.set_space(2);
+        s.step_focus(1);
+        s.text_scale = TEXT_SCALES[3];
+        let mut copy = s.duplicate();
+        assert_eq!(
+            (copy.space, copy.colour, copy.focus, copy.text_scale),
+            (s.space, s.colour, s.focus, s.text_scale)
+        );
+        assert_eq!(copy.groups(), s.groups());
+        copy.cycle_colour();
+        copy.set_space(0);
+        assert_ne!(copy.colour, s.colour);
+        assert_eq!(s.space, 2);
+    }
+
+    #[test]
+    fn t_steps_label_sizes_then_off_then_small() {
+        let mut s = scene();
+        assert!(s.show_labels);
+        assert_eq!(s.text_scale, TEXT_SCALES[1]);
+        s.cycle_labels();
+        s.cycle_labels();
+        assert_eq!(s.text_scale, TEXT_SCALES[3]);
+        s.cycle_labels();
+        assert!(!s.show_labels);
+        s.cycle_labels();
+        assert!(s.show_labels);
+        assert_eq!(s.text_scale, TEXT_SCALES[0]);
+        assert!(s.note.take().unwrap().contains("small"));
+    }
+
+    #[test]
     fn focus_wraps_both_ways() {
         let mut s = scene();
         s.step_focus(-1);
@@ -665,10 +809,10 @@ mod tests {
     fn a_clicked_cell_is_drawn_with_edges_to_its_features() {
         let mut s = scene();
         let mut placed = space("umap", SpaceKind::FeaturesOnCells, &["g1", "g2", "g3"]);
-        placed.points = Points::new(
+        placed.points = std::sync::Arc::new(Points::new(
             ["g1", "g2", "g3"].map(Into::into).to_vec(),
             vec![[3.0, 0.0], [3.0, 2.0], [0.0, 2.0]],
-        );
+        ));
         placed.backdrop = Some(0);
         s.data.spaces.push(placed);
         s.show_labels = false;

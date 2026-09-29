@@ -21,6 +21,7 @@ pub enum Axis {
 }
 
 /// One set of 2D points.
+#[derive(Clone)]
 pub struct Points {
     pub names: Vec<Box<str>>,
     pub xy: Vec<[f32; 2]>,
@@ -103,10 +104,12 @@ impl SpaceKind {
 }
 
 /// A view of one layout method on one axis.
+#[derive(Clone)]
 pub struct Space {
     pub method: String,
     pub kind: SpaceKind,
-    pub points: Points,
+    /// Shared, so a copy of the view does not copy every point.
+    pub points: std::sync::Arc<Points>,
     /// For features placed on a cell map: that map's cells, drawn muted
     /// underneath for context.
     pub backdrop: Option<usize>,
@@ -178,12 +181,14 @@ impl LabelKind {
 }
 
 /// A categorical labelling keyed by point name.
+#[derive(Clone)]
 pub struct Labels {
     pub kind: LabelKind,
     pub levels: Vec<Box<str>>,
     /// For clusters: the numeric id of each level.
     pub ids: Vec<i64>,
-    pub by_name: HashMap<Box<str>, u32>,
+    /// Shared, so a copy of the view does not copy one entry per cell.
+    pub by_name: std::sync::Arc<HashMap<Box<str>, u32>>,
 }
 
 /// Group id per point, `NONE` where the point has no label.
@@ -226,7 +231,7 @@ impl Labels {
             kind,
             levels,
             ids: Vec::new(),
-            by_name,
+            by_name: std::sync::Arc::new(by_name),
         };
         labels.sort_naturally();
         labels
@@ -277,7 +282,8 @@ impl Labels {
             remap[old] = new as u32;
         }
         self.levels = idx.iter().map(|&i| self.levels[i].clone()).collect();
-        for v in self.by_name.values_mut() {
+        // Only called while the map is being built, so nothing is copied.
+        for v in std::sync::Arc::make_mut(&mut self.by_name).values_mut() {
             *v = remap[*v as usize];
         }
     }
@@ -293,6 +299,7 @@ impl Labels {
     }
 }
 
+#[derive(Clone)]
 pub struct Dataset {
     pub prefix: String,
     pub spaces: Vec<Space>,
@@ -438,7 +445,7 @@ fn load_spaces(m: &RunManifest, dir: &Path) -> anyhow::Result<Vec<Space>> {
             spaces.push(Space {
                 method: method.clone(),
                 kind,
-                points: read_xy(&at(p))?,
+                points: std::sync::Arc::new(read_xy(&at(p))?),
                 backdrop: (kind == SpaceKind::FeaturesOnCells)
                     .then_some(cells)
                     .flatten(),

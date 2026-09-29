@@ -18,6 +18,7 @@ pub(crate) enum Centre {
 
 /// Features shown around one clicked cell, or features and cells around one
 /// clicked feature.
+#[derive(Clone)]
 pub(crate) struct Near {
     pub name: Box<str>,
     pub centre: Centre,
@@ -368,7 +369,7 @@ impl Scene {
     pub fn pin(&mut self) {
         if let Some(n) = self.near.take() {
             self.note = Some(format!(
-                "pinned {} names · k or l again clears",
+                "pinned {} names · k again clears",
                 n.features.len() + n.cells.len()
             ));
             self.locked.push(n);
@@ -384,11 +385,11 @@ impl Scene {
                     .feature_positions()
                     .into_iter()
                     .chain(
-                        (self.current().axis() == Axis::Features).then(|| &self.current().points),
+                        (self.current().axis() == Axis::Features).then(|| &*self.current().points),
                     )
                     .any(|p| p.names.iter().any(|n| n == f));
                 self.note = Some(if placed {
-                    format!("pinned {f} · k or l again clears")
+                    format!("pinned {f} · k again clears")
                 } else {
                     format!("{f} has no place on this map")
                 });
@@ -469,7 +470,7 @@ impl Scene {
             out.extend(list.iter().map(|(f, v)| format!("  {f:<14} {v:+.2}")));
             out.push(String::new());
         }
-        out.push("k or l pins their names on the map".into());
+        out.push("k pins their names on the map".into());
         Some(out)
     }
 }

@@ -260,18 +260,27 @@ impl Scene {
         self.focus.map(|f| self.levels()[f as usize].clone())
     }
 
-    pub fn cycle_text_size(&mut self) {
-        let at = TEXT_SCALES
-            .iter()
-            .position(|&t| t >= self.text_scale)
-            .unwrap_or(0);
-        let next = (at + 1) % TEXT_SCALES.len();
-        self.text_scale = TEXT_SCALES[next];
-        self.note = Some(format!(
-            "text size {} of {} · T for the next",
-            next + 1,
-            TEXT_SCALES.len()
-        ));
+    /// Labels on the map in turn: small, medium, large, largest, off.
+    pub fn cycle_labels(&mut self) {
+        const SIZES: [&str; 4] = ["small", "medium", "large", "largest"];
+        let next = if self.show_labels {
+            let at = TEXT_SCALES
+                .iter()
+                .position(|&t| t >= self.text_scale)
+                .unwrap_or(0);
+            (at + 1 < TEXT_SCALES.len()).then_some(at + 1)
+        } else {
+            Some(0)
+        };
+        self.show_labels = next.is_some();
+        self.note = Some(match next {
+            Some(k) => {
+                self.text_scale = TEXT_SCALES[k];
+                let then = SIZES.get(k + 1).copied().unwrap_or("off");
+                format!("labels {} · t for {then}", SIZES[k])
+            }
+            None => "labels off · t shows them small".into(),
+        });
     }
 
     /// Colour by the grouping of `kind`, when the run has one.

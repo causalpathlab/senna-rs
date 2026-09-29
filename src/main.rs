@@ -786,7 +786,8 @@ enum Commands {
                       focus one group, zoom and pan. Uses kitty / sixel / iTerm2 images\n\
                       when the terminal supports them, block characters otherwise.\n\
                       \n\
-                      `--png FILE` renders the starting view to an image and exits."
+                      `--pdf FILE` saves the starting view as a PDF (points as an image,\n\
+                      labels as text) and exits."
     )]
     View(view::ViewArgs),
 }

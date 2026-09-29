@@ -8,6 +8,7 @@
 mod annotate;
 mod decisions;
 mod draw;
+mod grid;
 mod help;
 mod input;
 mod modal;
@@ -43,10 +44,10 @@ fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 
+/// Open one session per run and hand the terminal to them.
 pub fn run(
-    scene: Scene,
+    sessions: Vec<(Scene, std::path::PathBuf)>,
     graphics: Graphics,
-    from: std::path::PathBuf,
     lupin: String,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
@@ -70,12 +71,28 @@ pub fn run(
             Graphics::Blocks => picker.set_protocol_type(ProtocolType::Halfblocks),
         }
         execute!(std::io::stdout(), EnableMouseCapture)?;
-        App::new(scene, picker, from, lupin).run(&mut terminal)
+        let apps = sessions
+            .into_iter()
+            .map(|(scene, from)| App::new(scene, picker.clone(), from, lupin.clone()))
+            .collect();
+        grid::Deck::new(apps, picker).run(&mut terminal)
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
+
+/// `img` ready to draw into `area`, scaled to fit it.
+fn protocol(picker: &Picker, img: image::RgbaImage, area: Rect) -> anyhow::Result<Protocol> {
+    Ok(picker.new_protocol(
+        DynamicImage::ImageRgba8(img),
+        Size::new(area.width, area.height),
+        Resize::Fit(Some(image::imageops::FilterType::Triangle)),
+    )?)
+}
+
+/// How long a toast stays up.
+const TOAST_FOR: Duration = Duration::from_millis(2500);
 
 /// Lines at the bottom: what is on screen, then two lines of keys.
 const STATUS_LINES: u16 = 3;
@@ -240,67 +257,44 @@ impl App {
         }
     }
 
-    fn run(mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
-        while !self.quit {
-            let area = terminal.size()?;
-            self.layout(Rect::new(0, 0, area.width, area.height));
-            if self.advance()? {
-                terminal.draw(|f| self.draw(f))?;
-            }
-            if self.finish_zoom() | self.finish_relabel() | self.keep_scores_current() {
-                // Show the answer now, not at the next key press.
-                terminal.draw(|f| self.draw(f))?;
-                continue;
-            }
-            if self.job.is_none() && self.checked.elapsed() >= Duration::from_secs(1) {
-                self.checked = std::time::Instant::now();
-                if modified(&self.from) != self.stamp {
-                    let from = self.from.clone();
-                    self.open_round(&from, "reloaded");
-                    continue;
-                }
-                if self.follow_watcher() {
-                    continue;
-                }
-            }
-            if self
-                .toast
-                .as_ref()
-                .is_some_and(|(_, until)| std::time::Instant::now() >= *until)
-            {
-                self.toast = None;
-                terminal.draw(|f| self.draw(f))?;
-            }
-            let wait = if self.job.is_some() {
-                Duration::ZERO
-            } else if self.zooming.is_some()
-                || self.relabeling.is_some()
-                || self.rescoring.is_some()
-                || self.toast.is_some()
-            {
-                Duration::from_millis(50)
+    /// Work that goes on whether or not this view is on screen: a zoom
+    /// laid out, lupin answering, the file changing on disk, the watched
+    /// chain moving on, a toast running out. Returns whether the view
+    /// changed (on screen, lupin's elapsed time counts as a change).
+    fn background(&mut self, on_screen: bool) -> bool {
+        let mut changed = self.finish_zoom() | self.finish_relabel() | self.keep_scores_current();
+        // Not while drawing on screen: a reload would restart the picture.
+        let idle = !on_screen || self.job.is_none();
+        if idle && self.checked.elapsed() >= Duration::from_secs(1) {
+            self.checked = std::time::Instant::now();
+            if modified(&self.from) != self.stamp {
+                let from = self.from.clone();
+                self.open_round(&from, "reloaded");
+                changed = true;
             } else {
-                Duration::from_millis(250)
-            };
-            if event::poll(wait)? {
-                // Drain everything queued so a burst of scroll events costs
-                // one re-render, not one per event.
-                let mut changed = false;
-                loop {
-                    changed |= self.handle(event::read()?);
-                    if !event::poll(Duration::ZERO)? {
-                        break;
-                    }
-                }
-                if changed || self.relabeling.is_some() {
-                    terminal.draw(|f| self.draw(f))?;
-                }
-            } else if self.relabeling.is_some() {
-                // Keep the elapsed time ticking while lupin works.
-                terminal.draw(|f| self.draw(f))?;
+                changed |= self.follow_watcher();
             }
         }
-        Ok(())
+        if grid::expired(&self.toast) {
+            self.toast = None;
+            changed = true;
+        }
+        changed || (on_screen && self.relabeling.is_some())
+    }
+
+    /// How long to wait for input while this view is on screen.
+    fn wait(&self) -> Duration {
+        if self.job.is_some() {
+            Duration::ZERO
+        } else if self.zooming.is_some()
+            || self.relabeling.is_some()
+            || self.rescoring.is_some()
+            || self.toast.is_some()
+        {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(250)
+        }
     }
 
     /// The sidebar's text, when it shows text rather than the style menu.
@@ -364,6 +358,17 @@ impl App {
         }
     }
 
+    /// Pixel size of the view: its camera's, else the map area's.
+    fn view_px(&self) -> (f32, f32) {
+        match self.vp {
+            Some(v) => (v.w as f32, v.h as f32),
+            None => {
+                let (w, h) = self.map_px();
+                (w as f32, h as f32)
+            }
+        }
+    }
+
     fn map_px(&self) -> (usize, usize) {
         (
             (f32::from(self.map.width) * self.cell.0) as usize,
@@ -406,12 +411,7 @@ impl App {
     }
 
     fn show(&mut self, img: image::RgbaImage) -> anyhow::Result<()> {
-        let size = Size::new(self.map.width, self.map.height);
-        self.proto = Some(self.picker.new_protocol(
-            DynamicImage::ImageRgba8(img),
-            size,
-            Resize::Fit(Some(image::imageops::FilterType::Triangle)),
-        )?);
+        self.proto = Some(protocol(&self.picker, img, self.map)?);
         Ok(())
     }
 
@@ -581,19 +581,15 @@ impl App {
         }
     }
 
-    fn save(&mut self) {
-        let Some(vp) = self.vp else { return };
+    /// Where this view's PDF goes unless another name is typed (`.pdf`
+    /// follows).
+    fn pdf_name(&self) -> String {
         let s = self.scene.current();
-        let path = format!(
-            "{}.view.{}.{}.png",
+        format!(
+            "{}.view.{}.{}",
             self.scene.data.prefix,
             s.method,
             s.kind.slug()
-        );
-        let img = super::render_full(&self.scene, vp, self.cell.1);
-        self.message = Some(match img.save(&path) {
-            Ok(()) => format!("saved {path}"),
-            Err(e) => format!("save failed: {e}"),
-        });
+        )
     }
 }

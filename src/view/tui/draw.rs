@@ -4,9 +4,7 @@ use super::*;
 
 impl App {
     pub(super) fn draw(&self, f: &mut ratatui::Frame) {
-        let page = Style::default()
-            .bg(rgb(color::BACKGROUND))
-            .fg(rgb(color::INK));
+        let page = page();
         f.render_widget(Block::default().style(page), f.area());
         let [_, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(STATUS_LINES)])
             .areas(f.area());
@@ -17,8 +15,8 @@ impl App {
 
         // Status area: what is on screen (or the latest message), then the
         // keys that act here.
-        let mut first = match &self.modal {
-            Some(m) => m.line(),
+        let mut first = match self.modal.as_ref().and_then(Modal::line) {
+            Some(line) => line,
             None => match &self.relabeling {
                 Some(r) if matches!(r.job, RelabelJob::Annotate) => format!(
                     "lupin is annotating this run… {:.0} s · {}",
@@ -98,39 +96,29 @@ impl App {
         }
 
         if let Some((text, _)) = &self.toast {
-            let w = (text.chars().count() as u16 + 4).min(map.width);
-            let r = Rect::new(map.x + (map.width - w) / 2, map.y + 1, w, 3.min(map.height));
-            f.render_widget(Clear, r);
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    text.clone(),
-                    Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(Block::bordered().border_style(Style::default().fg(rgb(color::MUTED))))
-                .style(page),
-                r,
-            );
+            toast(f, map, text);
+        }
+
+        if let Some(Modal::Submit(decisions)) = &self.modal {
+            let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+            let mut lines = vec![
+                Line::from(Span::styled(" Submit this round to lupin?", bold)),
+                Line::from(""),
+            ];
+            lines.extend(decisions.iter().map(|d| Line::from(format!("  {d}"))));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                " lupin writes a new round from these; this one stays as it is",
+            ));
+            lines.push(Line::from(Span::styled(
+                " S or enter submits   any other key cancels",
+                Style::default().fg(rgb(color::MUTED)),
+            )));
+            popup(f, map, lines, 76, At::Middle, color::INK);
         }
 
         if self.help {
-            let lines = self.help_lines();
-            let w = 96.min(map.width);
-            let h = (lines.len() as u16 + 2).min(map.height);
-            let r = Rect::new(
-                map.x + (map.width - w) / 2,
-                map.y + (map.height - h) / 2,
-                w,
-                h,
-            );
-            f.render_widget(Clear, r);
-            f.render_widget(
-                Paragraph::new(lines)
-                    .wrap(ratatui::widgets::Wrap { trim: false })
-                    .block(Block::bordered().border_style(Style::default().fg(rgb(color::MUTED))))
-                    .style(page),
-                r,
-            );
+            popup(f, map, self.help_lines(), 96, At::Middle, color::MUTED);
         }
     }
 
@@ -213,6 +201,55 @@ impl App {
             r,
         );
     }
+}
+
+/// The page's colours: ink on the map's background.
+pub(super) fn page() -> Style {
+    Style::default()
+        .bg(rgb(color::BACKGROUND))
+        .fg(rgb(color::INK))
+}
+
+/// Where a popup sits over its area.
+#[derive(Clone, Copy)]
+pub(super) enum At {
+    Top,
+    Middle,
+}
+
+/// A bordered popup of `lines` over `area`, at most `max_w` columns wide
+/// and as tall as its lines.
+pub(super) fn popup(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    lines: Vec<Line<'_>>,
+    max_w: u16,
+    at: At,
+    border: [u8; 3],
+) {
+    let w = max_w.min(area.width);
+    let h = (lines.len() as u16 + 2).min(area.height);
+    let y = match at {
+        At::Top => area.y + 1.min(area.height - h),
+        At::Middle => area.y + (area.height - h) / 2,
+    };
+    let r = Rect::new(area.x + (area.width - w) / 2, y, w, h);
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(Block::bordered().border_style(Style::default().fg(rgb(border))))
+            .style(page()),
+        r,
+    );
+}
+
+/// A one-line notice at the top of `area`: lupin answered, a file saved.
+pub(super) fn toast(f: &mut ratatui::Frame, area: Rect, text: &str) {
+    let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+    let line = Line::from(Span::styled(text.to_string(), bold)).centered();
+    let w = text.chars().count() as u16 + 4;
+    popup(f, area, vec![line], w, At::Top, color::MUTED);
 }
 
 /// The sidebar's frame: one thin rule on the map side, nothing else.

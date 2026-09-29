@@ -113,6 +113,7 @@ pub struct Evidence {
 }
 
 /// Where a round sits, and what lupin recorded about its clusters.
+#[derive(Clone)]
 pub struct Round {
     /// This manifest.
     pub path: PathBuf,

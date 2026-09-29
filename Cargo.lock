@@ -3675,6 +3675,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-writer"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753"
+dependencies = [
+ "bitflags 2.13.2",
+ "itoa",
+ "memchr",
+ "ryu",
+]
+
+[[package]]
 name = "pest"
 version = "2.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4467,11 +4479,13 @@ dependencies = [
  "legume-numeric",
  "log",
  "mimalloc",
+ "miniz_oxide 0.8.9",
  "mung-cnv",
  "nalgebra",
  "nalgebra-sparse",
  "noto-sans-mono-bitmap",
  "num_cpus",
+ "pdf-writer",
  "rand 0.10.3",
  "rand_distr 0.6.0",
  "ratatui",

@@ -68,7 +68,7 @@ impl App {
             KeyCode::Char(']') => self.change(|s| s.step_focus(1)),
             KeyCode::Char('[') => self.change(|s| s.step_focus(-1)),
             KeyCode::Char('t') => {
-                self.scene.show_labels = !self.scene.show_labels;
+                self.change_text(Scene::cycle_labels);
                 self.redecorate();
             }
             KeyCode::Char('+' | '=') => {
@@ -77,7 +77,7 @@ impl App {
             KeyCode::Char('-' | '_') => {
                 self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
             }
-            KeyCode::Char('0' | 'r') => {
+            KeyCode::Char('0') => {
                 self.scene.zoom_to_root();
                 self.vp = None;
             }
@@ -111,14 +111,9 @@ impl App {
                 let d = step(self);
                 self.with_vp(|v| v.pan_px(sx * d, sy * d));
             }
-            KeyCode::Char('s') => self.save(),
             KeyCode::Char('R') => self.toggle_review(),
             KeyCode::Char('A') => self.ask_markers(),
-            KeyCode::Char('T') => {
-                self.change_text(Scene::cycle_text_size);
-                self.redecorate();
-            }
-            KeyCode::Char('k' | 'l') => {
+            KeyCode::Char('k') => {
                 self.change_text(Scene::pin);
                 self.redecorate();
             }
