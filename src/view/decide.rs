@@ -159,6 +159,79 @@ pub fn relabel(
     Ok(Reply::Refused { reason, latest })
 }
 
+/// A `lupin relabel -f <round> -d - --preview` of the staged marker edits,
+/// running in the background so the scores follow the edits. Dropping it
+/// kills lupin: a newer edit replaces it.
+pub struct Rescore {
+    child: std::process::Child,
+    done: std::sync::mpsc::Receiver<Result<Value, String>>,
+}
+
+impl Rescore {
+    /// Start lupin on `decisions` (JSON lines naming `round`).
+    pub fn spawn(lupin: &str, round: &Path, decisions: &[Value]) -> Result<Self, String> {
+        use std::io::Read;
+        let mut child = Command::new(lupin)
+            .args(["relabel", "-f"])
+            .arg(round)
+            .args(["-d", "-", "--preview"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| cannot_run(lupin, &e))?;
+        let mut lines = String::new();
+        for d in decisions {
+            lines.push_str(&serde_json::to_string(d).map_err(|e| e.to_string())?);
+            lines.push('\n');
+        }
+        let (stdin, stdout, stderr) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take());
+        let (tx, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Some(mut stdin) = stdin {
+                let _ = stdin.write_all(lines.as_bytes());
+            }
+            // Both pipes are drained at once, so neither fills and stalls lupin.
+            let err = std::thread::spawn(move || {
+                let mut s = String::new();
+                if let Some(mut e) = stderr {
+                    let _ = e.read_to_string(&mut s);
+                }
+                s
+            });
+            let mut out = String::new();
+            if let Some(mut o) = stdout {
+                let _ = o.read_to_string(&mut out);
+            }
+            let err = err.join().unwrap_or_default();
+            let reply = serde_json::from_str::<Value>(&out)
+                .map_err(|_| reason_of(err.lines().rev().map(str::trim).find(|l| !l.is_empty())));
+            let _ = tx.send(reply);
+        });
+        Ok(Self { child, done })
+    }
+
+    /// lupin's preview once it has answered.
+    #[must_use]
+    pub fn poll(&self) -> Option<Result<Value, String>> {
+        match self.done.try_recv() {
+            Ok(r) => Some(r),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("the rescoring stopped without an answer".into()))
+            }
+        }
+    }
+}
+
+impl Drop for Rescore {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Run `lupin annotate -f <run> -m <markers> -o <out>`: the run's first
 /// annotation round, written as `{out}.senna.json`. Each line lupin logs is
 /// put in `progress` as it comes. A failure lupin explains comes back as
@@ -455,5 +528,39 @@ mod tests {
         assert_eq!(v["cells_changed"], 7);
         let sent = std::fs::read_to_string(d.join("stdin.txt")).unwrap();
         assert_eq!(sent.lines().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rescore_answers_in_the_background_or_says_why_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let dec = Decision {
+            action: Action::MarkersAdd,
+            clusters: Vec::new(),
+            features: vec!["GENE1".into()],
+            label: "CT1".into(),
+            rationale: "high in C3".into(),
+            evidence: Vec::new(),
+        };
+        let json = dec.to_json("r.senna.json");
+        let wait = |job: &Rescore| loop {
+            if let Some(r) = job.poll() {
+                return r;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        let ok = fake_lupin(d, "echo '{\"scores\": {\"3\": []}}'");
+        let job =
+            Rescore::spawn(&ok, Path::new("r.senna.json"), std::slice::from_ref(&json)).unwrap();
+        assert!(wait(&job).unwrap()["scores"]["3"].is_array());
+        let sent: Value =
+            serde_json::from_str(&std::fs::read_to_string(d.join("stdin.txt")).unwrap()).unwrap();
+        assert_eq!(sent["action"], "markers_add");
+
+        let stale = fake_lupin(d, "echo 'Error: not the latest round' >&2; exit 1");
+        let job = Rescore::spawn(&stale, Path::new("r.senna.json"), &[json]).unwrap();
+        assert_eq!(wait(&job).unwrap_err(), "not the latest round");
     }
 }

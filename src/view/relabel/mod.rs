@@ -9,9 +9,11 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 mod fit;
+mod live;
 mod merge;
 mod panel;
 
+pub(crate) use live::{parse_scores, Live};
 pub(crate) use panel::preview_lines;
 
 /// Rows of the review list: differentially expressed features first.
@@ -70,6 +72,8 @@ pub(crate) struct Review {
     pub merge: Option<MergeSel>,
     /// The last answer from lupin's preview, as text.
     pub preview: Option<Vec<String>>,
+    /// lupin's scores with the staged marker edits, when there are any.
+    pub live: Option<Live>,
     evidence: Rc<Evidence>,
     /// Per-group sums for the (space, grouping) on screen, taken once.
     sums: Option<(SumsKey, Result<GroupSums, String>)>,
@@ -126,6 +130,7 @@ impl Review {
             overview,
             merge: None,
             preview: None,
+            live: None,
             evidence: Rc::default(),
             sums: None,
         }

@@ -288,6 +288,21 @@ impl Round {
             .collect()
     }
 
+    /// The q the round recorded for calling cluster `id` cell type `label`,
+    /// passing FDR or not.
+    #[must_use]
+    pub fn recorded_q(&self, id: &str, label: &str) -> Option<f64> {
+        let key = label_key(label);
+        self.summary
+            .get(id)?
+            .get("calls")?
+            .as_array()?
+            .iter()
+            .find(|c| c.get("label").and_then(Value::as_str).map(label_key) == Some(key.clone()))?
+            .get("q")?
+            .as_f64()
+    }
+
     /// Cell types worth considering for cluster `id`: its current label,
     /// then lupin's top calls, without repeats.
     #[must_use]
