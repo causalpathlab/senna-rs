@@ -1157,9 +1157,11 @@ impl RunManifest {
         if given.exists() {
             return given;
         }
-        let here = manifest_dir
-            .canonicalize()
-            .unwrap_or_else(|_| manifest_dir.to_path_buf());
+        // Lexically absolute, not canonical: the recorded paths are as
+        // written, so resolving symlinks here alone would skew the rebase.
+        let here = normalize(
+            &std::path::absolute(manifest_dir).unwrap_or_else(|_| manifest_dir.to_path_buf()),
+        );
         let recorded_abs = normalize(Path::new(recorded));
         let trained_in = Path::new(&self.prefix)
             .is_absolute()
@@ -1174,14 +1176,17 @@ impl RunManifest {
                 .components()
                 .filter(|c| matches!(c, std::path::Component::Normal(_)))
                 .collect();
-            (0..parts.len()).find_map(|skip| {
+            // At least the file and its folder must match, so an unrelated
+            // file of the same name elsewhere is not taken for the data.
+            let min = parts.len().min(2);
+            (0..=parts.len().checked_sub(min.max(1))?).find_map(|skip| {
                 let tail: PathBuf = parts[skip..].iter().collect();
                 here.ancestors().map(|a| a.join(&tail)).find(|p| p.exists())
             })
         });
         match found {
             Some(p) => {
-                log::info!("{recorded} is not here; using {}", p.display());
+                log::warn!("{recorded} is not here; using {}", p.display());
                 p
             }
             None => given,
@@ -1332,11 +1337,15 @@ fn normalize(p: &Path) -> PathBuf {
     for c in p.components() {
         match c {
             Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
+            // `..` cancels a name before it; after nothing, a root or
+            // another `..` it stays.
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
                 }
-            }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            },
             c => out.push(c),
         }
     }
@@ -1816,6 +1825,30 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_folds_dots_without_losing_leading_parents() {
+        assert_eq!(
+            normalize(Path::new("../../a/b")),
+            PathBuf::from("../../a/b")
+        );
+        assert_eq!(normalize(Path::new("a/./b/../c")), PathBuf::from("a/c"));
+        assert_eq!(normalize(Path::new("/../a")), PathBuf::from("/a"));
+        assert_eq!(normalize(Path::new("a/../../b")), PathBuf::from("../b"));
+    }
+
+    #[test]
+    fn a_file_of_the_same_name_alone_is_not_taken_for_moved_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let out = root.join("proj/out");
+        fs::create_dir_all(&out).unwrap();
+        // Only the bare name exists above the run, in another folder.
+        fs::create_dir_all(root.join("other/x.zarr")).unwrap();
+        let m = RunManifest::new(RunKind::Svd, "/elsewhere/proj/out/run");
+        let recorded = "/elsewhere/proj/data/x.zarr";
+        assert_eq!(m.data_file(&out, recorded), PathBuf::from(recorded));
+    }
 
     #[test]
     fn a_moved_runs_data_is_found_where_it_now_sits() {

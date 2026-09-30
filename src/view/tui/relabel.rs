@@ -19,6 +19,24 @@ impl App {
 
     /// Keys of relabel mode. Returns whether the key was one of them.
     pub(super) fn review_key(&mut self, k: KeyEvent) -> bool {
+        if self.scene.review.is_none() {
+            return false;
+        }
+        // Relabel works on the cluster colouring of this cell view: keys that
+        // would change it, or the round, wait — in merge mode too.
+        if matches!(k.code, KeyCode::Char('c' | ',' | '.') | KeyCode::BackTab) {
+            self.message = Some("leave relabel mode first (R)".into());
+            return true;
+        }
+        // Back to the cluster: drop a feature or suggestions on show, keep
+        // the focus.
+        if k.code == KeyCode::Char('x') {
+            self.info = None;
+            self.scene.clear_suggestions();
+            self.scene.clear_pick();
+            self.restart();
+            return true;
+        }
         let Some(r) = self.scene.review.as_mut() else {
             return false;
         };
@@ -51,19 +69,6 @@ impl App {
             KeyCode::Char('p') => self.send_draft(Mode::Preview),
             KeyCode::Char('S') => self.confirm_submit(),
             KeyCode::Esc | KeyCode::Char('R') => self.toggle_review(),
-            // Relabel works on the cluster colouring of this cell view and
-            // the cluster in focus: keys that would change them wait.
-            KeyCode::Char('c' | ',' | '.') | KeyCode::BackTab => {
-                self.message = Some("leave relabel mode first (R)".into());
-            }
-            // Back to the cluster: drop a feature or suggestions on show,
-            // keep the focus.
-            KeyCode::Char('x') => {
-                self.info = None;
-                self.scene.clear_suggestions();
-                self.scene.clear_pick();
-                self.restart();
-            }
             _ => return false,
         }
         true

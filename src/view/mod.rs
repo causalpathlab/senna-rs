@@ -53,7 +53,7 @@ pub struct ViewArgs {
                 Omitted: browse to one",
         long_help = "Run manifest(s) (`{out}.senna.json`).\n\
                      Omitted, the view opens a file browser on the current directory\n\
-                     to choose one (not with --pdf, --relabel or --suggest).\n\
+                     to choose one (not with --pdf or --relabel).\n\
                      Every layout under `manifest.layout.methods` is available,\n\
                      together with clusters, annotation and topics the run carries.\n\
                      Several manifests (`-f a.senna.json b.senna.json`, or a glob)\n\
@@ -135,12 +135,6 @@ pub struct ViewArgs {
         help = "Start inside a fresh layout of this group's cells (a name in the starting grouping)"
     )]
     pub zoom_into: Option<Box<str>>,
-
-    #[arg(
-        long,
-        help = "Print suggested features for the starting view (with --pdf, show the top one)"
-    )]
-    pub suggest: bool,
 
     #[arg(
         long,
@@ -482,22 +476,13 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     let picked: Vec<Box<str>>;
     let from: &[Box<str>] = if args.from.is_empty() {
         anyhow::ensure!(
-            args.pdf.is_none() && !args.relabel && !args.suggest,
-            "--pdf, --relabel and --suggest need the run: pass -f <run>.senna.json"
+            args.pdf.is_none() && !args.relabel,
+            "--pdf and --relabel need the run: pass -f <run>.senna.json"
         );
         let Some(path) = tui::pick_run()? else {
             return Ok(());
         };
-        // As typed: relative to the working directory when under it.
-        let path = std::env::current_dir()
-            .ok()
-            .and_then(|cwd| {
-                path.strip_prefix(cwd)
-                    .ok()
-                    .map(std::path::Path::to_path_buf)
-            })
-            .unwrap_or(path);
-        picked = vec![path.to_string_lossy().into()];
+        picked = vec![tui::shown(&path).into()];
         &picked
     } else {
         &args.from
@@ -532,20 +517,6 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         scene.leave_review();
         return Ok(());
     }
-    if args.suggest {
-        let several = scenes.len() > 1;
-        for (scene, from) in scenes.iter_mut().zip(from) {
-            if several {
-                println!("== {from}");
-            }
-            scene.suggest();
-            match scene.suggestion_lines() {
-                Some(lines) => lines.iter().for_each(|l| println!("{l}")),
-                None => println!("{}", scene.note.take().unwrap_or_default()),
-            }
-        }
-    }
-
     if let Some(path) = &args.pdf {
         anyhow::ensure!(
             args.width > 0.0 && args.dpi > 0,
@@ -670,7 +641,6 @@ mod tests {
             observed: false,
             focus: None,
             zoom_into: None,
-            suggest: false,
             relabel: false,
             lupin: None,
             no_compute: true,

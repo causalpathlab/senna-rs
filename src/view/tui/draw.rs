@@ -57,10 +57,22 @@ impl App {
             if let Some(menu) = &self.menu {
                 self.draw_menu(f, side, menu, page);
             } else if let Some(lines) = self.side_lines() {
+                // A list longer than the panel scrolls to keep its cursor
+                // (the last `▸` line) in sight, counted in wrapped rows.
+                let rows = usize::from(side.height);
+                let width = usize::from(side.width.saturating_sub(1)).max(1);
+                let tall = |l: &String| (l.chars().count() + 1).div_ceil(width).max(1);
+                let at = lines.iter().rposition(|l| l.starts_with('▸')).unwrap_or(0);
+                let above: usize = lines[..at].iter().map(tall).sum();
+                let total: usize = lines.iter().map(tall).sum();
+                let skip = (above + rows / 2)
+                    .saturating_sub(rows)
+                    .min(total.saturating_sub(rows));
                 let text: Vec<Line> = lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
                 f.render_widget(
                     Paragraph::new(text)
                         .wrap(ratatui::widgets::Wrap { trim: false })
+                        .scroll((u16::try_from(skip).unwrap_or(u16::MAX), 0))
                         .block(side_block())
                         .style(page),
                     side,

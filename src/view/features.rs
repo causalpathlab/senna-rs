@@ -104,7 +104,7 @@ impl Scene {
     /// group from the rest of the view, or, with nothing focused, what varies
     /// most here. Shows the first one straight away.
     pub fn suggest(&mut self) {
-        const TOP: usize = 25;
+        const TOP: usize = 100;
         if self.current().axis() != Axis::Cells {
             self.note = Some("suggestions work on a cell view".into());
             return;

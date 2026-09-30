@@ -16,7 +16,7 @@ mod modal;
 mod recompute;
 mod relabel;
 
-pub use browse::pick_run;
+pub use browse::{pick_run, shown};
 use decisions::Prompt;
 use modal::Modal;
 

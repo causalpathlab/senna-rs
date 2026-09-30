@@ -18,7 +18,7 @@ const PANEL_MAX_BYTES: u64 = 8 << 20;
 /// Extensions that are never marker panels. With the size cap and the rules
 /// in [`read_panel`], the same test `lupin annotate --tui` applies.
 const NOT_PANELS: &[&str] = &[
-    "parquet", "zarr", "h5", "h5ad", "json", "bam", "bai", "png", "pdf", "log",
+    "parquet", "zarr", "zip", "h5", "h5ad", "json", "bam", "bai", "png", "pdf", "log",
 ];
 
 /// What the browser looks for.
@@ -111,12 +111,18 @@ impl Browser {
             .unwrap_or(usize::from(self.shown().len() > 1));
     }
 
-    /// The entries the filter lets through, `..` always first.
+    /// The entries the filter lets through, `..` always first. Hidden ones
+    /// only when the filter starts with `.`.
     pub fn shown(&self) -> Vec<&Entry> {
         let f = self.filter.to_lowercase();
+        let hidden = f.starts_with('.');
         self.entries
             .iter()
-            .filter(|e| matches!(e, Entry::Up) || e.name().to_lowercase().contains(&f))
+            .filter(|e| {
+                matches!(e, Entry::Up)
+                    || ((hidden || !e.name().starts_with('.'))
+                        && e.name().to_lowercase().contains(&f))
+            })
             .collect()
     }
 
@@ -171,14 +177,17 @@ impl Browser {
                 }
             }
             KeyCode::Char(c) => {
+                let on = self.shown().get(self.row).map(|e| e.name().to_string());
                 self.filter.push(c);
                 let shown = self.shown();
-                // Stay on a match: the best file if it still shows, else the
-                // first entry after `..`.
-                self.row = self
-                    .best
-                    .as_ref()
-                    .and_then(|best| shown.iter().position(|e| e.name() == best))
+                // Stay where the cursor was if it still shows, else on the
+                // best file, else on the first entry after `..`.
+                let at = |name: &str| shown.iter().position(|e| e.name() == name);
+                self.row = on
+                    .as_deref()
+                    .filter(|n| *n != "..")
+                    .and_then(at)
+                    .or_else(|| self.best.as_deref().and_then(at))
                     .unwrap_or(usize::from(shown.len() > 1));
             }
             _ => return Outcome::Ignored,
@@ -279,10 +288,8 @@ fn list_dir(dir: &Path, want: &Want) -> Vec<Entry> {
     let mut dirs = Vec::new();
     let mut found = Vec::new();
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        // Hidden entries are kept; `shown` lists them only on request.
         let name = e.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
         let path = e.path();
         if path.is_dir() {
             if !name.ends_with(".zarr") {
@@ -409,7 +416,7 @@ fn read_panel(path: &Path, genes: Option<&GeneIndex>) -> Option<Panel> {
 }
 
 /// A path as shown: relative to the working directory when it is under it.
-fn shown(p: &Path) -> String {
+pub fn shown(p: &Path) -> String {
     std::env::current_dir()
         .ok()
         .and_then(|cwd| p.strip_prefix(cwd).ok().map(Path::to_path_buf))
@@ -485,9 +492,12 @@ mod tests {
         let want = Want::Panels(Some(genes));
         let entries = list_dir(d, &want);
         let listed: Vec<&str> = entries.iter().map(Entry::name).collect();
-        assert_eq!(listed, ["..", "sub", "one.tsv", "small.tsv", "wide.csv"]);
         assert_eq!(
-            entries[3],
+            listed,
+            ["..", ".hidden", "sub", "one.tsv", "small.tsv", "wide.csv"]
+        );
+        assert_eq!(
+            entries[4],
             Entry::Panel(
                 "small.tsv".into(),
                 Panel {
@@ -500,8 +510,12 @@ mod tests {
         // `one.tsv` finds as many genes but names a single type.
         assert_eq!(best_panel(&entries).as_deref(), Some("wide.csv"));
 
-        let b = Browser::open(d.to_path_buf(), want, None);
+        let mut b = Browser::open(d.to_path_buf(), want, None);
         assert_eq!(b.shown()[b.row].name(), "wide.csv");
+        // Hidden entries show only when asked for with a leading `.`.
+        assert!(b.shown().iter().all(|e| e.name() != ".hidden"));
+        b.filter.push('.');
+        assert!(b.shown().iter().any(|e| e.name() == ".hidden"));
     }
 
     #[test]
@@ -530,9 +544,17 @@ mod tests {
         let d = dir.path();
         let old = RunManifest::new(senna::run_manifest::RunKind::Svd, "a");
         old.save(&d.join("a.senna.json")).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
         let new = RunManifest::new(senna::run_manifest::RunKind::Svd, "b");
         new.save(&d.join("b.senna.json")).unwrap();
+        // Set the times outright: two writes can share one mtime.
+        let at = |secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        for (name, secs) in [("a.senna.json", 1_000), ("b.senna.json", 2_000)] {
+            let f = std::fs::File::options()
+                .write(true)
+                .open(d.join(name))
+                .unwrap();
+            f.set_modified(at(secs)).unwrap();
+        }
         write(d, "c.pinto.json", "{}");
         write(d, "markers.tsv", "CD3E\tT\nMS4A1\tB\n");
 
