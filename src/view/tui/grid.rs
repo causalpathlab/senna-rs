@@ -399,6 +399,11 @@ impl Deck {
                 (f32::from(inner.height) * self.cell.1) as usize,
             );
             if w > 0 && h > 0 {
+                // A chart is drawn whole, at once.
+                if let Some(frame) = app.scene.chart_frame(w, h, self.cell.1, false) {
+                    tile.proto = protocol(&self.picker, frame.to_image(), inner).ok();
+                    continue;
+                }
                 let vp = deck::camera(app.vp, app.scene.current().points.bounds, w, h);
                 tile.job = Some(Job::new(vp, &app.scene.layers()));
             }

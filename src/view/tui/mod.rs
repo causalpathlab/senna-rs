@@ -397,6 +397,9 @@ impl App {
     fn restart(&mut self) {
         self.job = None;
         self.base = None;
+        if self.scene.chart.is_some() {
+            return self.draw_chart();
+        }
         if let Some(vp) = self.vp {
             if vp.w > 0 && vp.h > 0 {
                 self.job = Some(Job::new(vp, &self.scene.layers()));
@@ -433,9 +436,28 @@ impl App {
         Ok(())
     }
 
+    /// The chart on screen, made for the current grouping and drawn whole.
+    fn draw_chart(&mut self) {
+        let Some(vp) = self.vp.filter(|v| v.w > 0 && v.h > 0) else {
+            return;
+        };
+        self.scene.refresh_chart();
+        if let Some(frame) = self.scene.chart_frame(vp.w, vp.h, self.cell.1, false) {
+            if let Err(e) = self.show(frame.to_image()) {
+                self.message = Some(e.to_string());
+            }
+        }
+        if let Some(note) = self.scene.note.take() {
+            self.message = Some(note);
+        }
+    }
+
     /// Redraw labels and marks over the last finished frame, when only they
     /// changed. A running job decorates when it finishes.
     fn redecorate(&mut self) {
+        if self.scene.chart.is_some() {
+            return self.draw_chart();
+        }
         if self.job.is_some() {
             return;
         }
@@ -615,11 +637,11 @@ impl App {
     /// follows).
     fn pdf_name(&self) -> String {
         let s = self.scene.current();
-        format!(
-            "{}.view.{}.{}",
-            here(&self.scene.data.prefix),
-            s.method,
-            s.kind.slug()
-        )
+        let what = match self.scene.chart.as_ref().map(|c| c.kind) {
+            Some(crate::view::chart::Kind::Structure) => "structure".to_string(),
+            Some(crate::view::chart::Kind::Heatmap) => "heatmap".to_string(),
+            None => format!("{}.{}", s.method, s.kind.slug()),
+        };
+        format!("{}.view.{what}", here(&self.scene.data.prefix))
     }
 }

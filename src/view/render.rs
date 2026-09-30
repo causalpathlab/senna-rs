@@ -362,6 +362,28 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// A `w × h` page in the background colour, for a chart drawn from
+    /// scratch rather than from points.
+    #[must_use]
+    pub fn blank(w: usize, h: usize) -> Self {
+        let bg = color::linear_rgb(color::BACKGROUND);
+        Self {
+            w,
+            h,
+            px: vec![bg; w * h],
+            bg,
+            text: None,
+        }
+    }
+
+    /// Fill the pixels `x0..x1 × y0..y1` (clipped to the frame) with `c`.
+    pub fn fill(&mut self, [x0, y0, x1, y1]: [usize; 4], c: Rgb) {
+        let (x1, y1) = (x1.min(self.w), y1.min(self.h));
+        for y in y0.min(y1)..y1 {
+            self.px[y * self.w + x0.min(x1)..y * self.w + x1].fill(c);
+        }
+    }
+
     #[must_use]
     pub fn background(&self) -> Rgb {
         self.bg

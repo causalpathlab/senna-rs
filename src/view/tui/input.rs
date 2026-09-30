@@ -74,11 +74,21 @@ impl App {
                 self.change_text(Scene::cycle_labels);
                 self.redecorate();
             }
+            // On a chart, `+` / `-` show more or fewer features per group.
+            KeyCode::Char('+' | '=' | '-' | '_') if self.scene.chart.is_some() => {
+                let more = matches!(k.code, KeyCode::Char('+' | '='));
+                self.change_text(|s| s.change_top(more));
+                self.restart();
+            }
             KeyCode::Char('+' | '=') => {
                 self.with_vp(|v| v.zoom_at(1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
             }
             KeyCode::Char('-' | '_') => {
                 self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
+            }
+            KeyCode::Char('v') => {
+                self.change_text(Scene::cycle_chart);
+                self.restart();
             }
             KeyCode::Char('0') => {
                 self.scene.zoom_to_root();
@@ -86,7 +96,7 @@ impl App {
             }
             KeyCode::Char('z') => self.start_zoom(),
             KeyCode::Char('n') => self.change(Scene::suggest),
-            KeyCode::Char('v' | 'L' | 'M' | 'K' | 'D') => {
+            KeyCode::Char('L' | 'M' | 'K' | 'D') => {
                 self.message = Some("decisions are made in relabel mode: press R".into());
             }
             KeyCode::Char('b') => {
@@ -222,6 +232,10 @@ impl App {
 
     /// A mouse event. Returns whether anything changed.
     pub(super) fn mouse(&mut self, m: MouseEvent) -> bool {
+        // A chart has no points to hover, click, pan or zoom.
+        if self.scene.chart.is_some() {
+            return false;
+        }
         if let MouseEventKind::Moved = m.kind {
             return self.hover(m.column, m.row);
         }

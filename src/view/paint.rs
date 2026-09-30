@@ -131,7 +131,7 @@ impl Scene {
 
     /// Text height on the map for a terminal cell `cell_px` tall: text grows
     /// and shrinks with the dots.
-    fn text_px(&self, cell_px: f32) -> f32 {
+    pub(super) fn text_px(&self, cell_px: f32) -> f32 {
         cell_px * self.scale
     }
 

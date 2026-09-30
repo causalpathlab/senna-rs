@@ -11,7 +11,11 @@ impl App {
         if self.scene.review.is_some() {
             self.scene.leave_review();
             self.message = Some("left relabel mode · draft kept".into());
-        } else if let Err(e) = self.scene.enter_review() {
+        } else if let Err(e) = {
+            // Relabel works on the map.
+            self.scene.chart = None;
+            self.scene.enter_review()
+        } {
             self.message = Some(e);
         }
         self.settle();
@@ -24,7 +28,10 @@ impl App {
         }
         // Relabel works on the cluster colouring of this cell view: keys that
         // would change it, or the round, wait — in merge mode too.
-        if matches!(k.code, KeyCode::Char('c' | ',' | '.') | KeyCode::BackTab) {
+        if matches!(
+            k.code,
+            KeyCode::Char('c' | ',' | '.' | 'v') | KeyCode::BackTab
+        ) {
             self.message = Some("leave relabel mode first (R)".into());
             return true;
         }

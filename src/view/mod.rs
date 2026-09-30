@@ -1,6 +1,7 @@
 //! `senna view`: a run's layouts, coloured by its groupings, in the terminal.
 
 mod activity;
+mod chart;
 mod color;
 mod data;
 mod decide;
@@ -138,6 +139,13 @@ pub struct ViewArgs {
 
     #[arg(
         long,
+        value_enum,
+        help = "Start on a chart instead of the map: structure (topic runs) or heatmap (`v` in the view)"
+    )]
+    pub chart: Option<chart::Kind>,
+
+    #[arg(
+        long,
         help = "Print relabel mode's panel for the first cluster to visit, and exit"
     )]
     pub relabel: bool,
@@ -251,6 +259,8 @@ pub(crate) struct Scene {
     /// The run's feature embedding, read on the first click on a feature.
     feature_embedding: Option<Result<features::FeatureEmbedding, String>>,
     pub review: Option<relabel::Review>,
+    /// A chart drawn in place of the map (`v`), when one is on.
+    pub chart: Option<chart::Chart>,
     /// Features near the last clicked cell, and sets locked on screen.
     pub near: Option<features::Near>,
     pub locked: Vec<features::Near>,
@@ -284,6 +294,7 @@ impl Scene {
             feature_embedding: None,
             suggestions: None,
             review: None,
+            chart: None,
             near: None,
             locked: Vec::new(),
             orders: std::cell::RefCell::new(Vec::new()),
@@ -343,6 +354,7 @@ impl Scene {
             show_labels: self.show_labels,
             text_scale: self.text_scale,
             scale: self.scale,
+            chart: self.chart.as_ref().map(chart::Chart::like),
             hover: None,
             label_hits: std::cell::RefCell::default(),
             groups: None,
@@ -517,6 +529,12 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         scene.leave_review();
         return Ok(());
     }
+    if let Some(kind) = args.chart {
+        for scene in &mut scenes {
+            scene.start_chart(kind);
+        }
+    }
+
     if let Some(path) = &args.pdf {
         anyhow::ensure!(
             args.width > 0.0 && args.dpi > 0,
@@ -641,6 +659,7 @@ mod tests {
             observed: false,
             focus: None,
             zoom_into: None,
+            chart: None,
             relabel: false,
             lupin: None,
             no_compute: true,

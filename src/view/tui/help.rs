@@ -16,6 +16,8 @@ pub(super) enum Context {
     Prompt,
     /// Browsing for the marker panel `lupin annotate` reads.
     MarkersFile,
+    /// A structure plot or heatmap in place of the map.
+    Chart,
     /// Confirming a relabel round before it goes to lupin.
     Submit,
     /// Choosing what senna recomputes for the run.
@@ -72,6 +74,19 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("o", "expected (model) or observed (counts)"),
             ("k", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
             ("x  esc", "back to group colours"),
+        ],
+    ),
+    (
+        "Charts",
+        &[
+            (
+                "v",
+                "structure plot (topic runs: each cell's topic mixture, a panel per group), heatmap, back to the map",
+            ),
+            (
+                "+  -",
+                "heatmap: more or fewer top features per group (z-scored mean ln(1 + count))",
+            ),
         ],
     ),
     (
@@ -217,6 +232,8 @@ impl App {
             } else {
                 Context::Relabel
             }
+        } else if self.scene.chart.is_some() {
+            Context::Chart
         } else if self.scene.pick.is_some() {
             Context::Feature
         } else {
@@ -247,6 +264,10 @@ impl App {
             Context::Prompt => [
                 "type, or keep what is filled in   enter accepts   esc cancels",
                 "tab completes a known cell type (while typing the label)",
+            ],
+            Context::Chart => [
+                "v next chart (structure plot, heatmap, map)   c group by another grouping   + / - features per group (heatmap)",
+                "s save PDF   ctrl-r redraw   ? all keys   q quit",
             ],
             // The popup says what the keys do.
             Context::Submit | Context::Recompute | Context::MarkersFile => ["", ""],

@@ -722,6 +722,150 @@ impl Activity {
         Ok((out, &e.features.names))
     }
 
+    /// Every feature's expected level in each group's mean cell, from
+    /// `sums`: feature-major (`features × groups`), `NaN` for an empty group
+    /// and, on an embedding run with a baseline, for features below its
+    /// median (rarely expressed, with noisy loadings). Embedding runs:
+    /// `ρ_g · z̄ + bias_g`; topic runs: `ln(β_g · θ̄)`. And the features.
+    pub fn group_levels(&mut self, sums: &GroupSums) -> Result<(Vec<f32>, &[Box<str>]), String> {
+        let e = self.expected()?;
+        let n = sums.sums.len();
+        let d = e.features.names.len();
+        let mut out = vec![f32::NAN; d * n];
+        for (g, (s, &count)) in sums.sums.iter().zip(&sums.counts).enumerate() {
+            if count == 0 {
+                continue;
+            }
+            let mean = s / count as f32;
+            let level: Vec<f32> = match (&e.model, e.linear()) {
+                (Model::Embedding { rho, bias, .. }, _) => (rho * &mean)
+                    .iter()
+                    .enumerate()
+                    .map(|(f, &v)| v + bias.as_ref().map_or(0.0, |b| b[f]))
+                    .collect(),
+                (_, Some((_, beta))) => (beta * &mean).iter().map(|&v| v.max(1e-12).ln()).collect(),
+                _ => unreachable!("a topic run has linear tables"),
+            };
+            for (f, v) in level.into_iter().enumerate() {
+                out[f * n + g] = v;
+            }
+        }
+        if let Some((b, median)) = e.baseline().filter(|(b, _)| b.len() == d) {
+            for (f, &v) in b.iter().enumerate() {
+                if v.is_nan() || v < median {
+                    out[f * n..(f + 1) * n].fill(f32::NAN);
+                }
+            }
+        }
+        Ok((out, &e.features.names))
+    }
+
+    /// Each point's topic mixture (θ, summing to one), `k` values a point,
+    /// `NaN` for a point the model has no row for; and `k`. Topic runs only.
+    pub fn mixtures(
+        &mut self,
+        key: usize,
+        universe: &[Box<str>],
+    ) -> Result<(Vec<f32>, usize), String> {
+        let rows = self.rows(Source::Expected, key, universe)?;
+        let e = self.expected()?;
+        let Some((theta, _)) = e.linear() else {
+            return Err("a structure plot needs a topic model (topic, masked-topic, …)".into());
+        };
+        let k = theta.ncols();
+        let mut out = vec![f32::NAN; rows.len() * k];
+        for (p, &r) in rows.iter().enumerate() {
+            if r == NO_ROW {
+                continue;
+            }
+            let row = theta.row(r as usize);
+            let total: f32 = row.iter().sum::<f32>().max(1e-12);
+            for (o, &v) in out[p * k..(p + 1) * k].iter_mut().zip(row.iter()) {
+                *o = v / total;
+            }
+        }
+        Ok((out, k))
+    }
+
+    /// Each feature's mean level in each group of the points in view
+    /// (`groups`, `>= n_groups` for none), feature-major (`features.len() ×
+    /// n_groups`): the mean `ln(1 + count)` over the group's cells from the
+    /// data files, or, when they cannot be read, the model's expected level
+    /// of the group's mean cell. Also says which source it used. A feature
+    /// neither has is `NaN`.
+    pub fn group_means(
+        &mut self,
+        key: usize,
+        universe: &[Box<str>],
+        groups: &[u32],
+        n_groups: usize,
+        features: &[Box<str>],
+    ) -> Result<(Vec<f32>, Source), String> {
+        if let Ok(v) = self.observed_group_means(key, universe, groups, n_groups, features) {
+            return Ok((v, Source::Observed));
+        }
+        let sums = self.group_sums(key, universe, groups, n_groups)?;
+        let (levels, _) = self.group_levels(&sums)?;
+        let index = &self.expected()?.features.index;
+        let mut out = vec![f32::NAN; features.len() * n_groups];
+        for (i, f) in features.iter().enumerate() {
+            if let Some(g) = index.match_gene(f) {
+                out[i * n_groups..(i + 1) * n_groups]
+                    .copy_from_slice(&levels[g * n_groups..(g + 1) * n_groups]);
+            }
+        }
+        Ok((out, Source::Expected))
+    }
+
+    fn observed_group_means(
+        &mut self,
+        key: usize,
+        universe: &[Box<str>],
+        groups: &[u32],
+        n_groups: usize,
+        features: &[Box<str>],
+    ) -> Result<Vec<f32>, String> {
+        let rows = self.rows(Source::Observed, key, universe)?;
+        let o = self.observed()?;
+        // Each data column's group, and each group's size in columns.
+        let mut group_of = vec![u32::MAX; o.cells.len()];
+        let mut size = vec![0usize; n_groups];
+        for (&r, &g) in rows.iter().zip(groups) {
+            if r != NO_ROW && (g as usize) < n_groups {
+                group_of[r as usize] = g;
+                size[g as usize] += 1;
+            }
+        }
+        let matched: Vec<(usize, usize)> = features
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| Some((i, o.features.index.match_gene(f)?)))
+            .collect();
+        let mut out = vec![f32::NAN; features.len() * n_groups];
+        if matched.is_empty() {
+            return Ok(out);
+        }
+        let csr = o
+            .data
+            .read_rows_csr(matched.iter().map(|&(_, g)| g))
+            .map_err(|e| e.to_string())?;
+        for (k, &(i, _)) in matched.iter().enumerate() {
+            let mut sum = vec![0f32; n_groups];
+            let row = csr.row(k);
+            for (&c, &v) in row.col_indices().iter().zip(row.values()) {
+                if let Some(s) = sum.get_mut(group_of[c] as usize) {
+                    *s += v.ln_1p();
+                }
+            }
+            for (j, (s, &n)) in sum.iter().zip(&size).enumerate() {
+                if n > 0 {
+                    out[i * n_groups + j] = s / n as f32;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// `contrast` of the union of the groups `chosen` picks, over every
     /// other cell in view (cells with no group included), from `sums`.
     pub fn union_contrast(
