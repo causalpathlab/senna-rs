@@ -466,7 +466,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         llik: scores.llik,
         kl: scores.kl,
     }
-    .to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
+    .to_parquet(&format!("{}.log_likelihood.parquet", args.out))?;
 
     // Persist weights + per-gene mean, then move to CPU for threaded eval.
     info!("Writing model parameters");

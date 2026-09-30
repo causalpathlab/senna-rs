@@ -86,7 +86,7 @@ impl ClusterResult {
             .filter(|(_, &s)| s > 0)
             .map(|(id, &s)| (id, s))
             .collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
 
         let n_total = ranked.len();
         let n_show = max_show.min(n_total);

@@ -960,7 +960,7 @@ pub(crate) fn create_device(
 pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Result<()> {
     use candle_core::Var;
     let mut data = parameters.data().lock().expect("VarMap lock");
-    for (_name, var) in data.iter_mut() {
+    for var in data.values_mut() {
         if !var.device().is_cpu() {
             let cpu_tensor = var.to_device(&Device::Cpu)?;
             *var = Var::from_tensor(&cpu_tensor)?;

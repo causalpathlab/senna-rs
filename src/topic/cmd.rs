@@ -595,7 +595,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         run_multi_decoder_pipeline(&ctx, &mut encoder)?
     };
 
-    scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
+    scores.to_parquet(&format!("{}.log_likelihood.parquet", args.out))?;
 
     let cell_names = data_vec.column_names()?;
 
