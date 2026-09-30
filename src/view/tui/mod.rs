@@ -12,6 +12,7 @@ mod grid;
 mod help;
 mod input;
 mod modal;
+mod recompute;
 mod relabel;
 
 use decisions::Prompt;
@@ -205,6 +206,8 @@ struct App {
     watcher: Option<Watcher>,
     lupin: String,
     relabeling: Option<Relabeling>,
+    /// senna recomputing layouts or clusterings of this run (`r`).
+    recomputing: Option<recompute::Recomputing>,
     /// lupin rescoring the round against the staged marker edits.
     rescoring: Option<Rescore>,
     /// A short popup over the map (lupin answered), and when it goes.
@@ -229,6 +232,7 @@ impl App {
             watcher: Watcher::find(&from),
             lupin,
             relabeling: None,
+            recomputing: None,
             rescoring: None,
             toast: None,
             modal: None,
@@ -262,9 +266,13 @@ impl App {
     /// chain moving on, a toast running out. Returns whether the view
     /// changed (on screen, lupin's elapsed time counts as a change).
     fn background(&mut self, on_screen: bool) -> bool {
-        let mut changed = self.finish_zoom() | self.finish_relabel() | self.keep_scores_current();
-        // Not while drawing on screen: a reload would restart the picture.
-        let idle = !on_screen || self.job.is_none();
+        let mut changed = self.finish_zoom()
+            | self.finish_relabel()
+            | self.finish_recompute()
+            | self.keep_scores_current();
+        // Not while drawing on screen: a reload would restart the picture;
+        // nor while senna rewrites the run, which reloads when it is done.
+        let idle = (!on_screen || self.job.is_none()) && self.recomputing.is_none();
         if idle && self.checked.elapsed() >= Duration::from_secs(1) {
             self.checked = std::time::Instant::now();
             if modified(&self.from) != self.stamp {
@@ -279,7 +287,8 @@ impl App {
             self.toast = None;
             changed = true;
         }
-        changed || (on_screen && self.relabeling.is_some())
+        // On screen, lupin's or senna's elapsed time keeps ticking.
+        changed || (on_screen && (self.relabeling.is_some() || self.recomputing.is_some()))
     }
 
     /// How long to wait for input while this view is on screen.
@@ -288,6 +297,7 @@ impl App {
             Duration::ZERO
         } else if self.zooming.is_some()
             || self.relabeling.is_some()
+            || self.recomputing.is_some()
             || self.rescoring.is_some()
             || self.toast.is_some()
         {

@@ -33,7 +33,12 @@ impl App {
                     r.sent.len(),
                     r.started.elapsed().as_secs_f32()
                 ),
-                None => self.message.clone().unwrap_or_else(|| self.scene.caption()),
+                // What was just said first; senna's progress when nothing was.
+                None => self
+                    .message
+                    .clone()
+                    .or_else(|| self.recompute_line())
+                    .unwrap_or_else(|| self.scene.caption()),
             },
         };
         if self.job.is_some() {
@@ -42,14 +47,8 @@ impl App {
         let [main, more] = self.status_keys();
         let lines = vec![
             Line::from(format!(" {first}")),
-            Line::from(Span::styled(
-                format!(" {main}"),
-                Style::default().fg(rgb(color::INK)),
-            )),
-            Line::from(Span::styled(
-                format!(" {more}"),
-                Style::default().fg(rgb(color::MUTED)),
-            )),
+            Line::from(format!(" {main}")),
+            Line::from(Span::styled(format!(" {more}"), hint())),
         ];
         f.render_widget(Paragraph::new(lines).style(page), status);
 
@@ -112,13 +111,18 @@ impl App {
             ));
             lines.push(Line::from(Span::styled(
                 " S or enter submits   any other key cancels",
-                Style::default().fg(rgb(color::MUTED)),
+                hint(),
             )));
-            popup(f, map, lines, 76, At::Middle, color::INK);
+            popup(f, map, lines, 76, At::Middle, color::TEXT);
+        }
+
+        if let Some(Modal::Recompute(_, menu)) = &self.modal {
+            let lines = App::recompute_lines(menu, &files::name(&self.from));
+            popup(f, map, lines, 72, At::Middle, color::TEXT);
         }
 
         if self.help {
-            popup(f, map, self.help_lines(), 96, At::Middle, color::MUTED);
+            popup(f, map, self.help_lines(), 96, At::Middle, color::TEXT);
         }
     }
 
@@ -139,7 +143,6 @@ impl App {
             .saturating_sub(list_rows / 2)
             .min(levels.len().saturating_sub(list_rows));
 
-        let dim = Style::default().fg(rgb(color::MUTED));
         let mut lines: Vec<Line> = Vec::new();
         for (g, level) in levels.iter().enumerate().skip(first).take(list_rows) {
             let st = self.scene.style_of(g);
@@ -148,13 +151,11 @@ impl App {
                 format!(" {} ", st.shape.glyph()),
                 Style::default().fg(res.map_or(Color::Reset, |r| to_color(r.colour))),
             );
-            let mut name = Style::default();
-            if st.hidden {
-                name = dim;
-            }
-            if g == menu.row {
-                name = name.add_modifier(ratatui::style::Modifier::REVERSED);
-            }
+            let name = match (g == menu.row, st.hidden) {
+                (true, _) => selected(),
+                (false, true) => hint().add_modifier(ratatui::style::Modifier::CROSSED_OUT),
+                (false, false) => Style::default(),
+            };
             lines.push(Line::from(vec![
                 mark,
                 Span::styled(level.to_string(), name),
@@ -171,7 +172,7 @@ impl App {
                     } else {
                         "default"
                     },
-                    dim,
+                    hint(),
                 ),
             ])
             .style(Style::default().fg(res.map_or(Color::Reset, |r| to_color(r.colour)))),
@@ -186,12 +187,17 @@ impl App {
             Style::default().add_modifier(ratatui::style::Modifier::BOLD),
         )));
         for (k, (field, value)) in FIELDS.iter().zip(values).enumerate() {
-            let cursor = if k == menu.field { " ▸ " } else { "   " };
-            let mut spans = vec![Span::raw(format!("{cursor}{field:<8} "))];
+            let here = k == menu.field;
+            let cursor = if here { " ▸ " } else { "   " };
+            let label = if here { selected() } else { Style::default() };
+            let mut spans = vec![
+                Span::styled(format!("{cursor}{field:<8}"), label),
+                Span::raw(" "),
+            ];
             spans.extend(value.spans.into_iter().map(|s| s.patch_style(value.style)));
             lines.push(Line::from(spans));
         }
-        lines.push(Line::from(Span::styled(format!(" {MENU_HINT}"), dim)));
+        lines.push(Line::from(Span::styled(format!(" {MENU_HINT}"), hint())));
 
         f.render_widget(
             Paragraph::new(lines)
@@ -207,7 +213,20 @@ impl App {
 pub(super) fn page() -> Style {
     Style::default()
         .bg(rgb(color::BACKGROUND))
-        .fg(rgb(color::INK))
+        .fg(rgb(color::TEXT))
+}
+
+/// Key hints and other secondary lines: a step lighter than the text.
+pub(super) fn hint() -> Style {
+    Style::default().fg(rgb(color::HINT))
+}
+
+/// The line under a menu's cursor: a dark bar, so where you are is plain.
+pub(super) fn selected() -> Style {
+    Style::default()
+        .bg(rgb(color::TEXT))
+        .fg(rgb(color::BACKGROUND))
+        .add_modifier(ratatui::style::Modifier::BOLD)
 }
 
 /// Where a popup sits over its area.
@@ -249,7 +268,7 @@ pub(super) fn toast(f: &mut ratatui::Frame, area: Rect, text: &str) {
     let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
     let line = Line::from(Span::styled(text.to_string(), bold)).centered();
     let w = text.chars().count() as u16 + 4;
-    popup(f, area, vec![line], w, At::Top, color::MUTED);
+    popup(f, area, vec![line], w, At::Top, color::TEXT);
 }
 
 /// The sidebar's frame: one thin rule on the map side, nothing else.

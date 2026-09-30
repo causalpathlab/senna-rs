@@ -18,6 +18,8 @@ pub(super) enum Context {
     MarkersFile,
     /// Confirming a relabel round before it goes to lupin.
     Submit,
+    /// Choosing what senna recomputes for the run.
+    Recompute,
     Search,
     StyleMenu,
 }
@@ -34,6 +36,10 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             (
                 "click a feature",
                 "on a feature map: the features nearest it (cosine), and the cells nearest it",
+            ),
+            (
+                "click a label",
+                "a cluster's label on the map: the features most up in that cluster",
             ),
             ("[  ]", "focus the previous / next group (drawn on top)"),
             (
@@ -94,6 +100,10 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "every open view in a grid: point or arrows choose, click or enter opens, 1-9 by number",
             ),
             ("{  }", "previous / next view"),
+            (
+                "f",
+                "saved figures on the left, newest first, kept in .senna-view/ here",
+            ),
             ("X  (grid)", "close the view under the pointer (shift: it cannot be undone)"),
         ],
     ),
@@ -106,6 +116,14 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             ("t", "labels on the map: small, medium, large, largest, off, in turn"),
             ("b", "sidebar on or off"),
+            (
+                "<  >",
+                "every dot and all text smaller / bigger (each group's own style stays)",
+            ),
+            (
+                "r",
+                "recompute this run's layouts or clusters: choose in a menu, then enter",
+            ),
             (
                 "s",
                 "save as PDF: this view, or every run (one grid, or a page each); width, dpi, file name",
@@ -234,7 +252,7 @@ impl App {
                 "tab completes the path   enter runs lupin annotate   esc cancels",
             ],
             // The popup says what the keys do.
-            Context::Submit => ["", ""],
+            Context::Submit | Context::Recompute => ["", ""],
             Context::Search => [
                 "type part of a feature name   enter shows the first match   esc cancels",
                 "",

@@ -20,6 +20,20 @@ use senna::run_manifest::{
 };
 use std::path::{Path, PathBuf};
 
+/// Which table of a run's features a feature map or feature clustering reads.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[clap(rename_all = "kebab-case")]
+pub enum FeatureSpace {
+    /// The co-embedding when the run wrote one, else ρ.
+    #[default]
+    Auto,
+    /// The co-embedding: each feature where the cells it is active in are,
+    /// so neighbouring features are active in the same cells.
+    Coembedding,
+    /// The feature embedding ρ as trained.
+    Rho,
+}
+
 /// Which axis `senna layout` lays out.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[clap(rename_all = "kebab-case")]
@@ -43,6 +57,57 @@ fn write_xy(path: &str, names: &[Box<str>], coords: &Mat, row_label: &str) -> an
     Ok(())
 }
 
+/// The run's feature co-embedding (`features × dims`) and its feature names,
+/// when it has one in the cells' space: an embedding run whose co-embed has
+/// the `dims` of the cell table. `None` otherwise (topic/SVD runs,
+/// interrupted embedding runs, a layout that ran on a projection instead of
+/// Z).
+pub(crate) fn read_coembedding(
+    manifest: Option<&RunManifest>,
+    manifest_path: Option<&PathBuf>,
+    dims: usize,
+) -> anyhow::Result<Option<(Vec<Box<str>>, Mat)>> {
+    let (Some(m), Some(mp)) = (manifest, manifest_path) else {
+        return Ok(None);
+    };
+    if m.kind.cell_space() != CellSpace::Embedding {
+        return Ok(None);
+    }
+    let Some(rel) = m.outputs.feature_coembedding.as_deref() else {
+        return Ok(None);
+    };
+    let path = run_manifest::resolve(manifest_dir(mp), rel)
+        .to_string_lossy()
+        .into_owned();
+    let MatWithNames {
+        rows: feature_names,
+        mat: coembed_dh,
+        ..
+    } = Mat::from_parquet_with_row_names(&path, Some(0))?;
+    if coembed_dh.ncols() != dims {
+        log::warn!(
+            "feature co-embed has {} dims but the cell layout ran on {dims}; \
+             skipping features",
+            coembed_dh.ncols(),
+        );
+        return Ok(None);
+    }
+    Ok(Some((feature_names, coembed_dh)))
+}
+
+/// Write features' coordinates on the `method` cell map. Returns the path.
+pub(crate) fn write_features_on_cells(
+    out: &str,
+    method: &str,
+    names: &[Box<str>],
+    coords: &Mat,
+) -> anyhow::Result<String> {
+    let out_path = format!("{out}.{method}.feature_on_cell_coords.parquet");
+    write_xy(&out_path, names, coords, "feature")?;
+    info!("Saved {out_path}");
+    Ok(out_path)
+}
+
 /// Place `feature_coembedding` on a finished cell layout.
 ///
 /// `cell_feat_kn` is the (H × N) cell table the layout was computed from and
@@ -58,33 +123,11 @@ pub(crate) fn place_features_on_cells(
     cell_feat_kn: &Mat,
     cell_coords: &Mat,
 ) -> anyhow::Result<Option<String>> {
-    let (Some(m), Some(mp)) = (manifest, manifest_path) else {
+    let Some((feature_names, coembed_dh)) =
+        read_coembedding(manifest, manifest_path, cell_feat_kn.nrows())?
+    else {
         return Ok(None);
     };
-    if m.kind.cell_space() != CellSpace::Embedding {
-        return Ok(None);
-    }
-    let Some(rel) = m.outputs.feature_coembedding.as_deref() else {
-        return Ok(None);
-    };
-    let path = run_manifest::resolve(manifest_dir(mp), rel)
-        .to_string_lossy()
-        .into_owned();
-
-    let MatWithNames {
-        rows: feature_names,
-        mat: coembed_dh,
-        ..
-    } = Mat::from_parquet_with_row_names(&path, Some(0))?;
-    if coembed_dh.ncols() != cell_feat_kn.nrows() {
-        log::warn!(
-            "feature co-embed has {} dims but the cell layout ran on {}; \
-             skipping feature placement",
-            coembed_dh.ncols(),
-            cell_feat_kn.nrows()
-        );
-        return Ok(None);
-    }
 
     // Landmarks: a seeded subsample of cells with finite coordinates.
     let finite: Vec<usize> = (0..cell_coords.nrows())
@@ -118,10 +161,7 @@ pub(crate) fn place_features_on_cells(
         args.kernel_alpha,
     );
 
-    let out_path = format!("{out}.{method}.feature_on_cell_coords.parquet");
-    write_xy(&out_path, &feature_names, &coords, "feature")?;
-    info!("Saved {out_path}");
-    Ok(Some(out_path))
+    write_features_on_cells(out, method, &feature_names, &coords).map(Some)
 }
 
 /// Input for `--target features`: the feature embedding, one column per
@@ -141,12 +181,28 @@ pub(crate) struct FeatureLayoutInput {
 pub(crate) fn read_feature_rows(
     manifest: &RunManifest,
     dir: &Path,
+    space: FeatureSpace,
 ) -> anyhow::Result<(Vec<Box<str>>, Mat)> {
-    let (path, _bias) = run_manifest::resolve_feature_embedding_for(manifest, dir)?;
+    let coembedding = manifest.outputs.feature_coembedding.as_deref();
+    let (path, from) = match (space, coembedding) {
+        (FeatureSpace::Rho, _) | (FeatureSpace::Auto, None) => {
+            let (rho, _bias) = run_manifest::resolve_feature_embedding_for(manifest, dir)?;
+            (rho, "ρ")
+        }
+        (_, Some(rel)) => (
+            run_manifest::resolve(dir, rel)
+                .to_string_lossy()
+                .into_owned(),
+            "co-embedding",
+        ),
+        (FeatureSpace::Coembedding, None) => {
+            anyhow::bail!("this run has no feature co-embedding; --feature-space rho uses its ρ")
+        }
+    };
     let MatWithNames { rows, mut mat, .. } = Mat::from_parquet_with_row_names(&path, Some(0))?;
     l2_normalize_rows_inplace(&mut mat);
     info!(
-        "Feature embedding: {} features × {} dims from {path} (cosine)",
+        "Features: {} × {} dims, the {from} in {path} (cosine)",
         mat.nrows(),
         mat.ncols()
     );
@@ -163,7 +219,7 @@ pub(crate) fn load_feature_layout_input(
     })?;
     let manifest_path = PathBuf::from(from);
     let (manifest, dir) = RunManifest::load(&manifest_path)?;
-    let (names, rows) = read_feature_rows(&manifest, &dir)?;
+    let (names, rows) = read_feature_rows(&manifest, &dir, args.feature_space)?;
 
     let out: String = args
         .out
@@ -248,6 +304,62 @@ pub(crate) fn record_cell_layout(
 mod tests {
     use super::*;
     use senna::run_manifest::RunKind;
+
+    /// A bge run in `dir` with a ρ table and, if asked, a co-embedding whose
+    /// row g2 points another way, so a read tells which table it came from.
+    fn run_with_tables(dir: &Path, coembedding: bool) -> RunManifest {
+        let names: Vec<Box<str>> = ["g1", "g2", "g3"].map(Into::into).to_vec();
+        let cols: Vec<Box<str>> = ["h1", "h2"].map(Into::into).to_vec();
+        let write = |file: &str, v: f32| {
+            let mut m = Mat::from_element(3, 2, v);
+            m[(1, 0)] = 0.0; // not every row the same direction
+            m.to_parquet_with_names(
+                &dir.join(file).to_string_lossy(),
+                (Some(&names), Some("feature")),
+                Some(&cols),
+            )
+            .unwrap();
+        };
+        let mut m = RunManifest::new(RunKind::Bge, "r");
+        write("r.feature_embedding.parquet", 1.0);
+        m.outputs.feature_embedding = Some("r.feature_embedding.parquet".into());
+        if coembedding {
+            // Row g2 points another way than in ρ: (5, 0) here, (0, 1) there.
+            let mut c = Mat::from_element(3, 2, 2.0);
+            c[(1, 0)] = 5.0;
+            c[(1, 1)] = 0.0;
+            c.to_parquet_with_names(
+                &dir.join("r.feature_coembedding.parquet").to_string_lossy(),
+                (Some(&names), Some("feature")),
+                Some(&cols),
+            )
+            .unwrap();
+            m.outputs.feature_coembedding = Some("r.feature_coembedding.parquet".into());
+        }
+        m
+    }
+
+    #[test]
+    fn a_run_with_a_coembedding_lays_out_and_clusters_genes_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = run_with_tables(dir.path(), true);
+        let read = |space| read_feature_rows(&m, dir.path(), space).unwrap();
+        let (names, rows) = read(FeatureSpace::Auto);
+        assert_eq!(names.len(), 3);
+        // Auto is the co-embedding, which g2 tells apart from ρ.
+        assert_eq!(rows, read(FeatureSpace::Coembedding).1);
+        assert_ne!(rows, read(FeatureSpace::Rho).1);
+    }
+
+    #[test]
+    fn a_run_without_one_uses_rho_unless_the_coembedding_is_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = run_with_tables(dir.path(), false);
+        let read = |space| read_feature_rows(&m, dir.path(), space).unwrap().1;
+        assert_eq!(read(FeatureSpace::Auto), read(FeatureSpace::Rho));
+        let err = read_feature_rows(&m, dir.path(), FeatureSpace::Coembedding).unwrap_err();
+        assert!(err.to_string().contains("no feature co-embedding"), "{err}");
+    }
 
     #[test]
     fn rerunning_a_cell_layout_keeps_that_methods_feature_layout() {

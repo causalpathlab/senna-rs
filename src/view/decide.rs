@@ -243,7 +243,6 @@ pub fn annotate(
     out: &Path,
     progress: &std::sync::Mutex<String>,
 ) -> Result<Reply, String> {
-    use std::io::BufRead;
     let mut child = Command::new(lupin)
         .args(["annotate", "-f"])
         .arg(run)
@@ -256,23 +255,11 @@ pub fn annotate(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| cannot_run(lupin, &e))?;
-    let mut last = String::new();
-    if let Some(err) = child.stderr.take() {
-        for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
-            // Log lines start with "[time LEVEL module] "; the message is
-            // what matters on a status line.
-            let line = match line.trim().split_once("] ") {
-                Some((head, msg)) if head.starts_with('[') => msg.to_string(),
-                _ => line.trim().to_string(),
-            };
-            if !line.is_empty() {
-                if let Ok(mut p) = progress.lock() {
-                    p.clone_from(&line);
-                }
-                last = line;
-            }
+    let last = follow_log(child.stderr.take(), |line| {
+        if let Ok(mut p) = progress.lock() {
+            *p = line.to_string();
         }
-    }
+    });
     let status = child.wait().map_err(|e| e.to_string())?;
     let written = PathBuf::from(run_manifest::default_path(&out.to_string_lossy()));
     if status.success() && written.exists() {
@@ -287,6 +274,27 @@ pub fn annotate(
         reason,
         latest: None,
     })
+}
+
+/// Read a child's log (its stderr) to the end a line at a time, each line's
+/// "[time LEVEL module] " prefix trimmed (the message is what matters on a
+/// status line), handing every non-empty one to `each`. Returns the last.
+pub(crate) fn follow_log(log: Option<impl std::io::Read>, mut each: impl FnMut(&str)) -> String {
+    use std::io::BufRead;
+    let mut last = String::new();
+    if let Some(err) = log {
+        for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+            let line = match line.trim().split_once("] ") {
+                Some((head, msg)) if head.starts_with('[') => msg.to_string(),
+                _ => line.trim().to_string(),
+            };
+            if !line.is_empty() {
+                each(&line);
+                last = line;
+            }
+        }
+    }
+    last
 }
 
 fn cannot_run(lupin: &str, e: &std::io::Error) -> String {

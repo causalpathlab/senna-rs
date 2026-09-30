@@ -10,6 +10,9 @@ impl App {
         if self.modal.is_some() {
             return self.modal_key(k);
         }
+        if self.menu.is_none() && !self.help && self.guard_recompute(k) {
+            return true;
+        }
         if self.scene.review.is_some() && !self.help && self.menu.is_none() {
             self.message = None;
             if self.review_key(k) {
@@ -112,6 +115,9 @@ impl App {
                 self.with_vp(|v| v.pan_px(sx * d, sy * d));
             }
             KeyCode::Char('R') => self.toggle_review(),
+            KeyCode::Char('r') => self.open_recompute(),
+            KeyCode::Char('>') => self.change(|s| s.resize(1)),
+            KeyCode::Char('<') => self.change(|s| s.resize(-1)),
             KeyCode::Char('A') => self.ask_markers(),
             KeyCode::Char('k') => {
                 self.change_text(Scene::pin);
@@ -216,6 +222,9 @@ impl App {
 
     /// A mouse event. Returns whether anything changed.
     pub(super) fn mouse(&mut self, m: MouseEvent) -> bool {
+        if let MouseEventKind::Moved = m.kind {
+            return self.hover(m.column, m.row);
+        }
         let Some((px, py)) = self.cell_to_px(m.column, m.row) else {
             return false;
         };
@@ -253,9 +262,46 @@ impl App {
         true
     }
 
+    /// Frame the cluster label under the pointer and say what a click on it
+    /// does; clear that when the pointer leaves it. Returns whether it changed.
+    fn hover(&mut self, col: u16, row: u16) -> bool {
+        let under = match (self.cell_to_px(col, row), self.vp) {
+            (Some((px, py)), Some(vp)) => self.scene.group_at(&vp, px, py),
+            _ => None,
+        };
+        if under == self.scene.hover {
+            return false;
+        }
+        let was = std::mem::replace(&mut self.scene.hover, under);
+        match under {
+            Some(g) => {
+                let name = &self.scene.levels()[g as usize];
+                self.message = Some(format!(
+                    "{name} · click for the features most up in this cluster"
+                ));
+            }
+            // Leaving a label takes its note with it.
+            None if was.is_some() => self.message = None,
+            None => {}
+        }
+        self.redecorate();
+        true
+    }
+
     /// Focus the group of the point nearest the click, and name the point.
     pub(super) fn click(&mut self, px: f32, py: f32) {
         let Some(vp) = self.vp else { return };
+        // A cluster's label stands for the cluster: its features, not one
+        // cell's.
+        if let Some(g) = self.scene.group_at(&vp, px, py) {
+            self.scene.focus = Some(g);
+            self.scene.show_near_group(g);
+            self.info = None;
+            let name = &self.scene.levels()[g as usize];
+            self.message = Some(format!("{name} · the features most up in this cluster"));
+            self.settle();
+            return;
+        }
         let pts = &self.scene.current().points;
         let reach = 2.0 * self.cell.0.max(8.0);
         let best = pts

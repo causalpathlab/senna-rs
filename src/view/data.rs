@@ -312,7 +312,8 @@ pub struct Dataset {
 
 fn read_xy(path: &Path) -> anyhow::Result<Points> {
     let MatWithNames { rows, cols, mat } =
-        Mat::from_parquet_with_row_names(&path.to_string_lossy(), Some(0))?;
+        Mat::from_parquet_with_row_names(&path.to_string_lossy(), Some(0))
+            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     let col = |name: &str, default: usize| {
         cols.iter()
             .position(|c| c.as_ref() == name)
@@ -442,10 +443,19 @@ fn load_spaces(m: &RunManifest, dir: &Path) -> anyhow::Result<Vec<Space>> {
             (&e.feature_coords, SpaceKind::Features),
         ] {
             let Some(p) = slot else { continue };
+            // One layout that cannot be read (moved, deleted) leaves the
+            // others to show.
+            let points = match read_xy(&at(p)) {
+                Ok(points) => points,
+                Err(e) => {
+                    log::warn!("view: skipping the {method} {} layout: {e}", kind.slug());
+                    continue;
+                }
+            };
             spaces.push(Space {
                 method: method.clone(),
                 kind,
-                points: std::sync::Arc::new(read_xy(&at(p))?),
+                points: std::sync::Arc::new(points),
                 backdrop: (kind == SpaceKind::FeaturesOnCells)
                     .then_some(cells)
                     .flatten(),

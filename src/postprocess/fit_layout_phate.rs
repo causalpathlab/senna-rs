@@ -173,7 +173,7 @@ fn obtain_pseudotime(
     resolved: &ResolvedViz,
     prep: &PbLayoutPrep,
 ) -> anyhow::Result<Vec<f32>> {
-    let cell_names = prep.data_vec.column_names()?;
+    let cell_names = prep.cell_names.clone();
 
     let manifest = resolved.manifest.as_ref().ok_or_else(|| {
         anyhow::anyhow!(

@@ -397,6 +397,10 @@ impl Activity {
             .iter()
             .map(|p| run_manifest::resolve(&self.dir, p).to_string_lossy().into())
             .collect();
+        // Observed counts are the one thing here that needs the data.
+        if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
+            anyhow::bail!("the data is not here ({gone})");
+        }
         let reload =
             senna::multiome_layout::recorded_layout(m.data.multiome.as_ref(), files.len())?;
         info!(
@@ -425,6 +429,12 @@ impl Activity {
             .expect("just set")
             .as_ref()
             .map_err(Clone::clone)
+    }
+
+    /// Whether the observed counts could not be opened at all (as opposed
+    /// to one feature missing from them).
+    pub fn observed_failed(&self) -> bool {
+        matches!(self.observed, Some(Err(_)))
     }
 
     fn observed(&mut self) -> Result<&Observed, String> {
@@ -755,21 +765,29 @@ impl Activity {
         Ok(best(&scores, names, top))
     }
 
-    /// Features whose expected level is highest in cell `cell` relative to
-    /// the average cell (for an embedding run, `ρ_g · (z_cell − mean z)`):
-    /// the genes nearest that cell in the embedding. Rarely expressed
+    /// Features whose expected level is highest in `cells` (one clicked
+    /// cell, or a cluster) relative to the average cell: for an embedding
+    /// run, `ρ_g · (mean z of the cells − mean z)`, the genes nearest them in
+    /// the embedding. Cells not in the model are skipped; rarely expressed
     /// features are left out as in `contrast`.
-    pub fn near_cell(&mut self, cell: &str, top: usize) -> Result<Vec<(Box<str>, f32)>, String> {
+    pub fn near_cells<'a>(
+        &mut self,
+        cells: impl IntoIterator<Item = &'a str>,
+        top: usize,
+    ) -> Result<Vec<(Box<str>, f32)>, String> {
         let e = self.expected()?;
         let Model::Embedding { z, rho, .. } = &e.model else {
             return Err("neighbouring features need an embedding run".into());
         };
-        let n = *e
-            .cell_index()
-            .get(cell)
-            .ok_or_else(|| format!("{cell} is not in the model"))? as usize;
-        let mean = e.z_mean(z);
-        let d = z.row(n).transpose() - mean;
+        let index = e.cell_index();
+        let rows: Vec<usize> = cells
+            .into_iter()
+            .filter_map(|c| index.get(c).map(|&n| n as usize))
+            .collect();
+        if rows.is_empty() {
+            return Err("none of these cells is in the model".into());
+        }
+        let d = row_mean(z, &rows) - e.z_mean(z);
         let mut scores: Vec<f32> = (rho * d).iter().copied().collect();
         drop_below_median(&mut scores, e.baseline());
         Ok(best(&scores, &e.features.names, top))
@@ -977,6 +995,21 @@ mod tests {
         assert!((near[0].1 - 0.57).abs() < 1e-5);
         assert!(tiny(false).near_feature("NOPE", 3).is_err());
         assert!(tiny(true).near_feature("GENE0", 3).is_err());
+    }
+
+    #[test]
+    fn features_near_a_cluster_rank_by_its_mean_against_the_average_cell() {
+        // Cells c1, c2 average z = (0.65, 0.25); the average cell is
+        // (0.46, 0.56), so the cluster leans (0.19, -0.31). ρ · that is
+        // 0.345 for GENE0, -0.563 for GENE1, -0.314 for GENE2; GENE1's
+        // baseline (0.1) is below the median (0.5), so it is left out.
+        let cluster = ["c1", "c2", "not-in-model"];
+        let near = tiny(false).near_cells(cluster, 3).unwrap();
+        let got: Vec<&str> = near.iter().map(|(n, _)| n.as_ref()).collect();
+        assert_eq!(got, ["GENE0", "GENE2"]);
+        assert!((near[0].1 - 0.345).abs() < 1e-5, "{near:?}");
+        assert!(tiny(false).near_cells(["cx"], 3).is_err());
+        assert!(tiny(true).near_cells(cluster, 3).is_err());
     }
 
     #[test]

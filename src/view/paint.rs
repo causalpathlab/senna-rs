@@ -16,7 +16,7 @@ impl Scene {
                 focus: None,
                 selected: None,
                 muted: true,
-                size: 0.8,
+                size: 0.8 * self.scale,
                 levels: None,
                 order: None,
             });
@@ -32,7 +32,7 @@ impl Scene {
             focus: self.focus,
             selected,
             muted: false,
-            size: if space.backdrop.is_some() { 1.5 } else { 1.0 },
+            size: self.scale * if space.backdrop.is_some() { 1.5 } else { 1.0 },
             levels: shown.map(|s| (&s.levels, self.ramp.as_slice())),
             order: None,
         });
@@ -67,6 +67,76 @@ impl Scene {
         layers
     }
 
+    /// Group label anchors for the space and grouping on screen, computed
+    /// once per (space, grouping).
+    fn medians_of(
+        &self,
+        groups: &[u32],
+        n: usize,
+    ) -> std::cell::Ref<'_, Option<((usize, usize), render::Medians)>> {
+        let key = (self.space, self.colour.unwrap_or(usize::MAX));
+        if self
+            .medians
+            .borrow()
+            .as_ref()
+            .is_none_or(|(k, _)| *k != key)
+        {
+            *self.medians.borrow_mut() =
+                Some((key, group_medians(&self.current().points, groups, n)));
+        }
+        self.medians.borrow()
+    }
+
+    /// Where group `g`'s label sits on the cell map on screen, in data
+    /// coordinates.
+    pub fn group_centre(&self, g: u32) -> Option<[f32; 2]> {
+        if self.current().axis() != Axis::Cells {
+            return None;
+        }
+        let groups = self.groups()?;
+        let medians = self.medians_of(groups, self.levels().len());
+        let (_, m) = medians.as_ref()?;
+        m.get(g as usize).copied().flatten().map(|(xy, _)| xy)
+    }
+
+    /// The group whose label is under pixel `(px, py)` in the frame last
+    /// drawn with camera `vp`: only labels that frame showed count.
+    pub fn group_at(&self, vp: &Viewport, px: f32, py: f32) -> Option<u32> {
+        let hits = self.label_hits.borrow();
+        let (at, drawn) = hits.as_ref()?;
+        if at != vp {
+            return None;
+        }
+        drawn
+            .iter()
+            .filter(|(_, [x0, y0, x1, y1])| (*x0..=*x1).contains(&px) && (*y0..=*y1).contains(&py))
+            .min_by(|a, b| {
+                let d = |r: &[f32; 4]| (0.5 * (r[0] + r[2]) - px).hypot(0.5 * (r[1] + r[3]) - py);
+                d(&a.1).total_cmp(&d(&b.1))
+            })
+            .map(|(g, _)| *g)
+    }
+
+    /// Where group `g`'s label was drawn in the last frame, if it was.
+    #[cfg(test)]
+    pub fn label_rect(&self, g: u32) -> Option<[f32; 4]> {
+        let hits = self.label_hits.borrow();
+        let (_, drawn) = hits.as_ref()?;
+        drawn.iter().find(|(k, _)| *k == g).map(|(_, r)| *r)
+    }
+
+    /// Text height on the map for a terminal cell `cell_px` tall: text grows
+    /// and shrinks with the dots.
+    fn text_px(&self, cell_px: f32) -> f32 {
+        cell_px * self.scale
+    }
+
+    /// The bold font of names on a cell map (group labels, the picked
+    /// feature), for text `cell_px` from `text_px`.
+    fn label_font(&self, cell_px: f32) -> Font {
+        Font::for_cell_height(cell_px * self.text_scale, true)
+    }
+
     /// Labels for a finished frame. Cells: each group's name at its median.
     /// Features: the features' own names (a group of features, such as one
     /// type's markers, is often scattered, so a median would point at
@@ -85,13 +155,9 @@ impl Scene {
 
         if space.axis() == Axis::Cells {
             let Some(groups) = groups else { return out };
-            let font = Font::for_cell_height(cell_px * self.text_scale, true);
+            let font = self.label_font(cell_px);
             let n = self.levels().len();
-            let key = (self.space, self.colour.unwrap_or(usize::MAX));
-            let mut cached = self.medians.borrow_mut();
-            if cached.as_ref().is_none_or(|(k, _)| *k != key) {
-                *cached = Some((key, group_medians(&space.points, groups, n)));
-            }
+            let cached = self.medians_of(groups, n);
             let medians = cached.as_ref().map_or(&[][..], |(_, m)| &m[..]);
             for (g, m) in medians.iter().enumerate() {
                 let &Some((xy, size)) = m else { continue };
@@ -107,6 +173,7 @@ impl Scene {
                     tier: Tier::Map,
                     priority: size as f32,
                     font,
+                    group: Some(g as u32),
                 });
             }
             return out;
@@ -154,6 +221,7 @@ impl Scene {
                 tier: Tier::Map,
                 priority: (n - rank) as f32,
                 font,
+                group: None,
             });
         }
         out
@@ -205,6 +273,7 @@ impl Scene {
 
     /// Labels, key and marks over a composited frame.
     pub fn decorate(&self, frame: &mut render::Frame, vp: &Viewport, cell_px: f32) {
+        let cell_px = self.text_px(cell_px);
         // The picked feature is marked even with labels off: it is the answer
         // to what was just asked for.
         let mut reserved = Vec::new();
@@ -212,7 +281,7 @@ impl Scene {
         let ink = color::highlight_ink();
         let picked = self.picked_point();
         if let Some(i) = picked {
-            let font = Font::for_cell_height(cell_px * self.text_scale, true);
+            let font = self.label_font(cell_px);
             let at = vp.to_px(self.current().points.xy[i]);
             let text = self.current().points.names[i].to_string();
             let r = 0.45 * cell_px;
@@ -233,12 +302,18 @@ impl Scene {
         let font = Font::for_cell_height(cell_px * 0.85 * self.text_scale, true);
         let (centre_r, near_r) = (0.4 * cell_px, 0.25 * cell_px);
         for near in self.locked.iter().chain(&self.near) {
-            let centre_space = match near.centre {
-                Centre::Cell => cells,
-                Centre::Feature => features,
+            // Where the centre is drawn, and the point it is, if one.
+            let point = |space: Option<usize>| {
+                let k = space?;
+                let i = self.point_of(k, &near.name)?;
+                Some((vp.to_px(self.data.spaces[k].points.xy[i]), Some((k, i))))
+            };
+            let centre = match near.centre {
+                Centre::Cell => point(cells),
+                Centre::Feature => point(features),
+                Centre::Group { space, xy } => (cells == Some(space)).then(|| (vp.to_px(xy), None)),
                 Centre::None => None,
             };
-            let centre = centre_space.and_then(|k| Some((k, self.point_of(k, &near.name)?)));
             let place = |space: Option<usize>, list: &'_ [(Box<str>, f32)], tier: Tier| {
                 let Some(k) = space else {
                     return Vec::new();
@@ -254,13 +329,12 @@ impl Scene {
             };
             let mut placed = place(features, &near.features, Tier::NearFeature);
             placed.extend(place(cells, &near.cells, Tier::NearCell));
-            if let Some((k, i)) = centre {
-                let at = vp.to_px(self.data.spaces[k].points.xy[i]);
+            if let Some((at, point)) = centre {
                 for &(_, _, to) in &placed {
                     render::draw_edge(frame, at, to, centre_r, near_r, ink, 0.7);
                 }
                 // A centre that is the picked point is marked already.
-                if !(k == self.space && picked == Some(i)) {
+                if !point.is_some_and(|(k, i)| k == self.space && picked == Some(i)) {
                     let text = near.name.to_string();
                     mark(
                         frame,
@@ -287,7 +361,21 @@ impl Scene {
         if self.show_labels {
             labels.extend(self.labels(vp, cell_px));
         }
-        draw_labels(frame, labels, &reserved);
+        let drawn = draw_labels(frame, labels, &reserved);
+        // The label under the pointer is framed: a click there picks it.
+        let hovered = self.hover.and_then(|h| drawn.iter().find(|(g, _)| *g == h));
+        if let Some(&(_, [x0, y0, x1, y1])) = hovered {
+            let ink = color::highlight_ink();
+            for (a, b) in [
+                ((x0, y0), (x1, y0)),
+                ((x1, y0), (x1, y1)),
+                ((x1, y1), (x0, y1)),
+                ((x0, y1), (x0, y0)),
+            ] {
+                render::draw_edge(frame, a, b, 0.0, 0.0, ink, 1.0);
+            }
+        }
+        *self.label_hits.borrow_mut() = Some((*vp, drawn));
     }
 }
 
@@ -312,5 +400,6 @@ fn mark(
         tier,
         priority,
         font,
+        group: None,
     });
 }

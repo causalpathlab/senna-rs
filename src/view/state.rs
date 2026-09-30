@@ -260,6 +260,13 @@ impl Scene {
         self.focus.map(|f| self.levels()[f as usize].clone())
     }
 
+    /// Every dot and all text bigger (`step` 1) or smaller (-1), by ×1.25
+    /// within 0.4–4×; each group's own size and colour are kept.
+    pub fn resize(&mut self, step: isize) {
+        self.scale = (self.scale * 1.25_f32.powi(step as i32)).clamp(0.4, 4.0);
+        self.note = Some(format!("dots and text ×{:.2} · < > resize", self.scale));
+    }
+
     /// Labels on the map in turn: small, medium, large, largest, off.
     pub fn cycle_labels(&mut self) {
         const SIZES: [&str; 4] = ["small", "medium", "large", "largest"];

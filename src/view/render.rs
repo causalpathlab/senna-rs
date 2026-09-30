@@ -421,11 +421,19 @@ pub struct Label {
     /// Within a tier, larger goes first when labels collide.
     pub priority: f32,
     pub font: Font,
+    /// The group a label names on a cell map, so a click can find it.
+    pub group: Option<u32>,
 }
 
 /// Place labels centred on their anchors, dropping any that would overlap one
-/// already placed or a `reserved` rectangle. Higher priority wins.
-pub fn draw_labels(frame: &mut Frame, mut labels: Vec<Label>, reserved: &[[f32; 4]]) {
+/// already placed or a `reserved` rectangle, or run off the frame. Higher
+/// priority wins. Returns where each group label was drawn.
+pub fn draw_labels(
+    frame: &mut Frame,
+    mut labels: Vec<Label>,
+    reserved: &[[f32; 4]],
+) -> Vec<(u32, [f32; 4])> {
+    let mut drawn = Vec::new();
     labels.sort_by(|a, b| b.tier.cmp(&a.tier).then(b.priority.total_cmp(&a.priority)));
     let bg = frame.background();
     let mut placed: Vec<[f32; 4]> = reserved.to_vec();
@@ -443,6 +451,9 @@ pub fn draw_labels(frame: &mut Frame, mut labels: Vec<Label>, reserved: &[[f32; 
             continue;
         }
         placed.push(rect);
+        if let Some(g) = l.group {
+            drawn.push((g, rect));
+        }
         text::draw_aligned(
             frame,
             l.font,
@@ -453,6 +464,7 @@ pub fn draw_labels(frame: &mut Frame, mut labels: Vec<Label>, reserved: &[[f32; 
             bg,
         );
     }
+    drawn
 }
 
 /// A key in the top-left corner: a dot in the point colour and the name in
