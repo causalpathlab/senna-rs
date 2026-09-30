@@ -264,6 +264,15 @@ pub struct Activity {
     /// Row of each point of a view in a source's cell table, by (source,
     /// view key).
     rows: HashMap<(Source, usize), Arc<Vec<u32>>>,
+    /// The latent as topic mixtures, read on first use.
+    mixture: Option<Result<Mixture, String>>,
+}
+
+/// Each cell's topic mixture (θ, rows summing to one) and the row of each
+/// cell name.
+struct Mixture {
+    theta: Mat,
+    index: HashMap<Box<str>, u32>,
 }
 
 impl std::hash::Hash for Source {
@@ -286,7 +295,51 @@ impl Activity {
             expected: None,
             observed: None,
             rows: HashMap::default(),
+            mixture: None,
         }
+    }
+
+    /// The run's latent as topic mixtures, when it is one: log θ whose
+    /// rows sum to one once exponentiated. Topic runs write it so, and so
+    /// does `bge` (its topics resolved from the cell embedding) unless it
+    /// was told `--skip-etm`; told by the numbers, not by the run's kind.
+    fn mixture(&mut self) -> Result<&Mixture, String> {
+        if self.mixture.is_none() {
+            self.mixture = Some(self.load_mixture());
+        }
+        self.mixture
+            .as_ref()
+            .expect("just set")
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    fn load_mixture(&self) -> Result<Mixture, String> {
+        const NONE: &str =
+            "a structure plot needs topics: this run's latent is not a topic mixture \
+                            (topic runs have one, and bge unless --skip-etm)";
+        let rel = self.manifest.outputs.latent.as_deref().ok_or(NONE)?;
+        let MatWithNames { rows, mat, .. } =
+            read_table(&self.dir, rel).map_err(|e| e.to_string())?;
+        let theta = mat.map(f32::exp);
+        let simplex = theta
+            .row_iter()
+            .take(1000)
+            .all(|r| (r.sum() - 1.0).abs() < 0.02);
+        if theta.nrows() == 0 || !simplex {
+            return Err(NONE.into());
+        }
+        let index = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, n)| (n, i as u32))
+            .collect();
+        Ok(Mixture { theta, index })
+    }
+
+    /// Whether the run has topic mixtures to draw.
+    pub fn has_mixtures(&mut self) -> bool {
+        self.mixture().is_ok()
     }
 
     /// Forget the per-view row maps, when the views themselves changed.
@@ -761,24 +814,20 @@ impl Activity {
     }
 
     /// Each point's topic mixture (θ, summing to one), `k` values a point,
-    /// `NaN` for a point the model has no row for; and `k`. Topic runs only.
+    /// `NaN` for a point the latent has no row for; and `k`. Runs with topics only.
     pub fn mixtures(
         &mut self,
-        key: usize,
+        _key: usize,
         universe: &[Box<str>],
     ) -> Result<(Vec<f32>, usize), String> {
-        let rows = self.rows(Source::Expected, key, universe)?;
-        let e = self.expected()?;
-        let Some((theta, _)) = e.linear() else {
-            return Err("a structure plot needs a topic model (topic, masked-topic, …)".into());
-        };
-        let k = theta.ncols();
-        let mut out = vec![f32::NAN; rows.len() * k];
-        for (p, &r) in rows.iter().enumerate() {
-            if r == NO_ROW {
+        let m = self.mixture()?;
+        let k = m.theta.ncols();
+        let mut out = vec![f32::NAN; universe.len() * k];
+        for (p, name) in universe.iter().enumerate() {
+            let Some(&r) = m.index.get(name) else {
                 continue;
-            }
-            let row = theta.row(r as usize);
+            };
+            let row = m.theta.row(r as usize);
             let total: f32 = row.iter().sum::<f32>().max(1e-12);
             for (o, &v) in out[p * k..(p + 1) * k].iter_mut().zip(row.iter()) {
                 *o = v / total;

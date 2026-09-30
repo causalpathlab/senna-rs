@@ -140,7 +140,7 @@ pub struct ViewArgs {
     #[arg(
         long,
         value_enum,
-        help = "Start on a chart instead of the map: structure (topic runs) or heatmap (`H` in the view)"
+        help = "Start on a chart instead of the map: structure (runs with topics, bge included) or heatmap (`H` in the view)"
     )]
     pub chart: Option<chart::Kind>,
 

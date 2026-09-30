@@ -3,7 +3,8 @@
 //!
 //! - **structure**: each cell's topic mixture as a thin stacked bar, cells
 //!   side by side in one panel per group — the admixture plot of population
-//!   genetics, as `lupin plot-topic` draws it. Topic runs only. Topics keep
+//!   genetics, as `lupin plot-topic` draws it. For runs with topics: topic
+//!   runs, and `bge` runs (topics resolved from the cell embedding). Topics keep
 //!   one colour each and one order everywhere (most prevalent first); inside
 //!   a panel, cells go by their dominant topic, then by how dominant it is.
 //! - **heatmap**: the top features of each group × the groups. A group's
@@ -106,7 +107,7 @@ pub struct Heatmap {
 }
 
 impl Scene {
-    /// Map → structure plot (topic runs) → heatmap → map.
+    /// Map → structure plot (runs with topics) → heatmap → map.
     pub fn cycle_chart(&mut self) {
         if self.current().axis() != Axis::Cells {
             self.note = Some("charts are drawn from a cell view (tab)".into());
@@ -135,11 +136,11 @@ impl Scene {
         self.refresh_chart();
     }
 
-    fn is_topic_run(&self) -> bool {
-        self.data
-            .run
-            .as_ref()
-            .is_some_and(|(m, _)| m.kind.latent_is_log_simplex())
+    /// Whether the run has topic mixtures: a topic run, or a `bge` run
+    /// with its topics resolved.
+    fn is_topic_run(&mut self) -> bool {
+        self.activity()
+            .is_some_and(super::activity::Activity::has_mixtures)
     }
 
     /// `+` / `-` on a heatmap: more or fewer features per group.

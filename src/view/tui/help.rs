@@ -81,7 +81,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "H",
-                "structure plot (topic runs: each cell's topic mixture, a panel per group), heatmap, back to the map",
+                "structure plot (runs with topics, bge included: each cell's topic mixture, a panel per group), heatmap, back to the map",
             ),
             (
                 "+  -",
