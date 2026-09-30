@@ -48,7 +48,7 @@ pub(crate) fn train_and_save<Dec: JointDecoderModuleT>(
         ctx.gene_names,
         &ctx.args.out,
     )?;
-    scores.to_parquet(&format!("{}.log_likelihood.parquet", &ctx.args.out))?;
+    scores.to_parquet(&format!("{}.log_likelihood.parquet", ctx.args.out))?;
 
     info!("Moving parameters to CPU for multi-threaded inference");
     let cpu_dev = candle_core::Device::Cpu;
@@ -241,7 +241,7 @@ where
                             .map(|j| j as u32)
                             .collect(),
                     };
-                    let indices = Tensor::from_iter(membership.into_iter(), config.dev)?;
+                    let indices = Tensor::from_iter(membership, config.dev)?;
                     Ok(delta.index_select(&indices, 0)?)
                 })
                 .transpose()

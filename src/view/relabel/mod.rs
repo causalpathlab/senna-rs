@@ -309,14 +309,6 @@ impl Scene {
                 .max_by(|a, b| fit(a).total_cmp(&fit(b)))
                 .cloned()
         });
-        // Markers listed: the target's, and the best-fitting other candidate's.
-        let alternative = candidates
-            .iter()
-            .filter(|c| Some(c.as_str()) != target.as_deref())
-            .max_by(|a, b| fit(a).total_cmp(&fit(b)))
-            .cloned();
-        let listed: Vec<String> = target.iter().cloned().chain(alternative).collect();
-        let rows = evidence.review_rows(&scores, &listed, target.as_deref(), staged.as_deref());
         candidates.sort_by(|a, b| fit(b).total_cmp(&fit(a)));
         let r = self.review.as_mut().expect("checked above");
         r.fits = candidates
@@ -325,9 +317,49 @@ impl Scene {
             .collect();
         r.candidates = candidates;
         r.target = target;
-        r.rows = rows;
+        r.rows = Vec::new();
         r.row = 0;
         r.preview = None;
+        self.relist(&scores);
+    }
+
+    /// The feature list of the visited cluster for its working type: that
+    /// type's markers and the best-fitting other candidate's, with the
+    /// proposals for that type. The cursor stays on its feature if listed.
+    fn relist(&mut self, scores: &[f32]) {
+        let evidence = self.evidence();
+        let Some(r) = self.review.as_mut() else {
+            return;
+        };
+        let staged = r
+            .draft
+            .clusters
+            .get(&r.cluster())
+            .and_then(|c| match &c.verdict {
+                Some(Verdict::Label { label, .. } | Verdict::Keep { label, .. }) => {
+                    Some(label.clone())
+                }
+                None => None,
+            });
+        let fit = |t: &str| {
+            r.fits
+                .iter()
+                .find(|f| f.0 == t)
+                .map_or(f32::NEG_INFINITY, |f| f.1)
+        };
+        let alternative = r
+            .candidates
+            .iter()
+            .filter(|c| Some(c.as_str()) != r.target.as_deref())
+            .max_by(|a, b| fit(a).total_cmp(&fit(b)))
+            .cloned();
+        let listed: Vec<String> = r.target.iter().cloned().chain(alternative).collect();
+        let rows = evidence.review_rows(scores, &listed, r.target.as_deref(), staged.as_deref());
+        let on = r.rows.get(r.row).map(|x| x.feature.clone());
+        r.row = on
+            .and_then(|f| rows.iter().position(|x| x.feature == f))
+            .unwrap_or(0);
+        r.rows = rows;
     }
 
     /// Every feature's expected log fold change, the focused cluster over the
@@ -384,7 +416,8 @@ impl Scene {
         out
     }
 
-    /// Stage `mark` for the selected row's feature (or clear it with `None`).
+    /// Stage `mark` for the selected row's feature (or clear it with `None`),
+    /// say what it did, and move to the next row.
     pub fn mark_row(&mut self, mark: Option<bool>) {
         let Some(r) = self.review.as_mut() else {
             return;
@@ -395,30 +428,43 @@ impl Scene {
         let score = row.score;
         let m = match mark {
             None => {
-                r.draft.cluster(id).marks.remove(&feature);
+                let had = r.draft.cluster(id).marks.remove(&feature).is_some();
+                r.row = (r.row + 1).min(r.rows.len() - 1);
+                if had {
+                    self.note = Some(format!("{feature}: mark cleared"));
+                }
                 return;
             }
             Some(true) => match &r.target {
+                Some(t) if r.evidence.lists(t, &feature) => {
+                    self.note = Some(format!("{feature} is already one of {t}'s markers"));
+                    return;
+                }
                 Some(t) => Mark::Include {
                     cell_type: t.clone(),
                 },
                 None => {
-                    self.note = Some("choose a target type first (tab)".into());
+                    self.note = Some("choose a working type first (tab)".into());
                     return;
                 }
             },
-            Some(false) => {
-                let t = row.marker_of.first().cloned().or_else(|| r.target.clone());
-                match t {
-                    Some(t) => Mark::Exclude { cell_type: t },
-                    None => {
-                        self.note = Some("this feature is not anyone's marker".into());
-                        return;
-                    }
+            // Only a type that lists the feature can drop it.
+            Some(false) => match row.marker_of.first() {
+                Some(t) => Mark::Exclude {
+                    cell_type: t.clone(),
+                },
+                None => {
+                    self.note = Some(format!("{feature} is not a listed marker; nothing to drop"));
+                    return;
                 }
-            }
+            },
         };
+        self.note = Some(match &m {
+            Mark::Include { cell_type } => format!("{feature}: add to {cell_type}'s markers"),
+            Mark::Exclude { cell_type } => format!("{feature}: drop from {cell_type}'s markers"),
+        });
         r.draft.cluster(id).marks.insert(feature, (m, score));
+        r.row = (r.row + 1).min(r.rows.len() - 1);
     }
 
     /// Stage every proposal of the current cluster.
@@ -454,6 +500,9 @@ impl Scene {
             .as_ref()
             .and_then(|t| r.candidates.iter().position(|c| c == t));
         r.target = Some(r.candidates[at.map_or(0, |i| (i + 1) % r.candidates.len())].clone());
+        // The proposals and listed markers follow the working type.
+        let scores = self.cluster_scores();
+        self.relist(&scores);
     }
 
     /// Stage a verdict for the current cluster.
@@ -465,6 +514,21 @@ impl Scene {
             let id = r.cluster();
             r.draft.cluster(id).verdict = Some(verdict);
         }
+    }
+
+    /// The next cluster after the one visited that has no verdict and is in
+    /// no merge, going round; `None` when every cluster is decided.
+    pub fn next_undecided(&self) -> Option<usize> {
+        let r = self.review.as_ref()?;
+        let n = r.overview.len();
+        (1..=n).map(|k| (r.at + k) % n).find(|&i| {
+            let id = r.overview[i].id;
+            r.draft
+                .clusters
+                .get(&id)
+                .is_none_or(|c| c.verdict.is_none())
+                && !r.draft.merges.iter().any(|m| m.clusters.contains(&id))
+        })
     }
 
     /// A rationale drafted from what was staged for the current cluster.

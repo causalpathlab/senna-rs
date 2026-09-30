@@ -92,7 +92,21 @@ fn document(pages: &[Page], dpi: f32) -> Vec<u8> {
             if run.centred {
                 x += 0.5 * (run.w * pt - width);
             }
-            let y = hpt - (run.y + BASELINE * run.line) * pt;
+            // Turned a quarter left, the baseline is a vertical line
+            // `BASELINE` of a line in from the column's left.
+            let matrix = if run.vertical {
+                [
+                    0.0,
+                    1.0,
+                    -1.0,
+                    0.0,
+                    (run.x + BASELINE * run.line) * pt,
+                    hpt - run.y * pt,
+                ]
+            } else {
+                let y = hpt - (run.y + BASELINE * run.line) * pt;
+                [1.0, 0.0, 0.0, 1.0, x, y]
+            };
             let font = Name(if run.bold { b"F2" } else { b"F1" });
             c.set_font(font, size);
             // The halo: a stroke in the page colour under the letters.
@@ -100,12 +114,12 @@ fn document(pages: &[Page], dpi: f32) -> Vec<u8> {
             c.set_stroke_rgb(r, g, b)
                 .set_line_width(0.22 * size)
                 .set_text_rendering_mode(TextRenderingMode::Stroke)
-                .set_text_matrix([1.0, 0.0, 0.0, 1.0, x, y])
+                .set_text_matrix(matrix)
                 .show(Str(&bytes));
             let [r, g, b] = srgb(run.ink);
             c.set_fill_rgb(r, g, b)
                 .set_text_rendering_mode(TextRenderingMode::Fill)
-                .set_text_matrix([1.0, 0.0, 0.0, 1.0, x, y])
+                .set_text_matrix(matrix)
                 .show(Str(&bytes));
         }
         c.end_text();
@@ -191,6 +205,7 @@ mod tests {
             line: 10.0,
             bold: true,
             centred: true,
+            vertical: false,
             ink: [0.1; 3],
             bg: [0.9; 3],
         };

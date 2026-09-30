@@ -6,6 +6,7 @@
 //! simply replaces the job.
 
 mod annotate;
+mod browse;
 mod decisions;
 mod draw;
 mod grid;
@@ -15,6 +16,7 @@ mod modal;
 mod recompute;
 mod relabel;
 
+pub use browse::{pick_run, shown};
 use decisions::Prompt;
 use modal::Modal;
 
@@ -41,6 +43,12 @@ use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 use std::time::Duration;
 
+/// A run prefix as a name in the directory the viewer runs from, where
+/// figures are saved unless a path is typed.
+fn here(prefix: &str) -> String {
+    files::name(std::path::Path::new(prefix))
+}
+
 fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
@@ -51,6 +59,10 @@ pub fn run(
     graphics: Graphics,
     lupin: String,
 ) -> anyhow::Result<()> {
+    // Log lines written to the terminal would land over the screen: none
+    // while it is ours. What matters reaches the status line instead.
+    let level = log::max_level();
+    log::set_max_level(log::LevelFilter::Off);
     let mut terminal = ratatui::init();
     let result = (|| {
         // A terminal that never answers must not stall startup; block
@@ -80,6 +92,7 @@ pub fn run(
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
+    log::set_max_level(level);
     result
 }
 
@@ -166,7 +179,8 @@ struct Menu {
 }
 
 const FIELDS: [&str; 5] = ["colour", "shape", "opacity", "size", "visible"];
-const MENU_HINT: &str = "↑↓ group  ←→ change  tab property  space show/hide  r reset  enter done";
+const MENU_HINT: &str =
+    "↑↓ group  ←→ change  tab property  space show/hide  backspace reset  enter done";
 
 struct App {
     scene: Scene,
@@ -389,6 +403,9 @@ impl App {
     fn restart(&mut self) {
         self.job = None;
         self.base = None;
+        if self.scene.chart.is_some() {
+            return self.draw_chart();
+        }
         if let Some(vp) = self.vp {
             if vp.w > 0 && vp.h > 0 {
                 self.job = Some(Job::new(vp, &self.scene.layers()));
@@ -425,9 +442,28 @@ impl App {
         Ok(())
     }
 
+    /// The chart on screen, made for the current grouping and drawn whole.
+    fn draw_chart(&mut self) {
+        let Some(vp) = self.vp.filter(|v| v.w > 0 && v.h > 0) else {
+            return;
+        };
+        self.scene.refresh_chart();
+        if let Some(frame) = self.scene.chart_frame(vp.w, vp.h, self.cell.1, false) {
+            if let Err(e) = self.show(frame.to_image()) {
+                self.message = Some(e.to_string());
+            }
+        }
+        if let Some(note) = self.scene.note.take() {
+            self.message = Some(note);
+        }
+    }
+
     /// Redraw labels and marks over the last finished frame, when only they
     /// changed. A running job decorates when it finishes.
     fn redecorate(&mut self) {
+        if self.scene.chart.is_some() {
+            return self.draw_chart();
+        }
         if self.job.is_some() {
             return;
         }
@@ -520,6 +556,13 @@ impl App {
         }
     }
 
+    /// Ctrl-R / Ctrl-L: read the run again and draw it afresh (relabel
+    /// mode, if on, stays on at the same cluster).
+    fn refresh(&mut self) {
+        let from = self.from.clone();
+        self.open_round(&from, "reloaded");
+    }
+
     /// Step to the source round (`back`) or to the round made from this one.
     fn step_round(&mut self, back: bool) {
         let round = self.scene.data.round.as_ref();
@@ -595,11 +638,11 @@ impl App {
     /// follows).
     fn pdf_name(&self) -> String {
         let s = self.scene.current();
-        format!(
-            "{}.view.{}.{}",
-            self.scene.data.prefix,
-            s.method,
-            s.kind.slug()
-        )
+        let what = match self.scene.chart.as_ref().map(|c| c.kind) {
+            Some(crate::view::chart::Kind::Structure) => "structure".to_string(),
+            Some(crate::view::chart::Kind::Heatmap) => "heatmap".to_string(),
+            None => format!("{}.{}", s.method, s.kind.slug()),
+        };
+        format!("{}.view.{what}", here(&self.scene.data.prefix))
     }
 }
