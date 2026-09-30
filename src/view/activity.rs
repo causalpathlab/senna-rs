@@ -893,13 +893,16 @@ impl Activity {
         if matched.is_empty() {
             return Ok(out);
         }
-        let csr = o
-            .data
-            .read_rows_csr(matched.iter().map(|&(_, g)| g))
-            .map_err(|e| e.to_string())?;
-        for (k, &(i, _)) in matched.iter().enumerate() {
+        // One row a read: data-beans' multi-row reads from a .zarr.zip can
+        // return wrong values or panic (seen in 0.6.12); single-row reads,
+        // as `raw` makes, are stable.
+        for &(i, g) in &matched {
+            let csr = o
+                .data
+                .read_rows_csr(std::iter::once(g))
+                .map_err(|e| e.to_string())?;
             let mut sum = vec![0f32; n_groups];
-            let row = csr.row(k);
+            let row = csr.row(0);
             for (&c, &v) in row.col_indices().iter().zip(row.values()) {
                 if let Some(s) = sum.get_mut(group_of[c] as usize) {
                     *s += v.ln_1p();
