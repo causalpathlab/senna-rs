@@ -121,6 +121,11 @@ impl App {
             popup(f, map, lines, 72, At::Middle, color::TEXT);
         }
 
+        if let Some(Modal::MarkersFile(b)) = &self.modal {
+            let rows = usize::from(map.height).saturating_sub(10).max(3);
+            popup(f, map, b.lines(rows), 100, At::Middle, color::TEXT);
+        }
+
         if self.help {
             popup(f, map, self.help_lines(), 96, At::Middle, color::TEXT);
         }

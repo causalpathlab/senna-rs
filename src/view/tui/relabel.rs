@@ -28,11 +28,11 @@ impl App {
         let n_rows = r.rows.len();
         let n_clusters = r.overview.len().max(1);
         match k.code {
-            KeyCode::Char(']') => {
+            KeyCode::Char(']') | KeyCode::Right => {
                 let next = (r.at + 1) % n_clusters;
                 self.change(|s| s.visit(next));
             }
-            KeyCode::Char('[') => {
+            KeyCode::Char('[') | KeyCode::Left => {
                 let prev = (r.at + n_clusters - 1) % n_clusters;
                 self.change(|s| s.visit(prev));
             }
@@ -51,6 +51,19 @@ impl App {
             KeyCode::Char('p') => self.send_draft(Mode::Preview),
             KeyCode::Char('S') => self.confirm_submit(),
             KeyCode::Esc | KeyCode::Char('R') => self.toggle_review(),
+            // Relabel works on the cluster colouring of this cell view and
+            // the cluster in focus: keys that would change them wait.
+            KeyCode::Char('c' | ',' | '.') | KeyCode::BackTab => {
+                self.message = Some("leave relabel mode first (R)".into());
+            }
+            // Back to the cluster: drop a feature or suggestions on show,
+            // keep the focus.
+            KeyCode::Char('x') => {
+                self.info = None;
+                self.scene.clear_suggestions();
+                self.scene.clear_pick();
+                self.restart();
+            }
             _ => return false,
         }
         true
@@ -67,8 +80,15 @@ impl App {
             return false;
         };
         match k.code {
-            KeyCode::Down => m.cursor = (m.cursor + 1).min(n.saturating_sub(1)),
-            KeyCode::Up => m.cursor = m.cursor.saturating_sub(1),
+            // The map marks the cluster under the cursor: draw it again.
+            KeyCode::Down => {
+                m.cursor = (m.cursor + 1).min(n.saturating_sub(1));
+                self.restart();
+            }
+            KeyCode::Up => {
+                m.cursor = m.cursor.saturating_sub(1);
+                self.restart();
+            }
             KeyCode::Char(' ') => self.change(Scene::toggle_merge_cursor),
             KeyCode::Enter => self.begin_staged(Action::Merge),
             KeyCode::Esc | KeyCode::Char('M') => {
@@ -161,10 +181,19 @@ impl App {
         if let Some(r) = self.scene.review.as_ref() {
             let _ = r.draft.save();
         }
-        self.message = Some("staged · ] next cluster · S submits everything".into());
-        if merge {
-            self.restart();
-        }
+        let done = match self.scene.next_undecided() {
+            Some(i) => {
+                self.change(|s| s.visit(i));
+                "staged · on to the next undecided cluster".to_string()
+            }
+            None => {
+                if merge {
+                    self.restart();
+                }
+                "staged · every cluster is decided · S hands them to lupin".to_string()
+            }
+        };
+        self.message = Some(done);
     }
 
     /// Keep the scores on screen current with the staged marker edits: take

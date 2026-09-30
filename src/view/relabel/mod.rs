@@ -384,7 +384,8 @@ impl Scene {
         out
     }
 
-    /// Stage `mark` for the selected row's feature (or clear it with `None`).
+    /// Stage `mark` for the selected row's feature (or clear it with `None`),
+    /// say what it did, and move to the next row.
     pub fn mark_row(&mut self, mark: Option<bool>) {
         let Some(r) = self.review.as_mut() else {
             return;
@@ -395,10 +396,18 @@ impl Scene {
         let score = row.score;
         let m = match mark {
             None => {
-                r.draft.cluster(id).marks.remove(&feature);
+                let had = r.draft.cluster(id).marks.remove(&feature).is_some();
+                r.row = (r.row + 1).min(r.rows.len() - 1);
+                if had {
+                    self.note = Some(format!("{feature}: mark cleared"));
+                }
                 return;
             }
             Some(true) => match &r.target {
+                Some(t) if r.evidence.lists(t, &feature) => {
+                    self.note = Some(format!("{feature} is already one of {t}'s markers"));
+                    return;
+                }
                 Some(t) => Mark::Include {
                     cell_type: t.clone(),
                 },
@@ -407,18 +416,23 @@ impl Scene {
                     return;
                 }
             },
-            Some(false) => {
-                let t = row.marker_of.first().cloned().or_else(|| r.target.clone());
-                match t {
-                    Some(t) => Mark::Exclude { cell_type: t },
-                    None => {
-                        self.note = Some("this feature is not anyone's marker".into());
-                        return;
-                    }
+            // Only a type that lists the feature can drop it.
+            Some(false) => match row.marker_of.first() {
+                Some(t) => Mark::Exclude {
+                    cell_type: t.clone(),
+                },
+                None => {
+                    self.note = Some(format!("{feature} is not a listed marker; nothing to drop"));
+                    return;
                 }
-            }
+            },
         };
+        self.note = Some(match &m {
+            Mark::Include { cell_type } => format!("{feature}: add to {cell_type}'s markers"),
+            Mark::Exclude { cell_type } => format!("{feature}: drop from {cell_type}'s markers"),
+        });
         r.draft.cluster(id).marks.insert(feature, (m, score));
+        r.row = (r.row + 1).min(r.rows.len() - 1);
     }
 
     /// Stage every proposal of the current cluster.
@@ -465,6 +479,21 @@ impl Scene {
             let id = r.cluster();
             r.draft.cluster(id).verdict = Some(verdict);
         }
+    }
+
+    /// The next cluster after the one visited that has no verdict and is in
+    /// no merge, going round; `None` when every cluster is decided.
+    pub fn next_undecided(&self) -> Option<usize> {
+        let r = self.review.as_ref()?;
+        let n = r.overview.len();
+        (1..=n).map(|k| (r.at + k) % n).find(|&i| {
+            let id = r.overview[i].id;
+            r.draft
+                .clusters
+                .get(&id)
+                .is_none_or(|c| c.verdict.is_none())
+                && !r.draft.merges.iter().any(|m| m.clusters.contains(&id))
+        })
     }
 
     /// A rationale drafted from what was staged for the current cluster.

@@ -120,7 +120,7 @@ impl Scene {
         let verdict = staged.and_then(|c| c.verdict.as_ref());
         let merged = r.draft.merges.iter().find(|m| m.clusters.contains(&id));
         let next = if verdict.is_some() || merged.is_some() {
-            "next: ] for the next cluster · S when done (p previews)"
+            "next: → for the next cluster · S when done (p previews)"
         } else if marks == 0 {
             "next: check the fit below, then + / - features (a accepts ?), then L"
         } else {
@@ -184,7 +184,13 @@ impl Scene {
         }
         out.extend(self.live_lines());
         out.push(String::new());
-        out.push("   mark feature       here  marker of".into());
+        // Which type a mark edits, said once: `+` the target, `−` the type
+        // listing the feature.
+        out.push(format!(
+            "+ adds to {} · − drops from its type",
+            r.target.as_deref().unwrap_or("the target (tab)")
+        ));
+        out.push("   mark feature        lfc  marker of".into());
         for (k, row) in r.rows.iter().enumerate() {
             let staged = staged.and_then(|c| c.marks.get(row.feature.as_ref()));
             let sign = match (staged, &row.proposal) {

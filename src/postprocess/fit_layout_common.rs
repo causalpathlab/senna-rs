@@ -441,16 +441,7 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
     let data_files: Vec<Box<str>> = if !args.data_files.is_empty() {
         args.data_files.clone()
     } else if let Some(m) = manifest.as_ref() {
-        m.data
-            .input
-            .iter()
-            .map(|s| {
-                run_manifest::resolve(&manifest_dir, s)
-                    .to_string_lossy()
-                    .into_owned()
-                    .into_boxed_str()
-            })
-            .collect()
+        m.data_inputs(&manifest_dir)
     } else {
         anyhow::bail!(
             "no data files given and no --from manifest; \
@@ -466,18 +457,7 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
             if m.data.batch.is_empty() {
                 None
             } else {
-                Some(
-                    m.data
-                        .batch
-                        .iter()
-                        .map(|s| {
-                            run_manifest::resolve(&manifest_dir, s)
-                                .to_string_lossy()
-                                .into_owned()
-                                .into_boxed_str()
-                        })
-                        .collect(),
-                )
+                Some(m.data_batches(&manifest_dir))
             }
         })
     });

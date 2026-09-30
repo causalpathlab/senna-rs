@@ -246,6 +246,10 @@ impl Deck {
             n > 1
         };
         match k.code {
+            KeyCode::Char('r' | 'l') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.drawn = None;
+                app.refresh();
+            }
             KeyCode::Char('w') if several(app) => {
                 self.grid = true;
                 self.hover = self.at;
@@ -857,7 +861,7 @@ impl Deck {
     /// replace.
     fn default_name(&self, scope: Scope) -> String {
         let app = &self.apps[self.at];
-        let first = &self.apps[0].scene.data.prefix;
+        let first = here(&self.apps[0].scene.data.prefix);
         free_stem(&match scope {
             Scope::View => app.pdf_name(),
             Scope::Grid => format!("{first}.view.grid"),

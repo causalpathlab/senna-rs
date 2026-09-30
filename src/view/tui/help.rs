@@ -14,7 +14,7 @@ pub(super) enum Context {
     Merge,
     /// Typing a label or rationale.
     Prompt,
-    /// Typing the markers file for `lupin annotate`.
+    /// Browsing for the marker panel `lupin annotate` reads.
     MarkersFile,
     /// Confirming a relabel round before it goes to lupin.
     Submit,
@@ -84,7 +84,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             (",  .", "previous (source) / next annotation round"),
             (
                 "A",
-                "annotate this run with lupin (asks for a markers file; tab completes)",
+                "annotate this run with lupin: browse to a marker panel (★ fits the run best)",
             ),
         ],
     ),
@@ -128,6 +128,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "s",
                 "save as PDF: this view, or every run (one grid, or a page each); width, dpi, file name",
             ),
+            ("ctrl-r  ctrl-l", "reload the run from disk and redraw the screen"),
             ("q", "quit"),
         ],
     ),
@@ -170,7 +171,7 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "+  -  space",
-                "include in / exclude from the markers; clear",
+                "include in / exclude from the markers; clear (then the next feature)",
             ),
             ("a", "accept every proposal (?+ add, ?- drop)"),
             (
@@ -184,9 +185,9 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "L",
-                "label the cluster (target and rationale filled in; enter twice)",
+                "label the cluster (target and rationale filled in; enter twice), then on to the next undecided one",
             ),
-            ("K", "keep its current call"),
+            ("K", "keep its current call, then on to the next undecided one"),
             (
                 "M",
                 "merge mode: ↑ ↓ move, space choose, enter name the merged cluster, esc cancel",
@@ -196,7 +197,7 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "5. Move on, then finish",
         &[
-            ("]  [", "next / previous cluster (or click one)"),
+            ("→  ←  ]  [", "next / previous cluster (or click one)"),
             ("p", "ask lupin what everything staged would change"),
             ("S", "hand lupin everything as one round"),
             ("R  esc", "leave; the draft is kept for later"),
@@ -240,19 +241,15 @@ impl App {
                 "≈ marks clusters whose markers fit the same type   esc or M cancel   ? the steps",
             ],
             Context::Relabel => [
-                "] / [ next or previous cluster   ↑ ↓ choose a feature   enter show it   + / - include or exclude   a accept all ? proposals",
+                "→ ← next or previous cluster   ↑ ↓ choose a feature   enter show it   + / - include or exclude   a accept all ? proposals",
                 "tab target type   L label   K keep   M merge clusters   k pin names   p preview   S submit all   R leave   ? the steps",
             ],
             Context::Prompt => [
                 "type, or keep what is filled in   enter accepts   esc cancels",
                 "tab completes a known cell type (while typing the label)",
             ],
-            Context::MarkersFile => [
-                "type the path of a markers file (type, then its markers; TSV, or one comma per line)",
-                "tab completes the path   enter runs lupin annotate   esc cancels",
-            ],
             // The popup says what the keys do.
-            Context::Submit | Context::Recompute => ["", ""],
+            Context::Submit | Context::Recompute | Context::MarkersFile => ["", ""],
             Context::Search => [
                 "type part of a feature name   enter shows the first match   esc cancels",
                 "",

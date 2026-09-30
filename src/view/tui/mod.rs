@@ -6,6 +6,7 @@
 //! simply replaces the job.
 
 mod annotate;
+mod browse;
 mod decisions;
 mod draw;
 mod grid;
@@ -15,6 +16,7 @@ mod modal;
 mod recompute;
 mod relabel;
 
+pub use browse::pick_run;
 use decisions::Prompt;
 use modal::Modal;
 
@@ -40,6 +42,12 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 use std::time::Duration;
+
+/// A run prefix as a name in the directory the viewer runs from, where
+/// figures are saved unless a path is typed.
+fn here(prefix: &str) -> String {
+    files::name(std::path::Path::new(prefix))
+}
 
 fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
@@ -520,6 +528,18 @@ impl App {
         }
     }
 
+    /// Ctrl-R / Ctrl-L: read the run again and draw it afresh. In relabel
+    /// mode only the drawing: a reload would end the mode.
+    fn refresh(&mut self) {
+        if self.scene.review.is_some() {
+            self.message = Some("redrawn · the run reloads outside relabel mode".into());
+            self.restart();
+        } else {
+            let from = self.from.clone();
+            self.open_round(&from, "reloaded");
+        }
+    }
+
     /// Step to the source round (`back`) or to the round made from this one.
     fn step_round(&mut self, back: bool) {
         let round = self.scene.data.round.as_ref();
@@ -597,7 +617,7 @@ impl App {
         let s = self.scene.current();
         format!(
             "{}.view.{}.{}",
-            self.scene.data.prefix,
+            here(&self.scene.data.prefix),
             s.method,
             s.kind.slug()
         )

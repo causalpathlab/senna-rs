@@ -247,19 +247,11 @@ pub struct RestArgs {
 /// Resolve a file-list axis (counts or batches): a CLI override wins as-is;
 /// otherwise the manifest's recorded paths are resolved against the manifest
 /// directory. Shared by the count and batch axes.
-fn inherit_paths(cli: Option<&[Box<str>]>, manifest_rel: &[String], dir: &Path) -> Vec<Box<str>> {
-    match cli {
-        Some(paths) => paths.to_vec(),
-        None => manifest_rel
-            .iter()
-            .map(|p| {
-                senna::run_manifest::resolve(dir, p)
-                    .to_string_lossy()
-                    .into_owned()
-                    .into_boxed_str()
-            })
-            .collect(),
-    }
+fn inherit_paths(
+    cli: Option<&[Box<str>]>,
+    recorded: impl FnOnce() -> Vec<Box<str>>,
+) -> Vec<Box<str>> {
+    cli.map_or_else(recorded, <[_]>::to_vec)
 }
 
 pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
@@ -298,12 +290,12 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     let theta_full = theta_mat.mat.map(f32::exp); // log θ → θ
     let h = args.embedding_dim.resolve(None)?.unwrap_or(k);
 
-    let data_files = inherit_paths(args.data_files.as_deref(), &manifest.data.input, &dir);
+    let data_files = inherit_paths(args.data_files.as_deref(), || manifest.data_inputs(&dir));
     anyhow::ensure!(
         !data_files.is_empty(),
         "no count files: the --from manifest has an empty data.input and --data-files was not given"
     );
-    let batch_resolved = inherit_paths(args.batch_files.as_deref(), &manifest.data.batch, &dir);
+    let batch_resolved = inherit_paths(args.batch_files.as_deref(), || manifest.data_batches(&dir));
     let batch_files = (!batch_resolved.is_empty()).then_some(batch_resolved);
     let input_for_manifest: Vec<String> = data_files
         .iter()

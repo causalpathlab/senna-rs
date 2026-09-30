@@ -49,9 +49,11 @@ pub struct ViewArgs {
         long,
         short = 'f',
         num_args = 1..,
-        required = true,
-        help = "Run manifest(s) (`{out}.senna.json`); several open side by side (w shows the grid)",
+        help = "Run manifest(s) (`{out}.senna.json`); several open side by side (w shows the grid). \
+                Omitted: browse to one",
         long_help = "Run manifest(s) (`{out}.senna.json`).\n\
+                     Omitted, the view opens a file browser on the current directory\n\
+                     to choose one (not with --pdf, --relabel or --suggest).\n\
                      Every layout under `manifest.layout.methods` is available,\n\
                      together with clusters, annotation and topics the run carries.\n\
                      Several manifests (`-f a.senna.json b.senna.json`, or a glob)\n\
@@ -477,19 +479,41 @@ fn prepare_run(args: &ViewArgs, from: &str) -> anyhow::Result<()> {
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     use rayon::prelude::*;
+    let picked: Vec<Box<str>>;
+    let from: &[Box<str>] = if args.from.is_empty() {
+        anyhow::ensure!(
+            args.pdf.is_none() && !args.relabel && !args.suggest,
+            "--pdf, --relabel and --suggest need the run: pass -f <run>.senna.json"
+        );
+        let Some(path) = tui::pick_run()? else {
+            return Ok(());
+        };
+        // As typed: relative to the working directory when under it.
+        let path = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| {
+                path.strip_prefix(cwd)
+                    .ok()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .unwrap_or(path);
+        picked = vec![path.to_string_lossy().into()];
+        &picked
+    } else {
+        &args.from
+    };
     anyhow::ensure!(
-        !(args.relabel && args.from.len() > 1),
+        !(args.relabel && from.len() > 1),
         "--relabel reads one run; got {} manifests",
-        args.from.len()
+        from.len()
     );
     if !args.no_compute {
-        for from in &args.from {
-            prepare_run(args, from)?;
+        for f in from {
+            prepare_run(args, f)?;
         }
     }
     // Reading runs is independent work; the scenes are built in order.
-    let data = args
-        .from
+    let data = from
         .par_iter()
         .map(|f| Dataset::load(f))
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -510,7 +534,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     }
     if args.suggest {
         let several = scenes.len() > 1;
-        for (scene, from) in scenes.iter_mut().zip(&args.from) {
+        for (scene, from) in scenes.iter_mut().zip(from) {
             if several {
                 println!("== {from}");
             }
@@ -542,8 +566,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
             let vp = Viewport::fit(scene.current().points.bounds, w, h);
             deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
         } else {
-            let titles: Vec<String> = args
-                .from
+            let titles: Vec<String> = from
                 .iter()
                 .map(|f| files::name(std::path::Path::new(f.as_ref())))
                 .collect();
@@ -562,7 +585,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
 
     let sessions = scenes
         .into_iter()
-        .zip(&args.from)
+        .zip(from)
         .map(|(s, f)| (s, std::path::PathBuf::from(f.as_ref())))
         .collect();
     tui::run(

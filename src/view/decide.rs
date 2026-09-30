@@ -232,8 +232,11 @@ impl Drop for Rescore {
     }
 }
 
-/// Run `lupin annotate -f <run> -m <markers> -o <out>`: the run's first
-/// annotation round, written as `{out}.senna.json`. Each line lupin logs is
+/// Run `lupin annotate -f <run> -m <markers> -o <out> --method enrichment`:
+/// the run's first annotation round, written as `{out}.senna.json`.
+/// Enrichment, not lupin's default of projection for co-embedded runs (bge,
+/// fne, gem), because only enrichment writes the per-cluster gene evidence
+/// relabel mode reads. Each line lupin logs is
 /// put in `progress` as it comes. A failure lupin explains comes back as
 /// `Refused`; `Err` means lupin could not be run at all.
 pub fn annotate(
@@ -250,6 +253,7 @@ pub fn annotate(
         .arg(markers)
         .arg("-o")
         .arg(out)
+        .args(["--method", "enrichment"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

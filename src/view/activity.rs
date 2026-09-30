@@ -391,12 +391,7 @@ impl Activity {
     fn load_observed(&self) -> anyhow::Result<Observed> {
         let m = &self.manifest;
         anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
-        let files: Vec<Box<str>> = m
-            .data
-            .input
-            .iter()
-            .map(|p| run_manifest::resolve(&self.dir, p).to_string_lossy().into())
-            .collect();
+        let files = m.data_inputs(&self.dir);
         // Observed counts are the one thing here that needs the data.
         if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
             anyhow::bail!("the data is not here ({gone})");

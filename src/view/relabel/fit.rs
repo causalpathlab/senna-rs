@@ -97,6 +97,13 @@ impl Evidence {
         ranked
     }
 
+    /// Whether type `t`'s markers list feature `f`.
+    pub(crate) fn lists(&self, t: &str, f: &str) -> bool {
+        self.markers
+            .get(t)
+            .is_some_and(|ms| ms.iter().any(|m| m.as_ref() == f))
+    }
+
     /// Top DE features, then each candidate's best markers, with proposals.
     /// `−` only for the labelled type: a low marker of another type faults
     /// the type.
@@ -108,11 +115,7 @@ impl Evidence {
         labelled: Option<&str>,
     ) -> Vec<Row> {
         let markers = &self.markers;
-        let lists = |t: &str, f: &str| {
-            markers
-                .get(t)
-                .is_some_and(|ms| ms.iter().any(|m| m.as_ref() == f))
-        };
+        let lists = |t: &str, f: &str| self.lists(t, f);
         let marker_of = |f: &str| -> Vec<String> {
             candidates.iter().filter(|t| lists(t, f)).cloned().collect()
         };
