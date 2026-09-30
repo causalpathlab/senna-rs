@@ -164,7 +164,7 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "tab",
-                "choose the target type (the best fit is chosen for you)",
+                "choose the working type: + adds markers to it, L offers it as the label (the best fit is chosen for you)",
             ),
         ],
     ),
@@ -200,7 +200,7 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "L",
-                "label the cluster (target and rationale filled in; enter twice), then on to the next undecided one",
+                "label the cluster (the working type and a rationale filled in; enter twice), then on to the next undecided one",
             ),
             ("K", "keep its current call, then on to the next undecided one"),
             (
@@ -216,6 +216,13 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
             ("p", "ask lupin what everything staged would change"),
             ("S", "hand lupin everything as one round"),
             ("R  esc", "leave; the draft is kept for later"),
+        ],
+    ),
+    (
+        "How the keys read",
+        &[
+            ("L K M S R", "uppercase decides or writes: label, keep, merge, submit, leave"),
+            ("+ - a p k", "lowercase looks or edits the draft: marks, proposals, preview, names"),
         ],
     ),
 ];
@@ -259,7 +266,7 @@ impl App {
             ],
             Context::Relabel => [
                 "→ ← next or previous cluster   ↑ ↓ choose a feature   enter show it   + / - include or exclude   a accept all ? proposals",
-                "tab target type   L label   K keep   M merge clusters   k pin names   p preview   S submit all   R leave   ? the steps",
+                "tab working type   L label   K keep   M merge clusters   k pin names   p preview   S submit all   R leave   ? the steps",
             ],
             Context::Prompt => [
                 "type, or keep what is filled in   enter accepts   esc cancels",

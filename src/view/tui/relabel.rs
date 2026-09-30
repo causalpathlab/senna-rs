@@ -76,6 +76,10 @@ impl App {
             KeyCode::Char('p') => self.send_draft(Mode::Preview),
             KeyCode::Char('S') => self.confirm_submit(),
             KeyCode::Esc | KeyCode::Char('R') => self.toggle_review(),
+            // Decisions are uppercase; the lowercase letter is a slip.
+            KeyCode::Char('l' | 'm') => {
+                self.message = Some("decisions are uppercase: L labels, K keeps, M merges".into());
+            }
             _ => return false,
         }
         true

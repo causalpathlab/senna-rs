@@ -555,16 +555,11 @@ impl App {
         }
     }
 
-    /// Ctrl-R / Ctrl-L: read the run again and draw it afresh. In relabel
-    /// mode only the drawing: a reload would end the mode.
+    /// Ctrl-R / Ctrl-L: read the run again and draw it afresh (relabel
+    /// mode, if on, stays on at the same cluster).
     fn refresh(&mut self) {
-        if self.scene.review.is_some() {
-            self.message = Some("redrawn · the run reloads outside relabel mode".into());
-            self.restart();
-        } else {
-            let from = self.from.clone();
-            self.open_round(&from, "reloaded");
-        }
+        let from = self.from.clone();
+        self.open_round(&from, "reloaded");
     }
 
     /// Step to the source round (`back`) or to the round made from this one.

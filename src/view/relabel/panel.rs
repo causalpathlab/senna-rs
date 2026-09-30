@@ -168,8 +168,13 @@ impl Scene {
                 m.label
             ));
         }
-        out.push(format!("target {}", r.target.as_deref().unwrap_or("-")));
-        out.push("markers fit here (tab picks the target):".into());
+        // One type, two uses, both said: `+` adds markers to it, `L` offers
+        // it as the label.
+        out.push(match r.target.as_deref() {
+            Some(t) => format!("working type {t} · + adds markers to it · L labels as it"),
+            None => "no working type yet (tab picks one)".into(),
+        });
+        out.push("markers fit here (tab picks the working type):".into());
         for c in &r.candidates {
             let fit = r.fits.iter().find(|f| &f.0 == c);
             let mark = if r.target.as_ref() == Some(c) {
@@ -184,11 +189,11 @@ impl Scene {
         }
         out.extend(self.live_lines());
         out.push(String::new());
-        // Which type a mark edits, said once: `+` the target, `−` the type
-        // listing the feature.
+        // Which type a mark edits, said once: `+` the working type, `−` the
+        // type listing the feature.
         out.push(format!(
             "+ adds to {} · − drops from its type",
-            r.target.as_deref().unwrap_or("the target (tab)")
+            r.target.as_deref().unwrap_or("the working type (tab)")
         ));
         out.push("   mark feature        lfc  marker of".into());
         for (k, row) in r.rows.iter().enumerate() {

@@ -749,6 +749,33 @@ mod tests {
     }
 
     #[test]
+    fn reloading_the_same_round_keeps_relabel_mode_and_its_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.senna.json");
+        std::fs::write(&path, "{}").unwrap();
+        let round = || {
+            let m = senna::run_manifest::RunManifest::new(senna::run_manifest::RunKind::Svd, "r");
+            rounds::Round::load(&m, dir.path(), &path)
+        };
+        let mut s = scene();
+        s.data.round = Some(round());
+        s.enter_review().unwrap();
+        s.review.as_mut().unwrap().draft.cluster(1).verdict = Some(review::Verdict::Keep {
+            label: "CT1".into(),
+            rationale: "clear".into(),
+        });
+        let at = s.review.as_ref().unwrap().cluster();
+
+        let mut again = scene().data;
+        again.round = Some(round());
+        s.replace_data(again);
+        let r = s.review.as_ref().expect("still relabelling");
+        assert_eq!(r.cluster(), at);
+        assert!(r.draft.clusters[&1].verdict.is_some());
+        assert!(s.note.as_deref().unwrap().contains("still relabelling"));
+    }
+
+    #[test]
     fn a_copy_shows_the_same_view_then_goes_its_own_way() {
         let mut s = scene();
         s.set_space(2);
