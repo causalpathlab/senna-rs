@@ -30,7 +30,7 @@ impl App {
         // would change it, or the round, wait — in merge mode too.
         if matches!(
             k.code,
-            KeyCode::Char('c' | ',' | '.' | 'v') | KeyCode::BackTab
+            KeyCode::Char('c' | ',' | '.' | 'H') | KeyCode::BackTab
         ) {
             self.message = Some("leave relabel mode first (R)".into());
             return true;

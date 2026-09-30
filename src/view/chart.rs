@@ -7,9 +7,9 @@
 //!   one colour each and one order everywhere (most prevalent first); inside
 //!   a panel, cells go by their dominant topic, then by how dominant it is.
 //! - **heatmap**: the top features of each group × the groups. A group's
-//!   features are those whose model level there most exceeds the next-highest
-//!   group's, so each feature peaks in its own group and the rows fall into
-//!   a diagonal. Each cell of the heatmap is the
+//!   features are those whose level there most exceeds the next-highest
+//!   group's, so each peaks in its own group and the rows fall into a
+//!   diagonal: the model proposes candidates, the values shown choose. Each cell of the heatmap is the
 //!   group's mean `ln(1 + count)` from the data files (the model's expected
 //!   level when they cannot be read), z-scored per feature across the groups
 //!   and clipped to `±CLIP`.
@@ -25,6 +25,9 @@ use super::Scene;
 /// z-scores are clipped to this, so one extreme group cannot wash out the
 /// rest of the colours.
 pub const CLIP: f32 = 2.5;
+/// Candidates the model proposes per feature shown, for the counts to
+/// choose from.
+const CANDIDATES: usize = 5;
 /// Top features per group to begin with, and the range `+` / `-` allow.
 pub const TOP_START: usize = 10;
 const TOP_RANGE: (usize, usize) = (1, 100);
@@ -121,7 +124,7 @@ impl Scene {
             ..Chart::new(kind)
         });
         self.note = Some(match next {
-            Some(k) => format!("{} · v next · c groups by another grouping", k.name()),
+            Some(k) => format!("{} · H next · c groups by another grouping", k.name()),
             None => "back to the map".into(),
         });
     }
@@ -205,10 +208,20 @@ impl Scene {
             .ok_or("no manifest to read the model from")?;
         let names = &data.spaces[space].points.names;
         let sums = activity.group_sums(space, names, &groups, n)?;
+        // The model proposes candidates cheaply, for every feature; the
+        // values shown (the counts, when there are any) choose among them,
+        // so a row peaks in its group in what is drawn, and a feature the
+        // data files lack is never picked.
         let (levels_fg, all) = activity.group_levels(&sums)?;
-        let picked = pick_top(&margins(&levels_fg, n), top);
-        let features: Vec<Box<str>> = picked.iter().map(|&(f, _)| all[f].clone()).collect();
-        let (means, source) = activity.group_means(space, names, &groups, n, &features)?;
+        let proposed = pick_top(&own_peaks(margins(&levels_fg, n)), top * CANDIDATES);
+        let pool: Vec<Box<str>> = proposed.iter().map(|&(f, _)| all[f].clone()).collect();
+        let (pool_means, source) = activity.group_means(space, names, &groups, n, &pool)?;
+        let picked = pick_top(&own_peaks(margins(&pool_means, n)), top);
+        let features: Vec<Box<str>> = picked.iter().map(|&(i, _)| pool[i].clone()).collect();
+        let means: Vec<f32> = picked
+            .iter()
+            .flat_map(|&(i, _)| pool_means[i * n..(i + 1) * n].iter().copied())
+            .collect();
         // Only groups with cells in view get a column.
         let mut size = vec![0usize; n];
         for &g in &groups {
@@ -351,6 +364,17 @@ fn margins(levels: &[f32], n: usize) -> Vec<Vec<f32>> {
         }
     }
     out
+}
+
+/// Margins with those at or below zero dropped: a feature counts only for
+/// the group it peaks in.
+fn own_peaks(mut m: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+    for v in m.iter_mut().flatten() {
+        if v.is_nan() || *v <= 0.0 {
+            *v = f32::NAN;
+        }
+    }
+    m
 }
 
 /// Each group's top `top` features by score, groups in order, a feature

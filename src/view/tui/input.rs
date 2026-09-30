@@ -86,7 +86,7 @@ impl App {
             KeyCode::Char('-' | '_') => {
                 self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
             }
-            KeyCode::Char('v') => {
+            KeyCode::Char('H') => {
                 self.change_text(Scene::cycle_chart);
                 self.restart();
             }
@@ -96,7 +96,7 @@ impl App {
             }
             KeyCode::Char('z') => self.start_zoom(),
             KeyCode::Char('n') => self.change(Scene::suggest),
-            KeyCode::Char('L' | 'M' | 'K' | 'D') => {
+            KeyCode::Char('v' | 'L' | 'M' | 'K' | 'D') => {
                 self.message = Some("decisions are made in relabel mode: press R".into());
             }
             KeyCode::Char('b') => {

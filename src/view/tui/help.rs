@@ -80,7 +80,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         "Charts",
         &[
             (
-                "v",
+                "H",
                 "structure plot (topic runs: each cell's topic mixture, a panel per group), heatmap, back to the map",
             ),
             (
@@ -266,7 +266,7 @@ impl App {
                 "tab completes a known cell type (while typing the label)",
             ],
             Context::Chart => [
-                "v next chart (structure plot, heatmap, map)   c group by another grouping   + / - features per group (heatmap)",
+                "H next chart (structure plot, heatmap, map)   c group by another grouping   + / - features per group (heatmap)",
                 "s save PDF   ctrl-r redraw   ? all keys   q quit",
             ],
             // The popup says what the keys do.

@@ -59,6 +59,10 @@ pub fn run(
     graphics: Graphics,
     lupin: String,
 ) -> anyhow::Result<()> {
+    // Log lines written to the terminal would land over the screen: none
+    // while it is ours. What matters reaches the status line instead.
+    let level = log::max_level();
+    log::set_max_level(log::LevelFilter::Off);
     let mut terminal = ratatui::init();
     let result = (|| {
         // A terminal that never answers must not stall startup; block
@@ -88,6 +92,7 @@ pub fn run(
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
+    log::set_max_level(level);
     result
 }
 

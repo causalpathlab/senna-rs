@@ -140,7 +140,7 @@ pub struct ViewArgs {
     #[arg(
         long,
         value_enum,
-        help = "Start on a chart instead of the map: structure (topic runs) or heatmap (`v` in the view)"
+        help = "Start on a chart instead of the map: structure (topic runs) or heatmap (`H` in the view)"
     )]
     pub chart: Option<chart::Kind>,
 
@@ -259,7 +259,7 @@ pub(crate) struct Scene {
     /// The run's feature embedding, read on the first click on a feature.
     feature_embedding: Option<Result<features::FeatureEmbedding, String>>,
     pub review: Option<relabel::Review>,
-    /// A chart drawn in place of the map (`v`), when one is on.
+    /// A chart drawn in place of the map (`H`), when one is on.
     pub chart: Option<chart::Chart>,
     /// Features near the last clicked cell, and sets locked on screen.
     pub near: Option<features::Near>,

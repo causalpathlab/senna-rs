@@ -431,6 +431,8 @@ pub fn shown(p: &Path) -> String {
 pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
     let here = std::env::current_dir()?;
     let mut b = Browser::open(here, Want::Runs, None);
+    let level = log::max_level();
+    log::set_max_level(log::LevelFilter::Off);
     let mut terminal = ratatui::init();
     let picked = (|| loop {
         terminal.draw(|f| {
@@ -454,6 +456,7 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
         }
     })();
     ratatui::restore();
+    log::set_max_level(level);
     picked
 }
 
