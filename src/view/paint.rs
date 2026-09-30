@@ -15,6 +15,7 @@ impl Scene {
                 styles: &[],
                 focus: None,
                 selected: None,
+                cursor: None,
                 muted: true,
                 size: 0.8 * self.scale,
                 levels: None,
@@ -25,12 +26,14 @@ impl Scene {
         let shown = self.current_shown();
         let merge = self.review.as_ref().and_then(|r| r.merge.as_ref());
         let selected = merge.map(|m| m.levels.as_slice());
+        let cursor = self.merge_cursor_group();
         layers.push(Paint {
             points: &space.points,
             groups: self.groups(),
             styles: &self.styles,
             focus: self.focus,
             selected,
+            cursor,
             muted: false,
             size: self.scale * if space.backdrop.is_some() { 1.5 } else { 1.0 },
             levels: shown.map(|s| (&s.levels, self.ramp.as_slice())),
@@ -45,6 +48,7 @@ impl Scene {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 m.chosen.hash(&mut h);
+                cursor.hash(&mut h);
                 h.finish() | 1
             }),
             false,
@@ -127,7 +131,7 @@ impl Scene {
 
     /// Text height on the map for a terminal cell `cell_px` tall: text grows
     /// and shrinks with the dots.
-    fn text_px(&self, cell_px: f32) -> f32 {
+    pub(super) fn text_px(&self, cell_px: f32) -> f32 {
         cell_px * self.scale
     }
 

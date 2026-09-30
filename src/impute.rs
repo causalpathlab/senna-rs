@@ -339,7 +339,7 @@ fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<R
     let (data_files, multiome) = match args.reference_data.clone() {
         Some(files) => (files, None),
         None => {
-            let files: Vec<Box<str>> = manifest.data.input.iter().map(|s| to_box(s)).collect();
+            let files = manifest.data_inputs(&dir);
             anyhow::ensure!(
                 !files.is_empty(),
                 "reference run `{prefix}` records no data files; pass --reference-data"

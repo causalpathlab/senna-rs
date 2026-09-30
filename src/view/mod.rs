@@ -1,6 +1,7 @@
 //! `senna view`: a run's layouts, coloured by its groupings, in the terminal.
 
 mod activity;
+mod chart;
 mod color;
 mod data;
 mod decide;
@@ -49,9 +50,11 @@ pub struct ViewArgs {
         long,
         short = 'f',
         num_args = 1..,
-        required = true,
-        help = "Run manifest(s) (`{out}.senna.json`); several open side by side (w shows the grid)",
+        help = "Run manifest(s) (`{out}.senna.json`); several open side by side (w shows the grid). \
+                Omitted: browse to one",
         long_help = "Run manifest(s) (`{out}.senna.json`).\n\
+                     Omitted, the view opens a file browser on the current directory\n\
+                     to choose one (not with --pdf or --relabel).\n\
                      Every layout under `manifest.layout.methods` is available,\n\
                      together with clusters, annotation and topics the run carries.\n\
                      Several manifests (`-f a.senna.json b.senna.json`, or a glob)\n\
@@ -136,9 +139,10 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        help = "Print suggested features for the starting view (with --pdf, show the top one)"
+        value_enum,
+        help = "Start on a chart instead of the map: structure (runs with topics, bge included) or heatmap (`H` in the view)"
     )]
-    pub suggest: bool,
+    pub chart: Option<chart::Kind>,
 
     #[arg(
         long,
@@ -255,6 +259,8 @@ pub(crate) struct Scene {
     /// The run's feature embedding, read on the first click on a feature.
     feature_embedding: Option<Result<features::FeatureEmbedding, String>>,
     pub review: Option<relabel::Review>,
+    /// A chart drawn in place of the map (`H`), when one is on.
+    pub chart: Option<chart::Chart>,
     /// Features near the last clicked cell, and sets locked on screen.
     pub near: Option<features::Near>,
     pub locked: Vec<features::Near>,
@@ -288,6 +294,7 @@ impl Scene {
             feature_embedding: None,
             suggestions: None,
             review: None,
+            chart: None,
             near: None,
             locked: Vec::new(),
             orders: std::cell::RefCell::new(Vec::new()),
@@ -347,6 +354,7 @@ impl Scene {
             show_labels: self.show_labels,
             text_scale: self.text_scale,
             scale: self.scale,
+            chart: self.chart.as_ref().map(chart::Chart::like),
             hover: None,
             label_hits: std::cell::RefCell::default(),
             groups: None,
@@ -477,19 +485,32 @@ fn prepare_run(args: &ViewArgs, from: &str) -> anyhow::Result<()> {
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     use rayon::prelude::*;
+    let picked: Vec<Box<str>>;
+    let from: &[Box<str>] = if args.from.is_empty() {
+        anyhow::ensure!(
+            args.pdf.is_none() && !args.relabel,
+            "--pdf and --relabel need the run: pass -f <run>.senna.json"
+        );
+        let Some(path) = tui::pick_run()? else {
+            return Ok(());
+        };
+        picked = vec![tui::shown(&path).into()];
+        &picked
+    } else {
+        &args.from
+    };
     anyhow::ensure!(
-        !(args.relabel && args.from.len() > 1),
+        !(args.relabel && from.len() > 1),
         "--relabel reads one run; got {} manifests",
-        args.from.len()
+        from.len()
     );
     if !args.no_compute {
-        for from in &args.from {
-            prepare_run(args, from)?;
+        for f in from {
+            prepare_run(args, f)?;
         }
     }
     // Reading runs is independent work; the scenes are built in order.
-    let data = args
-        .from
+    let data = from
         .par_iter()
         .map(|f| Dataset::load(f))
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -508,17 +529,9 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         scene.leave_review();
         return Ok(());
     }
-    if args.suggest {
-        let several = scenes.len() > 1;
-        for (scene, from) in scenes.iter_mut().zip(&args.from) {
-            if several {
-                println!("== {from}");
-            }
-            scene.suggest();
-            match scene.suggestion_lines() {
-                Some(lines) => lines.iter().for_each(|l| println!("{l}")),
-                None => println!("{}", scene.note.take().unwrap_or_default()),
-            }
+    if let Some(kind) = args.chart {
+        for scene in &mut scenes {
+            scene.start_chart(kind);
         }
     }
 
@@ -542,8 +555,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
             let vp = Viewport::fit(scene.current().points.bounds, w, h);
             deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
         } else {
-            let titles: Vec<String> = args
-                .from
+            let titles: Vec<String> = from
                 .iter()
                 .map(|f| files::name(std::path::Path::new(f.as_ref())))
                 .collect();
@@ -562,7 +574,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
 
     let sessions = scenes
         .into_iter()
-        .zip(&args.from)
+        .zip(from)
         .map(|(s, f)| (s, std::path::PathBuf::from(f.as_ref())))
         .collect();
     tui::run(
@@ -647,7 +659,7 @@ mod tests {
             observed: false,
             focus: None,
             zoom_into: None,
-            suggest: false,
+            chart: None,
             relabel: false,
             lupin: None,
             no_compute: true,
@@ -734,6 +746,33 @@ mod tests {
             .unwrap()
             .contains("draft stays with r.senna.json"));
         assert!(!review::Draft::load(&round).is_empty());
+    }
+
+    #[test]
+    fn reloading_the_same_round_keeps_relabel_mode_and_its_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.senna.json");
+        std::fs::write(&path, "{}").unwrap();
+        let round = || {
+            let m = senna::run_manifest::RunManifest::new(senna::run_manifest::RunKind::Svd, "r");
+            rounds::Round::load(&m, dir.path(), &path)
+        };
+        let mut s = scene();
+        s.data.round = Some(round());
+        s.enter_review().unwrap();
+        s.review.as_mut().unwrap().draft.cluster(1).verdict = Some(review::Verdict::Keep {
+            label: "CT1".into(),
+            rationale: "clear".into(),
+        });
+        let at = s.review.as_ref().unwrap().cluster();
+
+        let mut again = scene().data;
+        again.round = Some(round());
+        s.replace_data(again);
+        let r = s.review.as_ref().expect("still relabelling");
+        assert_eq!(r.cluster(), at);
+        assert!(r.draft.clusters[&1].verdict.is_some());
+        assert!(s.note.as_deref().unwrap().contains("still relabelling"));
     }
 
     #[test]

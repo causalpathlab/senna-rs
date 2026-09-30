@@ -1119,6 +1119,80 @@ impl RunManifest {
         }
     }
 
+    /// The run's input files (`data.input`), found from `manifest_dir` (see
+    /// [`Self::data_file`]).
+    #[must_use]
+    pub fn data_inputs(&self, manifest_dir: &Path) -> Vec<Box<str>> {
+        self.data_files(manifest_dir, &self.data.input)
+    }
+
+    /// The run's batch files (`data.batch`), found as [`Self::data_inputs`].
+    #[must_use]
+    pub fn data_batches(&self, manifest_dir: &Path) -> Vec<Box<str>> {
+        self.data_files(manifest_dir, &self.data.batch)
+    }
+
+    fn data_files(&self, manifest_dir: &Path, recorded: &[String]) -> Vec<Box<str>> {
+        recorded
+            .iter()
+            .map(|p| {
+                self.data_file(manifest_dir, p)
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_boxed_str()
+            })
+            .collect()
+    }
+
+    /// A data file the run recorded, found here even when the run was
+    /// trained on another machine or the tree has moved: as recorded
+    /// ([`resolve`]); else at the same place relative to the run's
+    /// directory as it was relative to the training `prefix`'s; else under
+    /// the manifest's directory or an ancestor of it, by the longest tail of
+    /// the recorded path that exists there. Unfound, as recorded. The same
+    /// rule as lupin's, so both find a moved run's data alike.
+    #[must_use]
+    pub fn data_file(&self, manifest_dir: &Path, recorded: &str) -> PathBuf {
+        let given = resolve(manifest_dir, recorded);
+        if given.exists() {
+            return given;
+        }
+        // Lexically absolute, not canonical: the recorded paths are as
+        // written, so resolving symlinks here alone would skew the rebase.
+        let here = normalize(
+            &std::path::absolute(manifest_dir).unwrap_or_else(|_| manifest_dir.to_path_buf()),
+        );
+        let recorded_abs = normalize(Path::new(recorded));
+        let trained_in = Path::new(&self.prefix)
+            .is_absolute()
+            .then(|| normalize(Path::new(&self.prefix)))
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        let rebased = trained_in
+            .filter(|_| recorded_abs.is_absolute())
+            .map(|old| normalize(&here.join(relative_to(&recorded_abs, &old))))
+            .filter(|p| p.exists());
+        let found = rebased.or_else(|| {
+            let parts: Vec<_> = recorded_abs
+                .components()
+                .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                .collect();
+            // At least the file and its folder must match, so an unrelated
+            // file of the same name elsewhere is not taken for the data.
+            let min = parts.len().min(2);
+            (0..=parts.len().checked_sub(min.max(1))?).find_map(|skip| {
+                let tail: PathBuf = parts[skip..].iter().collect();
+                here.ancestors().map(|a| a.join(&tail)).find(|p| p.exists())
+            })
+        });
+        match found {
+            Some(p) => {
+                log::warn!("{recorded} is not here; using {}", p.display());
+                p
+            }
+            None => given,
+        }
+    }
+
     /// Read the manifest and return it together with its parent
     /// directory (used to resolve the relative paths inside).
     pub fn load(path: &Path) -> anyhow::Result<(Self, PathBuf)> {
@@ -1254,6 +1328,37 @@ pub fn resolve(manifest_dir: &Path, rel: &str) -> PathBuf {
     } else {
         manifest_dir.join(p)
     }
+}
+
+/// `p` with `.` and `..` folded away, without touching the file system.
+fn normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            // `..` cancels a name before it; after nothing, a root or
+            // another `..` it stays.
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            },
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `p` as a path from `base`, both absolute and normalized.
+fn relative_to(p: &Path, base: &Path) -> PathBuf {
+    let (pc, bc): (Vec<_>, Vec<_>) = (p.components().collect(), base.components().collect());
+    let common = pc.iter().zip(&bc).take_while(|(a, b)| a == b).count();
+    let mut out: PathBuf = bc[common..].iter().map(|_| "..").collect();
+    out.extend(&pc[common..]);
+    out
 }
 
 /// Derive an output prefix from a `--from` manifest path when `--out` was
@@ -1486,8 +1591,8 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         );
     }
     let to_box = |s: &str| -> Box<str> { resolve(&dir, s).to_string_lossy().into_owned().into() };
-    let data_files: Vec<Box<str>> = m.data.input.iter().map(|s| to_box(s)).collect();
-    let batch_files: Vec<Box<str>> = m.data.batch.iter().map(|s| to_box(s)).collect();
+    let data_files = m.data_inputs(&dir);
+    let batch_files = m.data_batches(&dir);
     let feature_embedding_prefix: Box<str> = to_box(&m.prefix);
     let cell_to_pb_path: Option<Box<str>> = m.outputs.cell_to_pb.as_deref().map(to_box);
     let reload =
@@ -1720,6 +1825,57 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_folds_dots_without_losing_leading_parents() {
+        assert_eq!(
+            normalize(Path::new("../../a/b")),
+            PathBuf::from("../../a/b")
+        );
+        assert_eq!(normalize(Path::new("a/./b/../c")), PathBuf::from("a/c"));
+        assert_eq!(normalize(Path::new("/../a")), PathBuf::from("/a"));
+        assert_eq!(normalize(Path::new("a/../../b")), PathBuf::from("../b"));
+    }
+
+    #[test]
+    fn a_file_of_the_same_name_alone_is_not_taken_for_moved_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let out = root.join("proj/out");
+        fs::create_dir_all(&out).unwrap();
+        // Only the bare name exists above the run, in another folder.
+        fs::create_dir_all(root.join("other/x.zarr")).unwrap();
+        let m = RunManifest::new(RunKind::Svd, "/elsewhere/proj/out/run");
+        let recorded = "/elsewhere/proj/data/x.zarr";
+        assert_eq!(m.data_file(&out, recorded), PathBuf::from(recorded));
+    }
+
+    #[test]
+    fn a_moved_runs_data_is_found_where_it_now_sits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        // Trained at /elsewhere/proj/out/run with data at /elsewhere/proj/data/x.zarr;
+        // the project now sits under `root`.
+        let out = root.join("proj/out");
+        let data = root.join("proj/data/x.zarr");
+        fs::create_dir_all(&out).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        let m = RunManifest::new(RunKind::Svd, "/elsewhere/proj/out/run");
+
+        // Same place relative to the training prefix.
+        assert_eq!(m.data_file(&out, "/elsewhere/proj/data/x.zarr"), data);
+        // A relative path that no longer resolves: its tail under an ancestor.
+        assert_eq!(m.data_file(&out, "../../old/data/x.zarr"), data);
+        // As recorded when it exists, and when nothing is found.
+        assert_eq!(
+            m.data_file(&out, "../data/x.zarr"),
+            out.join("../data/x.zarr")
+        );
+        assert_eq!(
+            m.data_file(&out, "/nowhere/y.zarr"),
+            PathBuf::from("/nowhere/y.zarr")
+        );
+    }
 
     #[test]
     fn round_trip() {

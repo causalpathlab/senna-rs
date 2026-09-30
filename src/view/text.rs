@@ -73,6 +73,9 @@ pub struct TextRun {
     pub bold: bool,
     /// Centred on its box (a map label) rather than starting at its left.
     pub centred: bool,
+    /// Read bottom to top, turned a quarter left: `x` is then the left of
+    /// the column the text stands in and `y` its bottom.
+    pub vertical: bool,
     pub ink: Rgb,
     pub bg: Rgb,
 }
@@ -114,13 +117,70 @@ pub fn draw_aligned<C: Canvas>(
             line: font.line_height() as f32,
             bold: matches!(font.weight, FontWeight::Bold),
             centred,
+            vertical: false,
             ink,
             bg,
         });
         return;
     }
-    let (w, h) = canvas.size();
     let adv = font.advance() as i32;
+    stamp(
+        canvas,
+        font,
+        s,
+        |k, col, row| (x + k * adv + col, y + row),
+        ink,
+        bg,
+    );
+}
+
+/// `s` read bottom to top, turned a quarter left, standing in a column
+/// whose left is `x` and whose bottom is `y` (a heatmap's column names).
+pub fn draw_vertical<C: Canvas>(
+    canvas: &mut C,
+    font: Font,
+    s: &str,
+    (x, y): (i32, i32),
+    ink: Rgb,
+    bg: Rgb,
+) {
+    if let Some(sink) = canvas.text_sink() {
+        sink.push(TextRun {
+            text: s.to_string(),
+            x: x as f32,
+            y: y as f32,
+            w: font.width(s) as f32,
+            line: font.line_height() as f32,
+            bold: matches!(font.weight, FontWeight::Bold),
+            centred: false,
+            vertical: true,
+            ink,
+            bg,
+        });
+        return;
+    }
+    let adv = font.advance() as i32;
+    stamp(
+        canvas,
+        font,
+        s,
+        |k, col, row| (x + row, y - 1 - k * adv - col),
+        ink,
+        bg,
+    );
+}
+
+/// Blend the glyphs of `s` into `canvas`, glyph `k`'s pixel `(col, row)`
+/// going where `place` puts it: a halo in `bg` first, then the ink.
+fn stamp<C: Canvas>(
+    canvas: &mut C,
+    font: Font,
+    s: &str,
+    place: impl Fn(i32, i32, i32) -> (i32, i32),
+    ink: Rgb,
+    bg: Rgb,
+) {
+    let (w, h) = canvas.size();
     let glyphs: Vec<Option<Vec<Vec<u8>>>> = s
         .chars()
         .map(|ch| {
@@ -136,14 +196,13 @@ pub fn draw_aligned<C: Canvas>(
     for pass in 0..2 {
         for (k, g) in glyphs.iter().enumerate() {
             let Some(g) = g else { continue };
-            let gx = x + k as i32 * adv;
             for (row, line) in g.iter().enumerate() {
                 for (col, &v) in line.iter().enumerate() {
                     if v < 24 {
                         continue;
                     }
                     let a = f32::from(v) / 255.0;
-                    let (px, py) = (gx + col as i32, y + row as i32);
+                    let (px, py) = place(k as i32, col as i32, row as i32);
                     if pass == 0 {
                         for dy in -halo..=halo {
                             for dx in -halo..=halo {

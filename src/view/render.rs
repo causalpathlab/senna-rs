@@ -95,6 +95,9 @@ pub struct Paint<'a> {
     /// Groups picked out (by group id), drawn in colour and on top; the rest
     /// muted. Overrides `focus`.
     pub selected: Option<&'a [bool]>,
+    /// The group under the merge cursor: drawn in ink, on top of the rest,
+    /// so where it lies shows whether or not it is chosen.
+    pub cursor: Option<u32>,
     /// Draw everything muted (a backdrop layer).
     pub muted: bool,
     /// Radius multiplier.
@@ -116,7 +119,7 @@ struct Mark {
 impl Paint<'_> {
     /// The mark for point `i`, or `None` when its group is hidden.
     #[inline]
-    fn mark(&self, i: usize, muted: Rgb) -> Option<Mark> {
+    fn mark(&self, i: usize, muted: Rgb, ink: Rgb) -> Option<Mark> {
         let plain = |colour| Mark {
             colour,
             alpha: 1.0,
@@ -142,6 +145,14 @@ impl Paint<'_> {
         if st.hidden {
             return None;
         }
+        if self.cursor == Some(g) {
+            return Some(Mark {
+                colour: ink,
+                alpha: 1.0,
+                shape: st.shape,
+                size: st.size,
+            });
+        }
         let picked = match self.selected {
             Some(sel) => sel.get(g as usize).copied().unwrap_or(false),
             None => self.focus.is_none_or(|f| f == g),
@@ -162,6 +173,9 @@ impl Paint<'_> {
             return 0;
         }
         let g = self.groups.map_or(NONE, |g| g[i]);
+        if g != NONE && self.cursor == Some(g) {
+            return 3;
+        }
         if let (Some(sel), true) = (self.selected, g != NONE) {
             return if sel.get(g as usize).copied().unwrap_or(false) {
                 2
@@ -188,7 +202,7 @@ impl Paint<'_> {
             o.sort_by(|&a, &b| t[a as usize].total_cmp(&t[b as usize]));
             return o;
         }
-        let mut buckets: [Vec<u32>; 3] = Default::default();
+        let mut buckets: [Vec<u32>; 4] = Default::default();
         for &i in order {
             buckets[self.rank(i as usize) as usize].push(i);
         }
@@ -286,6 +300,7 @@ impl Job {
     /// Draw the next chunk. Returns `true` once every layer is drawn.
     pub fn step(&mut self, layers: &[Paint<'_>]) -> bool {
         let muted = color::linear_rgb(color::MUTED);
+        let ink = color::linear_rgb(color::TEXT);
         let mut budget = self.chunk;
         while budget > 0 && self.layer < layers.len() {
             let paint = &layers[self.layer];
@@ -300,7 +315,7 @@ impl Job {
                 if x < -pad || y < -pad || x > w + pad || y > h + pad {
                     continue;
                 }
-                if let Some(m) = paint.mark(i, muted) {
+                if let Some(m) = paint.mark(i, muted, ink) {
                     self.stamp(x, y, base * m.size, &m);
                 }
             }
@@ -347,6 +362,28 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// A `w × h` page in the background colour, for a chart drawn from
+    /// scratch rather than from points.
+    #[must_use]
+    pub fn blank(w: usize, h: usize) -> Self {
+        let bg = color::linear_rgb(color::BACKGROUND);
+        Self {
+            w,
+            h,
+            px: vec![bg; w * h],
+            bg,
+            text: None,
+        }
+    }
+
+    /// Fill the pixels `x0..x1 × y0..y1` (clipped to the frame) with `c`.
+    pub fn fill(&mut self, [x0, y0, x1, y1]: [usize; 4], c: Rgb) {
+        let (x1, y1) = (x1.min(self.w), y1.min(self.h));
+        for y in y0.min(y1)..y1 {
+            self.px[y * self.w + x0.min(x1)..y * self.w + x1].fill(c);
+        }
+    }
+
     #[must_use]
     pub fn background(&self) -> Rgb {
         self.bg
@@ -642,4 +679,49 @@ pub fn group_medians(points: &Points, groups: &[u32], n_groups: usize) -> Median
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::view::data::Points;
+    use crate::view::style::Resolved;
+
+    #[test]
+    fn the_merge_cursor_group_is_drawn_last_in_ink() {
+        let xy: Vec<[f32; 2]> = (0..6).map(|i| [i as f32, 0.0]).collect();
+        let names = (0..6).map(|i| i.to_string().into()).collect();
+        let points = Points::new(names, xy);
+        let groups = [0, 1, 2, 0, 1, 2];
+        let style = |c: f32| Resolved {
+            colour: [c; 3],
+            ink: [0.0; 3],
+            shape: Shape::Circle,
+            alpha: 1.0,
+            size: 1.0,
+            hidden: false,
+        };
+        let styles = [style(0.1), style(0.2), style(0.3)];
+        // Group 0 chosen; the cursor on group 2, not chosen.
+        let selected = [true, false, false];
+        let paint = Paint {
+            points: &points,
+            groups: Some(&groups),
+            styles: &styles,
+            focus: None,
+            selected: Some(&selected),
+            cursor: Some(2),
+            muted: false,
+            size: 1.0,
+            levels: None,
+            order: None,
+        };
+        let order = paint.draw_order();
+        let last: Vec<u32> = order[4..].iter().map(|&i| groups[i as usize]).collect();
+        assert_eq!(last, [2, 2]);
+        let (muted, ink) = ([0.9; 3], [0.05; 3]);
+        assert_eq!(paint.mark(2, muted, ink).unwrap().colour, ink);
+        assert_eq!(paint.mark(0, muted, ink).unwrap().colour, [0.1; 3]);
+        assert_eq!(paint.mark(1, muted, ink).unwrap().colour, muted);
+    }
 }

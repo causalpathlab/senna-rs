@@ -46,6 +46,24 @@ pub(crate) fn camera(cam: Option<Viewport>, bounds: [f32; 4], w: usize, h: usize
 /// another, so views are the parallel unit. With `keep_text`, text comes
 /// back as runs for a PDF instead of drawn into the pixels.
 pub(crate) fn frames(views: &[(&Scene, Viewport, f32)], keep_text: bool) -> Vec<Frame> {
+    // A view showing a chart is drawn whole; the rest are maps.
+    let charts: Vec<Option<Frame>> = views
+        .iter()
+        .map(|(s, vp, cell_px)| s.chart_frame(vp.w, vp.h, *cell_px, keep_text))
+        .collect();
+    if charts.iter().any(Option::is_some) {
+        let maps: Vec<(&Scene, Viewport, f32)> = views
+            .iter()
+            .zip(&charts)
+            .filter(|(_, c)| c.is_none())
+            .map(|(v, _)| *v)
+            .collect();
+        let mut maps = frames(&maps, keep_text).into_iter();
+        return charts
+            .into_iter()
+            .map(|c| c.unwrap_or_else(|| maps.next().expect("one map frame per map view")))
+            .collect();
+    }
     let layers: Vec<Vec<Paint<'_>>> = views.iter().map(|(s, ..)| s.layers()).collect();
     let mut jobs: Vec<Job> = views
         .iter()

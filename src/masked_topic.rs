@@ -1394,7 +1394,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     metadata.populate_theta_mean_and_save(&theta_nk, &args.out)?;
 
-    scores.to_parquet(&format!("{}.log_likelihood.parquet", &args.out))?;
+    scores.to_parquet(&format!("{}.log_likelihood.parquet", args.out))?;
 
     let cell_names = data_vec.column_names()?;
 

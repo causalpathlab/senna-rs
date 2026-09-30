@@ -138,14 +138,14 @@ impl Scene {
     /// focus by name; a zoomed layout falls back to its root.
     pub fn replace_data(&mut self, data: Dataset) {
         // A relabel draft uses the ids of the round it was made on; it must
-        // never be applied to another round. Keep it with its own round.
-        let left = self.review.as_ref().map(|r| r.draft.round.clone());
-        if let Some(round) = left {
+        // never be applied to another round. Leave (saving the draft), and
+        // come back below if this is the same round read again.
+        let left = self
+            .review
+            .as_ref()
+            .map(|r| (r.draft.round.clone(), r.overview.get(r.at).map(|o| o.id)));
+        if left.is_some() {
             self.leave_review();
-            let name = files::name(&round);
-            self.note = Some(format!(
-                "a different round is open: relabel mode left, the draft stays with {name}"
-            ));
         }
         let (method, kind) = {
             let s = &self.data.spaces[self.root()];
@@ -200,6 +200,40 @@ impl Scene {
         }
         self.suggestions = None;
         self.refresh_activity();
+        if let Some((round, id)) = left {
+            self.resume_review(&round, id);
+        }
+    }
+
+    /// After new data: relabel `round` again at cluster `id` if the data is
+    /// that round read again (it changed on disk, or was reloaded); else say
+    /// the draft stays with it.
+    fn resume_review(&mut self, round: &std::path::Path, id: Option<i64>) {
+        let same = self
+            .data
+            .round
+            .as_ref()
+            .is_some_and(|r| files::same_file(&r.path, round));
+        if !same {
+            let name = files::name(round);
+            self.note = Some(format!(
+                "a different round is open: relabel mode left, the draft stays with {name}"
+            ));
+            return;
+        }
+        match self.enter_review() {
+            Ok(()) => {
+                let at = self
+                    .review
+                    .as_ref()
+                    .and_then(|r| r.overview.iter().position(|o| Some(o.id) == id));
+                if let Some(i) = at {
+                    self.visit(i);
+                }
+                self.note = Some("reloaded · still relabelling, at the same cluster".into());
+            }
+            Err(e) => self.note = Some(format!("reloaded · relabel mode left: {e}")),
+        }
     }
 
     /// Colour by what the round changed against its source, and describe

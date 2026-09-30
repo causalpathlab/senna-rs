@@ -11,7 +11,11 @@ impl App {
         if self.scene.review.is_some() {
             self.scene.leave_review();
             self.message = Some("left relabel mode · draft kept".into());
-        } else if let Err(e) = self.scene.enter_review() {
+        } else if let Err(e) = {
+            // Relabel works on the map.
+            self.scene.chart = None;
+            self.scene.enter_review()
+        } {
             self.message = Some(e);
         }
         self.settle();
@@ -19,6 +23,27 @@ impl App {
 
     /// Keys of relabel mode. Returns whether the key was one of them.
     pub(super) fn review_key(&mut self, k: KeyEvent) -> bool {
+        if self.scene.review.is_none() {
+            return false;
+        }
+        // Relabel works on the cluster colouring of this cell view: keys that
+        // would change it, or the round, wait — in merge mode too.
+        if matches!(
+            k.code,
+            KeyCode::Char('c' | ',' | '.' | 'H') | KeyCode::BackTab
+        ) {
+            self.message = Some("leave relabel mode first (R)".into());
+            return true;
+        }
+        // Back to the cluster: drop a feature or suggestions on show, keep
+        // the focus.
+        if k.code == KeyCode::Char('x') {
+            self.info = None;
+            self.scene.clear_suggestions();
+            self.scene.clear_pick();
+            self.restart();
+            return true;
+        }
         let Some(r) = self.scene.review.as_mut() else {
             return false;
         };
@@ -28,11 +53,11 @@ impl App {
         let n_rows = r.rows.len();
         let n_clusters = r.overview.len().max(1);
         match k.code {
-            KeyCode::Char(']') => {
+            KeyCode::Char(']') | KeyCode::Right => {
                 let next = (r.at + 1) % n_clusters;
                 self.change(|s| s.visit(next));
             }
-            KeyCode::Char('[') => {
+            KeyCode::Char('[') | KeyCode::Left => {
                 let prev = (r.at + n_clusters - 1) % n_clusters;
                 self.change(|s| s.visit(prev));
             }
@@ -40,17 +65,21 @@ impl App {
             KeyCode::Up => r.row = r.row.saturating_sub(1),
             KeyCode::Enter => self.change(Scene::show_row),
             // These change the draft and the panels, not the map.
-            KeyCode::Char('+' | '=') => self.change_text(|s| s.mark_row(Some(true))),
-            KeyCode::Char('-' | '_') => self.change_text(|s| s.mark_row(Some(false))),
+            KeyCode::Char('y') => self.change_text(|s| s.mark_row(Some(true))),
+            KeyCode::Char('n') => self.change_text(|s| s.mark_row(Some(false))),
             KeyCode::Char(' ') => self.change_text(|s| s.mark_row(None)),
-            KeyCode::Char('a') => self.change_text(Scene::accept_proposals),
+            KeyCode::Char('A') => self.change_text(Scene::accept_proposals),
             KeyCode::Tab => self.change_text(Scene::next_target),
             KeyCode::Char('L') => self.begin_staged(Action::Label),
             KeyCode::Char('K') => self.begin_staged(Action::Keep),
             KeyCode::Char('M') => self.change(Scene::begin_merge),
-            KeyCode::Char('p') => self.send_draft(Mode::Preview),
+            KeyCode::Char('P') => self.send_draft(Mode::Preview),
             KeyCode::Char('S') => self.confirm_submit(),
             KeyCode::Esc | KeyCode::Char('R') => self.toggle_review(),
+            // Decisions are uppercase; the lowercase letter is a slip.
+            KeyCode::Char('l' | 'm') => {
+                self.message = Some("decisions are uppercase: L labels, K keeps, M merges".into());
+            }
             _ => return false,
         }
         true
@@ -67,8 +96,15 @@ impl App {
             return false;
         };
         match k.code {
-            KeyCode::Down => m.cursor = (m.cursor + 1).min(n.saturating_sub(1)),
-            KeyCode::Up => m.cursor = m.cursor.saturating_sub(1),
+            // The map marks the cluster under the cursor: draw it again.
+            KeyCode::Down => {
+                m.cursor = (m.cursor + 1).min(n.saturating_sub(1));
+                self.restart();
+            }
+            KeyCode::Up => {
+                m.cursor = m.cursor.saturating_sub(1);
+                self.restart();
+            }
             KeyCode::Char(' ') => self.change(Scene::toggle_merge_cursor),
             KeyCode::Enter => self.begin_staged(Action::Merge),
             KeyCode::Esc | KeyCode::Char('M') => {
@@ -76,7 +112,13 @@ impl App {
                 self.message = Some("merge cancelled".into());
                 self.restart();
             }
-            _ => return false,
+            // Quitting and help pass; nothing else may change the map or
+            // the clusters under a merge.
+            KeyCode::Char('q' | '?') => return false,
+            _ => {
+                self.message =
+                    Some("in merge mode: ↑ ↓ move, space chooses, enter names, esc cancels".into());
+            }
         }
         true
     }
@@ -161,10 +203,19 @@ impl App {
         if let Some(r) = self.scene.review.as_ref() {
             let _ = r.draft.save();
         }
-        self.message = Some("staged · ] next cluster · S submits everything".into());
-        if merge {
-            self.restart();
-        }
+        let done = match self.scene.next_undecided() {
+            Some(i) => {
+                self.change(|s| s.visit(i));
+                "staged · on to the next undecided cluster".to_string()
+            }
+            None => {
+                if merge {
+                    self.restart();
+                }
+                "staged · every cluster is decided · S hands them to lupin".to_string()
+            }
+        };
+        self.message = Some(done);
     }
 
     /// Keep the scores on screen current with the staged marker edits: take

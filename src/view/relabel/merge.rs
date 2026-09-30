@@ -58,6 +58,14 @@ impl Scene {
         }
     }
 
+    /// The group (of the colouring on screen) under the merge cursor.
+    pub fn merge_cursor_group(&self) -> Option<u32> {
+        let m = self.review.as_ref()?.merge.as_ref()?;
+        let id = self.review.as_ref()?.overview.get(m.cursor)?.id;
+        let ids = &self.data.labels[self.colour?].ids;
+        ids.iter().position(|&x| x == id).map(|g| g as u32)
+    }
+
     /// Stage a merge of the clusters chosen in merge mode, and leave it.
     pub fn stage_merge(&mut self, label: String, rationale: String) {
         let Some(r) = self.review.as_mut() else {

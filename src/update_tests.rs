@@ -1,7 +1,7 @@
 //! What `senna update` decides before it dispatches: whether to substitute the
 //! parent's carried pseudobulks, and what it does when it cannot.
 
-use super::{carried_reference_among, multiome_in_args, recorded_paths, UpdateArgs};
+use super::{carried_reference_among, multiome_in_args, UpdateArgs};
 use clap::Parser;
 
 #[derive(clap::Parser)]
@@ -63,7 +63,10 @@ fn a_substituted_lineage_is_recognised_by_its_carried_reference() {
 #[test]
 fn recorded_paths_resolve_against_the_run_directory() {
     let run = std::path::Path::new("/runs/r1");
-    let got = recorded_paths(&["rna.zarr.zip".into(), "/abs/atac.zarr".into()], run);
+    let mut m =
+        senna::run_manifest::RunManifest::new(senna::run_manifest::RunKind::Svd, "/runs/r1/p");
+    m.data.input = vec!["rna.zarr.zip".into(), "/abs/atac.zarr".into()];
+    let got = m.data_inputs(run);
     assert_eq!(
         got,
         vec![

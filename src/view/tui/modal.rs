@@ -1,6 +1,6 @@
 //! What is being typed in the status line: at most one at a time.
 
-use super::annotate::path_options;
+use super::browse::Browser;
 use super::help::Context;
 use super::*;
 
@@ -9,9 +9,8 @@ pub(super) enum Modal {
     Search(String, Vec<Box<str>>),
     /// A decision: its label, then its rationale.
     Prompt(Prompt),
-    /// The markers file for `lupin annotate`, and the entries its last part
-    /// could complete to (read once per edit, not per draw).
-    MarkersFile(String, Vec<(String, bool)>),
+    /// Browsing for the marker panel `lupin annotate` reads.
+    MarkersFile(Browser),
     /// Submitting the relabel draft: one line per decision it hands lupin.
     Submit(Vec<String>),
     /// The `r` menu: what to recompute for the run.
@@ -19,11 +18,6 @@ pub(super) enum Modal {
 }
 
 impl Modal {
-    pub(super) fn markers_file(input: String) -> Self {
-        let options = path_options(&input);
-        Modal::MarkersFile(input, options)
-    }
-
     pub(super) fn context(&self) -> Context {
         match self {
             Modal::Search(..) => Context::Search,
@@ -42,17 +36,7 @@ impl Modal {
                 format!("/{q}   {}", shown.join("  "))
             }
             Modal::Prompt(p) => p.line(),
-            Modal::Submit(_) | Modal::Recompute(..) => return None,
-            Modal::MarkersFile(input, options) => {
-                let hint = if options.len() > 1 {
-                    let names: Vec<&str> =
-                        options.iter().take(4).map(|(n, _)| n.as_str()).collect();
-                    format!("   tab: {}", names.join(" · "))
-                } else {
-                    String::new()
-                };
-                format!("markers file for lupin annotate: {input}▏{hint}")
-            }
+            Modal::Submit(_) | Modal::Recompute(..) | Modal::MarkersFile(_) => return None,
         })
     }
 }

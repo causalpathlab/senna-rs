@@ -246,6 +246,10 @@ impl Deck {
             n > 1
         };
         match k.code {
+            KeyCode::Char('r' | 'l') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.drawn = None;
+                app.refresh();
+            }
             KeyCode::Char('w') if several(app) => {
                 self.grid = true;
                 self.hover = self.at;
@@ -395,6 +399,11 @@ impl Deck {
                 (f32::from(inner.height) * self.cell.1) as usize,
             );
             if w > 0 && h > 0 {
+                // A chart is drawn whole, at once.
+                if let Some(frame) = app.scene.chart_frame(w, h, self.cell.1, false) {
+                    tile.proto = protocol(&self.picker, frame.to_image(), inner).ok();
+                    continue;
+                }
                 let vp = deck::camera(app.vp, app.scene.current().points.bounds, w, h);
                 tile.job = Some(Job::new(vp, &app.scene.layers()));
             }
@@ -857,7 +866,7 @@ impl Deck {
     /// replace.
     fn default_name(&self, scope: Scope) -> String {
         let app = &self.apps[self.at];
-        let first = &self.apps[0].scene.data.prefix;
+        let first = here(&self.apps[0].scene.data.prefix);
         free_stem(&match scope {
             Scope::View => app.pdf_name(),
             Scope::Grid => format!("{first}.view.grid"),

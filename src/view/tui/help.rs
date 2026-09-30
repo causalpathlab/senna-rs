@@ -14,8 +14,10 @@ pub(super) enum Context {
     Merge,
     /// Typing a label or rationale.
     Prompt,
-    /// Typing the markers file for `lupin annotate`.
+    /// Browsing for the marker panel `lupin annotate` reads.
     MarkersFile,
+    /// A structure plot or heatmap in place of the map.
+    Chart,
     /// Confirming a relabel round before it goes to lupin.
     Submit,
     /// Choosing what senna recomputes for the run.
@@ -70,8 +72,25 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("/", "search a feature by name"),
             ("a", "activity of the focused group's whole marker set"),
             ("o", "expected (model) or observed (counts)"),
-            ("k", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
+            ("p", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
             ("x  esc", "back to group colours"),
+        ],
+    ),
+    (
+        "Charts",
+        &[
+            (
+                "H",
+                "structure plot (runs with topics, bge included: each cell's topic mixture, a panel per group), heatmap, back to the map",
+            ),
+            (
+                "+  -",
+                "heatmap: more or fewer top features per group (z-scored mean ln(1 + count))",
+            ),
+            (
+                "T",
+                "make topics for a run with none (simba, gem, bge --skip-etm): one per cell cluster",
+            ),
         ],
     ),
     (
@@ -84,7 +103,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             (",  .", "previous (source) / next annotation round"),
             (
                 "A",
-                "annotate this run with lupin (asks for a markers file; tab completes)",
+                "annotate this run with lupin: browse to a marker panel (★ fits the run best)",
             ),
         ],
     ),
@@ -128,6 +147,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "s",
                 "save as PDF: this view, or every run (one grid, or a page each); width, dpi, file name",
             ),
+            ("ctrl-r  ctrl-l", "reload the run from disk and redraw the screen"),
             ("q", "quit"),
         ],
     ),
@@ -148,7 +168,7 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "tab",
-                "choose the target type (the best fit is chosen for you)",
+                "choose the working type: y adds markers to it, L offers it as the label (the best fit is chosen for you)",
             ),
         ],
     ),
@@ -161,7 +181,7 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "click a cell",
-                "the features nearest it; k pins their names on the map",
+                "the features nearest it; p pins their names on the map",
             ),
         ],
     ),
@@ -169,10 +189,10 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
         "3. Mark features",
         &[
             (
-                "+  -  space",
-                "include in / exclude from the markers; clear",
+                "y  n  space",
+                "include in / exclude from the markers; clear (then the next feature)",
             ),
-            ("a", "accept every proposal (?+ add, ?- drop)"),
+            ("A", "accept every proposal (?+ add, ?- drop)"),
             (
                 "(live)",
                 "lupin rescores the edited types as you mark; its calls show under the fit",
@@ -184,9 +204,9 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "L",
-                "label the cluster (target and rationale filled in; enter twice)",
+                "label the cluster (the working type and a rationale filled in; enter twice), then on to the next undecided one",
             ),
-            ("K", "keep its current call"),
+            ("K", "keep its current call, then on to the next undecided one"),
             (
                 "M",
                 "merge mode: ↑ ↓ move, space choose, enter name the merged cluster, esc cancel",
@@ -196,10 +216,17 @@ const RELABEL_HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "5. Move on, then finish",
         &[
-            ("]  [", "next / previous cluster (or click one)"),
-            ("p", "ask lupin what everything staged would change"),
+            ("→  ←  ]  [", "next / previous cluster (or click one)"),
+            ("P", "ask lupin what everything staged would change"),
             ("S", "hand lupin everything as one round"),
             ("R  esc", "leave; the draft is kept for later"),
+        ],
+    ),
+    (
+        "How the keys read",
+        &[
+            ("L K M A P S R", "uppercase decides or writes: label, keep, merge, accept all, preview, submit, leave"),
+            ("y n p", "lowercase looks or edits the draft: marks, names"),
         ],
     ),
 ];
@@ -216,6 +243,8 @@ impl App {
             } else {
                 Context::Relabel
             }
+        } else if self.scene.chart.is_some() {
+            Context::Chart
         } else if self.scene.pick.is_some() {
             Context::Feature
         } else {
@@ -228,38 +257,38 @@ impl App {
     pub(super) fn status_keys(&self) -> [&'static str; 2] {
         match self.context() {
             Context::Browse => [
-                "click a cell: its cluster and the features nearest it (k pins their names)   [ ] focus a group   c change the colouring   n suggest features",
+                "click a cell: its cluster and the features nearest it (p pins their names)   [ ] focus a group   c change the colouring   n suggest features",
                 "R relabel clusters   A annotate with lupin   , . rounds   tab / m other layouts   z lay out a group   d copy view   w all views   s save PDF   ? all keys   q quit",
             ],
             Context::Feature => [
                 "g / G next or previous feature   o switch between counts and model   a the group's whole marker set   x back to group colours",
-                "/ search a feature   n new suggestions   k pin its name   [ ] focus a group   ? all keys",
+                "/ search a feature   n new suggestions   p pin its name   [ ] focus a group   ? all keys",
             ],
             Context::Merge => [
                 "↑ ↓ move   space choose or unchoose the cluster   enter name the merged cluster",
                 "≈ marks clusters whose markers fit the same type   esc or M cancel   ? the steps",
             ],
             Context::Relabel => [
-                "] / [ next or previous cluster   ↑ ↓ choose a feature   enter show it   + / - include or exclude   a accept all ? proposals",
-                "tab target type   L label   K keep   M merge clusters   k pin names   p preview   S submit all   R leave   ? the steps",
+                "→ ← next or previous cluster   ↑ ↓ choose a feature   enter show it   y / n marker or not   A accept all ? proposals",
+                "tab working type   L label   K keep   M merge clusters   p pin names   P preview   S submit all   R leave   ? the steps",
             ],
             Context::Prompt => [
                 "type, or keep what is filled in   enter accepts   esc cancels",
                 "tab completes a known cell type (while typing the label)",
             ],
-            Context::MarkersFile => [
-                "type the path of a markers file (type, then its markers; TSV, or one comma per line)",
-                "tab completes the path   enter runs lupin annotate   esc cancels",
+            Context::Chart => [
+                "H next chart (structure plot, heatmap, map)   c group by another grouping   + / - features per group (heatmap)",
+                "s save PDF   ctrl-r redraw   ? all keys   q quit",
             ],
             // The popup says what the keys do.
-            Context::Submit | Context::Recompute => ["", ""],
+            Context::Submit | Context::Recompute | Context::MarkersFile => ["", ""],
             Context::Search => [
                 "type part of a feature name   enter shows the first match   esc cancels",
                 "",
             ],
             Context::StyleMenu => [
                 "↑ ↓ choose a group   ← → change the value   tab next property",
-                "space show / hide   r reset   enter done",
+                "space show / hide   backspace reset   enter done",
             ],
         }
     }

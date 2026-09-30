@@ -264,6 +264,15 @@ pub struct Activity {
     /// Row of each point of a view in a source's cell table, by (source,
     /// view key).
     rows: HashMap<(Source, usize), Arc<Vec<u32>>>,
+    /// The latent as topic mixtures, read on first use.
+    mixture: Option<Result<Mixture, String>>,
+}
+
+/// Each cell's topic mixture (θ, rows summing to one) and the row of each
+/// cell name.
+struct Mixture {
+    theta: Mat,
+    index: HashMap<Box<str>, u32>,
 }
 
 impl std::hash::Hash for Source {
@@ -286,7 +295,50 @@ impl Activity {
             expected: None,
             observed: None,
             rows: HashMap::default(),
+            mixture: None,
         }
+    }
+
+    /// The run's latent as topic mixtures, when it is one: log θ whose
+    /// rows sum to one once exponentiated. Topic runs write it so, and so
+    /// does `bge` (its topics resolved from the cell embedding) unless it
+    /// was told `--skip-etm`; told by the numbers, not by the run's kind.
+    fn mixture(&mut self) -> Result<&Mixture, String> {
+        if self.mixture.is_none() {
+            self.mixture = Some(self.load_mixture());
+        }
+        self.mixture
+            .as_ref()
+            .expect("just set")
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    fn load_mixture(&self) -> Result<Mixture, String> {
+        const NONE: &str =
+            "a structure plot needs topics: this run's latent is not a topic mixture \
+                            (topic runs have one, and bge unless --skip-etm)";
+        let rel = self.manifest.outputs.latent.as_deref().ok_or(NONE)?;
+        let MatWithNames { rows, mat, .. } =
+            read_table(&self.dir, rel).map_err(|e| e.to_string())?;
+        // Rows are the simplex here; `detect` classifies columns.
+        if run_manifest::ArtifactScale::detect(&mat.transpose())
+            != run_manifest::ArtifactScale::LogSimplexColumns
+        {
+            return Err(NONE.into());
+        }
+        let theta = mat.map(f32::exp);
+        let index = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, n)| (n, i as u32))
+            .collect();
+        Ok(Mixture { theta, index })
+    }
+
+    /// Whether the run has topic mixtures to draw.
+    pub fn has_mixtures(&mut self) -> bool {
+        self.mixture().is_ok()
     }
 
     /// Forget the per-view row maps, when the views themselves changed.
@@ -391,12 +443,7 @@ impl Activity {
     fn load_observed(&self) -> anyhow::Result<Observed> {
         let m = &self.manifest;
         anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
-        let files: Vec<Box<str>> = m
-            .data
-            .input
-            .iter()
-            .map(|p| run_manifest::resolve(&self.dir, p).to_string_lossy().into())
-            .collect();
+        let files = m.data_inputs(&self.dir);
         // Observed counts are the one thing here that needs the data.
         if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
             anyhow::bail!("the data is not here ({gone})");
@@ -725,6 +772,149 @@ impl Activity {
             })
             .collect();
         Ok((out, &e.features.names))
+    }
+
+    /// Every feature's expected level in each group's mean cell, from
+    /// `sums`: feature-major (`features × groups`), `NaN` for an empty group
+    /// and, on an embedding run with a baseline, for features below its
+    /// median (rarely expressed, with noisy loadings). Embedding runs:
+    /// `ρ_g · z̄ + bias_g`; topic runs: `ln(β_g · θ̄)`. And the features.
+    pub fn group_levels(&mut self, sums: &GroupSums) -> Result<(Vec<f32>, &[Box<str>]), String> {
+        let e = self.expected()?;
+        let n = sums.sums.len();
+        let d = e.features.names.len();
+        let mut out = vec![f32::NAN; d * n];
+        for (g, (s, &count)) in sums.sums.iter().zip(&sums.counts).enumerate() {
+            if count == 0 {
+                continue;
+            }
+            let mean = s / count as f32;
+            let level: Vec<f32> = match (&e.model, e.linear()) {
+                (Model::Embedding { rho, bias, .. }, _) => (rho * &mean)
+                    .iter()
+                    .enumerate()
+                    .map(|(f, &v)| v + bias.as_ref().map_or(0.0, |b| b[f]))
+                    .collect(),
+                (_, Some((_, beta))) => (beta * &mean).iter().map(|&v| v.max(1e-12).ln()).collect(),
+                _ => unreachable!("a topic run has linear tables"),
+            };
+            for (f, v) in level.into_iter().enumerate() {
+                out[f * n + g] = v;
+            }
+        }
+        if let Some((b, median)) = e.baseline().filter(|(b, _)| b.len() == d) {
+            for (f, &v) in b.iter().enumerate() {
+                if v.is_nan() || v < median {
+                    out[f * n..(f + 1) * n].fill(f32::NAN);
+                }
+            }
+        }
+        Ok((out, &e.features.names))
+    }
+
+    /// Each point's topic mixture (θ, summing to one), `k` values a point,
+    /// `NaN` for a point the latent has no row for; and `k`. Runs with topics only.
+    pub fn mixtures(
+        &mut self,
+        _key: usize,
+        universe: &[Box<str>],
+    ) -> Result<(Vec<f32>, usize), String> {
+        let m = self.mixture()?;
+        let k = m.theta.ncols();
+        let mut out = vec![f32::NAN; universe.len() * k];
+        for (p, name) in universe.iter().enumerate() {
+            let Some(&r) = m.index.get(name) else {
+                continue;
+            };
+            let row = m.theta.row(r as usize);
+            let total: f32 = row.iter().sum::<f32>().max(1e-12);
+            for (o, &v) in out[p * k..(p + 1) * k].iter_mut().zip(row.iter()) {
+                *o = v / total;
+            }
+        }
+        Ok((out, k))
+    }
+
+    /// Each feature's mean level in each group of the points in view
+    /// (`groups`, `>= n_groups` for none), feature-major (`features.len() ×
+    /// n_groups`): the mean `ln(1 + count)` over the group's cells from the
+    /// data files, or, when they cannot be read, the model's expected level
+    /// of the group's mean cell. Also says which source it used. A feature
+    /// neither has is `NaN`.
+    pub fn group_means(
+        &mut self,
+        key: usize,
+        universe: &[Box<str>],
+        groups: &[u32],
+        n_groups: usize,
+        features: &[Box<str>],
+    ) -> Result<(Vec<f32>, Source), String> {
+        if let Ok(v) = self.observed_group_means(key, universe, groups, n_groups, features) {
+            return Ok((v, Source::Observed));
+        }
+        let sums = self.group_sums(key, universe, groups, n_groups)?;
+        let (levels, _) = self.group_levels(&sums)?;
+        let index = &self.expected()?.features.index;
+        let mut out = vec![f32::NAN; features.len() * n_groups];
+        for (i, f) in features.iter().enumerate() {
+            if let Some(g) = index.match_gene(f) {
+                out[i * n_groups..(i + 1) * n_groups]
+                    .copy_from_slice(&levels[g * n_groups..(g + 1) * n_groups]);
+            }
+        }
+        Ok((out, Source::Expected))
+    }
+
+    fn observed_group_means(
+        &mut self,
+        key: usize,
+        universe: &[Box<str>],
+        groups: &[u32],
+        n_groups: usize,
+        features: &[Box<str>],
+    ) -> Result<Vec<f32>, String> {
+        let rows = self.rows(Source::Observed, key, universe)?;
+        let o = self.observed()?;
+        // Each data column's group, and each group's size in columns.
+        let mut group_of = vec![u32::MAX; o.cells.len()];
+        let mut size = vec![0usize; n_groups];
+        for (&r, &g) in rows.iter().zip(groups) {
+            if r != NO_ROW && (g as usize) < n_groups {
+                group_of[r as usize] = g;
+                size[g as usize] += 1;
+            }
+        }
+        let matched: Vec<(usize, usize)> = features
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| Some((i, o.features.index.match_gene(f)?)))
+            .collect();
+        let mut out = vec![f32::NAN; features.len() * n_groups];
+        if matched.is_empty() {
+            return Ok(out);
+        }
+        // One row a read: data-beans' multi-row reads from a .zarr.zip can
+        // return wrong values or panic (seen in 0.6.12); single-row reads,
+        // as `raw` makes, are stable.
+        for &(i, g) in &matched {
+            let csr = o
+                .data
+                .read_rows_csr(std::iter::once(g))
+                .map_err(|e| e.to_string())?;
+            let mut sum = vec![0f32; n_groups];
+            let row = csr.row(0);
+            for (&c, &v) in row.col_indices().iter().zip(row.values()) {
+                if let Some(s) = sum.get_mut(group_of[c] as usize) {
+                    *s += v.ln_1p();
+                }
+            }
+            for (j, (s, &n)) in sum.iter().zip(&size).enumerate() {
+                if n > 0 {
+                    out[i * n_groups + j] = s / n as f32;
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// `contrast` of the union of the groups `chosen` picks, over every

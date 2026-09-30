@@ -29,7 +29,7 @@
 
 use senna::embed_common::*;
 use senna::run_manifest::{RunKind, RunManifest};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The four things `update` changes about a recorded fit.
 ///
@@ -176,24 +176,6 @@ pub struct UpdateArgs {
                      reject this."
     )]
     add_embedding_dim: usize,
-}
-
-/// Resolve the parent's recorded input paths against the run directory.
-///
-/// Same policy as annotate / `--from` / [`senna::run_manifest::inherit_from`]:
-/// manifests store data paths relative to the run dir (or absolute when
-/// outside it). No cwd fallback — a same-named file in the caller's working
-/// directory must not win.
-fn recorded_paths(recorded: &[String], dir: &Path) -> Vec<Box<str>> {
-    recorded
-        .iter()
-        .map(|s| {
-            senna::run_manifest::resolve(dir, s)
-                .to_string_lossy()
-                .into_owned()
-                .into()
-        })
-        .collect()
 }
 
 /// Refuse a new input the parent already trained on.
@@ -393,7 +375,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     })?;
     let kind = manifest.kind;
 
-    let recorded = recorded_paths(&manifest.data.input, &dir);
+    let recorded = manifest.data_inputs(&dir);
     ensure_not_recorded(&recorded, &args.data_files)?;
     let reference = select_reference(args, &manifest, &recorded)?;
 
@@ -421,7 +403,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             let mut d = recorded;
             d.extend(args.data_files.iter().cloned());
             let b = union_batches(
-                recorded_paths(&manifest.data.batch, &dir),
+                manifest.data_batches(&dir),
                 args.batch_files.as_deref(),
                 args.data_files.len(),
             )?;
