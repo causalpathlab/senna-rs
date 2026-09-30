@@ -77,6 +77,36 @@ impl App {
             self.message = Some("nothing chosen · space chooses".into());
             return;
         }
+        self.launch(target, chosen);
+    }
+
+    /// `T`: resolve topics for a run that has none, one per cell cluster,
+    /// as senna does for the `r` menu's steps; `H` then draws them.
+    pub(super) fn resolve_topics(&mut self) {
+        if self.recomputing.is_some() {
+            self.message = Some("already recomputing · it reloads when done".into());
+            return;
+        }
+        let target = match Target::load(&self.from.to_string_lossy()) {
+            Ok(t) => t,
+            Err(e) => {
+                self.message = Some(format!("cannot make topics: {e}"));
+                return;
+            }
+        };
+        if !target.can_resolve_topics {
+            self.message = Some(if self.scene.run_has_latent() {
+                "this run has its topics (or cell factors) already · H draws topics".into()
+            } else {
+                "topics need the run's cell and gene embeddings".into()
+            });
+            return;
+        }
+        self.launch(target, vec![(Step::Topics, "")]);
+    }
+
+    /// Have senna run `chosen` for `target` on a worker thread.
+    fn launch(&mut self, target: Target, chosen: Vec<(Step, &'static str)>) {
         let what = chosen
             .iter()
             .map(|(s, m)| match s.say(m) {

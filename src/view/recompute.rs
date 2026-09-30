@@ -18,7 +18,7 @@ pub(crate) enum Step {
     CellClusters,
     FeatureClusters,
     /// One topic per cell cluster, for an embedding run with none
-    /// (`senna resolve-topics`); after the clusterings it is made from.
+    /// (`senna resolve-topics`): `T` in the view, not in the `r` menu.
     Topics,
 }
 
@@ -190,7 +190,8 @@ impl Target {
                 Step::CellClusters => self.latent.is_some(),
                 Step::FeatureLayout | Step::FeatureClusters => self.has_features,
                 Step::JointLayout => self.has_coembedding,
-                Step::Topics => self.can_resolve_topics,
+                // Its own key, `T`.
+                Step::Topics => false,
             })
             .collect()
     }
@@ -396,13 +397,13 @@ mod tests {
     }
 
     #[test]
-    fn topics_are_offered_last_and_resolved_by_senna() {
+    fn topics_are_resolved_by_senna_under_their_own_key() {
         let t = Target {
             can_resolve_topics: true,
             ..target(true)
         };
-        assert_eq!(t.offered().last(), Some(&Step::Topics));
-        assert!(!target(true).offered().contains(&Step::Topics));
+        // `T` makes topics; the `r` menu does not offer them.
+        assert!(!t.offered().contains(&Step::Topics));
         assert_eq!(
             Step::Topics.argv(&t, ""),
             ["resolve-topics", "--from", "run.senna.json", "-o", "run"]

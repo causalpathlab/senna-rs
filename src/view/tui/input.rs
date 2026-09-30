@@ -86,6 +86,7 @@ impl App {
             KeyCode::Char('-' | '_') => {
                 self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
             }
+            KeyCode::Char('T') => self.resolve_topics(),
             KeyCode::Char('H') => {
                 self.change_text(Scene::cycle_chart);
                 self.restart();

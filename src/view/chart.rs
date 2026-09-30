@@ -136,6 +136,15 @@ impl Scene {
         self.refresh_chart();
     }
 
+    /// Whether the run records a latent (topics, or its own cell factors).
+    #[must_use]
+    pub fn run_has_latent(&self) -> bool {
+        self.data
+            .run
+            .as_ref()
+            .is_some_and(|(m, _)| m.outputs.latent.is_some())
+    }
+
     /// Whether the run has topic mixtures: a topic run, or a `bge` run
     /// with its topics resolved.
     fn is_topic_run(&mut self) -> bool {

@@ -87,6 +87,10 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "+  -",
                 "heatmap: more or fewer top features per group (z-scored mean ln(1 + count))",
             ),
+            (
+                "T",
+                "make topics for a run with none (simba, gem, bge --skip-etm): one per cell cluster",
+            ),
         ],
     ),
     (
