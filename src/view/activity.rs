@@ -321,14 +321,13 @@ impl Activity {
         let rel = self.manifest.outputs.latent.as_deref().ok_or(NONE)?;
         let MatWithNames { rows, mat, .. } =
             read_table(&self.dir, rel).map_err(|e| e.to_string())?;
-        let theta = mat.map(f32::exp);
-        let simplex = theta
-            .row_iter()
-            .take(1000)
-            .all(|r| (r.sum() - 1.0).abs() < 0.02);
-        if theta.nrows() == 0 || !simplex {
+        // Rows are the simplex here; `detect` classifies columns.
+        if run_manifest::ArtifactScale::detect(&mat.transpose())
+            != run_manifest::ArtifactScale::LogSimplexColumns
+        {
             return Err(NONE.into());
         }
+        let theta = mat.map(f32::exp);
         let index = rows
             .into_iter()
             .enumerate()
