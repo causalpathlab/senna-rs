@@ -62,7 +62,7 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => menu.step_setting(-1),
             KeyCode::Right | KeyCode::Char('l') => menu.step_setting(1),
             KeyCode::Enter => self.start_recompute(),
-            KeyCode::Esc | KeyCode::Char('q' | 'r') => self.modal = None,
+            KeyCode::Esc => self.modal = None,
             _ => return false,
         }
         true
@@ -165,7 +165,7 @@ impl App {
                 r.stopper.stop();
                 self.message = Some("stopping senna…".into());
             }
-            KeyCode::Char(',' | '.' | 'A' | 'S' | 'p') => {
+            KeyCode::Char(',' | '.' | 'A' | 'S' | 'P') => {
                 self.message = Some(format!(
                     "senna is recomputing {} for this run · wait, or esc stops it",
                     r.what
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn nothing_that_changes_the_run_starts_while_senna_rewrites_it() {
         let (mut app, stopper, _tx) = busy();
-        for c in [',', '.', 'A', 'S', 'p'] {
+        for c in [',', '.', 'A', 'S', 'P'] {
             app.message = None;
             press(&mut app, KeyCode::Char(c));
             let said = app.message.clone().unwrap_or_default();

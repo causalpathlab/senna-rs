@@ -65,15 +65,15 @@ impl App {
             KeyCode::Up => r.row = r.row.saturating_sub(1),
             KeyCode::Enter => self.change(Scene::show_row),
             // These change the draft and the panels, not the map.
-            KeyCode::Char('+' | '=') => self.change_text(|s| s.mark_row(Some(true))),
-            KeyCode::Char('-' | '_') => self.change_text(|s| s.mark_row(Some(false))),
+            KeyCode::Char('y') => self.change_text(|s| s.mark_row(Some(true))),
+            KeyCode::Char('n') => self.change_text(|s| s.mark_row(Some(false))),
             KeyCode::Char(' ') => self.change_text(|s| s.mark_row(None)),
-            KeyCode::Char('a') => self.change_text(Scene::accept_proposals),
+            KeyCode::Char('A') => self.change_text(Scene::accept_proposals),
             KeyCode::Tab => self.change_text(Scene::next_target),
             KeyCode::Char('L') => self.begin_staged(Action::Label),
             KeyCode::Char('K') => self.begin_staged(Action::Keep),
             KeyCode::Char('M') => self.change(Scene::begin_merge),
-            KeyCode::Char('p') => self.send_draft(Mode::Preview),
+            KeyCode::Char('P') => self.send_draft(Mode::Preview),
             KeyCode::Char('S') => self.confirm_submit(),
             KeyCode::Esc | KeyCode::Char('R') => self.toggle_review(),
             // Decisions are uppercase; the lowercase letter is a slip.
@@ -112,7 +112,13 @@ impl App {
                 self.message = Some("merge cancelled".into());
                 self.restart();
             }
-            _ => return false,
+            // Quitting and help pass; nothing else may change the map or
+            // the clusters under a merge.
+            KeyCode::Char('q' | '?') => return false,
+            _ => {
+                self.message =
+                    Some("in merge mode: ↑ ↓ move, space chooses, enter names, esc cancels".into());
+            }
         }
         true
     }

@@ -460,7 +460,7 @@ impl Scene {
             }
         }
         if self.locked.is_empty() {
-            self.note = Some("click a cell or show a feature, then k pins its names".into());
+            self.note = Some("click a cell or show a feature, then p pins its names".into());
         } else {
             self.locked.clear();
             self.note = Some("pins cleared".into());
@@ -525,7 +525,7 @@ impl Scene {
             out.extend(list.iter().map(|(f, v)| format!("  {f:<14} {v:+.2}")));
             out.push(String::new());
         }
-        out.push("k pins their names on the map".into());
+        out.push("p pins their names on the map".into());
         Some(out)
     }
 }

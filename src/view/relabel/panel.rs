@@ -120,9 +120,9 @@ impl Scene {
         let verdict = staged.and_then(|c| c.verdict.as_ref());
         let merged = r.draft.merges.iter().find(|m| m.clusters.contains(&id));
         let next = if verdict.is_some() || merged.is_some() {
-            "next: → for the next cluster · S when done (p previews)"
+            "next: → for the next cluster · S when done (P previews)"
         } else if marks == 0 {
-            "next: check the fit below, then + / - features (a accepts ?), then L"
+            "next: check the fit below, then y / n features (A accepts ?), then L"
         } else {
             "next: L to label it (or K to keep it, M to merge it with others)"
         };
@@ -171,7 +171,7 @@ impl Scene {
         // One type, two uses, both said: `+` adds markers to it, `L` offers
         // it as the label.
         out.push(match r.target.as_deref() {
-            Some(t) => format!("working type {t} · + adds markers to it · L labels as it"),
+            Some(t) => format!("working type {t} · y adds markers to it · L labels as it"),
             None => "no working type yet (tab picks one)".into(),
         });
         out.push("markers fit here (tab picks the working type):".into());
@@ -192,7 +192,7 @@ impl Scene {
         // Which type a mark edits, said once: `+` the working type, `−` the
         // type listing the feature.
         out.push(format!(
-            "+ adds to {} · − drops from its type",
+            "y adds to {} · n drops from its type",
             r.target.as_deref().unwrap_or("the working type (tab)")
         ));
         out.push("   mark feature        lfc  marker of".into());
@@ -219,7 +219,7 @@ impl Scene {
         }
         if let Some(near) = &self.near {
             out.push(String::new());
-            out.push(format!("near {} (k pins their names)", near.name));
+            out.push(format!("near {} (p pins their names)", near.name));
             let names: Vec<&str> = near.features.iter().map(|(f, _)| f.as_ref()).collect();
             out.push(format!("  {}", names.join(" ")));
         }

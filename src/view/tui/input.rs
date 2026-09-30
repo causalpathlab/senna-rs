@@ -27,6 +27,19 @@ impl App {
             self.help = false;
             return true;
         }
+        if self.scene.chart.is_some() {
+            if k.code == KeyCode::Esc {
+                self.scene.chart = None;
+                self.message = Some("back to the map".into());
+                self.restart();
+                return true;
+            }
+            if !chart_takes(k) {
+                self.message =
+                    Some("on a chart: H next chart or back to the map · esc the map".into());
+                return true;
+            }
+        }
         let step = |app: &App| app.vp.map_or(0.0, |v| 0.1 * v.w.min(v.h) as f32);
         match k.code {
             KeyCode::Char('q') => self.quit = true,
@@ -97,7 +110,7 @@ impl App {
             }
             KeyCode::Char('z') => self.start_zoom(),
             KeyCode::Char('n') => self.change(Scene::suggest),
-            KeyCode::Char('v' | 'L' | 'M' | 'K' | 'D') => {
+            KeyCode::Char('L' | 'M' | 'K') => {
                 self.message = Some("decisions are made in relabel mode: press R".into());
             }
             KeyCode::Char('b') => {
@@ -130,7 +143,7 @@ impl App {
             KeyCode::Char('>') => self.change(|s| s.resize(1)),
             KeyCode::Char('<') => self.change(|s| s.resize(-1)),
             KeyCode::Char('A') => self.ask_markers(),
-            KeyCode::Char('k') => {
+            KeyCode::Char('p') => {
                 self.change_text(Scene::pin);
                 self.redecorate();
             }
@@ -201,7 +214,7 @@ impl App {
             KeyCode::Tab => menu.field = (menu.field + 1) % FIELDS.len(),
             KeyCode::BackTab => menu.field = (menu.field + FIELDS.len() - 1) % FIELDS.len(),
             KeyCode::Char(' ') => self.scene.restyle(row, |st| st.hidden = !st.hidden),
-            KeyCode::Char('r') => self
+            KeyCode::Backspace => self
                 .scene
                 .restyle(row, |st| *st = crate::view::style::Style::plain()),
             _ if step != 0 => {
@@ -516,9 +529,70 @@ fn search(names: &[Box<str>], lower: &[String], query: &str) -> Vec<Box<str>> {
         .collect()
 }
 
+/// Whether a chart takes `k`; the map's other keys would act unseen.
+fn chart_takes(k: KeyEvent) -> bool {
+    matches!(
+        k.code,
+        KeyCode::Char('H' | 'c' | '+' | '=' | '-' | '_' | 'T' | '?' | 'q')
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::search;
+    use super::*;
+
+    fn app() -> App {
+        App::new(
+            crate::view::tests::scene(),
+            Picker::halfblocks(),
+            "r.senna.json".into(),
+            "lupin".into(),
+        )
+    }
+
+    fn press(app: &mut App, c: char) {
+        app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn a_chart_keeps_to_its_keys_and_esc_returns_to_the_map() {
+        let mut a = app();
+        a.scene.cycle_chart();
+        assert!(a.scene.chart.is_some());
+        let colour = a.scene.colour;
+        press(&mut a, 'n');
+        assert!(a.message.as_deref().unwrap().starts_with("on a chart"));
+        assert!(a.scene.pick.is_none());
+        press(&mut a, 'c');
+        assert_ne!(a.scene.colour, colour);
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(a.scene.chart.is_none());
+    }
+
+    #[test]
+    fn merge_mode_keeps_to_its_keys() {
+        let mut a = app();
+        let draft = crate::view::review::Draft::default();
+        let mut review = crate::view::relabel::Review::new(Vec::new(), draft);
+        review.merge = Some(crate::view::relabel::MergeSel {
+            cursor: 0,
+            chosen: std::collections::BTreeSet::new(),
+            levels: Vec::new(),
+            best: None,
+        });
+        a.scene.review = Some(review);
+        let space = a.scene.space;
+        for c in ['m', 'z', 'L', 'a'] {
+            press(&mut a, c);
+            assert!(
+                a.message.as_deref().unwrap().starts_with("in merge mode"),
+                "{c}"
+            );
+        }
+        assert_eq!(a.scene.space, space);
+        assert!(a.zooming.is_none());
+    }
 
     #[test]
     pub(super) fn search_ranks_exact_then_symbol_then_prefix_then_substring() {

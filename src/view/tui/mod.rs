@@ -179,7 +179,8 @@ struct Menu {
 }
 
 const FIELDS: [&str; 5] = ["colour", "shape", "opacity", "size", "visible"];
-const MENU_HINT: &str = "↑↓ group  ←→ change  tab property  space show/hide  r reset  enter done";
+const MENU_HINT: &str =
+    "↑↓ group  ←→ change  tab property  space show/hide  backspace reset  enter done";
 
 struct App {
     scene: Scene,
