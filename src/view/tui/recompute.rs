@@ -1,0 +1,262 @@
+//! `r`: have senna compute a run's layouts or clusterings again, from a
+//! menu, while the view stays usable; the run reloads when it is done.
+
+use super::*;
+use crate::view::recompute::{self, Menu, Step, Target};
+
+/// senna recomputing on a worker thread.
+pub(super) struct Recomputing {
+    started: std::time::Instant,
+    /// What was asked for, for the status line and the reload message.
+    what: String,
+    /// The run being rewritten, reloaded when it is done.
+    from: std::path::PathBuf,
+    progress: std::sync::Arc<std::sync::Mutex<String>>,
+    stopper: std::sync::Arc<recompute::Stopper>,
+    done: Pending<()>,
+}
+
+/// A view that goes (the viewer quits) stops what senna does for it,
+/// rather than leave it rewriting the run unseen.
+impl Drop for Recomputing {
+    fn drop(&mut self) {
+        self.stopper.stop();
+    }
+}
+
+impl App {
+    /// Open the menu for the run on screen, the map on screen chosen.
+    pub(super) fn open_recompute(&mut self) {
+        if self.recomputing.is_some() {
+            self.message = Some("already recomputing · it reloads when done".into());
+            return;
+        }
+        let target = match Target::load(&self.from.to_string_lossy()) {
+            Ok(t) => t,
+            Err(e) => {
+                self.message = Some(format!("cannot recompute: {e}"));
+                return;
+            }
+        };
+        if target.offered().is_empty() {
+            self.message = Some("nothing to recompute for this run".into());
+            return;
+        }
+        // A zoom was laid out from its root map: redo that one.
+        let kind = self.scene.current().kind;
+        let method = self.scene.data.spaces[self.scene.root()].method.clone();
+        let on_screen = Step::on_screen(kind, &method);
+        let menu = Menu::new(&target, on_screen, &method);
+        self.modal = Some(Modal::Recompute(target, menu));
+    }
+
+    /// A key in the menu. Returns whether anything changed.
+    pub(super) fn recompute_key(&mut self, k: KeyEvent) -> bool {
+        let Some(Modal::Recompute(_, menu)) = self.modal.as_mut() else {
+            return false;
+        };
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => menu.step(-1),
+            KeyCode::Down | KeyCode::Char('j') => menu.step(1),
+            KeyCode::Char(' ') => menu.toggle(),
+            KeyCode::Left | KeyCode::Char('h') => menu.step_setting(-1),
+            KeyCode::Right | KeyCode::Char('l') => menu.step_setting(1),
+            KeyCode::Enter => self.start_recompute(),
+            KeyCode::Esc | KeyCode::Char('q' | 'r') => self.modal = None,
+            _ => return false,
+        }
+        true
+    }
+
+    fn start_recompute(&mut self) {
+        let Some(Modal::Recompute(target, menu)) = self.modal.take() else {
+            return;
+        };
+        let chosen = menu.chosen();
+        if chosen.is_empty() {
+            self.message = Some("nothing chosen · space chooses".into());
+            return;
+        }
+        let what = chosen
+            .iter()
+            .map(|(s, m)| match s.say(m) {
+                Some(said) => format!("{} ({said})", s.label()),
+                None => s.label().to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let progress: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
+        let stopper = std::sync::Arc::new(recompute::Stopper::default());
+        let (shared, stops) = (progress.clone(), stopper.clone());
+        let done = Pending::spawn(move || recompute::run(&target, &chosen, &shared, &stops));
+        self.recomputing = Some(Recomputing {
+            started: std::time::Instant::now(),
+            what,
+            from: self.from.clone(),
+            progress,
+            stopper,
+            done,
+        });
+    }
+
+    /// Take a finished recompute: reload the run (what finished before a
+    /// failure is kept too). Returns whether it did.
+    pub(super) fn finish_recompute(&mut self) -> bool {
+        let Some(result) = self
+            .recomputing
+            .as_ref()
+            .and_then(|r| r.done.poll("senna stopped without an answer"))
+        else {
+            return false;
+        };
+        let r = self.recomputing.take().expect("checked above");
+        self.open_round(&r.from.clone(), "reloaded");
+        match result {
+            Ok(()) => self.pop(format!("recomputed {}", r.what)),
+            Err(e) if e == "stopped" => {
+                self.message = Some(format!(
+                    "stopped recomputing {} · what finished before is kept",
+                    r.what
+                ));
+            }
+            Err(e) => self.message = Some(e),
+        }
+        true
+    }
+
+    /// While senna rewrites the run: esc stops it, and nothing that changes
+    /// the run (another round, lupin) starts. Returns whether `k` was taken.
+    pub(super) fn guard_recompute(&mut self, k: KeyEvent) -> bool {
+        let Some(r) = &self.recomputing else {
+            return false;
+        };
+        match k.code {
+            KeyCode::Esc => {
+                r.stopper.stop();
+                self.message = Some("stopping senna…".into());
+            }
+            KeyCode::Char(',' | '.' | 'A' | 'S' | 'p') => {
+                self.message = Some(format!(
+                    "senna is recomputing {} for this run · wait, or esc stops it",
+                    r.what
+                ));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// The status line while senna works.
+    pub(super) fn recompute_line(&self) -> Option<String> {
+        let r = self.recomputing.as_ref()?;
+        let now = r.progress.lock().map(|p| p.clone()).unwrap_or_default();
+        Some(format!(
+            "recomputing {} · {now} · {:.0} s · reloads when done · esc stops",
+            r.what,
+            r.started.elapsed().as_secs_f32()
+        ))
+    }
+
+    /// The menu, as a popup over the map.
+    pub(super) fn recompute_lines(menu: &Menu, run: &str) -> Vec<Line<'static>> {
+        let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+        let mut lines = vec![
+            Line::from(Span::styled(format!(" Recompute for {run}"), bold)),
+            Line::from(""),
+        ];
+        for (k, item) in menu.items.iter().enumerate() {
+            let here = k == menu.at;
+            let cursor = if here { " ▸ " } else { "   " };
+            let mark = if item.on { "[x]" } else { "[ ]" };
+            let method = item
+                .step
+                .say(item.setting())
+                .map_or_else(String::new, |said| format!("‹ {said} ›"));
+            // The cursor's line is a dark bar; chosen lines stand out in bold.
+            let style = match (here, item.on) {
+                (true, _) => super::draw::selected(),
+                (false, true) => bold,
+                (false, false) => Style::default(),
+            };
+            let text = format!("{cursor}{mark} {:<26}{method} ", item.step.label());
+            lines.push(Line::from(Span::styled(text, style)));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " replaces those files of the run; the view reloads when done",
+            super::draw::hint(),
+        )));
+        lines.push(Line::from(
+            " ↑ ↓ move   space choose   ← → method or resolution   enter run   esc cancel",
+        ));
+        lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A view whose run senna is recomputing (a job that never answers).
+    fn busy() -> (
+        App,
+        std::sync::Arc<recompute::Stopper>,
+        std::sync::mpsc::Sender<Result<(), String>>,
+    ) {
+        let mut app = App::new(
+            crate::view::tests::scene(),
+            Picker::halfblocks(),
+            "r.senna.json".into(),
+            "lupin".into(),
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stopper = std::sync::Arc::new(recompute::Stopper::default());
+        app.recomputing = Some(Recomputing {
+            started: std::time::Instant::now(),
+            what: "cell layout (umap)".into(),
+            from: "r.senna.json".into(),
+            progress: Default::default(),
+            stopper: stopper.clone(),
+            done: Pending(rx),
+        });
+        (app, stopper, tx)
+    }
+
+    fn press(app: &mut App, c: KeyCode) {
+        app.key(KeyEvent::new(c, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn nothing_that_changes_the_run_starts_while_senna_rewrites_it() {
+        let (mut app, stopper, _tx) = busy();
+        for c in [',', '.', 'A', 'S', 'p'] {
+            app.message = None;
+            press(&mut app, KeyCode::Char(c));
+            let said = app.message.clone().unwrap_or_default();
+            assert!(said.contains("recomputing"), "{c}: {said}");
+            assert!(app.modal.is_none() && app.relabeling.is_none(), "{c}");
+        }
+        assert!(!stopper.is_stopped());
+        // Esc stops senna.
+        press(&mut app, KeyCode::Esc);
+        assert!(stopper.is_stopped());
+    }
+
+    #[test]
+    fn a_finished_recompute_reloads_the_run_it_was_for() {
+        let (mut app, _stopper, tx) = busy();
+        app.from = "elsewhere.senna.json".into();
+        tx.send(Ok(())).unwrap();
+        assert!(app.finish_recompute());
+        // It tried the recomputed run (not the one now on screen).
+        let said = app.message.clone().unwrap_or_default();
+        assert!(said.contains("r.senna.json"), "{said}");
+    }
+
+    #[test]
+    fn quitting_stops_senna() {
+        let (app, stopper, _tx) = busy();
+        drop(app);
+        assert!(stopper.is_stopped());
+    }
+}

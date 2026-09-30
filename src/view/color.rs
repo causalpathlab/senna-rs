@@ -10,8 +10,12 @@ pub type Rgb = [f32; 3];
 pub const BACKGROUND: [u8; 3] = [246, 245, 242];
 /// Points with no group, and points outside the focused group.
 pub const MUTED: [u8; 3] = [200, 199, 196];
-/// Status-line text.
+/// Text drawn on the map (labels, titles).
 pub const INK: [u8; 3] = [92, 92, 92];
+/// Menus, popups and the status line: near-black, to read at a glance.
+pub const TEXT: [u8; 3] = [30, 30, 32];
+/// Key hints and other secondary lines beside `TEXT`: lighter, still clear.
+pub const HINT: [u8; 3] = [104, 104, 104];
 
 #[must_use]
 pub fn srgb_to_linear(c: u8) -> f32 {
@@ -139,4 +143,37 @@ pub fn activity_ramp(n: usize) -> Vec<Rgb> {
 #[must_use]
 pub fn highlight_ink() -> Rgb {
     oklch(0.36, 0.17, 310.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG contrast ratio between two sRGB colours.
+    fn contrast(a: [u8; 3], b: [u8; 3]) -> f32 {
+        let lum = |c: [u8; 3]| {
+            let [r, g, b] = linear_rgb(c);
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn menu_text_and_hints_read_clearly_on_the_page() {
+        assert!(
+            contrast(TEXT, BACKGROUND) >= 7.0,
+            "{}",
+            contrast(TEXT, BACKGROUND)
+        );
+        assert!(
+            contrast(HINT, BACKGROUND) >= 4.5,
+            "{}",
+            contrast(HINT, BACKGROUND)
+        );
+        // Hints stay a step below the text they explain.
+        assert!(contrast(HINT, BACKGROUND) < contrast(TEXT, BACKGROUND));
+        // The old hint grey did not.
+        assert!(contrast(MUTED, BACKGROUND) < 2.0);
+    }
 }

@@ -9,10 +9,12 @@ mod features;
 mod files;
 mod paint;
 mod pdf;
+mod recompute;
 mod relabel;
 mod render;
 mod review;
 mod rounds;
+mod saved;
 mod state;
 mod style;
 mod sublayout;
@@ -199,6 +201,9 @@ struct Shown {
     levels: Levels,
 }
 
+/// The camera of a frame, and each group label it drew with where.
+type LabelHits = (Viewport, Vec<(u32, [f32; 4])>);
+
 /// Point of each name (its first, for a repeated name).
 type NameIndex = std::collections::HashMap<Box<str>, usize>;
 
@@ -215,6 +220,14 @@ pub(crate) struct Scene {
     pub show_labels: bool,
     /// Text size on the map, relative to the terminal's cell height.
     pub text_scale: f32,
+    /// Every dot and all text on the map, together (`<` `>`), on top of
+    /// each group's own size and `text_scale`.
+    pub scale: f32,
+    /// The group whose label is under the pointer, framed when drawn.
+    pub hover: Option<u32>,
+    /// Where group labels were drawn in the last frame, and its camera: what
+    /// a click on the map can hit.
+    label_hits: std::cell::RefCell<Option<LabelHits>>,
     /// Group id per point, and points per group, cached per (space, labels).
     groups: Option<(usize, usize, Vec<u32>, Vec<usize>)>,
     /// Resolved style per group of the current grouping.
@@ -260,6 +273,9 @@ impl Scene {
             focus: None,
             show_labels: true,
             text_scale: TEXT_SCALES[1],
+            scale: 1.0,
+            hover: None,
+            label_hits: std::cell::RefCell::default(),
             groups: None,
             styles: Vec::new(),
             book,
@@ -330,6 +346,9 @@ impl Scene {
             focus: self.focus,
             show_labels: self.show_labels,
             text_scale: self.text_scale,
+            scale: self.scale,
+            hover: None,
+            label_hits: std::cell::RefCell::default(),
             groups: None,
             styles: Vec::new(),
             book: self.book.clone(),
@@ -369,7 +388,7 @@ fn pick_space(data: &Dataset, method: Option<&str>, space: Option<&str>) -> usiz
 
 /// Run `senna` itself with `argv` on the way into the view, its progress
 /// showing before the view opens.
-fn run_senna(why: &str, argv: &[&str]) -> anyhow::Result<()> {
+fn run_senna(why: &str, argv: &[String]) -> anyhow::Result<()> {
     eprintln!("senna view: {why}; running `senna {}`", argv.join(" "));
     let status = std::process::Command::new(std::env::current_exe()?)
         .args(argv)
@@ -388,64 +407,70 @@ fn run_senna(why: &str, argv: &[&str]) -> anyhow::Result<()> {
 /// once. Only a missing cell layout is an error; the rest warn and the view
 /// opens without them.
 fn prepare_run(args: &ViewArgs, from: &str) -> anyhow::Result<()> {
+    use recompute::{Step, Target};
     use senna::run_manifest::RunManifest;
     let load = || RunManifest::load(std::path::Path::new(from));
     let (m, dir) = load()?;
-    let out = senna::run_manifest::derive_out_prefix(from);
-    let has_features = m.outputs.feature_embedding.is_some();
+    let target = Target::from_manifest(from, &m, &dir);
     let method = args
         .method
         .as_deref()
         .or(m.layout.current.as_deref())
         .unwrap_or("umap")
         .to_string();
+    // An output counts only when its file is here: one recorded but moved
+    // or deleted is computed again.
+    let here = |slot: &Option<String>| {
+        slot.as_deref()
+            .is_some_and(|p| senna::run_manifest::resolve(&dir, p).exists())
+    };
     // The method asked for, else any: a feature map alone is no cell layout.
-    let no_cells = |e: &senna::run_manifest::LayoutEntry| e.cell_coords.is_none();
-    let wants_cell_layout = m.kind.has_cells()
+    let no_cells = |e: &senna::run_manifest::LayoutEntry| !here(&e.cell_coords);
+    let wants_cell_layout = target.has_cells
         && match &args.method {
             Some(w) => m.layout.methods.get(w.as_ref()).is_none_or(no_cells),
-            None => m.layout.cell_coords.is_none() && m.layout.methods.values().all(no_cells),
+            None => !here(&m.layout.cell_coords) && m.layout.methods.values().all(no_cells),
         };
+    let run = |step: Step, method: &str, why: String| run_senna(&why, &step.argv(&target, method));
     let warn = |r: anyhow::Result<()>| {
         if let Err(e) = r {
             log::warn!("view: {e}; opening without it");
         }
     };
-    let cluster = |why: &str, extra: &[&str]| {
-        let mut argv = vec!["clustering", "--from", from, "-m", "leiden", "-o", &out];
-        argv.extend(extra);
-        warn(run_senna(&format!("{from} has no {why} yet"), &argv));
-    };
 
     if wants_cell_layout {
-        run_senna(
-            &format!("{from} has no {method} layout of its cells yet"),
-            &["layout", &method, "--from", from, "--out", &out],
-        )?;
+        let why = format!("{from} has no {method} layout of its cells yet");
+        run(Step::for_method(&method), &method, why)?;
     }
     let (m, _) = load()?;
-    if has_features
-        && m.layout
-            .methods
-            .values()
-            .all(|e| e.feature_coords.is_none())
-    {
-        // Only umap and phate lay out features; t-SNE and tree refuse.
-        let method = if method == "phate" { "phate" } else { "umap" };
-        warn(run_senna(
-            &format!("{from} has no layout of its feature embedding yet"),
-            &[
-                "layout", method, "--target", "features", "--from", from, "--out", &out,
-            ],
-        ));
+    if target.has_features && m.layout.methods.values().all(|e| !here(&e.feature_coords)) {
+        // The cell layout's method when features can take it, else the default.
+        let methods = Step::FeatureLayout.settings();
+        let method = methods
+            .iter()
+            .find(|m| **m == method)
+            .unwrap_or(&methods[0]);
+        let why = format!("{from} has no layout of its feature embedding yet");
+        warn(run(Step::FeatureLayout, method, why));
     }
-    let latent = m.outputs.geometry_latent().filter(|_| m.kind.has_cells());
-    if let (Some(latent), None) = (latent, &m.cluster.clusters) {
-        let latent = senna::run_manifest::resolve(&dir, latent);
-        cluster("cell clusters", &["--latent", &latent.to_string_lossy()]);
-    }
-    if has_features && m.cluster.feature_clusters.is_none() {
-        cluster("feature clusters", &["--target", "features"]);
+    for (step, wanted) in [
+        (
+            // Only on a latent that is here: a missing one would fail anyway.
+            Step::CellClusters,
+            target
+                .latent
+                .as_deref()
+                .is_some_and(|l| std::path::Path::new(l).exists())
+                && !here(&m.cluster.clusters),
+        ),
+        (
+            Step::FeatureClusters,
+            target.has_features && !here(&m.cluster.feature_clusters),
+        ),
+    ] {
+        if wanted {
+            warn(run(step, "", format!("{from} has no {} yet", step.label())));
+        }
     }
     Ok(())
 }
@@ -579,7 +604,7 @@ mod tests {
         }
     }
 
-    fn scene() -> Scene {
+    pub(super) fn scene() -> Scene {
         let cells = ["c1", "c2", "c3", "c4"];
         let genes = ["g1", "g2", "g3"];
         let data = Dataset {
@@ -836,5 +861,129 @@ mod tests {
             before.get_pixel(x as u32, y as u32),
             after.get_pixel(x as u32, y as u32)
         );
+    }
+
+    #[test]
+    fn a_click_on_a_cluster_label_finds_that_cluster() {
+        let s = scene();
+        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        // Only a frame that was drawn has labels to click.
+        let (x, y) = vp.to_px(s.group_centre(1).unwrap());
+        assert_eq!(s.group_at(&vp, x, y), None);
+        render_full(&s, vp, 16.0);
+        // C1 (cells c2, c3) is labelled at its centre; a click there is C1.
+        assert_eq!(s.group_at(&vp, x, y), Some(1));
+        // Far from every label, nothing; nor on another camera's frame.
+        assert_eq!(s.group_at(&vp, 100.0, 5.0), None);
+        let moved = Viewport {
+            cx: vp.cx + 1.0,
+            ..vp
+        };
+        assert_eq!(s.group_at(&moved, x, y), None);
+        // No grouping on screen (as `c` leaves it), no labels to click.
+        let mut plain = scene();
+        plain.cycle_colour();
+        plain.cycle_colour();
+        assert_eq!(plain.colour, None);
+        render_full(&plain, vp, 16.0);
+        assert_eq!(plain.group_at(&vp, x, y), None);
+    }
+
+    #[test]
+    fn a_label_not_drawn_is_not_clicked() {
+        // C0 is one cell in the frame's corner: its label would run off the
+        // frame, so it is not drawn, and a click there is not C0.
+        let s = scene();
+        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        render_full(&s, vp, 16.0);
+        let (x, y) = vp.to_px(s.group_centre(0).unwrap());
+        assert_ne!(s.group_at(&vp, x, y), Some(0));
+    }
+
+    #[test]
+    fn a_label_under_the_pointer_is_framed() {
+        let mut s = scene();
+        s.show_labels = true;
+        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let plain = render_full(&s, vp, 16.0);
+        let [x0, y0, x1, _] = s.label_rect(1).unwrap();
+        s.hover = Some(1);
+        let framed = render_full(&s, vp, 16.0);
+        // Along the frame's top edge, just outside the label's text.
+        let changed = (x0 as u32..x1 as u32)
+            .filter(|&x| plain.get_pixel(x, y0 as u32) != framed.get_pixel(x, y0 as u32))
+            .count();
+        assert!(changed > 0);
+    }
+
+    #[test]
+    fn a_clicked_cluster_is_drawn_with_edges_to_its_features() {
+        let mut s = scene();
+        let mut placed = space("umap", SpaceKind::FeaturesOnCells, &["g1", "g2", "g3"]);
+        placed.points = std::sync::Arc::new(Points::new(
+            ["g1", "g2", "g3"].map(Into::into).to_vec(),
+            vec![[3.0, 2.0], [3.0, 0.0], [0.0, 2.0]],
+        ));
+        placed.backdrop = Some(0);
+        s.data.spaces.push(placed);
+        s.show_labels = false;
+        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let before = render_full(&s, vp, 16.0);
+        let centre = s.group_centre(1).unwrap();
+        s.near = Some(features::Near {
+            name: "C1".into(),
+            centre: features::Centre::Group {
+                space: 0,
+                xy: centre,
+            },
+            features: vec![("g1".into(), 1.0)],
+            cells: Vec::new(),
+        });
+        let after = render_full(&s, vp, 16.0);
+        // Halfway from the cluster's centre to g1 at (3, 2): the edge.
+        let (x, y) = vp.to_px([0.5 * (centre[0] + 3.0), 0.5 * (centre[1] + 2.0)]);
+        assert_ne!(
+            before.get_pixel(x as u32, y as u32),
+            after.get_pixel(x as u32, y as u32)
+        );
+    }
+
+    #[test]
+    fn one_knob_scales_every_dot_and_text_together() {
+        let mut s = scene();
+        assert_eq!(s.scale, 1.0);
+        let dot = |s: &Scene| s.layers().last().unwrap().size;
+        let before = dot(&s);
+        s.resize(1);
+        assert!((s.scale - 1.25).abs() < 1e-6);
+        assert!((dot(&s) - 1.25 * before).abs() < 1e-6);
+        assert!(s.note.take().unwrap().contains("1.25"));
+        // Text follows: the label box to click grows with it.
+        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let (x, y) = vp.to_px(s.group_centre(1).unwrap());
+        let reach = |s: &Scene| {
+            render_full(s, vp, 16.0);
+            (0..100)
+                .map(|d| d as f32)
+                .take_while(|&d| s.group_at(&vp, x + d, y) == Some(1))
+                .count()
+        };
+        let small = {
+            let mut t = scene();
+            t.resize(-1);
+            reach(&t)
+        };
+        assert!(reach(&s) > small);
+        // Bounded both ways.
+        for _ in 0..20 {
+            s.resize(1);
+        }
+        assert!((s.scale - 4.0).abs() < 1e-6);
+        for _ in 0..40 {
+            s.resize(-1);
+        }
+        assert!((s.scale - 0.4).abs() < 1e-6);
+        // A copy keeps its size.
+        assert_eq!(s.duplicate().scale, s.scale);
     }
 }

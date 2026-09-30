@@ -13,7 +13,9 @@ use super::fit_layout_common::{
     write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep, PbLayoutPrep,
     ResolvedViz,
 };
-use super::fit_layout_features::{load_feature_layout_input, write_feature_layout, LayoutTarget};
+use super::fit_layout_features::{
+    load_feature_layout_input, read_coembedding, write_feature_layout, LayoutTarget,
+};
 use legume_numeric::matrix::pca::{init_2d_from_scores, pc_scores, random_init_2d};
 use legume_numeric::matrix::umap::Umap;
 use rayon::prelude::*;
@@ -58,6 +60,19 @@ pub struct LayoutUmapArgs {
         help = "kNN for cell-cell graph during fine-tune"
     )]
     umap_finetune_knn: usize,
+
+    #[arg(
+        long,
+        help = "Lay out cells and features together, as the `joint` method",
+        long_help = "Lay out cells and features in one map, recorded as the `joint` method.\n\
+                     For runs whose cells and features share one embedding (bge, simba,\n\
+                     gem, resolve-embedding-space) and that wrote a feature co-embedding.\n\
+                     One t-UMAP runs over cells and features together: a kNN over all of\n\
+                     them, plus each feature's nearest cells, so features sit among the\n\
+                     cells they belong to and pull on them, rather than being placed on a\n\
+                     finished cell map. `senna view` shows it as another layout method."
+    )]
+    joint: bool,
 }
 
 impl Default for LayoutUmapArgs {
@@ -69,6 +84,7 @@ impl Default for LayoutUmapArgs {
             umap_lr: 1.0,
             umap_finetune_epochs: 100,
             umap_finetune_knn: 15,
+            joint: false,
         }
     }
 }
@@ -111,12 +127,63 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
         return fit_feature_layout_umap(args);
     }
     let mut resolved = resolve_inputs(&args.common)?;
+    if args.joint {
+        // Before any layout work: only an embedding run lays out directly.
+        let kind = resolved.manifest.as_ref().map(|m| m.kind);
+        anyhow::ensure!(
+            kind.is_some_and(|k| k.cell_space() == senna::run_manifest::CellSpace::Embedding),
+            "--joint needs a run whose cells and features share one embedding \
+             (bge, simba, gem, resolve-embedding-space), not {}",
+            kind.map_or("one given without --from".into(), |k| format!(
+                "a `{k}` run"
+            ))
+        );
+    }
     let prep = preprocess_layout_data(&args.common, &resolved, /*allow_direct_cells=*/ true)?;
 
     match &prep {
+        LayoutPrep::DirectCells(p) if args.joint => fit_layout_joint(args, &mut resolved, p),
         LayoutPrep::PbThenNystrom(p) => fit_layout_umap_pb(args, &mut resolved, p),
         LayoutPrep::DirectCells(p) => fit_layout_umap_direct(args, &mut resolved, p),
     }
+}
+
+/// `--joint`: cells and the feature co-embedding in one t-UMAP, written as
+/// the `joint` method (cells, and features on that same map).
+fn fit_layout_joint(
+    args: &LayoutUmapArgs,
+    resolved: &mut ResolvedViz,
+    prep: &DirectLayoutPrep,
+) -> anyhow::Result<()> {
+    let (names, coembed_dh) = read_coembedding(
+        resolved.manifest.as_ref(),
+        resolved.manifest_path.as_ref(),
+        prep.cell_proj_kn.nrows(),
+    )?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "--joint needs the run's feature co-embedding (outputs.feature_coembedding), \
+             in the cells' space; this run has none"
+        )
+    })?;
+    info!(
+        "UMAP joint mode: {} cells + {} features",
+        prep.cell_proj_kn.ncols(),
+        names.len()
+    );
+    let (cell_coords, feature_coords) = joint_tumap(
+        &prep.cell_proj_kn,
+        &coembed_dh.transpose(),
+        &args.direct_params(),
+    )?;
+    write_viz_outputs_direct(
+        &args.common,
+        resolved,
+        prep,
+        &cell_coords,
+        "joint",
+        Some((&names, &feature_coords)),
+    )
 }
 
 fn fit_layout_umap_pb(
@@ -202,7 +269,7 @@ fn fit_layout_umap_direct(
     // structure is seeded from the embedding rather than noise.
     let cell_coords = tumap_on_columns(&prep.cell_proj_kn, &args.direct_params())?;
 
-    write_viz_outputs_direct(&args.common, resolved, prep, &cell_coords, "umap")
+    write_viz_outputs_direct(&args.common, resolved, prep, &cell_coords, "umap", None)
 }
 
 /// `--target features`: t-UMAP of the feature embedding on its own, over a
@@ -250,6 +317,114 @@ pub(crate) fn tumap_on_columns(feat_kn: &Mat, p: &DirectUmap) -> anyhow::Result<
     let mut coords = pca_init_2d(feat_kn, p.seed);
     run_cell_level_umap_in_place(&mut coords, &edges, p.epochs, p.negative_rate, p.lr, p.seed);
     Ok(coords)
+}
+
+/// t-UMAP of cells and features that share one space: `cells_kn`
+/// (`dims × cells`, the cell embedding) and `features_kn` (`dims × features`,
+/// e.g. the co-embedding) become the points of one graph. It is a fuzzy kNN
+/// over all of them, plus each feature's `knn` nearest cells, so no feature
+/// is left tied only to other features. One SGD from a joint PCA(2) start.
+/// Returns (`cells × 2`, `features × 2`).
+pub(crate) fn joint_tumap(
+    cells_kn: &Mat,
+    features_kn: &Mat,
+    p: &DirectUmap,
+) -> anyhow::Result<(Mat, Mat)> {
+    let (h, n, d) = (cells_kn.nrows(), cells_kn.ncols(), features_kn.ncols());
+    anyhow::ensure!(
+        features_kn.nrows() == h,
+        "features have {} dims but cells {h}: not one shared space",
+        features_kn.nrows()
+    );
+    let mut all = Mat::zeros(h, n + d);
+    all.columns_mut(0, n).copy_from(cells_kn);
+    all.columns_mut(n, d).copy_from(features_kn);
+
+    let mut edges = build_cell_cell_fuzzy_edges(&all, p.knn, p.block_size)?;
+    edges.extend(feature_to_cell_edges(cells_kn, features_kn, p.knn)?);
+    let edges = merge_fuzzy_edges(edges);
+    info!(
+        "Joint graph: {n} cells + {d} features, {} edges",
+        edges.len()
+    );
+
+    let mut coords = pca_init_2d(&all, p.seed);
+    run_cell_level_umap_in_place(&mut coords, &edges, p.epochs, p.negative_rate, p.lr, p.seed);
+    Ok((
+        coords.rows(0, n).into_owned(),
+        coords.rows(n, d).into_owned(),
+    ))
+}
+
+/// Each feature to its `knn` nearest cells in the shared space, weighted by
+/// UMAP's kernel for that feature: `exp(-(dist - ρ) / σ)`, where ρ is the
+/// nearest distance and σ makes the weights sum to `log2(knn)`. Edges are
+/// `(cell, n + feature, w)`.
+fn feature_to_cell_edges(
+    cells_kn: &Mat,
+    features_kn: &Mat,
+    knn: usize,
+) -> anyhow::Result<Vec<(usize, usize, f32)>> {
+    use legume_numeric::matrix::knn::{ColumnDict, SearchScratch};
+    let n = cells_kn.ncols();
+    // Views onto the cells, not a copy of the table.
+    let index = ColumnDict::from_dvector_views(cells_kn.column_iter().collect(), (0..n).collect());
+    let per_feature: Vec<Vec<(usize, usize, f32)>> = (0..features_kn.ncols())
+        .into_par_iter()
+        .map_init(SearchScratch::default, |scratch, f| {
+            let query: Vec<f32> = features_kn.column(f).iter().copied().collect();
+            let (cells, dists) = index.search_by_query_data_reuse(&query, knn, scratch)?;
+            Ok(cells
+                .into_iter()
+                .zip(smooth_knn_weights(&dists))
+                .map(|(c, w)| (c, n + f, w))
+                .collect())
+        })
+        .collect::<anyhow::Result<_>>()?;
+    Ok(per_feature.into_iter().flatten().collect())
+}
+
+/// UMAP's membership weights for one point's neighbour distances (nearest
+/// first): `exp(-(d - ρ) / σ)` with ρ the nearest distance and σ found by
+/// bisection so the weights sum to `log2(k)`.
+fn smooth_knn_weights(dists: &[f32]) -> Vec<f32> {
+    let Some(&rho) = dists.first() else {
+        return Vec::new();
+    };
+    let target = (dists.len() as f32).log2().max(1.0);
+    let weights = |sigma: f32| {
+        dists
+            .iter()
+            .map(move |&d| (-(d - rho).max(0.0) / sigma).exp())
+    };
+    let (mut lo, mut hi) = (1e-6_f32, 1e6_f32);
+    for _ in 0..64 {
+        let mid = (lo * hi).sqrt();
+        if weights(mid).sum::<f32>() > target {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    weights((lo * hi).sqrt()).collect()
+}
+
+/// One edge per pair (`i < j`), weights of repeated pairs combined as a
+/// fuzzy union, `a + b - a·b`.
+fn merge_fuzzy_edges(edges: Vec<(usize, usize, f32)>) -> Vec<(usize, usize, f32)> {
+    let mut edges: Vec<(usize, usize, f32)> = edges
+        .into_iter()
+        .map(|(i, j, w)| (i.min(j), i.max(j), w))
+        .collect();
+    edges.par_sort_unstable_by_key(|&(i, j, _)| (i, j));
+    let mut out: Vec<(usize, usize, f32)> = Vec::with_capacity(edges.len());
+    for (i, j, w) in edges {
+        match out.last_mut() {
+            Some(last) if (last.0, last.1) == (i, j) => last.2 = last.2 + w - last.2 * w,
+            _ => out.push((i, j, w)),
+        }
+    }
+    out
 }
 
 /// Build the undirected cell-cell fuzzy kNN edge list used by both the
@@ -335,4 +510,114 @@ fn extract_upper_edges(sim: &Mat) -> Vec<(usize, usize, f32)> {
         }
     }
     edges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::SmallRng;
+    use rand::{RngExt, SeedableRng};
+
+    /// Two groups of cells in a shared 6-D space, and genes co-embedded at
+    /// each group's centre. Genes of a group are nearly identical, so a kNN
+    /// over the union alone would tie them mostly to each other.
+    fn two_groups(per: usize, genes: usize) -> (Mat, Mat) {
+        let h = 6;
+        let mut rng = SmallRng::seed_from_u64(7);
+        let centre = |g: usize, d: usize| if d % 2 == g { 4.0 } else { 0.0 };
+        let mut cells = Mat::zeros(h, 2 * per);
+        for c in 0..2 * per {
+            for d in 0..h {
+                cells[(d, c)] = centre(c / per, d) + rng.random_range(-1.0..1.0);
+            }
+        }
+        let mut gene_kn = Mat::zeros(h, genes);
+        for f in 0..genes {
+            for d in 0..h {
+                gene_kn[(d, f)] = centre(f % 2, d) + rng.random_range(-0.05..0.05);
+            }
+        }
+        (cells, gene_kn)
+    }
+
+    fn params() -> DirectUmap {
+        DirectUmap {
+            knn: 15,
+            epochs: 200,
+            negative_rate: 5,
+            lr: 1.0,
+            block_size: 128,
+            seed: 1,
+        }
+    }
+
+    #[test]
+    fn a_joint_layout_puts_each_gene_among_its_own_cells() {
+        let per = 200;
+        let (cells, genes) = two_groups(per, 40);
+        let (cell_xy, gene_xy) = joint_tumap(&cells, &genes, &params()).unwrap();
+        assert_eq!((cell_xy.nrows(), cell_xy.ncols()), (2 * per, 2));
+        assert_eq!((gene_xy.nrows(), gene_xy.ncols()), (40, 2));
+
+        let centroid = |g: usize| {
+            let rows = (g * per..(g + 1) * per).map(|c| [cell_xy[(c, 0)], cell_xy[(c, 1)]]);
+            let (sx, sy) = rows.fold((0.0, 0.0), |(x, y), [a, b]| (x + a, y + b));
+            [sx / per as f32, sy / per as f32]
+        };
+        let dist =
+            |p: [f32; 2], q: [f32; 2]| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt();
+        for f in 0..40 {
+            let at = [gene_xy[(f, 0)], gene_xy[(f, 1)]];
+            let (own, other) = (centroid(f % 2), centroid(1 - f % 2));
+            assert!(
+                dist(at, own) < dist(at, other),
+                "gene {f} sits nearer the other group's cells"
+            );
+        }
+    }
+
+    #[test]
+    fn genes_sit_inside_their_cells_not_on_an_island_beside_them() {
+        // A small population with more genes than cells, as a rare cell type
+        // with many markers: a kNN over the union alone ties each gene to
+        // other genes, and they drift off as a clump beside their cells.
+        let (per, n_genes) = (200, 800);
+        let (cells, genes) = two_groups(per, n_genes);
+        let (cell_xy, gene_xy) = joint_tumap(&cells, &genes, &params()).unwrap();
+        let xy = |m: &Mat, i: usize| [m[(i, 0)], m[(i, 1)]];
+        let dist =
+            |p: [f32; 2], q: [f32; 2]| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt();
+        // A group's radius: the median distance of its cells to their centroid.
+        let radius = |g: usize| {
+            let rows: Vec<usize> = (g * per..(g + 1) * per).collect();
+            let c = rows.iter().fold([0.0, 0.0], |[x, y], &r| {
+                [
+                    x + cell_xy[(r, 0)] / per as f32,
+                    y + cell_xy[(r, 1)] / per as f32,
+                ]
+            });
+            let mut d: Vec<f32> = rows.iter().map(|&r| dist(xy(&cell_xy, r), c)).collect();
+            d.sort_by(f32::total_cmp);
+            d[per / 2]
+        };
+        for f in 0..n_genes {
+            let at = xy(&gene_xy, f);
+            let (nearest, d) = (0..2 * per)
+                .map(|c| (c, dist(at, xy(&cell_xy, c))))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap();
+            assert_eq!(
+                nearest / per,
+                f % 2,
+                "gene {f}'s nearest cell is of the other group"
+            );
+            // Genes take room on the map too, so allow a margin past the
+            // cells' median radius; a clump beside the cells lies well beyond.
+            assert!(
+                d < 1.5 * radius(f % 2),
+                "gene {f} is {d:.2} from the nearest cell; its group's radius is {:.2}",
+                radius(f % 2)
+            );
+        }
+    }
 }

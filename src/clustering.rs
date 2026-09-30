@@ -4,7 +4,7 @@
 //! embeddings), or, with `--target features`, the run's feature embedding.
 
 use crate::cluster_bhc::{run_cluster_bhc, ClusterBhcConfig};
-use crate::postprocess::fit_layout_features::read_feature_rows;
+use crate::postprocess::fit_layout_features::{read_feature_rows, FeatureSpace};
 use senna::cluster::{
     hsblock_clustering, kmeans_clustering, leiden_clustering_with_metric, ClusterMethod,
     ClusterResult, LatentMetric,
@@ -44,7 +44,7 @@ pub enum ClusterTarget {
     /// Cells, on --latent (the default).
     #[default]
     Cells,
-    /// The run's feature embedding ρ, by cosine; needs --from.
+    /// The run's features, by cosine (see --feature-space); needs --from.
     Features,
 }
 
@@ -85,14 +85,26 @@ pub struct ClusteringArgs {
         long_help = "What to cluster.\n\
                      \n\
                      - cells: rows of --latent (the default).\n\
-                     - features: the feature embedding of the --from run\n\
-                     (`senna bge`, `senna fne`, ...), rows L2-normalized so\n\
+                     - features: the features of the --from run (`senna bge`,\n\
+                     `senna fne`, ...): the co-embedding when the run has one,\n\
+                     else ρ (see --feature-space); rows L2-normalized so\n\
                      distances are cosine; leiden is the usual choice.\n\
                      Writes {out}.feature_clusters.parquet and records it\n\
                      under `cluster.feature_clusters`, where `senna view`\n\
                      colours feature maps by it."
     )]
     target: ClusterTarget,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        help = "With --target features: the co-embedding (auto, when the run has one) or ρ",
+        long_help = "Which table of the run's features --target features clusters, as\n\
+                     `senna layout --target features` lays them out: auto (default) is the\n\
+                     co-embedding when the run wrote one, else ρ; or coembedding, or rho."
+    )]
+    feature_space: FeatureSpace,
 
     #[arg(
         long,
@@ -282,7 +294,7 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
                 "--data (BHC over cell counts) does not apply to --target features"
             );
             let (manifest, dir) = RunManifest::load(Path::new(from))?;
-            read_feature_rows(&manifest, &dir)?
+            read_feature_rows(&manifest, &dir, args.feature_space)?
         }
         // clap requires --from for an explicit --target features; the
         // default target is not seen by its conditions.

@@ -14,6 +14,8 @@ pub(super) enum Modal {
     MarkersFile(String, Vec<(String, bool)>),
     /// Submitting the relabel draft: one line per decision it hands lupin.
     Submit(Vec<String>),
+    /// The `r` menu: what to recompute for the run.
+    Recompute(crate::view::recompute::Target, crate::view::recompute::Menu),
 }
 
 impl Modal {
@@ -28,6 +30,7 @@ impl Modal {
             Modal::Prompt(_) => Context::Prompt,
             Modal::MarkersFile(..) => Context::MarkersFile,
             Modal::Submit(_) => Context::Submit,
+            Modal::Recompute(..) => Context::Recompute,
         }
     }
 
@@ -39,7 +42,7 @@ impl Modal {
                 format!("/{q}   {}", shown.join("  "))
             }
             Modal::Prompt(p) => p.line(),
-            Modal::Submit(_) => return None,
+            Modal::Submit(_) | Modal::Recompute(..) => return None,
             Modal::MarkersFile(input, options) => {
                 let hint = if options.len() > 1 {
                     let names: Vec<&str> =
@@ -61,6 +64,7 @@ impl App {
             Some(Modal::Search(..)) => self.search_key(k),
             Some(Modal::Prompt(_)) => self.prompt_key(k),
             Some(Modal::MarkersFile(..)) => self.markers_key(k),
+            Some(Modal::Recompute(..)) => self.recompute_key(k),
             Some(Modal::Submit(_)) => {
                 self.modal = None;
                 if matches!(k.code, KeyCode::Char('S') | KeyCode::Enter) {

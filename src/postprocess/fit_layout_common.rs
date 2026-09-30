@@ -9,7 +9,10 @@
 //! Both layout subcommands delegate here for everything except the
 //! actual 2D layout algorithm.
 
-use super::fit_layout_features::{place_features_on_cells, record_cell_layout, LayoutTarget};
+use super::fit_layout_features::{
+    place_features_on_cells, record_cell_layout, write_features_on_cells, FeatureSpace,
+    LayoutTarget,
+};
 use super::viz_prep::{aggregate_features_by_group, select_pb_coverage};
 use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::similarity::{
@@ -23,7 +26,6 @@ use rand::{rngs::SmallRng, SeedableRng};
 use rayon::prelude::*;
 use senna::embed_common::*;
 use senna::run_manifest::{self, load_cell_to_pb_raw, LayoutEntry, RunManifest};
-use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use std::path::{Path, PathBuf};
 
 /// How to pick landmarks for the latent-driven layout path.
@@ -81,13 +83,29 @@ pub struct LayoutCommonArgs {
         help = "What to lay out: cells, or the feature embedding on its own",
         long_help = "cells    (default): lay out cells. On an embedding run with a co-embed,\n\
                      \x20 features are also placed on the new cell map.\n\
-                     features: lay out the feature embedding ρ by itself (cosine kNN).\n\
+                     features: lay out the run's features by themselves (cosine kNN):\n\
+                     \x20 the co-embedding when the run has one, else ρ (see --feature-space).\n\
                      \x20 Needs --from; reads no count data.\n\
                      \n\
                      Each method keeps its own files, `{out}.{method}.*.parquet`,\n\
                      recorded under `manifest.layout.methods`."
     )]
     pub target: LayoutTarget,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        help = "With --target features: the co-embedding (auto, when the run has one) or ρ",
+        long_help = "Which table of the run's features --target features lays out.\n\
+                     \n\
+                     - auto (default): the co-embedding when the run wrote one\n\
+                     \x20 (bge, simba, gem, resolve-embedding-space), else ρ.\n\
+                     - coembedding: each feature where the cells it is active in are,\n\
+                     \x20 so neighbouring features are active in the same cells.\n\
+                     - rho: the feature embedding ρ as trained."
+    )]
+    pub feature_space: FeatureSpace,
 
     #[arg(
         value_delimiter = ',',
@@ -350,6 +368,7 @@ impl Default for LayoutCommonArgs {
         Self {
             from: None,
             target: LayoutTarget::Cells,
+            feature_space: FeatureSpace::Auto,
             data_files: Vec::new(),
             out: None,
             batch_files: None,
@@ -406,9 +425,6 @@ pub(crate) struct ResolvedViz {
     /// when present. Layout's recompute fallback uses this to skip the
     /// BBKNN + DC-SBM refinement on chained runs.
     pub cell_to_pb_path: Option<String>,
-    /// The multiome layout the run trained under, replayed from its manifest.
-    /// Default (a plain load) for every single-modality run.
-    pub reload: senna::multiome_layout::ReloadLayout,
 }
 
 pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<ResolvedViz> {
@@ -484,14 +500,6 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
         })
     });
 
-    // Replay the run's multiome layout, so the reload glues cells by barcode
-    // and namespaces features exactly as training did. Positional against
-    // `data.input`, hence the file-count check inside.
-    let reload = senna::multiome_layout::recorded_layout(
-        manifest.as_ref().and_then(|m| m.data.multiome.as_ref()),
-        data_files.len(),
-    )?;
-
     Ok(ResolvedViz {
         data_files,
         batch_files,
@@ -499,7 +507,6 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
         manifest_path,
         manifest,
         cell_to_pb_path,
-        reload,
     })
 }
 
@@ -532,7 +539,11 @@ pub(crate) enum LayoutPrep {
 }
 
 pub(crate) struct PbLayoutPrep {
-    pub data_vec: SparseIoVec,
+    /// Cell per column of `cell_proj_kn`.
+    pub cell_names: Vec<Box<str>>,
+    /// Gene per column of `pb_features` when they are in gene space
+    /// (`PbFeatureKind::Gene`); empty otherwise.
+    pub gene_names: Vec<Box<str>>,
     pub pb_size: Vec<usize>,
     pub pb_membership_kept: Vec<usize>,
     /// `(n_pb × D)` per-PB feature matrix, row-per-PB. Content depends
@@ -550,7 +561,8 @@ pub(crate) struct PbLayoutPrep {
 }
 
 pub(crate) struct DirectLayoutPrep {
-    pub data_vec: SparseIoVec,
+    /// Cell per column of `cell_proj_kn`.
+    pub cell_names: Vec<Box<str>>,
     /// L2-normalized latent embedding, column-per-cell, fed straight to
     /// the cell-level kNN graph.
     pub cell_proj_kn: Mat,
@@ -592,7 +604,7 @@ pub(crate) fn preprocess_layout_data(
 
     if let Some((p, kind)) = latent_path {
         info!("Layout latent path: PB + similarity from cached latent {p} (kind={kind})");
-        return preprocess_layout_data_from_latent(args, resolved, &p, kind, allow_direct_cells);
+        return preprocess_layout_data_from_latent(args, &p, kind, allow_direct_cells);
     }
 
     let cell_proj_path: Option<String> = resolved
@@ -604,7 +616,7 @@ pub(crate) fn preprocess_layout_data(
 
     if let Some(ref p) = cell_proj_path {
         info!("Layout fast path: PB partition from cached projection {p}");
-        preprocess_layout_data_from_cache(args, resolved, p)
+        preprocess_layout_data_from_cache(args, p)
     } else {
         info!(
             "Layout: no cached latent/cell_proj in manifest; running full load_and_collapse \
@@ -612,64 +624,6 @@ pub(crate) fn preprocess_layout_data(
         );
         preprocess_layout_data_recompute(args, resolved)
     }
-}
-
-/// Align the freshly-loaded backend to the cells present in a cached
-/// embedding (`latent` / `cell_proj`). Upstream cell QC (e.g. `senna bge`
-/// without `--no-qc`) drops cells from the written embedding, so the cache is
-/// a subset of the data columns. Rather than erroring on the size mismatch, we
-/// **mask** the data columns down to exactly the cached cells (by barcode),
-/// reusing the re-entrant `mask_columns` path — masking, not subsetting, keeps
-/// the backend object intact and renumbers columns in data order. The data
-/// here carries no batch/group membership yet (the layout discards the batch
-/// vector), so masking is safe.
-///
-/// `mask_columns` renumbers in data-column order; bge writes its QC-kept rows
-/// in that same ascending order, so the masked backend lines up row-for-row
-/// with the cached embedding. We assert that post-mask alignment holds.
-fn align_data_to_cached_cells(
-    data_vec: &mut data_beans::sparse_io_vector::SparseIoVec,
-    cell_names_cached: &[Box<str>],
-    cache_kind: &str,
-) -> anyhow::Result<()> {
-    let data_cell_names = data_vec.column_names()?;
-    if data_cell_names == cell_names_cached {
-        return Ok(());
-    }
-    use std::collections::HashSet;
-    let cached: HashSet<&str> = cell_names_cached
-        .iter()
-        .map(std::convert::AsRef::as_ref)
-        .collect();
-    let keep: Vec<bool> = data_cell_names
-        .iter()
-        .map(|n| cached.contains(n.as_ref()))
-        .collect();
-    let n_keep = keep.iter().filter(|&&k| k).count();
-    anyhow::ensure!(
-        n_keep == cell_names_cached.len(),
-        "cached {cache_kind} has {} cell(s) absent from the data ({} of {} data columns matched) \
-         — the cached embedding and the manifest's data input look mismatched",
-        cell_names_cached.len() - n_keep,
-        n_keep,
-        data_cell_names.len()
-    );
-    data_vec.mask_columns(&keep)?;
-    let masked = data_vec.column_names()?;
-    anyhow::ensure!(
-        masked == cell_names_cached,
-        "after masking to the cached {cache_kind} cells, data column order does not match the \
-         cached embedding's row order (masked={}, cache={}) — cached rows are not in data order",
-        masked.len(),
-        cell_names_cached.len()
-    );
-    info!(
-        "Layout: masked data to the {} cell(s) with a cached {cache_kind} embedding \
-         ({} dropped upstream, e.g. by cell QC)",
-        n_keep,
-        data_cell_names.len() - n_keep
-    );
-    Ok(())
 }
 
 /// The per-cell table a layout runs on, from a run's geometry latent
@@ -724,26 +678,17 @@ pub(crate) fn latent_layout_features(
 /// Hellinger-θ saturates and collapses the layout to rank-1.
 fn preprocess_layout_data_from_latent(
     args: &LayoutCommonArgs,
-    resolved: &ResolvedViz,
     latent_path: &str,
     kind: senna::run_manifest::RunKind,
     allow_direct_cells: bool,
 ) -> anyhow::Result<LayoutPrep> {
-    let SparseDataWithBatch {
-        data: mut data_vec, ..
-    } = read_data_on_shared_rows(resolved.reload.apply(ReadSharedRowsArgs {
-        data_files: resolved.data_files.clone(),
-        batch_files: resolved.batch_files.clone(),
-        preload: args.preload_data,
-        ..Default::default()
-    })?)?;
-
+    // The latent names its cells, and they are all the layout needs from
+    // the run: the data backend is not opened (it may not even be here).
     let MatWithNames {
-        rows: cell_names_cached,
+        rows: cell_names,
         cols: _,
         mat: latent_nk,
     } = Mat::from_parquet_with_row_names(latent_path, Some(0))?;
-    align_data_to_cached_cells(&mut data_vec, &cell_names_cached, "latent")?;
 
     let (feat_kn, latent_desc) = latent_layout_features(
         kind,
@@ -765,7 +710,7 @@ fn preprocess_layout_data_from_latent(
     if allow_direct_cells && kind.cell_space() == senna::run_manifest::CellSpace::Embedding {
         info!("Graph-trained latent → DirectCells mode: skipping PB landmark sampling");
         return Ok(LayoutPrep::DirectCells(DirectLayoutPrep {
-            data_vec,
+            cell_names,
             cell_proj_kn: feat_kn,
         }));
     }
@@ -917,7 +862,8 @@ fn preprocess_layout_data_from_latent(
     let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
 
     Ok(LayoutPrep::PbThenNystrom(PbLayoutPrep {
-        data_vec,
+        cell_names,
+        gene_names: Vec::new(),
         pb_size,
         pb_membership_kept,
         pb_features: pb_centroids_kp.transpose(),
@@ -929,37 +875,23 @@ fn preprocess_layout_data_from_latent(
 }
 
 /// Fast path: given a cached `cell_proj.parquet` from a prior training
-/// run, open the sparse backends lightly (no projection, no collapse),
-/// partition cells by hashing the cached projection, and build PB
+/// run (the data backend is not opened), partition cells by hashing the
+/// cached projection, and build PB
 /// features + similarity directly in projection space. Skips pb-sample
 /// matching and the Gamma posterior optimization that the recompute
 /// path runs — those are training-side concerns the layout doesn't need.
 fn preprocess_layout_data_from_cache(
     args: &LayoutCommonArgs,
-    resolved: &ResolvedViz,
     cell_proj_path: &str,
 ) -> anyhow::Result<LayoutPrep> {
-    // 1. Lightweight data open: no projection, no collapse. Only pays
-    //    for barcode / gene-name metadata + any batch annotation, which
-    //    we need later for output parquet headers.
-    let SparseDataWithBatch {
-        data: mut data_vec, ..
-    } = read_data_on_shared_rows(resolved.reload.apply(ReadSharedRowsArgs {
-        data_files: resolved.data_files.clone(),
-        batch_files: resolved.batch_files.clone(),
-        preload: args.preload_data,
-        ..Default::default()
-    })?)?;
-
-    // 2. Load the cached projection (written as cells × proj_dim). The
-    //    transpose lands us in column-per-cell layout expected by the
-    //    rest of the pipeline.
+    // Load the cached projection (written as cells × proj_dim); its row
+    // names are the cells, so the data backend is not opened. The
+    // transpose lands us in the column-per-cell layout the rest expects.
     let MatWithNames {
-        rows: cell_names_cached,
+        rows: cell_names,
         cols: _,
         mat: proj_nk,
     } = Mat::from_parquet_with_row_names(cell_proj_path, Some(0))?;
-    align_data_to_cached_cells(&mut data_vec, &cell_names_cached, "cell_proj")?;
     let mut proj_kn: Mat = proj_nk.transpose();
     info!(
         "Loaded cell_proj: {} cells × {} proj-dims",
@@ -1044,7 +976,8 @@ fn preprocess_layout_data_from_cache(
     let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
 
     Ok(LayoutPrep::PbThenNystrom(PbLayoutPrep {
-        data_vec,
+        cell_names,
+        gene_names: Vec::new(),
         pb_size,
         pb_membership_kept,
         pb_features: pb_centroids_kp.transpose(),
@@ -1203,7 +1136,8 @@ fn preprocess_layout_data_recompute(
     let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
 
     Ok(LayoutPrep::PbThenNystrom(PbLayoutPrep {
-        data_vec,
+        cell_names: data_vec.column_names()?,
+        gene_names: data_vec.row_names()?,
         pb_size,
         pb_membership_kept,
         pb_features: log_expr_dp.transpose(),
@@ -1366,7 +1300,7 @@ pub(crate) fn write_viz_outputs_pb(
     let pb_names: Vec<Box<str>> = (0..pb_coords.nrows())
         .map(|i| format!("PB_{i}").into_boxed_str())
         .collect();
-    let cell_names = prep.data_vec.column_names()?;
+    let cell_names = &prep.cell_names;
 
     let out = &resolved.out;
     let pb_coords_path = format!("{out}.{method}.pb_coords.parquet");
@@ -1387,7 +1321,7 @@ pub(crate) fn write_viz_outputs_pb(
         PbFeatureKind::Proj => (format!("{out}.pb_proj_mean.parquet"), false),
     };
     let feat_col_names: Vec<Box<str>> = if pb_feat_is_gene {
-        prep.data_vec.row_names()?
+        prep.gene_names.clone()
     } else {
         (0..prep.pb_features.ncols())
             .map(|i| format!("p{i}").into_boxed_str())
@@ -1431,7 +1365,7 @@ pub(crate) fn write_viz_outputs_pb(
     }
     cell_out.to_parquet_with_names(
         &cell_coords_path,
-        (Some(&cell_names), Some("cell")),
+        (Some(cell_names), Some("cell")),
         Some(&col_names),
     )?;
 
@@ -1468,8 +1402,9 @@ pub(crate) fn write_viz_outputs_direct(
     prep: &DirectLayoutPrep,
     cell_coords: &Mat,
     method: &str,
+    placed_features: Option<(&[Box<str>], &Mat)>,
 ) -> anyhow::Result<()> {
-    let cell_names = prep.data_vec.column_names()?;
+    let cell_names = &prep.cell_names;
     let n_cells = cell_coords.nrows();
     anyhow::ensure!(
         cell_names.len() == n_cells,
@@ -1500,21 +1435,26 @@ pub(crate) fn write_viz_outputs_direct(
 
     cell_out.to_parquet_with_names(
         &cell_coords_path,
-        (Some(&cell_names), Some("cell")),
+        (Some(cell_names), Some("cell")),
         Some(&col_names),
     )?;
 
     info!("Saved {cell_coords_path} (DirectCells; no pb_coords)");
 
-    let feature_path = place_features_on_cells(
-        args,
-        resolved.manifest.as_ref(),
-        resolved.manifest_path.as_ref(),
-        out,
-        method,
-        &prep.cell_proj_kn,
-        cell_coords,
-    )?;
+    // Features laid out with the cells (a joint layout) keep their own
+    // coordinates; otherwise they are placed on the finished cell map.
+    let feature_path = match placed_features {
+        Some((names, coords)) => Some(write_features_on_cells(out, method, names, coords)?),
+        None => place_features_on_cells(
+            args,
+            resolved.manifest.as_ref(),
+            resolved.manifest_path.as_ref(),
+            out,
+            method,
+            &prep.cell_proj_kn,
+            cell_coords,
+        )?,
+    };
 
     update_manifest_viz(
         resolved,

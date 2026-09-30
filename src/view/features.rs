@@ -6,10 +6,13 @@ use super::*;
 const NEAR: usize = 12;
 
 /// What a set of neighbours is drawn around.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Centre {
     /// A clicked cell, placed where the cells are.
     Cell,
+    /// A clicked cluster label: the cluster's label anchor on cell map
+    /// `space`, drawn only there.
+    Group { space: usize, xy: [f32; 2] },
     /// A clicked feature, placed where the features are.
     Feature,
     /// Nothing: a pinned feature name on its own.
@@ -39,7 +42,9 @@ impl FeatureEmbedding {
         run: Option<&(senna::run_manifest::RunManifest, std::path::PathBuf)>,
     ) -> Result<Self, String> {
         let (m, dir) = run.ok_or("no run to read a feature embedding from")?;
-        let (names, rows) = crate::postprocess::fit_layout_features::read_feature_rows(m, dir)
+        // The same table the feature map is laid out from, by default.
+        use crate::postprocess::fit_layout_features::{read_feature_rows, FeatureSpace};
+        let (names, rows) = read_feature_rows(m, dir, FeatureSpace::Auto)
             .map_err(|e| format!("no feature embedding: {e}"))?;
         Ok(Self {
             axis: activity::Axis::new(names),
@@ -293,7 +298,28 @@ impl Scene {
             }
             Err(e) => {
                 self.shown = None;
-                self.note = Some(e);
+                let no_counts = source == Source::Observed
+                    && self
+                        .activity
+                        .as_ref()
+                        .is_some_and(Activity::observed_failed);
+                if no_counts {
+                    // Without the data, the model's expectation is what there
+                    // is; if that fails too, its reason is said, not hidden.
+                    self.source = Source::Expected;
+                    self.note = None;
+                    self.refresh_activity();
+                    let then = match (&self.shown, self.note.take()) {
+                        (Some(_), _) => "showing the model's expectation".to_string(),
+                        (None, why) => format!(
+                            "the model's expectation failed too: {}",
+                            why.unwrap_or_else(|| "nothing to show".into())
+                        ),
+                    };
+                    self.note = Some(format!("no observed counts: {e} · {then}"));
+                } else {
+                    self.note = Some(e);
+                }
             }
         }
     }
@@ -306,7 +332,36 @@ impl Scene {
         let Some(activity) = self.activity() else {
             return;
         };
-        match activity.near_cell(cell, NEAR) {
+        let found = activity.near_cells([cell], NEAR);
+        self.keep_near(cell.into(), Centre::Cell, found);
+    }
+
+    /// Features nearest group `g` of the grouping on screen: those most up
+    /// in its cells against the average cell, drawn from its label.
+    pub fn show_near_group(&mut self, g: u32) {
+        let (Some(xy), Some(groups)) = (self.group_centre(g), self.groups()) else {
+            return;
+        };
+        // Members by index, their names read from a shared handle on the
+        // points: no copy per cell.
+        let members: Vec<usize> = (0..groups.len()).filter(|&i| groups[i] == g).collect();
+        let points = self.current().points.clone();
+        let (name, space) = (self.levels()[g as usize].clone(), self.space);
+        let Some(activity) = self.activity() else {
+            return;
+        };
+        let found = activity.near_cells(members.iter().map(|&i| &*points.names[i]), NEAR);
+        self.keep_near(name, Centre::Group { space, xy }, found);
+    }
+
+    /// Show the features `found` around `centre`, or say why there are none.
+    fn keep_near(
+        &mut self,
+        name: Box<str>,
+        centre: Centre,
+        found: Result<Vec<(Box<str>, f32)>, String>,
+    ) {
+        match found {
             Ok(features) => {
                 if self.feature_space().is_none() {
                     self.note = Some(if self.root() == self.space {
@@ -320,8 +375,8 @@ impl Scene {
                     });
                 }
                 self.near = Some(Near {
-                    name: cell.into(),
-                    centre: Centre::Cell,
+                    name,
+                    centre,
                     features,
                     cells: Vec::new(),
                 });
