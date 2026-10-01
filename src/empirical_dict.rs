@@ -19,7 +19,7 @@
 //! used during DC-Poisson refinement, kept consistent across pinto / senna /
 //! chickpea reporting). This is the dictionary `lupin annotate` (enrichment) consumes.
 
-pub use data_beans::alg::gene_weighting::{apply_gene_weights, compute_nb_fisher_weights};
+use data_beans::alg::gene_weighting::apply_gene_weights;
 use legume_numeric::matrix::traits::MatOps;
 use senna::embed_common::Mat;
 

@@ -266,6 +266,10 @@ pub(crate) struct Scene {
     pub locked: Vec<features::Near>,
     /// A message for the status line, taken by the front end.
     pub note: Option<String>,
+    /// A data file the observed counts need and could not find (its place
+    /// in `data.input` and recorded path), for the front end to ask where
+    /// it is.
+    pub missing_data: Option<(usize, String)>,
 }
 
 impl Scene {
@@ -303,6 +307,7 @@ impl Scene {
             name_index: std::cell::RefCell::default(),
             medians: std::cell::RefCell::new(None),
             note: None,
+            missing_data: None,
         };
         scene.colour = scene.default_colour(args.colour_by.as_deref());
         scene.refresh_groups();
@@ -378,6 +383,7 @@ impl Scene {
             near: self.near.clone(),
             locked: self.locked.clone(),
             note: None,
+            missing_data: None,
         };
         s.refresh_groups();
         s

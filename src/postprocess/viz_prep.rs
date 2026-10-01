@@ -1,6 +1,6 @@
 //! Data-preparation helpers for `fit_layout` (tsne/phate):
 //! - Per-PB mean-feature accumulation and coverage-based tail pruning.
-//! - Raw-gene-space log1p-CPM construction for PB landmarks.
+//! - The run's cell projection and PB membership, written at training.
 //! - SVD preprocessing for dimensionality reduction.
 
 use legume_numeric::matrix::traits::RandomizedAlgs;

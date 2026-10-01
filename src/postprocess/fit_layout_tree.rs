@@ -25,7 +25,7 @@ pub struct LayoutTreeArgs {
     #[arg(
         long,
         short = 'o',
-        help = "Output prefix (defaults to manifest.prefix)",
+        help = "Output prefix (defaults to the --from path without `.senna.json`)",
         long_help = "Output prefix. Produces:\n  \
                      {out}.tree_layout.cell_coords.parquet — N × 2 cell positions\n  \
                      {out}.tree_layout.nodes_2d.parquet    — K × 2 node positions"
@@ -128,10 +128,7 @@ pub fn fit_layout_tree(args: &LayoutTreeArgs) -> anyhow::Result<()> {
         args.tree_jitter_seed,
     );
 
-    let out_prefix = args
-        .out
-        .as_deref()
-        .map_or_else(|| manifest.prefix.clone(), std::string::ToString::to_string);
+    let out_prefix = senna::run_manifest::out_prefix(args.out.as_deref(), &args.from);
     mkdir_parent(&out_prefix)?;
 
     let cell_coords_path = format!("{out_prefix}.tree_layout.cell_coords.parquet");

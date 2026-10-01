@@ -133,7 +133,7 @@ impl App {
             popup(f, map, lines, 72, At::Middle, color::TEXT);
         }
 
-        if let Some(Modal::MarkersFile(b)) = &self.modal {
+        if let Some(Modal::MarkersFile(b) | Modal::DataFile(b, _)) = &self.modal {
             let rows = usize::from(map.height).saturating_sub(10).max(3);
             popup(f, map, b.lines(rows), 100, At::Middle, color::TEXT);
         }

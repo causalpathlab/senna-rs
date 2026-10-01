@@ -200,7 +200,9 @@ const NO_CONTRAST: &str = "the focused group has no cells, or no other cells are
 struct Observed {
     data: SparseIoVec,
     features: Axis,
-    cells: Vec<Box<str>>,
+    /// Column of each cell name.
+    cell_index: HashMap<Box<str>, u32>,
+    n_cells: usize,
 }
 
 /// Values of one feature (or feature set) per point, `NaN` where the point
@@ -371,15 +373,7 @@ impl Activity {
         };
         let rows = match source {
             Source::Expected => lookup(self.expected()?.cell_index()),
-            Source::Observed => {
-                let cells = &self.observed()?.cells;
-                let index: HashMap<Box<str>, u32> = cells
-                    .iter()
-                    .enumerate()
-                    .map(|(i, n)| (n.clone(), i as u32))
-                    .collect();
-                lookup(&index)
-            }
+            Source::Observed => lookup(&self.observed()?.cell_index),
         };
         self.rows.insert((source, key), rows.clone());
         Ok(rows)
@@ -460,9 +454,17 @@ impl Activity {
                 keep_empty_barcodes: true,
                 ..Default::default()
             })?)?;
+        let cells = data.column_names()?;
+        let n_cells = cells.len();
+        let cell_index = cells
+            .into_iter()
+            .enumerate()
+            .map(|(i, n)| (n, i as u32))
+            .collect();
         Ok(Observed {
             features: Axis::new(data.row_names()?),
-            cells: data.column_names()?,
+            cell_index,
+            n_cells,
             data,
         })
     }
@@ -476,6 +478,31 @@ impl Activity {
             .expect("just set")
             .as_ref()
             .map_err(Clone::clone)
+    }
+
+    /// The data files the observed counts need that are not here, even
+    /// looked for where a moved run's data would be: each one's place in
+    /// `data.input` and the path recorded there.
+    #[must_use]
+    pub fn missing_inputs(&self) -> Vec<(usize, String)> {
+        self.manifest
+            .data
+            .input
+            .iter()
+            .enumerate()
+            .filter(|(_, rec)| !self.manifest.data_file(&self.dir, rec).exists())
+            .map(|(i, rec)| (i, rec.clone()))
+            .collect()
+    }
+
+    /// How many of `cells` the observed counts have, opening them if need
+    /// be: whether a data file is this run's.
+    pub fn observed_cells_found(&mut self, cells: &[Box<str>]) -> Result<usize, String> {
+        let index = &self.observed()?.cell_index;
+        Ok(cells
+            .iter()
+            .filter(|c| index.contains_key(c.as_ref()))
+            .count())
     }
 
     /// Whether the observed counts could not be opened at all (as opposed
@@ -549,7 +576,7 @@ impl Activity {
                     .data
                     .read_rows_csr(std::iter::once(g))
                     .map_err(|e| e.to_string())?;
-                let mut values = vec![0f32; o.cells.len()];
+                let mut values = vec![0f32; o.n_cells];
                 for (&c, &v) in row.col_indices().iter().zip(row.values()) {
                     values[c] = v.ln_1p();
                 }
@@ -876,7 +903,7 @@ impl Activity {
         let rows = self.rows(Source::Observed, key, universe)?;
         let o = self.observed()?;
         // Each data column's group, and each group's size in columns.
-        let mut group_of = vec![u32::MAX; o.cells.len()];
+        let mut group_of = vec![u32::MAX; o.n_cells];
         let mut size = vec![0usize; n_groups];
         for (&r, &g) in rows.iter().zip(groups) {
             if r != NO_ROW && (g as usize) < n_groups {

@@ -196,7 +196,7 @@ impl App {
             screen: Screen::Data,
             pairs: Vec::new(),
             pair_row: 0,
-            browser: Some(Browser::open(start.clone(), Want::Data, None)),
+            browser: Some(Browser::open(start.clone(), Want::Counts, None)),
             browse_dir: start,
             rows,
             method_row: 0,
@@ -444,7 +444,7 @@ impl App {
         match k.code {
             KeyCode::Up => self.pair_row = self.pair_row.saturating_sub(1),
             KeyCode::Down => self.pair_row = (self.pair_row + 1).min(last),
-            KeyCode::Char('a') => self.browse(Want::Data),
+            KeyCode::Char('a') => self.browse(Want::Counts),
             KeyCode::Char('b') if !self.pairs.is_empty() => self.browse(Want::Batch),
             KeyCode::Char('x') => {
                 if let Some(p) = self.pairs.get_mut(self.pair_row) {
