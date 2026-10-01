@@ -3,7 +3,6 @@ use super::*;
 fn table() -> CloneTable {
     let b = |v: &[&str]| v.iter().map(|s| Box::from(*s)).collect::<Vec<Box<str>>>();
     CloneTable {
-        cell: b(&["c1", "c2", "c3", "c4", "c5"]),
         donor: b(&["d1", "d1", "d1", "d2", "d2"]),
         stratum: vec![0, 2, 2, 0, 1],
         purity: Some(vec![0.0, 0.9, 0.7, 0.0, 1.0]),

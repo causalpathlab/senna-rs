@@ -327,10 +327,7 @@ pub fn write(
 /// how many rounds of accumulation are behind the file.
 ///
 /// `column_weight` is the loaded cohort's
-/// [`SparseIoVec::column_multiplicities`], captured while the backend is
-/// still alive — taking the slice rather than the `SparseIoVec` lets callers
-/// run this *after* the steps that consume the backend (CNV detection), so
-/// the triplet build never overlaps it in memory.
+/// [`SparseIoVec::column_multiplicities`].
 ///
 /// `parent` is the run this one continues (`--init-from`); absent, the count
 /// restarts at 1, which is honest: nothing on disk connects this run to an

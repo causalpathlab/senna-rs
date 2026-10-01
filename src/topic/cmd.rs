@@ -598,7 +598,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     senna::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
-    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
+    let column_weight = data_vec.column_multiplicities();
 
     crate::postprocess::viz_prep::write_cell_proj(
         &args.out,
@@ -629,7 +629,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &args.out,
         finest_collapsed,
         cell_to_pb_per_level.as_deref(),
-        column_weight.as_deref(),
+        column_weight,
         &gene_names,
         args.init_from.as_deref(),
         args.pb_reference.as_ref(),

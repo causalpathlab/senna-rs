@@ -9,6 +9,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use super::script;
@@ -25,13 +26,21 @@ pub enum Tool {
 }
 
 impl Tool {
-    /// The program as the script names it, overridable from the shell.
+    /// The program's name.
     #[must_use]
-    pub fn word(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
-            Tool::Senna => "\"${SENNA:-senna}\"",
-            Tool::Mung => "\"${MUNG:-mung}\"",
+            Tool::Senna => "senna",
+            Tool::Mung => "mung",
         }
+    }
+
+    /// The program as the script names it, overridable from the shell
+    /// (`$SENNA`, `$MUNG`).
+    #[must_use]
+    pub fn word(self) -> String {
+        let name = self.name();
+        format!("\"${{{}:-{name}}}\"", name.to_uppercase())
     }
 
     /// What a finished run leaves at `{out}.`, and the script refuses to
@@ -45,8 +54,9 @@ impl Tool {
     }
 }
 
-/// The flag that hands the clones of `mung clones` to a senna fit.
-pub const CLONES_FLAG: &str = "--cnv-clones";
+/// The flag that hands the clones of `mung clones` to a senna fit, as
+/// its form lists it.
+pub const CLONES_FLAG: &str = "cnv-clones";
 
 /// After `mung clones`: what the fits after it do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +73,10 @@ pub enum Keep {
 #[derive(Clone, Debug)]
 pub struct Job {
     pub tool: Tool,
+    /// The program started: senna itself, or mung.
+    pub program: PathBuf,
+    /// The row it comes from.
+    pub row: usize,
     pub method: String,
     /// Where it runs and the script goes.
     pub dir: PathBuf,
@@ -72,9 +86,9 @@ pub struct Job {
     pub argv: Vec<String>,
     /// Batch label files to write before it starts.
     pub labels: Vec<super::batches::Written>,
-    /// Whether `argv` passes the clones of the `mung clones` step queued
-    /// before it.
-    pub clones: bool,
+    /// The clone table of the `mung clones` step queued before it, as
+    /// passed: relative to `dir`.
+    pub clones: Option<String>,
 }
 
 impl Job {
@@ -85,12 +99,21 @@ impl Job {
             .join(format!("{}.{}", self.out, self.tool.result()))
     }
 
-    /// `argv` without the clones of the `mung clones` step.
-    fn without_clones(&mut self) {
-        if let Some(k) = self.argv.iter().position(|w| w == CLONES_FLAG) {
-            self.argv.drain(k..(k + 2).min(self.argv.len()));
+    /// The command it runs and records, without the program: `argv`, then
+    /// the clones.
+    #[must_use]
+    pub fn command(&self) -> Vec<String> {
+        let mut c = self.argv.clone();
+        if let Some(table) = &self.clones {
+            c.extend([format!("--{CLONES_FLAG}"), table.clone()]);
         }
-        self.clones = false;
+        c
+    }
+
+    /// Whether the queue waits after it for the user to judge its clones.
+    #[must_use]
+    pub fn asks(&self) -> bool {
+        self.tool == Tool::Mung
     }
 
     #[must_use]
@@ -122,60 +145,59 @@ pub struct Shared {
     /// The last line each job wrote.
     pub last: Vec<String>,
     pub finished: bool,
-    /// The `mung clones` step waiting for [`Queue::answer`].
-    pub asking: Option<usize>,
-    answer: Option<Keep>,
+    /// What the `mung clones` step waiting for [`Queue::answer`] found.
+    pub asking: Option<Told>,
 }
+
+/// The clones of a finished `mung clones` step: the summary's lines and a
+/// word on keeping them, or why the table cannot be read.
+pub type Told = Result<(Vec<String>, &'static str), String>;
 
 /// The queue, running.
 pub struct Queue {
     pub jobs: Vec<Job>,
     pub shared: Arc<Mutex<Shared>>,
     stopper: Arc<Stopper>,
+    answers: Sender<Keep>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Queue {
-    /// Start `jobs` in order: senna's with `senna` (senna itself), mung's
-    /// with `mung`.
-    pub fn start(jobs: Vec<Job>, senna: PathBuf, mung: PathBuf) -> Self {
+    /// Start `jobs` in order, each with its program.
+    pub fn start(jobs: Vec<Job>) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
             states: vec![State::Waiting; jobs.len()],
             last: vec![String::new(); jobs.len()],
             ..Shared::default()
         }));
         let stopper = Arc::new(Stopper::default());
-        let (s, st, js) = (shared.clone(), stopper.clone(), jobs.clone());
+        let (answers, answered) = std::sync::mpsc::channel();
+        let (s, st, mut js) = (shared.clone(), stopper.clone(), jobs.clone());
         let worker = std::thread::spawn(move || {
-            let mut js = js;
             // Why the fits that wanted the clones cannot have them.
             let mut no_clones: Option<String> = None;
             for i in 0..js.len() {
-                let job = js[i].clone();
+                let job = &js[i];
                 let state = if st.is_stopped() {
                     State::Stopped
-                } else if let (true, Some(why)) = (job.clones, &no_clones) {
+                } else if let (Some(_), Some(why)) = (&job.clones, &no_clones) {
                     State::Failed(why.clone())
                 } else {
                     set(&s, i, State::Running);
-                    let program = match job.tool {
-                        Tool::Senna => &senna,
-                        Tool::Mung => &mung,
-                    };
-                    run_job(&job, program, i, &s, &st)
+                    run_job(job, i, &s, &st)
                 };
                 let done = state == State::Done;
                 set(&s, i, state);
-                if job.tool != Tool::Mung {
+                if !job.asks() {
                     continue;
                 }
                 if !done {
                     no_clones = Some(format!("{} did not finish", job.method));
                     continue;
                 }
-                match ask(&s, &st, i) {
+                match ask(&s, &answered, told(job)) {
                     Keep::Use => {}
-                    Keep::Without => js[i + 1..].iter_mut().for_each(Job::without_clones),
+                    Keep::Without => js[i + 1..].iter_mut().for_each(|j| j.clones = None),
                     Keep::Stop => st.stop(),
                 }
             }
@@ -187,26 +209,27 @@ impl Queue {
             jobs,
             shared,
             stopper,
+            answers,
             worker: Mutex::new(Some(worker)),
         }
     }
 
-    /// The `mung clones` step waiting for an answer, if one is.
+    /// Whether a `mung clones` step waits for an answer.
     #[must_use]
-    pub fn asking(&self) -> Option<usize> {
-        self.shared.lock().ok().and_then(|s| s.asking)
+    pub fn asking(&self) -> bool {
+        self.shared.lock().is_ok_and(|s| s.asking.is_some())
     }
 
     /// Tell the queue waiting after `mung clones` what to do.
     pub fn answer(&self, keep: Keep) {
-        if let Ok(mut s) = self.shared.lock() {
-            s.answer = Some(keep);
-        }
+        let _ = self.answers.send(keep);
     }
 
     /// Kill the fit running and start none after it.
     pub fn stop(&self) {
         self.stopper.stop();
+        // A queue waiting on the clones stops waiting.
+        self.answer(Keep::Stop);
     }
 
     /// Wait for the worker to finish: after [`Queue::stop`], until the fit
@@ -244,26 +267,27 @@ impl Queue {
     }
 }
 
-/// Wait for the user's answer about the clones of job `i`; stopping the
-/// queue answers it too.
-fn ask(s: &Mutex<Shared>, stopper: &Stopper, i: usize) -> Keep {
+/// The clones of finished job `job`, told for the user to judge.
+fn told(job: &Job) -> Told {
+    senna::clone_strata::read(&job.result().to_string_lossy())
+        .map(|t| {
+            let s = super::clones::of(&t);
+            (s.lines(), s.advice())
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Show what a `mung clones` step found and wait for the user's answer;
+/// a queue gone answers stop.
+fn ask(s: &Mutex<Shared>, answered: &Receiver<Keep>, told: Told) -> Keep {
     if let Ok(mut s) = s.lock() {
-        s.asking = Some(i);
+        s.asking = Some(told);
     }
-    loop {
-        let answer = if stopper.is_stopped() {
-            Some(Keep::Stop)
-        } else {
-            s.lock().ok().and_then(|mut s| s.answer.take())
-        };
-        if let Some(a) = answer {
-            if let Ok(mut s) = s.lock() {
-                s.asking = None;
-            }
-            return a;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    let keep = answered.recv().unwrap_or(Keep::Stop);
+    if let Ok(mut s) = s.lock() {
+        s.asking = None;
     }
+    keep
 }
 
 fn set(s: &Mutex<Shared>, i: usize, state: State) {
@@ -282,13 +306,7 @@ fn say(s: &Mutex<Shared>, i: usize, line: String) {
     }
 }
 
-fn run_job(
-    job: &Job,
-    program: &std::path::Path,
-    i: usize,
-    s: &Mutex<Shared>,
-    stopper: &Stopper,
-) -> State {
+fn run_job(job: &Job, i: usize, s: &Mutex<Shared>, stopper: &Stopper) -> State {
     if job.result().exists() {
         return State::Failed(format!("{} exists", job.result().display()));
     }
@@ -297,7 +315,8 @@ fn run_job(
             return State::Failed(format!("cannot write the batch labels: {e}"));
         }
     }
-    if let Err(e) = script::write(&job.script(), &job.out, &job.argv, job.tool) {
+    let argv = job.command();
+    if let Err(e) = script::write(&job.script(), &job.out, &argv, job.tool) {
         return State::Failed(format!("cannot write the script: {e}"));
     }
     say(
@@ -305,8 +324,8 @@ fn run_job(
         i,
         format!("── {} · {}", job.method, crate::tui::shown(&job.script())),
     );
-    let mut command = Command::new(program);
-    command.args(&job.argv).current_dir(&job.dir);
+    let mut command = Command::new(&job.program);
+    command.args(&argv).current_dir(&job.dir);
     // The log level the script sets, so the run is the one it records.
     if std::env::var_os("RUST_LOG").is_none() {
         command.env("RUST_LOG", script::LOG_LEVEL);

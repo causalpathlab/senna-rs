@@ -763,9 +763,8 @@ pub fn load_cnv_cell_strata(
     clones_path: &str,
     data_vec: &SparseIoVec,
 ) -> anyhow::Result<Vec<usize>> {
-    let table = senna::clone_strata::read(clones_path)?;
     let names = data_vec.column_names()?;
-    let cell_to_stratum = senna::clone_strata::align(&table, &names);
+    let cell_to_stratum = senna::clone_strata::strata_of(clones_path, &names)?;
     let n_kept = cell_to_stratum.iter().filter(|&&s| s > 0).count();
     info!(
         "CNV strata from {clones_path}: {} / {} cells in donor-private clones",

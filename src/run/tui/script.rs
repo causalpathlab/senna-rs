@@ -94,7 +94,7 @@ pub const LOG_LEVEL: &str = "info";
 /// values per line. The value of `--out` is the script's `$out`.
 #[must_use]
 pub fn command_lines(argv: &[String], tool: Tool) -> Vec<String> {
-    let mut lines: Vec<String> = vec![tool.word().to_string()];
+    let mut lines: Vec<String> = vec![tool.word()];
     let mut in_flags = false;
     for (k, w) in argv.iter().enumerate() {
         let word = if k > 0 && argv[k - 1] == "--out" {

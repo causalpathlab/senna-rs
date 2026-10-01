@@ -28,8 +28,9 @@ fn reads_the_table_and_aligns_cells_by_name() {
     assert_eq!(t.stratum, [0, 1, 0]);
     assert_eq!(&*t.donor[2], "d2");
     assert_eq!(t.p_malig.as_deref(), Some(&[0.1f32, 0.8, 0.2][..]));
+    assert_eq!(t.purity.as_deref(), Some(&[0.0f32, 0.9, 0.0][..]));
     let cells: Vec<Box<str>> = ["c2@d1", "other", "c1@d1"].map(Box::from).to_vec();
-    assert_eq!(align(&t, &cells), [1, 0, 0]);
+    assert_eq!(strata_of(path, &cells).unwrap(), [1, 0, 0]);
 }
 
 #[test]

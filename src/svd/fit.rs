@@ -248,7 +248,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     let cell_names = data_vec.column_names()?;
     let gene_names = data_vec.row_names()?;
-    let output_gene_names = gene_names.clone();
 
     // SVD reuses the topic models' `T{c}` convention so `lupin plot
     // --colour-by topic` reads the latent.parquet identically regardless
@@ -259,18 +258,14 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         &cell_names,
         output_keep_idx.as_deref(),
     )?;
-    senna::output_helpers::save_dictionary(
-        &args.out,
-        &nystrom_out.dictionary_dk,
-        &output_gene_names,
-    )?;
+    senna::output_helpers::save_dictionary(&args.out, &nystrom_out.dictionary_dk, &gene_names)?;
 
     {
         let pb_gene_gp: Mat = x_dn.posterior_mean().clone();
-        senna::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &output_gene_names)?;
+        senna::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names)?;
     }
 
-    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
+    let column_weight = data_vec.column_multiplicities();
 
     // Save selected feature list if feature selection was applied
     if let Some(sel) = &selected_features {
@@ -296,7 +291,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         &args.out,
         &collapse_out,
         Some(std::slice::from_ref(&finest_membership)),
-        column_weight.as_deref(),
+        column_weight,
         &gene_names,
         args.init_from.as_deref(),
         args.pb_reference.as_ref(),

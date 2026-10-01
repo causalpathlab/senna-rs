@@ -53,9 +53,9 @@ impl App {
         } else if self.confirm.is_some() {
             let rows = usize::from(area.height).saturating_sub(4);
             popup(f, area, self.confirm_lines(rows), 120, At::Middle, TEXT);
-        } else if let Some(i) = self.asking() {
+        } else if self.asking() {
             let rows = usize::from(area.height).saturating_sub(4);
-            popup(f, area, self.clones_lines(i, rows), 100, At::Middle, TEXT);
+            popup(f, area, self.clones_lines(rows), 100, At::Middle, TEXT);
         } else if let Some((row, at)) = self.relabel {
             let rows = usize::from(area.height).saturating_sub(10).max(3);
             popup(
@@ -69,7 +69,7 @@ impl App {
         }
         if let Some(e) = &self.editor {
             let what = match e.target {
-                Target::Out(i) => format!(" --out for {}", self.rows[i].label()),
+                Target::Out(i) => format!(" --out for {}", self.rows[i].label),
                 Target::Field(m, i) => format!(" --{}", self.rows[m].form.fields[i].long),
                 Target::Filter => " flags containing".to_string(),
                 Target::BatchName(i) => format!(
@@ -98,11 +98,11 @@ impl App {
             });
             spans.push(Span::raw(" "));
         }
-        let queued: Vec<String> = self
+        let queued: Vec<&str> = self
             .rows
             .iter()
             .filter(|r| r.on)
-            .map(super::Row::label)
+            .map(|r| r.label.as_str())
             .collect();
         let summary = format!(
             "  {} data · {}",
@@ -289,7 +289,7 @@ impl App {
             let text = format!(
                 " [{}] {:<13} --out {:<out_w$}  {:<11} {}",
                 if r.on { "x" } else { " " },
-                r.label(),
+                r.label,
                 fit(&r.out, out_w),
                 if changed == 0 {
                     "defaults".to_string()
@@ -314,7 +314,7 @@ impl App {
                 lines.push(Line::from(""));
             }
             if r.on {
-                if let Some(warn) = self.shape_warning(&r.form.name) {
+                if let Some(warn) = self.shape_warning(r) {
                     lines.push(Line::from(Span::styled(format!("      {warn}"), hint())));
                 }
             }
@@ -331,7 +331,7 @@ impl App {
         .areas(area);
         let mut tabs = Vec::new();
         for m in self.param_methods() {
-            let name = format!(" {} ", self.rows[m].label());
+            let name = format!(" {} ", self.rows[m].label);
             tabs.push(if m == self.param_method {
                 Span::styled(name, selected())
             } else {
@@ -449,8 +449,7 @@ impl App {
                 return blamed.clone();
             }
         }
-        let cmd = self.command_of(self.rows[m].tool).unwrap_or(&self.cli);
-        let blamed = super::form::check(cmd, &argv)
+        let blamed = super::form::check(self.command_of(self.rows[m].tool), &argv)
             .err()
             .and_then(|why| super::form::blamed(&why, &form.fields).map(str::to_string));
         *self.blame.borrow_mut() = Some((m, argv, blamed.clone()));
@@ -506,31 +505,38 @@ impl App {
     /// `mung clones` step.
     fn filled_by_clones(&self, x: &super::Field) -> bool {
         self.rows[self.param_method].tool == Tool::Senna
-            && x.long == CLONES_FLAG.trim_start_matches('-')
-            && self.clones_planned().is_some()
+            && x.long == CLONES_FLAG
+            && self.clones_row().is_some()
     }
 
-    /// The popup the queue waits on after `mung clones` (job `i`).
-    fn clones_lines(&self, i: usize, rows: usize) -> Vec<Line<'static>> {
+    /// The popup the queue waits on after `mung clones`.
+    fn clones_lines(&self, rows: usize) -> Vec<Line<'static>> {
         let mut out = vec![
             Line::from(Span::styled(" mung clones is done: its clones", bold())),
             Line::from(""),
         ];
-        let advice = match self.clones_of(i) {
-            Ok(s) => {
-                let lines = s.lines();
-                let room = rows.saturating_sub(7);
-                let cut = lines.len() > room;
+        let Some(q) = &self.queue else { return out };
+        let Ok(shared) = q.shared.lock() else {
+            return out;
+        };
+        let Some(told) = &shared.asking else {
+            return out;
+        };
+        let advice = match told {
+            Ok((lines, advice)) => {
+                let room = rows.saturating_sub(7).max(1);
+                let first = self.clones_scroll.min(lines.len().saturating_sub(room));
                 out.extend(
                     lines
-                        .into_iter()
+                        .iter()
+                        .skip(first)
                         .take(room)
                         .map(|l| Line::from(format!(" {l}"))),
                 );
-                if cut {
-                    out.push(Line::from(Span::styled(" …", hint())));
+                if lines.len() > room {
+                    out.push(Line::from(Span::styled(" ↑ ↓ scroll", hint())));
                 }
-                s.advice().to_string()
+                (*advice).to_string()
             }
             Err(why) => format!("cannot read the clones: {why}"),
         };
@@ -557,7 +563,7 @@ impl App {
                     hint(),
                 ),
             ]));
-            let lines = super::script::command_lines(&p.job.argv, p.job.tool);
+            let lines = super::script::command_lines(&p.job.command(), p.job.tool);
             let n = lines.len();
             body.extend(lines.into_iter().enumerate().map(|(k, l)| {
                 let indent = if k == 0 { "   " } else { "     " };

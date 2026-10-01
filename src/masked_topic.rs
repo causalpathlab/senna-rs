@@ -1496,7 +1496,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         }
     }
 
-    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
+    let column_weight = data_vec.column_multiplicities();
 
     crate::postprocess::viz_prep::write_cell_proj(
         &args.out,
@@ -1527,7 +1527,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         &args.out,
         finest_collapsed,
         cell_to_pb_per_level.as_deref(),
-        column_weight.as_deref(),
+        column_weight,
         &gene_names,
         args.init_from.as_deref(),
         args.pb_reference.as_ref(),

@@ -35,16 +35,26 @@ fn cli() -> clap::Command {
     c
 }
 
-fn app(dir: &Path) -> App {
+/// An app in `dir`, with mung or not.
+fn app_from(dir: &Path, mung: Result<clap::Command, String>) -> App {
     let mut a = App {
         here: dir.to_path_buf(),
-        ..App::new(cli(), Err("no mung".into()), dir.to_path_buf()).unwrap()
+        ..App::new(cli(), mung, dir.to_path_buf()).unwrap()
     };
     a.browser = None;
     for m in &mut a.rows {
-        m.out = free_out(dir, &m.form.name);
+        let name = if m.tool == Tool::Mung {
+            "cnv"
+        } else {
+            m.form.name.as_str()
+        };
+        m.out = free_out(dir, name);
     }
     a
+}
+
+fn app(dir: &Path) -> App {
+    app_from(dir, Err("no mung".into()))
 }
 
 /// A stand-in for `mung` as `mung describe clones` tells it.
@@ -62,20 +72,7 @@ fn mung() -> clap::Command {
 
 /// An app whose first row is the `mung clones` step.
 fn app_with_mung(dir: &Path) -> App {
-    let mut a = App {
-        here: dir.to_path_buf(),
-        ..App::new(cli(), Ok(mung()), dir.to_path_buf()).unwrap()
-    };
-    a.browser = None;
-    for m in &mut a.rows {
-        let name = if m.tool == Tool::Mung {
-            "cnv"
-        } else {
-            m.form.name.as_str()
-        };
-        m.out = free_out(dir, name);
-    }
-    a
+    app_from(dir, Ok(mung()))
 }
 
 fn key(a: &mut App, c: KeyCode) {
@@ -452,14 +449,14 @@ fn queued_clones_go_to_every_fit_that_takes_them() {
     let mut a = app_with_mung(dir.path());
     a.pairs = data(dir.path(), &["d.zarr"]);
     assert_eq!(a.rows[0].tool, Tool::Mung);
-    assert_eq!(a.rows[0].label(), "mung clones");
+    assert_eq!(a.rows[0].label, "mung clones");
     assert_eq!(a.rows[0].out, "cnv");
     let row = |name: &str| a.rows.iter().position(|r| r.form.name == name).unwrap();
     let (svd, simba) = (row("svd"), row("simba"));
     a.rows[svd].on = true;
     a.rows[simba].on = true;
     // Without the step, nothing is added.
-    assert!(!a.plan()[0].job.argv.contains(&CLONES_FLAG.to_string()));
+    assert!(a.plan().iter().all(|p| p.job.clones.is_none()));
 
     a.rows[0].on = true;
     let gff = a.rows[0]
@@ -481,12 +478,12 @@ fn queued_clones_go_to_every_fit_that_takes_them() {
     assert_eq!(p[0].job.argv[..3], ["clones", "d.zarr", "--out"]);
     assert!(p[0].job.result().ends_with("cnv.clones.parquet"));
     let svd_job = &p.iter().find(|p| p.job.method == "svd").unwrap().job;
-    assert!(svd_job.clones);
+    assert_eq!(svd_job.clones.as_deref(), Some("cnv.clones.parquet"));
     assert!(svd_job
-        .argv
-        .ends_with(&[CLONES_FLAG.to_string(), "cnv.clones.parquet".to_string()]));
+        .command()
+        .ends_with(&["--cnv-clones".to_string(), "cnv.clones.parquet".to_string()]));
     let simba_plan = p.iter().find(|p| p.job.method == "simba").unwrap();
-    assert!(!simba_plan.job.clones);
+    assert!(simba_plan.job.clones.is_none());
     assert!(simba_plan
         .warning
         .as_ref()

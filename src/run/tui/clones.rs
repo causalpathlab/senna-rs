@@ -1,7 +1,9 @@
 //! What `mung clones` found, told so the user can decide whether the fits
 //! after it keep donor-private clones apart (`--cnv-clones`).
 
+use rustc_hash::FxHashMap;
 use senna::clone_strata::CloneTable;
+use std::collections::BTreeMap;
 
 /// One donor-private clone.
 #[derive(Clone, Debug, PartialEq)]
@@ -31,63 +33,63 @@ pub struct Summary {
     pub donors: Vec<Donor>,
 }
 
-fn mean(of: Option<&[f32]>, at: &[usize]) -> Option<f32> {
-    let v = of?;
-    (!at.is_empty()).then(|| at.iter().map(|&i| v[i]).sum::<f32>() / at.len() as f32)
-}
-
-/// The clones and donors of `t`, clones by stratum, donors as first seen.
+/// The clones and donors of `t` in one pass: clones by stratum, donors
+/// as first seen.
 #[must_use]
 pub fn of(t: &CloneTable) -> Summary {
-    let mut donors: Vec<Donor> = Vec::new();
-    for (d, &s) in t.donor.iter().zip(&t.stratum) {
-        let at = match donors.iter().position(|x| *x.name == **d) {
-            Some(k) => k,
-            None => {
-                donors.push(Donor {
-                    name: d.to_string(),
-                    cells: 0,
-                    in_clones: 0,
-                });
-                donors.len() - 1
-            }
-        };
-        donors[at].cells += 1;
-        donors[at].in_clones += usize::from(s > 0);
+    #[derive(Default)]
+    struct Acc {
+        cells: usize,
+        /// Cells per donor, by donor slot.
+        by_donor: FxHashMap<usize, usize>,
+        purity: f32,
+        p_malig: f32,
     }
-    let mut strata: Vec<usize> = t.stratum.iter().copied().filter(|&s| s > 0).collect();
-    strata.sort_unstable();
-    strata.dedup();
+    let mut slot: FxHashMap<&str, usize> = FxHashMap::default();
+    let mut donors: Vec<Donor> = Vec::new();
+    let mut strata: BTreeMap<usize, Acc> = BTreeMap::new();
+    for (i, (d, &s)) in t.donor.iter().zip(&t.stratum).enumerate() {
+        let k = *slot.entry(d).or_insert_with(|| {
+            donors.push(Donor {
+                name: d.to_string(),
+                cells: 0,
+                in_clones: 0,
+            });
+            donors.len() - 1
+        });
+        donors[k].cells += 1;
+        if s == 0 {
+            continue;
+        }
+        donors[k].in_clones += 1;
+        let a = strata.entry(s).or_default();
+        a.cells += 1;
+        *a.by_donor.entry(k).or_default() += 1;
+        a.purity += t.purity.as_ref().map_or(0.0, |v| v[i]);
+        a.p_malig += t.p_malig.as_ref().map_or(0.0, |v| v[i]);
+    }
     let clones = strata
         .into_iter()
-        .map(|stratum| {
-            let at: Vec<usize> = (0..t.stratum.len())
-                .filter(|&i| t.stratum[i] == stratum)
-                .collect();
-            let mut by: Vec<(&str, usize)> = Vec::new();
-            for &i in &at {
-                match by.iter_mut().find(|(d, _)| *d == &*t.donor[i]) {
-                    Some(b) => b.1 += 1,
-                    None => by.push((&t.donor[i], 1)),
-                }
-            }
-            let (donor, n) = by
+        .map(|(stratum, a)| {
+            // The largest donor; the first seen among equals.
+            let (k, n) = a
+                .by_donor
                 .iter()
-                .max_by_key(|(_, n)| *n)
-                .copied()
-                .unwrap_or(("", 0));
+                .max_by_key(|(k, n)| (**n, std::cmp::Reverse(**k)))
+                .map_or((0, 0), |(k, n)| (*k, *n));
+            let n_cells = a.cells as f32;
             Clonal {
                 stratum,
-                cells: at.len(),
-                donor: donor.to_string(),
-                share: n as f32 / at.len().max(1) as f32,
-                purity: mean(t.purity.as_deref(), &at),
-                p_malig: mean(t.p_malig.as_deref(), &at),
+                cells: a.cells,
+                donor: donors[k].name.clone(),
+                share: n as f32 / n_cells,
+                purity: t.purity.as_ref().map(|_| a.purity / n_cells),
+                p_malig: t.p_malig.as_ref().map(|_| a.p_malig / n_cells),
             }
         })
         .collect();
     Summary {
-        cells: t.cell.len(),
+        cells: t.stratum.len(),
         clones,
         donors,
     }
