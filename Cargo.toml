@@ -1,6 +1,6 @@
 [package]
 name = "senna-rs"
-version = "0.19.9"
+version = "0.19.10"
 edition = "2021"
 rust-version = "1.91"
 license = "MIT"
@@ -40,13 +40,11 @@ view = [
 cuda = [
     "legume-numeric/cuda",
     "cnv/cuda",
-    "data-beans/cuda",
     "graph-embedding-util/cuda",
 ]
 metal = [
     "legume-numeric/metal",
     "cnv/metal",
-    "data-beans/metal",
     "graph-embedding-util/metal",
 ]
 hdf5 = ["data-beans/hdf5"]
