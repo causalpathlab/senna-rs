@@ -62,8 +62,9 @@ pub(crate) struct GemArgs {
         default_value = "",
         help = "Suffix stripped from every input basename to form its sample id.",
         long_help = "Suffix stripped from every input basename to form its sample id.\n\
-                     Empty (the default) strips _count (or the older _genes) from gene files and\n\
-                     _{modality} from modality files.\n\
+                     Empty (the default) takes each file's sample from its metadata (faba\n\
+                     writes it); a file without one has _count (gene files) or _{modality}\n\
+                     (modality files) stripped from its name.\n\
                      Files of one sample must land on the same id."
     )]
     pub(crate) genes_sample_strip: Box<str>,

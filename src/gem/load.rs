@@ -43,11 +43,12 @@ pub(crate) struct GemInputs {
 /// equal some gene file's sample id, so it merges onto the right sample
 /// under `Union` column alignment; a mismatch errors, listing both sets.
 ///
-/// Sample id per file: `strip` when non-empty, else `_count` (or the legacy
-/// `_genes`) for a gene file
-/// / `_{modality}` for a modality file, stripped from the file's basename
-/// ([`strip_sample_id`]). A basename that does not end with that suffix
-/// keeps its full name and is warned — see [`sample_id_for`].
+/// Sample id per file: `strip` stripped from its basename when non-empty;
+/// else the `sample` its producer wrote into its metadata (faba does); else,
+/// for a file written before that, `_count` for a gene file or
+/// `_{modality}` for a modality file stripped from its basename. A basename
+/// that does not end with that suffix keeps its full name and is warned; see
+/// [`sample_id_for`].
 pub(crate) fn resolve_inputs(
     genes: &[Box<str>],
     modality_files: &[Box<str>],
@@ -130,13 +131,20 @@ fn distinct_modalities(rows: &[Box<str>]) -> BTreeSet<Box<str>> {
         .collect()
 }
 
-/// A file's sample id: its basename with `strip` (when non-empty) or the first
+/// A file's sample id: its basename with `strip` removed when `strip` is
+/// given; else the `sample` in its metadata; else its basename with the first
 /// matching of `default_suffixes` removed. A basename that ends with none of
-/// them keeps its full name — and is warned, since it means this file did not
+/// them keeps its full name, and is warned, since it means this file did not
 /// match the naming convention every OTHER file of its kind is assumed to.
 fn sample_id_for(file: &str, strip: &str, default_suffixes: &[&str]) -> anyhow::Result<Box<str>> {
+    if strip.is_empty() {
+        if let Some(sample) = recorded_sample(file) {
+            return Ok(sample.into());
+        }
+    }
     let base = basename(file)?;
     let suffixes: &[&str] = if strip.is_empty() {
+        log::info!("{file}: no sample in its metadata; reading it from the file name");
         default_suffixes
     } else {
         std::slice::from_ref(&strip)
@@ -149,6 +157,13 @@ fn sample_id_for(file: &str, strip: &str, default_suffixes: &[&str]) -> anyhow::
         );
     }
     Ok(sid)
+}
+
+/// The sample the file's producer recorded in its metadata, if any.
+fn recorded_sample(file: &str) -> Option<String> {
+    use data_beans::sparse_io::{meta, open_sparse_matrix_by_path};
+    let m = open_sparse_matrix_by_path(file).ok()?;
+    m.meta(meta::SAMPLE).filter(|s| !s.trim().is_empty())
 }
 
 /// Load every resolved input into one [`ge::UnifiedData`] and assign its
