@@ -51,7 +51,7 @@ pub(crate) fn run_one(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
-            let program = command.get_program().to_string_lossy();
+            let program = super::name(std::path::Path::new(command.get_program()));
             Failed::Start(format!("cannot run {program}: {e}"))
         })?;
     let log = child.stderr.take();

@@ -160,7 +160,7 @@ fn a_refused_file_is_not_taken_and_the_popup_says_why() {
     write(dir.path(), "yes.txt");
     let mut b = Browser::open(dir.path().to_path_buf(), Picky, Some("no.txt"));
     assert_eq!(b.key(key(KeyCode::Enter)), Outcome::Moved);
-    let said: Vec<String> = b.lines(10).iter().map(ToString::to_string).collect();
+    let said: Vec<String> = b.lines(20).iter().map(ToString::to_string).collect();
     assert!(
         said.iter().any(|l| l.contains("no.txt will not do")),
         "{said:?}"
@@ -171,4 +171,71 @@ fn a_refused_file_is_not_taken_and_the_popup_says_why() {
         taken(b.key(key(KeyCode::Enter))),
         [dir.path().join("yes.txt")]
     );
+}
+
+/// Text files that can be taken several at once, refusing `no.txt`.
+struct PickyMany;
+
+impl Wanted for PickyMany {
+    type About = ();
+
+    fn header(&self) -> Header {
+        Picky.header()
+    }
+
+    fn file(&self, path: &Path, name: &str) -> Option<()> {
+        Picky.file(path, name)
+    }
+
+    fn describe<'a>(&self, (): &'a ()) -> std::borrow::Cow<'a, str> {
+        "".into()
+    }
+
+    fn refuse(&self, name: &str, (): &()) -> Option<String> {
+        Picky.refuse(name, &())
+    }
+
+    fn many(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn refused_files_are_never_marked() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "no.txt");
+    write(dir.path(), "yes.txt");
+    let mut b = Browser::open(dir.path().to_path_buf(), PickyMany, Some("no.txt"));
+    b.key(key(KeyCode::Char(' ')));
+    assert!(b.marked.is_empty());
+    assert_eq!(b.refused.as_deref(), Some("no.txt will not do"));
+    b.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(
+        b.marked.iter().collect::<Vec<_>>(),
+        [&dir.path().join("yes.txt")]
+    );
+    assert!(b.refused.is_some(), "the refused one is named");
+}
+
+#[test]
+fn a_refusal_stays_through_keys_that_do_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "no.txt");
+    let mut b = Browser::open(dir.path().to_path_buf(), Picky, Some("no.txt"));
+    b.key(key(KeyCode::Enter));
+    assert!(b.refused.is_some());
+    assert_eq!(b.key(key(KeyCode::Tab)), Outcome::Ignored);
+    assert!(b.refused.is_some());
+}
+
+#[test]
+fn the_key_hints_fit_however_short_the_popup() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..40 {
+        write(dir.path(), &format!("f{i:02}.txt"));
+    }
+    let b = Browser::open(dir.path().to_path_buf(), Txt { many: true }, None);
+    let lines = b.lines(20);
+    assert!(lines.len() + 2 <= 20, "{}", lines.len());
+    assert!(lines.last().unwrap().to_string().contains("esc cancel"));
 }

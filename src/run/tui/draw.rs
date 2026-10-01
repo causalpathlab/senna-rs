@@ -48,8 +48,8 @@ impl App {
         }
         f.render_widget(Paragraph::new(self.status()), status);
         if let Some(b) = &self.browser {
-            let rows = usize::from(area.height).saturating_sub(12).max(3);
-            popup(f, area, b.lines(rows), 110, At::Middle, TEXT);
+            let lines = b.lines(usize::from(area.height).saturating_sub(2));
+            popup(f, area, lines, 110, At::Middle, TEXT);
         } else if self.confirm.is_some() {
             let rows = usize::from(area.height).saturating_sub(4);
             popup(f, area, self.confirm_lines(rows), 120, At::Middle, TEXT);

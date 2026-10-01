@@ -250,8 +250,8 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
         terminal.draw(|f| {
             let area = f.area();
             f.render_widget(Block::default().style(page()), area);
-            let rows = usize::from(area.height).saturating_sub(10).max(3);
-            popup(f, area, b.lines(rows), 110, At::Middle, color::TEXT);
+            let lines = b.lines(usize::from(area.height).saturating_sub(2));
+            popup(f, area, lines, 110, At::Middle, color::TEXT);
         })?;
         if let Event::Key(k) = event::read()? {
             if k.kind == KeyEventKind::Release {

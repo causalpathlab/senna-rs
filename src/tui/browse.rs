@@ -112,6 +112,10 @@ impl Chosen {
     /// The file, where one is taken at a time.
     #[must_use]
     pub fn file(self) -> PathBuf {
+        debug_assert!(
+            self.rest.is_empty(),
+            "several files chosen where one is taken"
+        );
         self.first
     }
 
@@ -208,6 +212,14 @@ impl<W: Wanted> Browser<W> {
         Some(self.dir.join(e.name()))
     }
 
+    /// Why `e` cannot be taken, if it is a file the caller refuses.
+    fn refusal(&self, e: &Entry<W::About>) -> Option<String> {
+        match e {
+            Entry::File(name, about) => self.want.refuse(name, about),
+            _ => None,
+        }
+    }
+
     /// Take the file under the cursor, unless the caller refuses it: then
     /// say why and stay.
     fn take_here(&mut self) -> Outcome {
@@ -223,7 +235,16 @@ impl<W: Wanted> Browser<W> {
 
     /// A key: move, open a folder, narrow, mark, cancel, or choose.
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
-        self.refused = None;
+        // A refusal stays on screen until a key changes something.
+        let said = self.refused.take();
+        let out = self.handle(k);
+        if out == Outcome::Ignored && self.refused.is_none() {
+            self.refused = said;
+        }
+        out
+    }
+
+    fn handle(&mut self, k: KeyEvent) -> Outcome {
         if self.want.many() {
             if let Some(o) = self.mark_key(k) {
                 return o;
@@ -290,7 +311,9 @@ impl<W: Wanted> Browser<W> {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
             KeyCode::Char(' ') => {
-                if let Some(path) = self.file_here() {
+                if let Some(why) = self.current().and_then(|e| self.refusal(e)) {
+                    self.refused = Some(why);
+                } else if let Some(path) = self.file_here() {
                     if !self.marked.remove(&path) {
                         self.marked.insert(path);
                     }
@@ -299,17 +322,26 @@ impl<W: Wanted> Browser<W> {
                 Some(Outcome::Moved)
             }
             KeyCode::Char('a') if ctrl => {
-                let files: Vec<PathBuf> = self
-                    .shown()
-                    .iter()
-                    .filter(|e| e.is_file())
-                    .map(|e| self.dir.join(e.name()))
-                    .collect();
+                // Refused files are left unmarked, the first reason shown.
+                let mut files = Vec::new();
+                let mut refused = Vec::new();
+                for e in self.shown().into_iter().filter(|e| e.is_file()) {
+                    match self.refusal(e) {
+                        Some(why) => refused.push(why),
+                        None => files.push(self.dir.join(e.name())),
+                    }
+                }
+                if let Some(first) = refused.first() {
+                    self.refused = Some(match refused.len() {
+                        1 => first.clone(),
+                        n => format!("{n} files not marked; {first}"),
+                    });
+                }
                 self.marked.extend(files);
                 Some(Outcome::Moved)
             }
             KeyCode::Enter => {
-                self.file_here()?;
+                self.current().filter(|e| e.is_file())?;
                 let mut marked = std::mem::take(&mut self.marked).into_iter();
                 Some(match marked.next() {
                     Some(first) => Outcome::Chosen(Chosen {
@@ -323,31 +355,66 @@ impl<W: Wanted> Browser<W> {
         }
     }
 
-    /// The lines of the popup, `rows` entries tall at most.
-    pub fn lines(&self, rows: usize) -> Vec<Line<'static>> {
+    /// The lines of a popup at most `height` rows tall, borders included:
+    /// what is left after the header and footer goes to the entries.
+    pub fn lines(&self, height: usize) -> Vec<Line<'static>> {
         let h = self.want.header();
-        let mut out = vec![Line::from(Span::styled(format!(" {}", h.title), bold()))];
-        out.extend(
+        let mut head = vec![Line::from(Span::styled(format!(" {}", h.title), bold()))];
+        head.extend(
             h.notes
                 .iter()
                 .map(|n| Line::from(Span::styled(format!(" {n}"), hint()))),
         );
-        out.push(Line::from(Span::styled(
+        head.push(Line::from(Span::styled(
             format!(" {}", super::shown(&self.dir)),
             hint(),
         )));
         if !self.filter.is_empty() {
-            out.push(Line::from(format!(" names with “{}”", self.filter)));
+            head.push(Line::from(format!(" names with “{}”", self.filter)));
         }
-        out.push(Line::from(""));
+        head.push(Line::from(""));
+
         let shown = self.shown();
+        let many = self.want.many();
+        let mut foot = Vec::new();
+        if !shown.iter().any(|e| e.is_file()) {
+            foot.push(Line::from(Span::styled(
+                format!("  no {} here", h.what),
+                hint(),
+            )));
+        }
+        foot.push(Line::from(""));
+        if let Some(why) = &self.refused {
+            foot.push(Line::from(Span::styled(format!(" {why}"), bold())));
+        }
+        if let (Some(s), Some(_)) = (h.star, &self.best) {
+            foot.push(Line::from(Span::styled(s, hint())));
+        }
+        if many {
+            if !self.marked.is_empty() {
+                foot.push(Line::from(format!(" {} marked", self.marked.len())));
+            }
+            foot.push(Line::from(Span::styled(
+                " space mark   ctrl-a mark all shown   enter take marked (or the one here)",
+                hint(),
+            )));
+        }
+        foot.push(Line::from(Span::styled(
+            format!(
+                " ↑ ↓ choose   enter open / {}   ← or backspace up   type to narrow   ~ home   esc cancel",
+                h.verb
+            ),
+            hint(),
+        )));
+
+        let rows = height.saturating_sub(head.len() + foot.len() + 2).max(3);
         let width = shown
             .iter()
             .map(|e| e.name().chars().count() + 1)
             .max()
             .unwrap_or(0)
             .min(36);
-        let many = self.want.many();
+        let mut out = head;
         for (i, e) in shown
             .iter()
             .enumerate()
@@ -366,7 +433,11 @@ impl<W: Wanted> Browser<W> {
                         " "
                     };
                     let about = self.want.describe(about);
-                    format!("{mark}{n:<width$}  {about}")
+                    if about.is_empty() {
+                        format!("{mark}{n:<width$}")
+                    } else {
+                        format!("{mark}{n:<width$}  {about}")
+                    }
                 }
             };
             let style = if i == self.row {
@@ -378,35 +449,7 @@ impl<W: Wanted> Browser<W> {
             };
             out.push(Line::from(Span::styled(text, style)));
         }
-        if !shown.iter().any(|e| e.is_file()) {
-            out.push(Line::from(Span::styled(
-                format!("  no {} here", h.what),
-                hint(),
-            )));
-        }
-        out.push(Line::from(""));
-        if let Some(why) = &self.refused {
-            out.push(Line::from(Span::styled(format!(" {why}"), bold())));
-        }
-        if let (Some(s), Some(_)) = (h.star, &self.best) {
-            out.push(Line::from(Span::styled(s, hint())));
-        }
-        if many {
-            if !self.marked.is_empty() {
-                out.push(Line::from(format!(" {} marked", self.marked.len())));
-            }
-            out.push(Line::from(Span::styled(
-                " space mark   ctrl-a mark all shown   enter take marked (or the one here)",
-                hint(),
-            )));
-        }
-        out.push(Line::from(Span::styled(
-            format!(
-                " ↑ ↓ choose   enter open / {}   ← or backspace up   type to narrow   ~ home   esc cancel",
-                h.verb
-            ),
-            hint(),
-        )));
+        out.extend(foot);
         out
     }
 }

@@ -351,16 +351,15 @@ impl App {
         let Some(b) = self.browser.as_mut() else {
             return;
         };
-        let paths = match b.key(k) {
+        // Chosen files, or none when cancelled; either way it closes.
+        let chosen = match b.key(k) {
             Outcome::Ignored | Outcome::Moved => return,
-            Outcome::Cancelled => Vec::new(),
-            Outcome::Chosen(c) => c.files(),
+            Outcome::Cancelled => None,
+            Outcome::Chosen(c) => Some(c.files()),
         };
         let Some(b) = self.browser.take() else { return };
         self.browse_dir = b.dir;
-        if paths.is_empty() {
-            return;
-        }
+        let Some(paths) = chosen else { return };
         if b.want == Pick::Batch {
             self.take_batches(&paths);
         } else {

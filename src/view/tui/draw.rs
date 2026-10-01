@@ -133,10 +133,10 @@ impl App {
             popup(f, map, lines, 72, At::Middle, color::TEXT);
         }
 
-        let rows = usize::from(map.height).saturating_sub(10).max(3);
+        let tall = usize::from(map.height).saturating_sub(2);
         let browsing = match &self.modal {
-            Some(Modal::MarkersFile(b)) => Some(b.lines(rows)),
-            Some(Modal::DataFile(b, _)) => Some(b.lines(rows)),
+            Some(Modal::MarkersFile(b)) => Some(b.lines(tall)),
+            Some(Modal::DataFile(b, _)) => Some(b.lines(tall)),
             _ => None,
         };
         if let Some(lines) = browsing {
