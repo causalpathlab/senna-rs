@@ -42,14 +42,7 @@ fn app_from(dir: &Path, mung: Result<clap::Command, String>) -> App {
         ..App::new(cli(), mung, dir.to_path_buf()).unwrap()
     };
     a.browser = None;
-    for m in &mut a.rows {
-        let name = if m.tool == Tool::Mung {
-            "cnv"
-        } else {
-            m.form.name.as_str()
-        };
-        m.out = free_out(dir, name);
-    }
+    a.refresh_outs();
     a
 }
 
@@ -171,12 +164,13 @@ fn what_would_overwrite_or_misparse_is_stopped_before_running() {
     std::fs::write(dir.path().join("svd.senna.json"), "{}").unwrap();
     assert!(a.plan()[0].problem.as_ref().unwrap().contains("exists"));
     a.rows[svd].out = "sub/r".into();
+    std::fs::write(dir.path().join("sub"), "").unwrap();
     assert!(a.plan()[0]
         .problem
         .as_ref()
         .unwrap()
         .contains("not a folder"));
-    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::remove_file(dir.path().join("sub")).unwrap();
     let p = &a.plan()[0];
     assert_eq!(p.problem, None);
     assert_eq!(p.job.dir, script::normalize(&dir.path().join("sub")));
@@ -514,4 +508,41 @@ fn an_existing_clone_table_is_not_run_over() {
     a.rows[0].on = true;
     a.pairs = data(dir.path(), &["d.zarr"]);
     assert!(a.plan()[0].problem.as_ref().unwrap().contains("exists"));
+}
+
+#[test]
+fn the_output_header_names_every_out_not_typed_by_hand() {
+    assert_eq!(under("", "svd"), "svd");
+    assert_eq!(under("exp1", "svd"), "exp1_svd");
+    assert_eq!(under("results/", "svd"), "results/svd");
+    assert_eq!(under("results/exp1-", "svd"), "results/exp1-svd");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.pairs = data(dir.path(), &["d.zarr"]);
+    let svd = METHODS.iter().position(|m| *m == "svd").unwrap();
+    let bge = METHODS.iter().position(|m| *m == "bge").unwrap();
+    a.screen = Screen::Methods;
+    a.method_row = bge;
+    key(&mut a, KeyCode::Char('o'));
+    a.editor.as_mut().unwrap().text = "mine".into();
+    key(&mut a, KeyCode::Enter);
+    key(&mut a, KeyCode::Char('O'));
+    a.editor.as_mut().unwrap().text = "res/exp1".into();
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(a.rows[svd].out, "res/exp1_svd");
+    assert_eq!(a.rows[bge].out, "mine", "typed by hand, kept");
+
+    // A folder not there yet is made when the run starts.
+    a.rows[svd].on = true;
+    let p = &a.plan()[0];
+    assert_eq!(p.problem, None);
+    assert_eq!(p.job.out, "exp1_svd");
+    assert!(p.job.dir.ends_with("res"));
+
+    // An --out cleared goes back under the header.
+    key(&mut a, KeyCode::Char('o'));
+    a.editor.as_mut().unwrap().text.clear();
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(a.rows[bge].out, "res/exp1_bge");
 }

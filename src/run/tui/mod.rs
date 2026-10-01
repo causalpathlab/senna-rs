@@ -67,13 +67,17 @@ struct Row {
     label: String,
     form: Method,
     on: bool,
-    /// The `--out` prefix as typed: relative to where senna run started,
-    /// or absolute.
+    /// The `--out` prefix: relative to where senna run started, or
+    /// absolute.
     out: String,
+    /// What its `--out` is named after under the output header.
+    stem: &'static str,
+    /// Whether `out` was typed by hand, so the header leaves it be.
+    typed: bool,
 }
 
 impl Row {
-    fn new(tool: Tool, form: Method, out: String) -> Self {
+    fn new(tool: Tool, form: Method, stem: &'static str) -> Self {
         let label = match tool {
             Tool::Senna => form.name.clone(),
             Tool::Mung => format!("{} {}", tool.name(), form.name),
@@ -83,7 +87,9 @@ impl Row {
             label,
             form,
             on: false,
-            out,
+            out: stem.to_string(),
+            stem,
+            typed: false,
         }
     }
 }
@@ -92,6 +98,8 @@ impl Row {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Target {
     Out(usize),
+    /// What every `--out` not typed by hand starts with.
+    Header,
     /// Method row, field index.
     Field(usize, usize),
     Filter,
@@ -119,6 +127,9 @@ struct Planned {
 
 pub(crate) struct App {
     cli: clap::Command,
+    /// What every `--out` not typed by hand starts with: a name, or a
+    /// folder when it ends in `/`.
+    header: String,
     /// `mung` as described by itself, or why it is not there.
     mung: Result<clap::Command, String>,
     /// The programs the jobs start: senna itself, and mung.
@@ -235,22 +246,15 @@ impl App {
         // The clones step first: it runs before the fits.
         let mut rows = Vec::new();
         if let Ok(m) = &mung {
-            rows.push(Row::new(
-                Tool::Mung,
-                Method::new(m, CLONES)?,
-                free_out(&here, "cnv"),
-            ));
+            rows.push(Row::new(Tool::Mung, Method::new(m, CLONES)?, "cnv"));
         }
         for m in METHODS {
-            rows.push(Row::new(
-                Tool::Senna,
-                Method::new(&cli, m)?,
-                free_out(&here, m),
-            ));
+            rows.push(Row::new(Tool::Senna, Method::new(&cli, m)?, m));
         }
-        Ok(App {
+        let mut app = App {
             cli,
             mung,
+            header: String::new(),
             senna_program: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("senna")),
             mung_program: mung_program(),
             clones_scroll: 0,
@@ -280,7 +284,17 @@ impl App {
             message: None,
             quit: false,
             view: Vec::new(),
-        })
+        };
+        app.refresh_outs();
+        Ok(app)
+    }
+
+    /// Every `--out` not typed by hand: under the output header, first
+    /// free where the run writes.
+    fn refresh_outs(&mut self) {
+        for r in self.rows.iter_mut().filter(|r| !r.typed) {
+            r.out = free_out(&self.here, &under(&self.header, r.stem));
+        }
     }
 
     fn running(&self) -> bool {
@@ -384,11 +398,19 @@ impl App {
                 match target {
                     Target::Out(i) => {
                         let t = text.trim();
+                        let r = &mut self.rows[i];
                         if t.is_empty() {
-                            self.message = Some("--out cannot be empty".into());
+                            // Back to the header's.
+                            r.typed = false;
+                            self.refresh_outs();
                         } else {
-                            self.rows[i].out = t.to_string();
+                            r.out = t.to_string();
+                            r.typed = true;
                         }
+                    }
+                    Target::Header => {
+                        self.header = text.trim().to_string();
+                        self.refresh_outs();
                     }
                     Target::Field(m, f) => {
                         let field = &mut self.rows[m].form.fields[f];
@@ -657,6 +679,10 @@ impl App {
                 let r = &mut self.rows[self.method_row];
                 r.on = !r.on;
             }
+            KeyCode::Char('O') => {
+                let header = self.header.clone();
+                self.edit(Target::Header, header);
+            }
             KeyCode::Char('o') => {
                 let out = self.rows[self.method_row].out.clone();
                 self.edit(Target::Out(self.method_row), out);
@@ -885,7 +911,8 @@ impl App {
                 ))
             } else if outs.contains(&dir.join(&out)) {
                 Some("another queued method writes the same --out".to_string())
-            } else if !dir.is_dir() {
+            } else if dir.exists() && !dir.is_dir() {
+                // A folder not there yet is made when the run starts.
                 Some(format!("{} is not a folder", self.shown(&dir)))
             } else {
                 form::check(self.command_of(r.tool), &job.command())
@@ -1161,6 +1188,16 @@ fn describe_mung(program: &Path) -> Result<clap::Command, String> {
     described::Description::parse(&String::from_utf8_lossy(&out.stdout))
         .map(|d| d.command())
         .map_err(|e| format!("{name} describe: {e}"))
+}
+
+/// `stem` under the output header `header`: in it when it is a folder
+/// (ends in `/`) or ends in a separator, else after it and `_`.
+fn under(header: &str, stem: &str) -> String {
+    match header.chars().last() {
+        None => stem.to_string(),
+        Some('/' | '_' | '-' | '.') => format!("{header}{stem}"),
+        Some(_) => format!("{header}_{stem}"),
+    }
 }
 
 /// `{method}`, or `{method}-2`, … : the first prefix in `dir` with no

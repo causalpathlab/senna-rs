@@ -87,7 +87,11 @@ impl App {
         }
         if let Some(e) = &self.editor {
             let what = match e.target {
-                Target::Out(i) => format!(" --out for {}", self.rows[i].label),
+                Target::Out(i) => format!(
+                    " --out for {} (empty: under the output header)",
+                    self.rows[i].label
+                ),
+                Target::Header => " output header: every --out not typed starts with it (a folder when it ends in /)".to_string(),
                 Target::Field(m, i) => format!(" --{}", self.rows[m].form.fields[i].long),
                 Target::Filter => " flags containing".to_string(),
                 Target::BatchName(i) => format!(
@@ -138,7 +142,7 @@ impl App {
     fn status(&self) -> Vec<Line<'static>> {
         let keys = match self.screen {
             Screen::Data => "a add data   n name the batch   b label files (several: paired by name)   e rename labels   x own name   X all own   d remove   J K reorder",
-            Screen::Methods => "space queue   enter flags   o change --out",
+            Screen::Methods => "space queue   enter flags   o change --out   O output header",
             Screen::Params => "space / enter change   ← → choices   r reset   R reset all   a advanced   / filter   [ ] method",
             Screen::Run => "↑ ↓ PgUp PgDn scroll the log   End follow it   s stop   v open the results in senna view",
         };
@@ -286,6 +290,14 @@ impl App {
                 "Methods to fit on these data, each to its own --out",
                 bold(),
             )),
+            Line::from(vec![
+                Span::styled(" output header ", hint()),
+                if self.header.is_empty() {
+                    Span::styled("(none: O sets one)", hint())
+                } else {
+                    Span::styled(self.header.clone(), bold())
+                },
+            ]),
             Line::from(""),
         ];
         let w = usize::from(area.width);
@@ -305,10 +317,12 @@ impl App {
         for (i, r) in self.rows.iter().enumerate() {
             let changed = r.form.changed();
             let text = format!(
-                " [{}] {:<13} --out {:<out_w$}  {:<11} {}",
+                " [{}] {:<13} --out {:<out_w$}{} {:<11} {}",
                 if r.on { "x" } else { " " },
                 r.label,
                 fit(&r.out, out_w),
+                // Typed by hand: the header leaves it be.
+                if r.typed { " ✎" } else { "  " },
                 if changed == 0 {
                     "defaults".to_string()
                 } else {

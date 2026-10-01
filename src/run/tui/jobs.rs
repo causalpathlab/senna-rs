@@ -317,6 +317,9 @@ fn run_job(job: &Job, i: usize, s: &Mutex<Shared>, stopper: &Stopper) -> State {
     if job.result().exists() {
         return State::Failed(format!("{} exists", job.result().display()));
     }
+    if let Err(e) = std::fs::create_dir_all(&job.dir) {
+        return State::Failed(format!("cannot make {}: {e}", job.dir.display()));
+    }
     for w in &job.labels {
         if let Err(e) = super::batches::write(w) {
             return State::Failed(format!("cannot write the batch labels: {e}"));
