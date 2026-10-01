@@ -3094,26 +3094,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
-name = "mung-cnv"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aa35c996b541fbc1cad48e5ea94930a92396628f525ac78907a2b473c00af50"
-dependencies = [
- "anyhow",
- "clap",
- "data-beans",
- "legume-genomic-types",
- "legume-numeric",
- "log",
- "nalgebra",
- "nalgebra-sparse",
- "rand 0.10.3",
- "rand_distr 0.6.0",
- "rayon",
- "rustc-hash",
-]
-
-[[package]]
 name = "nalgebra"
 version = "0.34.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4469,7 +4449,6 @@ dependencies = [
  "log",
  "mimalloc",
  "miniz_oxide 0.8.9",
- "mung-cnv",
  "nalgebra",
  "nalgebra-sparse",
  "noto-sans-mono-bitmap",

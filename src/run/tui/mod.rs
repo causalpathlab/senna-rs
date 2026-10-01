@@ -1,9 +1,15 @@
 //! Terminal front end of `senna run`: data and batch files, methods,
 //! their flags, a confirm popup with the exact commands, then the queue
 //! running with its log.
+//!
+//! An optional `mung clones` step runs before the fits. mung is a separate
+//! program, started as a child like lupin is from `senna view`; its flags
+//! come from `mung describe clones`.
 
 mod batches;
+mod clones;
 mod data;
+mod described;
 mod draw;
 mod form;
 mod jobs;
@@ -14,7 +20,7 @@ use batches::Batch;
 use data::Pair;
 use data::Pick;
 use form::{Field, Kind, Method};
-use jobs::{Job, Queue};
+use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -56,11 +62,30 @@ impl Screen {
 
 /// A method, whether it is queued, and where it writes.
 struct Row {
+    tool: Tool,
+    /// Its name as listed: the method, or `mung clones`.
+    label: String,
     form: Method,
     on: bool,
     /// The `--out` prefix as typed: relative to where senna run started,
     /// or absolute.
     out: String,
+}
+
+impl Row {
+    fn new(tool: Tool, form: Method, out: String) -> Self {
+        let label = match tool {
+            Tool::Senna => form.name.clone(),
+            Tool::Mung => format!("{} {}", tool.name(), form.name),
+        };
+        Row {
+            tool,
+            label,
+            form,
+            on: false,
+            out,
+        }
+    }
 }
 
 /// What a line being typed will become.
@@ -94,6 +119,13 @@ struct Planned {
 
 pub(crate) struct App {
     cli: clap::Command,
+    /// `mung` as described by itself, or why it is not there.
+    mung: Result<clap::Command, String>,
+    /// The programs the jobs start: senna itself, and mung.
+    senna_program: PathBuf,
+    mung_program: PathBuf,
+    /// How far the clones popup is scrolled.
+    clones_scroll: usize,
     here: PathBuf,
     screen: Screen,
     pairs: Vec<Pair>,
@@ -138,7 +170,8 @@ type Blame = (usize, Vec<String>, Option<String>);
 /// Run the screens; `cli` is senna's built command, the source of every
 /// method's flags and the check of every command line.
 pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
-    let mut app = App::new(cli, start)?;
+    let mung = describe_mung(&mung_program());
+    let mut app = App::new(cli, mung, start)?;
     let level = log::max_level();
     log::set_max_level(log::LevelFilter::Off);
     let mut terminal = ratatui::init();
@@ -186,22 +219,36 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
 }
 
 impl App {
-    fn new(cli: clap::Command, start: PathBuf) -> anyhow::Result<Self> {
+    fn new(
+        cli: clap::Command,
+        mung: Result<clap::Command, String>,
+        start: PathBuf,
+    ) -> anyhow::Result<Self> {
         let here = std::env::current_dir()?;
         // `..` resolved, symlinks kept: the folders as the user knows them.
         let start = script::lexical(&here.join(start));
-        let rows = METHODS
-            .iter()
-            .map(|m| {
-                Ok(Row {
-                    form: Method::new(&cli, m)?,
-                    on: false,
-                    out: free_out(&here, m),
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        // The clones step first: it runs before the fits.
+        let mut rows = Vec::new();
+        if let Ok(m) = &mung {
+            rows.push(Row::new(
+                Tool::Mung,
+                Method::new(m, CLONES)?,
+                free_out(&here, "cnv"),
+            ));
+        }
+        for m in METHODS {
+            rows.push(Row::new(
+                Tool::Senna,
+                Method::new(&cli, m)?,
+                free_out(&here, m),
+            ));
+        }
         Ok(App {
             cli,
+            mung,
+            senna_program: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("senna")),
+            mung_program: mung_program(),
+            clones_scroll: 0,
             here,
             screen: Screen::Data,
             pairs: Vec::new(),
@@ -256,6 +303,8 @@ impl App {
             self.confirm_key(k);
         } else if self.relabel.is_some() {
             self.relabel_key(k);
+        } else if self.asking() {
+            self.clones_key(k);
         } else if !self.global_key(k) {
             match self.screen {
                 Screen::Data => self.data_key(k),
@@ -732,10 +781,58 @@ impl App {
         (dir, name)
     }
 
+    /// The command `tool`'s lines are checked against: a mung row exists
+    /// only when mung described itself.
+    fn command_of(&self, tool: Tool) -> &clap::Command {
+        match tool {
+            Tool::Senna => &self.cli,
+            Tool::Mung => self
+                .mung
+                .as_ref()
+                .expect("a mung row exists only when mung described itself"),
+        }
+    }
+
+    fn program_of(&self, tool: Tool) -> PathBuf {
+        match tool {
+            Tool::Senna => self.senna_program.clone(),
+            Tool::Mung => self.mung_program.clone(),
+        }
+    }
+
+    /// The queued `mung clones` row, if one is.
+    fn clones_row(&self) -> Option<usize> {
+        self.rows.iter().position(|r| r.on && r.tool == Tool::Mung)
+    }
+
+    /// How senna fit `r` takes the clone table `table` of the queued
+    /// `mung clones`: the table, or a warning that it cannot, or a problem.
+    fn clones_for(r: &Row, table: &str) -> (Option<String>, Option<String>, Option<String>) {
+        match r.form.fields.iter().find(|f| f.long == CLONES_FLAG) {
+            Some(f) if !f.is_default() => (
+                None,
+                None,
+                Some(format!(
+                    "--{CLONES_FLAG} is set here and mung clones is queued: reset one"
+                )),
+            ),
+            Some(_) => (Some(table.to_string()), None, None),
+            None => (
+                None,
+                Some(format!("takes no --{CLONES_FLAG}: runs without the clones")),
+                None,
+            ),
+        }
+    }
+
     /// The queued fits, each checked.
     fn plan(&self) -> Vec<Planned> {
         let mut outs: Vec<PathBuf> = Vec::new();
         let mut planned = Vec::new();
+        let table = self.clones_row().map(|i| {
+            let (dir, out) = self.out_of(i);
+            dir.join(format!("{out}.{}", Tool::Mung.result()))
+        });
         for (i, r) in self.rows.iter().enumerate().filter(|(_, r)| r.on) {
             let (dir, out) = self.out_of(i);
             let rel = |p: &Path| script::relative(p, &dir).to_string_lossy().into_owned();
@@ -749,20 +846,29 @@ impl App {
                 (Vec::new(), Vec::new(), None)
             };
             let batch_files: Vec<String> = batch_files.iter().map(|p| rel(p)).collect();
-            let argv = r.form.argv(&data, &batch_files, &out);
+            // The clones go to every fit that takes them.
+            let (clones, warning, clones_problem) = match (r.tool, &table) {
+                (Tool::Senna, Some(t)) => Self::clones_for(r, &rel(t)),
+                _ => (None, None, None),
+            };
+            let warning = warning.or_else(|| self.shape_warning(r));
             let job = Job {
-                method: r.form.name.clone(),
+                tool: r.tool,
+                program: self.program_of(r.tool),
+                row: i,
+                method: r.label.clone(),
                 dir: dir.clone(),
                 out: out.clone(),
-                argv,
+                argv: r.form.argv(&data, &batch_files, &out),
                 labels,
+                clones,
             };
             let mut blamed = None;
             let problem = if self.pairs.is_empty() {
                 Some("no data files: add some on the Data screen".to_string())
-            } else if let Some(p) = &batch_problem {
-                Some(p.clone())
-            } else if let Some(there) = [job.manifest(), job.script(), job.batches()]
+            } else if let Some(p) = batch_problem.or(clones_problem) {
+                Some(p)
+            } else if let Some(there) = [job.result(), job.script(), job.batches()]
                 .into_iter()
                 .find(|p| p.exists())
             {
@@ -775,13 +881,15 @@ impl App {
             } else if !dir.is_dir() {
                 Some(format!("{} is not a folder", self.shown(&dir)))
             } else {
-                form::check(&self.cli, &job.argv).err().inspect(|why| {
-                    blamed = form::blamed(why, &r.form.fields).map(str::to_string);
-                })
+                form::check(self.command_of(r.tool), &job.command())
+                    .err()
+                    .inspect(|why| {
+                        blamed = form::blamed(why, &r.form.fields).map(str::to_string);
+                    })
             };
             outs.push(dir.join(&out));
             planned.push(Planned {
-                warning: self.shape_warning(&r.form.name),
+                warning,
                 job,
                 problem,
                 blamed,
@@ -792,7 +900,11 @@ impl App {
 
     /// Whether the data look like what `method` reads: gem wants
     /// `{gene}/count/…` rows, the others plain features.
-    fn shape_warning(&self, method: &str) -> Option<String> {
+    fn shape_warning(&self, r: &Row) -> Option<String> {
+        if r.tool != Tool::Senna {
+            return None;
+        }
+        let method = r.form.name.as_str();
         let known: Vec<bool> = self.pairs.iter().filter_map(|p| p.gene_counts).collect();
         if known.is_empty() {
             return None;
@@ -841,7 +953,7 @@ impl App {
                 };
                 if let Some(p) = planned.iter().find(|p| p.problem.is_some()) {
                     if let Some(flag) = &p.blamed {
-                        self.go_to_flag(&p.job.method, flag);
+                        self.go_to_flag(p.job.row, flag);
                     }
                     self.message = Some(format!(
                         "{}: {}",
@@ -851,13 +963,9 @@ impl App {
                     return;
                 }
                 let jobs = planned.into_iter().map(|p| p.job).collect();
-                match std::env::current_exe() {
-                    Ok(exe) => {
-                        self.queue = Some(Queue::start(jobs, exe));
-                        self.screen = Screen::Run;
-                    }
-                    Err(e) => self.message = Some(format!("cannot find senna: {e}")),
-                }
+                self.queue = Some(Queue::start(jobs));
+                self.clones_scroll = 0;
+                self.screen = Screen::Run;
             }
             _ => {}
         }
@@ -865,10 +973,7 @@ impl App {
 
     /// Show `--flag` of `method` on the parameters screen, the advanced
     /// rows too when it is one of them.
-    fn go_to_flag(&mut self, method: &str, flag: &str) {
-        let Some(m) = self.rows.iter().position(|r| r.form.name == method) else {
-            return;
-        };
+    fn go_to_flag(&mut self, m: usize, flag: &str) {
         let Some(at) = self.rows[m].form.fields.iter().position(|f| f.long == flag) else {
             return;
         };
@@ -889,7 +994,7 @@ impl App {
             .iter()
             .flatten()
             .map(|p| {
-                let cmd = format!("senna {}", script::line(&p.job.argv));
+                let cmd = format!("{} {}", p.job.tool.name(), script::line(&p.job.command()));
                 if p.job.dir == self.here {
                     cmd
                 } else {
@@ -902,6 +1007,41 @@ impl App {
     }
 
     // ───────────── run ─────────────
+
+    /// Whether the queue waits on the clones of `mung clones`.
+    fn asking(&self) -> bool {
+        self.queue.as_ref().is_some_and(Queue::asking)
+    }
+
+    /// Keys while the queue waits on the clones: keep them, run without,
+    /// or stop.
+    fn clones_key(&mut self, k: KeyEvent) {
+        let keep = match k.code {
+            KeyCode::Up => {
+                self.clones_scroll = self.clones_scroll.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                self.clones_scroll += 1;
+                return;
+            }
+            KeyCode::Char('y') | KeyCode::Enter => Keep::Use,
+            KeyCode::Char('n') => Keep::Without,
+            KeyCode::Char('s') => Keep::Stop,
+            _ => return,
+        };
+        if let Some(q) = &self.queue {
+            q.answer(keep);
+        }
+        self.message = Some(
+            match keep {
+                Keep::Use => "the fits keep the clones apart",
+                Keep::Without => "the fits run without the clones",
+                Keep::Stop => "stopped after mung clones",
+            }
+            .into(),
+        );
+    }
 
     fn run_key(&mut self, k: KeyEvent) {
         match k.code {
@@ -966,13 +1106,45 @@ impl App {
     }
 }
 
+/// The mung subcommand `senna run` offers.
+const CLONES: &str = "clones";
+
+/// The mung to start: `$SENNA_MUNG`, else `mung` on the PATH.
+fn mung_program() -> PathBuf {
+    std::env::var_os("SENNA_MUNG").map_or_else(|| PathBuf::from("mung"), PathBuf::from)
+}
+
+/// `mung clones` as clap would see it, read from `mung describe clones`;
+/// why not, when that fails.
+fn describe_mung(program: &Path) -> Result<clap::Command, String> {
+    let name = program.display();
+    let out = std::process::Command::new(program)
+        .args(["describe", CLONES])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run {name} ({e}): install mung-cnv or set SENNA_MUNG"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{name} cannot describe its flags: mung-cnv 0.2.7 or later needed"
+        ));
+    }
+    described::Description::parse(&String::from_utf8_lossy(&out.stdout))
+        .map(|d| d.command())
+        .map_err(|e| format!("{name} describe: {e}"))
+}
+
 /// `{method}`, or `{method}-2`, … : the first prefix in `dir` with no
 /// manifest or script yet.
 fn free_out(dir: &Path, method: &str) -> String {
     let taken = |p: &str| {
-        ["senna.json", "cmd.sh", "batches"]
-            .iter()
-            .any(|end| dir.join(format!("{p}.{end}")).exists())
+        [
+            Tool::Senna.result(),
+            Tool::Mung.result(),
+            "cmd.sh",
+            "batches",
+        ]
+        .iter()
+        .any(|end| dir.join(format!("{p}.{end}")).exists())
     };
     if !taken(method) {
         return method.to_string();

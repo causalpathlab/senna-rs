@@ -103,16 +103,6 @@ pub struct SvdArgs {
     hvg: HvgCliArgs,
 
     #[command(flatten)]
-    cnv: CnvArgs,
-
-    #[arg(
-        long,
-        default_value_t = 5,
-        help = "Number of k-means cell clusters used as cell-type proxy for CNV."
-    )]
-    cnv_svd_clusters: usize,
-
-    #[command(flatten)]
     qc: QcArgs,
 }
 
@@ -241,12 +231,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    // 4b. Load gene positions for CNV (if requested)
-    let cnv_positions = {
-        let gene_names = data_vec.row_names()?;
-        crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?
-    };
-
     // 5. Nystrom projection
     let x_dn = match collapse_out.mu_adjusted.as_ref() {
         Some(adj) => adj,
@@ -264,7 +248,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     let cell_names = data_vec.column_names()?;
     let gene_names = data_vec.row_names()?;
-    let output_gene_names = gene_names.clone();
 
     // SVD reuses the topic models' `T{c}` convention so `lupin plot
     // --colour-by topic` reads the latent.parquet identically regardless
@@ -275,20 +258,14 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         &cell_names,
         output_keep_idx.as_deref(),
     )?;
-    senna::output_helpers::save_dictionary(
-        &args.out,
-        &nystrom_out.dictionary_dk,
-        &output_gene_names,
-    )?;
+    senna::output_helpers::save_dictionary(&args.out, &nystrom_out.dictionary_dk, &gene_names)?;
 
     {
         let pb_gene_gp: Mat = x_dn.posterior_mean().clone();
-        senna::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &output_gene_names)?;
+        senna::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names)?;
     }
 
-    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
-    // its triplet build never overlaps the live backend in memory.
-    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
+    let column_weight = data_vec.column_multiplicities();
 
     // Save selected feature list if feature selection was applied
     if let Some(sel) = &selected_features {
@@ -300,22 +277,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             sel.selected_names.len(),
             feature_file
         );
-    }
-
-    // 6. Cluster-informed CNV detection (after SVD, using latent for clustering)
-    if let Some(positions) = cnv_positions {
-        let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
-
-        let cnv_result = crate::cnv_pseudobulk::detect_cnv_cluster_informed(
-            data_vec,
-            &nystrom_out.latent_nk,
-            &batch_membership,
-            &positions,
-            args.cnv_svd_clusters.max(2),
-            &cnv_config,
-        )?;
-
-        crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
     }
 
     crate::postprocess::viz_prep::write_cell_proj(
@@ -330,7 +291,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         &args.out,
         &collapse_out,
         Some(std::slice::from_ref(&finest_membership)),
-        column_weight.as_deref(),
+        column_weight,
         &gene_names,
         args.init_from.as_deref(),
         args.pb_reference.as_ref(),

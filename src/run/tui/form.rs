@@ -290,10 +290,20 @@ pub fn check(cli: &Command, argv: &[String]) -> Result<(), String> {
     }
 }
 
-/// The first line of a clap error, without its `error: ` lead.
+/// The first line of a clap error, without its `error: ` lead, with the
+/// indented lines under it (such as the missing arguments).
 fn complaint(rendered: &str) -> String {
-    let first = rendered.lines().next().unwrap_or_default().trim();
-    first.strip_prefix("error: ").unwrap_or(first).to_string()
+    let mut lines = rendered.lines();
+    let first = lines.next().unwrap_or_default().trim();
+    let first = first.strip_prefix("error: ").unwrap_or(first);
+    std::iter::once(first)
+        .chain(
+            lines
+                .take_while(|l| l.starts_with(char::is_whitespace) && !l.trim().is_empty())
+                .map(str::trim),
+        )
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The flag a clap complaint is about, when it names one of `fields`.

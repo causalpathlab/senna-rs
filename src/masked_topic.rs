@@ -682,9 +682,6 @@ pub struct MaskedTopicArgs {
     feature_name_kind: FeatureNameKindArg,
 
     #[command(flatten)]
-    cnv: CnvArgs,
-
-    #[command(flatten)]
     qc: QcArgs,
 }
 
@@ -1499,33 +1496,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         }
     }
 
-    // CNV detection using topic proportions
-    let gene_names = data_vec.row_names()?;
-    let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
-
-    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
-    // its triplet build never overlaps the live backend in memory.
-    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
-
-    if let Some(positions) = cnv_positions {
-        if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
-            // `theta_nk` is unused after this; `detect_cnv_topic_informed` takes
-            // it by ref and clones internally, so pass it directly.
-            let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
-
-            let cnv_result = crate::cnv_pseudobulk::detect_cnv_topic_informed(
-                data_vec,
-                &theta_nk,
-                &batch_labels,
-                &positions,
-                &cnv_config,
-            )?;
-
-            crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
-        } else {
-            info!("CNV detection: skipped (no batch information)");
-        }
-    }
+    let column_weight = data_vec.column_multiplicities();
 
     crate::postprocess::viz_prep::write_cell_proj(
         &args.out,
@@ -1556,7 +1527,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         &args.out,
         finest_collapsed,
         cell_to_pb_per_level.as_deref(),
-        column_weight.as_deref(),
+        column_weight,
         &gene_names,
         args.init_from.as_deref(),
         args.pb_reference.as_ref(),

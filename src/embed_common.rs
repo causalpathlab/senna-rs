@@ -161,39 +161,6 @@ impl AdjMethod {
     }
 }
 
-/// Shared CNV detection CLI args (used by SVD, topic, masked-topic).
-/// Providing `--gff` or `--cnv-ground-truth` turns on the per-sample HMM CNV
-/// model from `cnv::per_sample`.
-#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
-pub struct CnvArgs {
-    #[arg(long, help = "GFF/GTF annotation for CNV detection.")]
-    pub gff: Option<Box<str>>,
-
-    #[arg(
-        long,
-        help = "CNV ground-truth TSV (alternative to --gff; from `data-beans simulate`).",
-        hide = true
-    )]
-    pub cnv_ground_truth: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Number of CN states (3 = del/neutral/gain; 5/6 = inferCNV i6-style).",
-        hide = true
-    )]
-    pub cnv_states: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "If ≥3, BIC-select K ∈ [3..max] via kmeans on the marginal signal.",
-        hide = true
-    )]
-    pub cnv_gmm_k_max: usize,
-}
-
 /// Training score tracker for topic models
 pub struct TrainScores {
     pub llik: Vec<f32>,

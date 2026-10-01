@@ -308,9 +308,6 @@ pub struct TopicArgs {
     pub(crate) rho_prior_beta: f32,
 
     #[command(flatten)]
-    pub(crate) cnv: CnvArgs,
-
-    #[command(flatten)]
     pub(crate) qc: QcArgs,
 }
 
@@ -601,33 +598,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     senna::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
-    // CNV detection using topic proportions as cell-type membership
-    let gene_names = data_vec.row_names()?;
-
-    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
-    // its triplet build never overlaps the live backend in memory.
-    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
-
-    let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
-
-    if let Some(positions) = cnv_positions {
-        if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
-            let topic_probs = z_nk.map(f32::exp);
-            let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
-
-            let cnv_result = crate::cnv_pseudobulk::detect_cnv_topic_informed(
-                data_vec,
-                &topic_probs,
-                &batch_labels,
-                &positions,
-                &cnv_config,
-            )?;
-
-            crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
-        } else {
-            info!("CNV detection: skipped (no batch information)");
-        }
-    }
+    let column_weight = data_vec.column_multiplicities();
 
     crate::postprocess::viz_prep::write_cell_proj(
         &args.out,
@@ -658,7 +629,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &args.out,
         finest_collapsed,
         cell_to_pb_per_level.as_deref(),
-        column_weight.as_deref(),
+        column_weight,
         &gene_names,
         args.init_from.as_deref(),
         args.pb_reference.as_ref(),
