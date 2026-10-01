@@ -1170,9 +1170,9 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.6.21"
+version = "0.6.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34e32de287ec6dc486a9771a7abc69f032981c44f8e34929c57d6ce7a4d67d10"
+checksum = "6ac70c063f3b5b94284e57e0087c84581ce579990f03b872295eb7a6e55b8c30"
 dependencies = [
  "anyhow",
  "approx",
@@ -2618,9 +2618,9 @@ dependencies = [
 
 [[package]]
 name = "legume-genomic-types"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e0330fcb5865ca0413dea0b074d4b4748142e826e4d49a0268e166fa04b7156"
+checksum = "fd11483ca84d3d989b55f257febaad2b57f29a8a0fa5eef3c302f1e91fbd161b"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -2633,9 +2633,9 @@ dependencies = [
 
 [[package]]
 name = "legume-graph-embedding"
-version = "0.8.4"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77f206329a11d39d7473d609b14931f2d8e7721952ef4b7f43b70053026c374e"
+checksum = "14fb325194ea2b1d930052a662668f6dd8c8ae37e8db1b7f8062f8e02ce4563f"
 dependencies = [
  "anyhow",
  "clap",
@@ -3095,9 +3095,9 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mung-cnv"
-version = "0.2.2"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46bd379cf425aa0656acab26d47cc142aca07ce8808b569066e00548886a8efb"
+checksum = "7aa35c996b541fbc1cad48e5ea94930a92396628f525ac78907a2b473c00af50"
 dependencies = [
  "anyhow",
  "clap",

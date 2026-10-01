@@ -202,3 +202,32 @@ fn sample_tagging_still_applies_with_explicit_batch_files() {
     );
     assert_eq!(unified.n_batches(), 2, "both batch labels round-trip");
 }
+
+/// `path`'s backend with `sample` recorded in its metadata, as faba does.
+fn with_sample(path: &str, sample: &str) {
+    use data_beans::sparse_io::{meta, open_sparse_matrix_by_path};
+    let mut b = open_sparse_matrix_by_path(path).expect("open backend");
+    b.set_meta(meta::SAMPLE, sample).expect("set sample");
+}
+
+#[test]
+fn resolve_inputs_takes_the_sample_recorded_in_each_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Names that follow no convention: the metadata alone ties them.
+    let genes = synth(dir.path(), "lane3", &["GENE1/count/spliced"], &["C1", "C2"]);
+    let m6a = synth(
+        dir.path(),
+        "lane3_extra",
+        &["GENE1/m6a/methylated", "GENE1/m6a/unmethylated"],
+        &["C1", "C2"],
+    );
+    with_sample(&genes, "s1");
+    with_sample(&m6a, "s1");
+    let inputs = resolve_inputs(std::slice::from_ref(&genes), std::slice::from_ref(&m6a), "")
+        .expect("resolve_inputs");
+    assert_eq!(&*inputs.sample_ids[0], "s1");
+    assert_eq!(&*inputs.sample_ids[1], "s1");
+    // An explicit strip still wins over the metadata.
+    let inputs = resolve_inputs(&[genes], &[], "3").expect("resolve_inputs");
+    assert_eq!(&*inputs.sample_ids[0], "lane");
+}
