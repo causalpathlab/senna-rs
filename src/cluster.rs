@@ -282,7 +282,7 @@ pub fn hsblock_clustering(
     latent_z.scale_columns_inplace();
 
     info!("Building KNN graph (k={knn}) for {n} cells ...");
-    let graph = KnnGraph::from_rows(
+    let (graph, weights) = KnnGraph::from_rows_fuzzy(
         &latent_z,
         KnnGraphArgs {
             knn,
@@ -304,7 +304,7 @@ pub fn hsblock_clustering(
     );
 
     // Step 2: Convert to legume_numeric::leiden::Network (discard total edge weight; HSBM doesn't need it)
-    let (network, _total_edge_weight) = graph.to_leiden_network();
+    let (network, _total_edge_weight) = graph.to_leiden_network_with(&weights);
 
     // Step 3: Run HSBM
     let options = HsbmOptions {

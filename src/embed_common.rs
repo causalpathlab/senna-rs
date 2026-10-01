@@ -87,15 +87,6 @@ pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
     )
 }
 
-/// Posterior log-mean PB matrix `[D, n_pb]`, preferring batch-adjusted.
-/// For Gamma(α, β), returns E[log X] = ψ(α) - log(β).
-pub fn preferred_posterior_log_mean(collapsed: &CollapsedOut) -> &Mat {
-    collapsed.mu_adjusted.as_ref().map_or_else(
-        || collapsed.mu_observed.posterior_log_mean(),
-        legume_numeric::param::traits::Inference::posterior_log_mean,
-    )
-}
-
 /// Shared compute device enum for candle-based models
 #[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]

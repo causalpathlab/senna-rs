@@ -1,14 +1,12 @@
-//! `senna layout tsne` — raw-gene-space PB landmarks laid out with
-//! an Rtsne-style t-SNE over the PB-PB cosine similarity. Cells
-//! placed by cheap Nyström in proj space. Initialised from random 2D
+//! `senna layout tsne`: PB landmarks of the run's cell table laid out
+//! with an Rtsne-style t-SNE over the PB-PB similarity. Cells
+//! placed by cheap Nyström. Initialised from random 2D
 //! coordinates (seeded via the shared `--seed` flag).
 
 use super::fit_layout_common::{
     finalize_viz, preprocess_layout_data, random_init_2d, resolve_inputs, LayoutCommonArgs,
-    LayoutPrep,
 };
 use super::fit_layout_features::LayoutTarget;
-use super::viz_prep::apply_svd_preprocessing;
 use crate::geometry::tsne::{similarity_to_distance, TSne};
 use senna::embed_common::*;
 
@@ -29,20 +27,6 @@ pub struct LayoutTsneArgs {
         help = "densMAP density-preservation strength (λ)"
     )]
     tsne_density_lambda: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "SVD preprocessing: keep top N components (0 = skip, use raw features)"
-    )]
-    svd_dims: usize,
-
-    #[arg(
-        long,
-        default_value_t = 2000,
-        help = "Number of highly variable genes to select (0 = use all genes)"
-    )]
-    n_hvg: usize,
 }
 
 pub fn fit_layout_tsne(args: &LayoutTsneArgs) -> anyhow::Result<()> {
@@ -52,41 +36,11 @@ pub fn fit_layout_tsne(args: &LayoutTsneArgs) -> anyhow::Result<()> {
          with --target features"
     );
     let mut resolved = resolve_inputs(&args.common)?;
-    // t-SNE is PB-level (PB-PB similarity → 2D); a graph-trained latent
-    // (bge/fne) goes through PB-then-Nyström too via `allow_direct_cells=false`
-    // (landmark sampling + Nyström rather than DirectCells).
-    let LayoutPrep::PbThenNystrom(prep) =
-        preprocess_layout_data(&args.common, &resolved, /*allow_direct_cells=*/ false)?
-    else {
-        // Unreachable: with allow_direct_cells=false, graph-trained latents
-        // (bge/fne) route through landmark sampling and every path returns
-        // PbThenNystrom. A DirectCells here means the routing logic regressed.
-        anyhow::bail!(
-            "internal: `senna layout tsne` expected a PB-then-Nyström layout prep but got \
-             DirectCells (allow_direct_cells=false should route bge/fne through landmarks)"
-        );
-    };
-
-    // HVG selection: keep top N genes by residual variance (mean-variance corrected)
-    let features = if args.n_hvg > 0 && args.n_hvg < prep.pb_features.ncols() {
-        info!(
-            "Selecting top {} HVGs from {} genes (mean-variance corrected)",
-            args.n_hvg,
-            prep.pb_features.ncols()
-        );
-        data_beans::alg::hvg::select_hvg(&prep.pb_features, args.n_hvg)
-    } else {
-        prep.pb_features.clone()
-    };
-
-    let features = if args.svd_dims > 0 {
-        apply_svd_preprocessing(&features, args.svd_dims)?
-    } else {
-        features
-    };
+    // t-SNE is PB-level (PB-PB similarity → 2D): landmarks of the run's cell
+    // table, cells placed by Nyström.
+    let prep = preprocess_layout_data(&args.common, &resolved)?;
 
     let n = prep.pb_similarity.nrows();
-    let _ = features; // reserved for future HVG/SVD-aware t-SNE variants
 
     info!(
         "Initialising t-SNE from random 2D coordinates (seed={})",

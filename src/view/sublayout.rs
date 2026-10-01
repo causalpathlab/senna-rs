@@ -5,7 +5,9 @@
 //! the same t-UMAP, so a sub-population's structure gets the whole screen
 //! instead of the corner the global layout gave it.
 
-use crate::postprocess::{latent_layout_features, tumap_on_columns, DirectUmap, DEFAULT_TRIM_MADS};
+use crate::postprocess::{
+    latent_layout_features, tumap_on_columns, TumapParams, DEFAULT_TRIM_MADS,
+};
 use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunKind, RunManifest};
@@ -56,9 +58,10 @@ impl Geometry {
         );
         let sub = self.latent_nk.select_rows(&rows);
         let (feat_kn, _) = latent_layout_features(self.kind, &sub, 1.0, DEFAULT_TRIM_MADS);
-        let params = DirectUmap {
-            knn: DirectUmap::default().knn.min(rows.len() - 1),
-            ..DirectUmap::default()
+        let params = TumapParams {
+            // n_neighbors counts each cell itself.
+            knn: TumapParams::default().knn.min(rows.len()),
+            ..TumapParams::default()
         };
         let coords = tumap_on_columns(&feat_kn, &params)?;
         let xy = (0..coords.nrows())

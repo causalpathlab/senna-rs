@@ -14,8 +14,9 @@ pub(super) enum Context {
     Merge,
     /// Typing a label or rationale.
     Prompt,
-    /// Browsing for the marker panel `lupin annotate` reads.
-    MarkersFile,
+    /// Browsing for a file: the marker panel `lupin annotate` reads, or
+    /// the run's data where the manifest's path is not here.
+    File,
     /// A structure plot or heatmap in place of the map.
     Chart,
     /// Confirming a relabel round before it goes to lupin.
@@ -281,7 +282,7 @@ impl App {
                 "s save PDF   ctrl-r redraw   ? all keys   q quit",
             ],
             // The popup says what the keys do.
-            Context::Submit | Context::Recompute | Context::MarkersFile => ["", ""],
+            Context::Submit | Context::Recompute | Context::File => ["", ""],
             Context::Search => [
                 "type part of a feature name   enter shows the first match   esc cancels",
                 "",

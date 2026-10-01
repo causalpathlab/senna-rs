@@ -251,6 +251,15 @@ impl Scene {
         Some((self.activity.as_mut()?, &self.data))
     }
 
+    /// The run's cells, as its first cell map names them.
+    pub fn cell_names(&self) -> Option<&[Box<str>]> {
+        self.data
+            .spaces
+            .iter()
+            .find(|s| s.axis() == Axis::Cells)
+            .map(|s| s.points.names.as_slice())
+    }
+
     /// Recompute the activity drawn for the current pick, space and source.
     /// Cell spaces only; on a feature space the pick is marked instead.
     pub(super) fn refresh_activity(&mut self) {
@@ -304,6 +313,10 @@ impl Scene {
                         .as_ref()
                         .is_some_and(Activity::observed_failed);
                 if no_counts {
+                    self.missing_data = self
+                        .activity
+                        .as_ref()
+                        .and_then(|a| a.missing_inputs().into_iter().next());
                     // Without the data, the model's expectation is what there
                     // is; if that fails too, its reason is said, not hidden.
                     self.source = Source::Expected;
