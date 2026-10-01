@@ -6,9 +6,9 @@
 //! simply replaces the job.
 
 mod annotate;
-mod browse;
+pub(crate) mod browse;
 mod decisions;
-mod draw;
+pub(crate) mod draw;
 mod grid;
 mod help;
 mod input;
@@ -49,7 +49,7 @@ fn here(prefix: &str) -> String {
     files::name(std::path::Path::new(prefix))
 }
 
-fn rgb(c: [u8; 3]) -> Color {
+pub(crate) fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
 

@@ -339,45 +339,70 @@ fn run_commands(
             *p = text;
         }
     };
-    for (label, mut command) in commands {
+    for (label, command) in commands {
         if stopper.is_stopped() {
             return Err("stopped".into());
         }
         say(format!("{label}…"));
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("cannot run senna: {e}"))?;
-        let log = child.stderr.take();
-        // Where `stop` can reach it; stopped meanwhile, it goes at once.
-        if let Ok(mut c) = stopper.child.lock() {
-            *c = Some(child);
-        }
-        if stopper.is_stopped() {
-            stopper.stop();
-        }
-        let last = crate::view::decide::follow_log(log, |line| say(format!("{label}: {line}")));
-        let status = stopper
-            .child
-            .lock()
-            .ok()
-            .and_then(|mut c| c.take())
-            .map(|mut c| c.wait());
-        if stopper.is_stopped() {
-            return Err("stopped".into());
-        }
-        match status {
-            Some(Ok(s)) if s.success() => {}
-            Some(Err(e)) => return Err(format!("{label} failed: {e}")),
-            _ => {
-                let why = last.strip_prefix("Error: ").unwrap_or(&last);
-                return Err(format!("{label} failed: {why}"));
-            }
+        match run_one(command, stopper, |line| say(format!("{label}: {line}"))) {
+            Ok(()) => {}
+            Err(Failed::Stopped) => return Err("stopped".into()),
+            Err(Failed::Start(why)) => return Err(why),
+            Err(Failed::Exit(why)) => return Err(format!("{label} failed: {why}")),
         }
     }
     Ok(())
+}
+
+/// Why [`run_one`] did not finish well.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Failed {
+    /// `stopper` was stopped.
+    Stopped,
+    /// The command did not start.
+    Start(String),
+    /// It ended badly: the reason it gave last.
+    Exit(String),
+}
+
+/// Run `command` to its end where `stopper` can kill it, each line of its
+/// log (its stderr) to `each`.
+pub(crate) fn run_one(
+    mut command: Command,
+    stopper: &Stopper,
+    each: impl FnMut(&str),
+) -> Result<(), Failed> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Failed::Start(format!("cannot run senna: {e}")))?;
+    let log = child.stderr.take();
+    // Where `stop` can reach it; stopped meanwhile, it goes at once.
+    if let Ok(mut c) = stopper.child.lock() {
+        *c = Some(child);
+    }
+    if stopper.is_stopped() {
+        stopper.stop();
+    }
+    let last = crate::view::decide::follow_log(log, each);
+    let status = stopper
+        .child
+        .lock()
+        .ok()
+        .and_then(|mut c| c.take())
+        .map(|mut c| c.wait());
+    if stopper.is_stopped() {
+        return Err(Failed::Stopped);
+    }
+    match status {
+        Some(Ok(s)) if s.success() => Ok(()),
+        Some(Err(e)) => Err(Failed::Exit(e.to_string())),
+        _ => Err(Failed::Exit(
+            last.strip_prefix("Error: ").unwrap_or(&last).to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]

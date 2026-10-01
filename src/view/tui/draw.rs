@@ -155,10 +155,7 @@ impl App {
         let r = map;
         let h = r.height;
         let list_rows = h.saturating_sub(chrome).max(1) as usize;
-        let first = menu
-            .row
-            .saturating_sub(list_rows / 2)
-            .min(levels.len().saturating_sub(list_rows));
+        let first = first_row(menu.row, list_rows, levels.len());
 
         let mut lines: Vec<Line> = Vec::new();
         for (g, level) in levels.iter().enumerate().skip(first).take(list_rows) {
@@ -227,35 +224,41 @@ impl App {
 }
 
 /// The page's colours: ink on the map's background.
-pub(super) fn page() -> Style {
+pub(crate) fn page() -> Style {
     Style::default()
         .bg(rgb(color::BACKGROUND))
         .fg(rgb(color::TEXT))
 }
 
 /// Key hints and other secondary lines: a step lighter than the text.
-pub(super) fn hint() -> Style {
+pub(crate) fn hint() -> Style {
     Style::default().fg(rgb(color::HINT))
 }
 
 /// The line under a menu's cursor: a dark bar, so where you are is plain.
-pub(super) fn selected() -> Style {
+pub(crate) fn selected() -> Style {
     Style::default()
         .bg(rgb(color::TEXT))
         .fg(rgb(color::BACKGROUND))
         .add_modifier(ratatui::style::Modifier::BOLD)
 }
 
+/// The first of `n` rows to show in a window `rows` tall so that `row`
+/// sits in its middle where it can.
+pub(crate) fn first_row(row: usize, rows: usize, n: usize) -> usize {
+    row.saturating_sub(rows / 2).min(n.saturating_sub(rows))
+}
+
 /// Where a popup sits over its area.
 #[derive(Clone, Copy)]
-pub(super) enum At {
+pub(crate) enum At {
     Top,
     Middle,
 }
 
 /// A bordered popup of `lines` over `area`, at most `max_w` columns wide
 /// and as tall as its lines.
-pub(super) fn popup(
+pub(crate) fn popup(
     f: &mut ratatui::Frame,
     area: Rect,
     lines: Vec<Line<'_>>,

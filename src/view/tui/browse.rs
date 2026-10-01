@@ -5,11 +5,15 @@
 //! A marker panel shows how many of its genes the run has; the panel that
 //! covers the most is starred and chosen to begin with. A run shows its kind
 //! and layouts; the newest is chosen to begin with.
+//!
+//! For `senna run` it also lists count backends and batch label files, and
+//! space marks several to take at once.
 
 use super::draw::{hint, selected};
 use super::*;
 use data_beans::utilities::name_matching::GeneIndex;
 use senna::run_manifest::RunManifest;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Files larger than this are not read as marker panels.
@@ -22,16 +26,40 @@ const NOT_PANELS: &[&str] = &[
 ];
 
 /// What the browser looks for.
-pub(super) enum Want {
+pub(crate) enum Want {
     /// Marker panels, counted against the run's genes when known.
     Panels(Option<GeneIndex>),
     /// Run manifests (`*.senna.json`).
     Runs,
+    /// Count backends (`.zarr`, `.zarr.zip`, `.h5`), several at once.
+    Data,
+    /// Batch label files (one label per line), several at once.
+    Batch,
+}
+
+impl Want {
+    /// Whether space marks several files to take together.
+    fn many(&self) -> bool {
+        matches!(self, Want::Data | Want::Batch)
+    }
+}
+
+/// Endings of batch label files: plain or gzipped text.
+pub(crate) const BATCH_ENDINGS: &[&str] =
+    &[".txt", ".tsv", ".csv", ".txt.gz", ".tsv.gz", ".csv.gz"];
+
+/// Whether `name` is one of the backends senna reads.
+pub(crate) fn is_data(name: &str) -> bool {
+    data_beans::hdf5_io::strip_backend_suffix(name) != name
+}
+
+pub(crate) fn is_batch(name: &str) -> bool {
+    BATCH_ENDINGS.iter().any(|e| name.ends_with(e))
 }
 
 /// A marker panel's size, and how much of it this run can use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Panel {
+pub(crate) struct Panel {
     pub types: usize,
     pub genes: usize,
     /// Genes this run has, when its feature names are known.
@@ -39,40 +67,44 @@ pub(super) struct Panel {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Entry {
+pub(crate) enum Entry {
     Up,
     Dir(String),
     Panel(String, Panel),
     /// A run: its name and a one-line description.
     Run(String, String),
+    /// A data or batch file: its name and size.
+    File(String, String),
 }
 
 impl Entry {
     fn name(&self) -> &str {
         match self {
             Entry::Up => "..",
-            Entry::Dir(n) | Entry::Panel(n, _) | Entry::Run(n, _) => n,
+            Entry::Dir(n) | Entry::Panel(n, _) | Entry::Run(n, _) | Entry::File(n, _) => n,
         }
     }
 
     fn is_file(&self) -> bool {
-        matches!(self, Entry::Panel(..) | Entry::Run(..))
+        matches!(self, Entry::Panel(..) | Entry::Run(..) | Entry::File(..))
     }
 }
 
 /// What a key did in the browser.
-pub(super) enum Outcome {
+pub(crate) enum Outcome {
     /// Not a browser key.
     Ignored,
     Moved,
     Cancelled,
     /// A file was chosen.
     Chosen(PathBuf, Entry),
+    /// Files taken together: the marked ones, or the one under the cursor.
+    ChosenMany(Vec<PathBuf>),
 }
 
-pub(super) struct Browser {
+pub(crate) struct Browser {
     pub dir: PathBuf,
-    want: Want,
+    pub want: Want,
     entries: Vec<Entry>,
     /// Typed letters narrow the list to names containing them.
     pub filter: String,
@@ -80,10 +112,12 @@ pub(super) struct Browser {
     pub row: usize,
     /// The file chosen to begin with: the best panel, or the newest run.
     best: Option<String>,
+    /// Files marked with space, in any folder.
+    pub marked: BTreeSet<PathBuf>,
 }
 
 impl Browser {
-    pub(super) fn open(dir: PathBuf, want: Want, select: Option<&str>) -> Self {
+    pub(crate) fn open(dir: PathBuf, want: Want, select: Option<&str>) -> Self {
         let mut b = Browser {
             dir,
             want,
@@ -91,6 +125,7 @@ impl Browser {
             filter: String::new(),
             row: 0,
             best: None,
+            marked: BTreeSet::new(),
         };
         b.read(select);
         b
@@ -103,6 +138,7 @@ impl Browser {
         self.best = match self.want {
             Want::Panels(_) => best_panel(&self.entries),
             Want::Runs => newest(&self.dir, &self.entries),
+            Want::Data | Want::Batch => None,
         };
         self.filter.clear();
         let want = select.map(str::to_string).or_else(|| self.best.clone());
@@ -138,6 +174,11 @@ impl Browser {
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
         let n = self.shown().len();
         let last = n.saturating_sub(1);
+        if self.want.many() {
+            if let Some(o) = self.mark_key(k) {
+                return o;
+            }
+        }
         match k.code {
             KeyCode::Esc => return Outcome::Cancelled,
             KeyCode::Up => self.row = self.row.saturating_sub(1),
@@ -195,6 +236,56 @@ impl Browser {
         Outcome::Moved
     }
 
+    /// The file under the cursor, if it is on one.
+    fn file_here(&self) -> Option<PathBuf> {
+        let e = self
+            .shown()
+            .get(self.row)
+            .copied()
+            .filter(|e| e.is_file())?;
+        Some(self.dir.join(e.name()))
+    }
+
+    /// Space marks or unmarks the file under the cursor and moves on;
+    /// ctrl-a marks every file shown; enter takes the marked files.
+    fn mark_key(&mut self, k: KeyEvent) -> Option<Outcome> {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Char(' ') => {
+                if let Some(path) = self.file_here() {
+                    if !self.marked.remove(&path) {
+                        self.marked.insert(path);
+                    }
+                    self.row = (self.row + 1).min(self.shown().len().saturating_sub(1));
+                }
+                Some(Outcome::Moved)
+            }
+            KeyCode::Char('a') if ctrl => {
+                let files: Vec<PathBuf> = self
+                    .shown()
+                    .iter()
+                    .filter(|e| e.is_file())
+                    .map(|e| self.dir.join(e.name()))
+                    .collect();
+                self.marked.extend(files);
+                Some(Outcome::Moved)
+            }
+            // On a file enter takes the marked ones, or this one when none
+            // is; on a folder it still opens it, so files marked here and
+            // there can be taken together.
+            KeyCode::Enter => {
+                let here = self.file_here()?;
+                let mut taken: Vec<PathBuf> =
+                    std::mem::take(&mut self.marked).into_iter().collect();
+                if taken.is_empty() {
+                    taken.push(here);
+                }
+                Some(Outcome::ChosenMany(taken))
+            }
+            _ => None,
+        }
+    }
+
     /// The lines of the popup, `rows` entries tall at most.
     pub fn lines(&self, rows: usize) -> Vec<Line<'static>> {
         let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
@@ -206,6 +297,18 @@ impl Browser {
                 "annotate",
             ),
             Want::Runs => ("Run to view", "runs (*.senna.json)", None, "open"),
+            Want::Data => (
+                "Data to embed",
+                "backends (.zarr, .zarr.zip, .h5)",
+                None,
+                "take",
+            ),
+            Want::Batch => (
+                "Batch labels, one file per data file",
+                "label files (.txt, .tsv, .csv, gzipped too)",
+                None,
+                "take",
+            ),
         };
         let mut out = vec![
             Line::from(Span::styled(format!(" {title}"), bold)),
@@ -216,10 +319,7 @@ impl Browser {
         }
         out.push(Line::from(""));
         let shown = self.shown();
-        let first = self
-            .row
-            .saturating_sub(rows / 2)
-            .min(shown.len().saturating_sub(rows));
+        let first = super::draw::first_row(self.row, rows, shown.len());
         let width = shown
             .iter()
             .map(|e| e.name().chars().count() + 1)
@@ -237,6 +337,14 @@ impl Browser {
                 Entry::Dir(n) => format!(" {n}/"),
                 Entry::Panel(n, p) => format!("{mark}{n:<width$}  {}", describe(p)),
                 Entry::Run(n, d) => format!(" {n:<width$}  {d}"),
+                Entry::File(n, d) => {
+                    let mark = if self.marked.contains(&self.dir.join(n)) {
+                        "●"
+                    } else {
+                        " "
+                    };
+                    format!("{mark}{n:<width$}  {d}")
+                }
             };
             let style = if i == self.row {
                 selected()
@@ -256,6 +364,15 @@ impl Browser {
         out.push(Line::from(""));
         if let (Some(s), Some(_)) = (star, &self.best) {
             out.push(Line::from(Span::styled(s, hint())));
+        }
+        if self.want.many() {
+            if !self.marked.is_empty() {
+                out.push(Line::from(format!(" {} marked", self.marked.len())));
+            }
+            out.push(Line::from(Span::styled(
+                " space mark   ctrl-a mark all shown   enter take marked (or the one here)",
+                hint(),
+            )));
         }
         out.push(Line::from(Span::styled(
             format!(
@@ -294,6 +411,8 @@ fn list_dir(dir: &Path, want: &Want) -> Vec<Entry> {
         if path.is_dir() {
             if !name.ends_with(".zarr") {
                 dirs.push(Entry::Dir(name));
+            } else if matches!(want, Want::Data) {
+                found.push(Entry::File(name, String::new()));
             }
             continue;
         }
@@ -302,6 +421,8 @@ fn list_dir(dir: &Path, want: &Want) -> Vec<Entry> {
             Want::Runs => name
                 .ends_with(".senna.json")
                 .then(|| Entry::Run(name, describe_run(&path))),
+            Want::Data => is_data(&name).then(|| Entry::File(name, size_of(&path))),
+            Want::Batch => is_batch(&name).then(|| Entry::File(name, size_of(&path))),
         };
         found.extend(entry);
     }
@@ -311,6 +432,21 @@ fn list_dir(dir: &Path, want: &Want) -> Vec<Entry> {
     out.extend(dirs);
     out.extend(found);
     out
+}
+
+/// A file's size, `12.3 MB`.
+fn size_of(path: &Path) -> String {
+    let bytes = std::fs::metadata(path).map_or(0, |m| m.len()) as f64;
+    let (v, unit) = [("kB", 1e3), ("MB", 1e6), ("GB", 1e9)]
+        .iter()
+        .rev()
+        .find(|(_, s)| bytes >= *s)
+        .map_or((bytes, "B"), |(u, s)| (bytes / s, *u));
+    if unit == "B" {
+        format!("{v:.0} B")
+    } else {
+        format!("{v:.1} {unit}")
+    }
 }
 
 /// `bge · umap, phate · annotated`, or why the manifest does not read.
@@ -451,7 +587,7 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
             match b.key(k) {
                 Outcome::Cancelled => return Ok(None),
                 Outcome::Chosen(path, _) => return Ok(Some(path)),
-                Outcome::Moved | Outcome::Ignored => {}
+                Outcome::Moved | Outcome::Ignored | Outcome::ChosenMany(_) => {}
             }
         }
     })();
@@ -519,6 +655,35 @@ mod tests {
         assert!(b.shown().iter().all(|e| e.name() != ".hidden"));
         b.filter.push('.');
         assert!(b.shown().iter().any(|e| e.name() == ".hidden"));
+    }
+
+    #[test]
+    fn enter_on_a_folder_opens_it_with_files_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.h5", "");
+        std::fs::create_dir(dir.path().join("more")).unwrap();
+        write(&dir.path().join("more"), "b.h5", "");
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut b = Browser::open(dir.path().to_path_buf(), Want::Data, None);
+        let shown = |b: &Browser| {
+            b.shown()
+                .iter()
+                .map(|e| e.name().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&b), ["..", "more", "a.h5"]);
+        b.row = 2;
+        b.key(key(KeyCode::Char(' ')));
+        b.row = 1;
+        assert!(matches!(b.key(key(KeyCode::Enter)), Outcome::Moved));
+        assert_eq!(b.dir, dir.path().join("more"));
+        b.row = 1;
+        b.key(key(KeyCode::Char(' ')));
+        b.row = 1;
+        let Outcome::ChosenMany(got) = b.key(key(KeyCode::Enter)) else {
+            panic!("enter on a file takes the marked ones");
+        };
+        assert_eq!(got, [dir.path().join("a.h5"), dir.path().join("more/b.h5")]);
     }
 
     #[test]

@@ -2,15 +2,15 @@
 
 mod activity;
 mod chart;
-mod color;
+pub(crate) mod color;
 mod data;
-mod decide;
+pub(crate) mod decide;
 mod deck;
 mod features;
-mod files;
+pub(crate) mod files;
 mod paint;
 mod pdf;
-mod recompute;
+pub(crate) mod recompute;
 mod relabel;
 mod render;
 mod review;
@@ -20,7 +20,7 @@ mod state;
 mod style;
 mod sublayout;
 mod text;
-mod tui;
+pub(crate) mod tui;
 mod zoom;
 
 use activity::{Activity, Levels, Source};

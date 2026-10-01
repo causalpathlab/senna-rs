@@ -54,7 +54,8 @@ impl App {
             return false;
         };
         match b.key(k) {
-            Outcome::Ignored => return false,
+            // Panels are taken one at a time.
+            Outcome::Ignored | Outcome::ChosenMany(_) => return false,
             Outcome::Moved => {}
             Outcome::Cancelled => {
                 self.modal = None;

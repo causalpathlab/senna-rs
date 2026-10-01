@@ -1331,7 +1331,8 @@ pub fn resolve(manifest_dir: &Path, rel: &str) -> PathBuf {
 }
 
 /// `p` with `.` and `..` folded away, without touching the file system.
-fn normalize(p: &Path) -> PathBuf {
+#[must_use]
+pub fn normalize(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for c in p.components() {
@@ -1353,7 +1354,8 @@ fn normalize(p: &Path) -> PathBuf {
 }
 
 /// `p` as a path from `base`, both absolute and normalized.
-fn relative_to(p: &Path, base: &Path) -> PathBuf {
+#[must_use]
+pub fn relative_to(p: &Path, base: &Path) -> PathBuf {
     let (pc, bc): (Vec<_>, Vec<_>) = (p.components().collect(), base.components().collect());
     let common = pc.iter().zip(&bc).take_while(|(a, b)| a == b).count();
     let mut out: PathBuf = bc[common..].iter().map(|_| "..").collect();
