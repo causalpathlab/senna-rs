@@ -232,13 +232,20 @@ pub fn reconcile_modalities(
     }
 
     // One vote per detected modality: the trained block holding the most of
-    // its raw feature names. A tag with no hits never enters, so absence of an
-    // entry IS "no match" — there is no second flag to keep consistent.
+    // its feature names. Trained rows carry the loader's canonical names, so
+    // a query row is put in the same form first (a peak `chrX:0-100` as its
+    // locus key, by the shared rule). A tag with no hits never enters, so
+    // absence of an entry IS "no match" — there is no second flag to keep
+    // consistent.
     let mut best: FxHashMap<&str, (usize, &str)> = FxHashMap::default();
     for (i, rows) in query_rows.iter().enumerate() {
         let tag = plan.modality[i].as_ref();
+        let keys: Vec<Box<str>> = rows
+            .iter()
+            .map(|r| ge::FeatureNameKind::Mixed.canonicalize(r))
+            .collect();
         for (&trained_tag, names) in &trained {
-            let hits = rows.iter().filter(|r| names.contains(r.as_ref())).count();
+            let hits = keys.iter().filter(|k| names.contains(k.as_ref())).count();
             if hits > best.get(tag).map_or(0, |&(h, _)| h) {
                 best.insert(tag, (hits, trained_tag));
             }

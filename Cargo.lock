@@ -1170,9 +1170,9 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.6.23"
+version = "0.6.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ac70c063f3b5b94284e57e0087c84581ce579990f03b872295eb7a6e55b8c30"
+checksum = "674699a07e014e2ec723e3e0d991808ff01c1ce8e2452047dfcc295b1a7cdb50"
 dependencies = [
  "anyhow",
  "approx",
@@ -1184,6 +1184,7 @@ dependencies = [
  "hdf5-metno",
  "indicatif",
  "indicatif-log-bridge",
+ "legume-genomic-types",
  "legume-numeric",
  "libz-sys",
  "log",
@@ -2618,9 +2619,9 @@ dependencies = [
 
 [[package]]
 name = "legume-genomic-types"
-version = "0.4.5"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd11483ca84d3d989b55f257febaad2b57f29a8a0fa5eef3c302f1e91fbd161b"
+checksum = "afa0a202928d3e34a16811aa0ec94c101608f9d7c5134f2980999d58a90b7575"
 dependencies = [
  "anyhow",
  "dashmap",

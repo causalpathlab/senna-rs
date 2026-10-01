@@ -260,3 +260,27 @@ fn an_explicit_mixed_kind_is_accepted_on_a_multiome_axis() {
     base.feature_kind = Some(FeatureNameKind::Mixed);
     assert!(l.apply(base).is_ok());
 }
+
+/// Trained rows carry the loader's canonical names, query rows their raw
+/// ones: a peak matches its trained block through the shared locus rule.
+#[test]
+fn query_peaks_match_trained_peaks_by_their_canonical_key() {
+    let key = |p: &str| format!("{}/peaks", FeatureNameKind::Mixed.canonicalize(p));
+    let trained: Vec<Box<str>> = ["chrX:0-100", "chr1:100-200"]
+        .iter()
+        .map(|p| key(p).into())
+        .chain(["CD3E/scRNA".into()])
+        .collect();
+    let detected = ge::MultiomePlan {
+        files: boxed(&["gex_q.zarr", "atac_q.zarr"]),
+        modality: boxed(&["gex", "atac"]),
+        group: boxed(&["q", "q"]),
+        group_sizes: vec![2],
+        barcode_tagged: false,
+        n_bridge_cells: Some(10),
+    };
+    let rows = vec![boxed(&["CD3E"]), boxed(&["chrX:0-100", "chr1:100-200"])];
+    let named = reconcile_modalities(detected, &rows, &trained).unwrap();
+    assert_eq!(&*named.modality[0], "scRNA");
+    assert_eq!(&*named.modality[1], "peaks");
+}
