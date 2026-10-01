@@ -9,9 +9,6 @@
 
 /// The suffix `faba count` gives its gene-count matrices (`{batch}_count`).
 pub const COUNT_SUFFIX: &str = "_count";
-/// The suffix `faba genes` gave them before the subcommand became `count`;
-/// still stripped so older outputs keep loading.
-pub const LEGACY_COUNT_SUFFIX: &str = "_genes";
 
 /// Strip whichever of `suffixes` the basename ends with, first match wins;
 /// none matching keeps the full basename.

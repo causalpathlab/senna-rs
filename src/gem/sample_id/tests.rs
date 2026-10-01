@@ -1,13 +1,10 @@
-//! Unit tests for [`super`] — sample-id suffix inference.
+//! Unit tests for [`super`]: sample-id suffix inference.
 
 use super::*;
 
-/// Gene files carry `_count` now and `_genes` from before the rename; both
-/// resolve to the same sample id, so old and new outputs load alike.
+/// Gene files carry `_count`; the sample id is the name without it.
 #[test]
-fn gene_file_default_strips_count_then_legacy_genes() {
-    let both = [COUNT_SUFFIX, LEGACY_COUNT_SUFFIX];
-    assert_eq!(&*strip_any_suffix("s1_count", &both), "s1");
-    assert_eq!(&*strip_any_suffix("s1_genes", &both), "s1");
-    assert_eq!(&*strip_any_suffix("s1", &both), "s1");
+fn gene_file_default_strips_count() {
+    assert_eq!(&*strip_any_suffix("s1_count", &[COUNT_SUFFIX]), "s1");
+    assert_eq!(&*strip_any_suffix("s1", &[COUNT_SUFFIX]), "s1");
 }

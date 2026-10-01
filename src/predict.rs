@@ -397,7 +397,7 @@ pub struct PredictArgs {
     #[arg(
         long,
         help = "Keep only rows whose suffix equals this value",
-        long_help = "e.g. `count/spliced` drops the `count/unspliced` rows of a faba genes backend,\n\
+        long_help = "e.g. `count/spliced` drops the `count/unspliced` rows of a `faba count` backend,\n\
                      collapsing the {spliced,unspliced} doubling to one row per gene.\n\
                      Requires --feature-name-suffix-delim.\n\
                      Rows lacking the delimiter are dropped when this is set."
