@@ -91,7 +91,9 @@ impl App {
                     " --out for {} (empty: under the output header)",
                     self.rows[i].label
                 ),
-                Target::Header => " output header: every --out not typed starts with it (a folder when it ends in /)".to_string(),
+                Target::Header => {
+                    " Output header: what every result of this run is named after".to_string()
+                }
                 Target::Field(m, i) => format!(" --{}", self.rows[m].form.fields[i].long),
                 Target::Filter => " flags containing".to_string(),
                 Target::BatchName(i) => format!(
@@ -100,11 +102,26 @@ impl App {
                 ),
                 Target::Label(..) => " new name for this label (empty: as it was)".to_string(),
             };
-            let lines = vec![
+            let mut lines = vec![
                 Line::from(Span::styled(what, bold())),
                 Line::from(format!(" {}▏", e.text)),
-                Line::from(Span::styled(" enter keep   esc cancel", hint())),
             ];
+            if e.target == Target::Header {
+                lines.extend([
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " e.g. exp1 → exp1_svd, exp1_topic, …   results/ → results/svd, …",
+                        hint(),
+                    )),
+                    Line::from(Span::styled(
+                        " O on Methods changes it later; o names one --out by hand",
+                        hint(),
+                    )),
+                    Line::from(Span::styled(" enter keep   esc no header", hint())),
+                ]);
+            } else {
+                lines.push(Line::from(Span::styled(" enter keep   esc cancel", hint())));
+            }
             popup(f, area, lines, 90, At::Middle, TEXT);
         }
     }

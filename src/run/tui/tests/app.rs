@@ -42,6 +42,7 @@ fn app_from(dir: &Path, mung: Result<clap::Command, String>) -> App {
         ..App::new(cli(), mung, dir.to_path_buf()).unwrap()
     };
     a.browser = None;
+    a.editor = None;
     a.refresh_outs();
     a
 }
@@ -545,4 +546,19 @@ fn the_output_header_names_every_out_not_typed_by_hand() {
     a.editor.as_mut().unwrap().text.clear();
     key(&mut a, KeyCode::Enter);
     assert_eq!(a.rows[bge].out, "res/exp1_bge");
+}
+
+#[test]
+fn the_output_header_is_asked_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = App::new(cli(), Err("no mung".into()), dir.path().to_path_buf()).unwrap();
+    assert_eq!(a.editor.as_ref().unwrap().target, Target::Header);
+    // Before the file browser: typing goes to the header.
+    for c in "exp1".chars() {
+        key(&mut a, KeyCode::Char(c));
+    }
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(a.header, "exp1");
+    assert!(a.editor.is_none() && a.browser.is_some());
+    assert!(a.rows.iter().all(|r| r.out.starts_with("exp1_")));
 }

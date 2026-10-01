@@ -272,7 +272,12 @@ impl App {
             field_row: 0,
             advanced: false,
             filter: String::new(),
-            editor: None,
+            // The output header is asked first: every result is named
+            // after it.
+            editor: Some(Editor {
+                target: Target::Header,
+                text: String::new(),
+            }),
             confirm: None,
             confirm_scroll: 0,
             confirm_max: std::cell::Cell::new(0),

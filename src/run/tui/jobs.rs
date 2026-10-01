@@ -317,7 +317,7 @@ fn run_job(job: &Job, i: usize, s: &Mutex<Shared>, stopper: &Stopper) -> State {
     if job.result().exists() {
         return State::Failed(format!("{} exists", job.result().display()));
     }
-    if let Err(e) = std::fs::create_dir_all(&job.dir) {
+    if let Err(e) = legume_numeric::matrix::common_io::mkdir(&job.dir.to_string_lossy()) {
         return State::Failed(format!("cannot make {}: {e}", job.dir.display()));
     }
     for w in &job.labels {
