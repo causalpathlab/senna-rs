@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn gene_file_default_strips_count_then_legacy_genes() {
     let both = [COUNT_SUFFIX, LEGACY_COUNT_SUFFIX];
-    assert_eq!(&*strip_any_suffix("rep1_wt_count", &both), "rep1_wt");
-    assert_eq!(&*strip_any_suffix("rep1_wt_genes", &both), "rep1_wt");
-    assert_eq!(&*strip_any_suffix("rep1_wt", &both), "rep1_wt");
+    assert_eq!(&*strip_any_suffix("s1_count", &both), "s1");
+    assert_eq!(&*strip_any_suffix("s1_genes", &both), "s1");
+    assert_eq!(&*strip_any_suffix("s1", &both), "s1");
 }

@@ -5,7 +5,7 @@
 //! each file's barcodes with `{COLUMN_SEP}{sample_id}` (COLUMN_SEP = `@`)
 //! under `ColumnAlignment::Union`, where the sample id is the file's basename
 //! with a suffix stripped so every file of one sample collapses to the same id
-//! (`rep1_wt_count` → `rep1_wt`).
+//! (`s1_count` → `s1`).
 
 /// The suffix `faba count` gives its gene-count matrices (`{batch}_count`).
 pub const COUNT_SUFFIX: &str = "_count";
