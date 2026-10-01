@@ -4,7 +4,7 @@ fn cli() -> clap::Command {
     // A stand-in for senna's command: every method takes data files,
     // --out and batch files, and one flag of its own.
     let method = |name: &'static str| {
-        clap::Command::new(name)
+        let c = clap::Command::new(name)
             .about("fit")
             .arg(
                 clap::Arg::new("data_files")
@@ -22,7 +22,13 @@ fn cli() -> clap::Command {
                     .long("steps")
                     .default_value("10")
                     .value_parser(clap::value_parser!(usize)),
-            )
+            );
+        // All but one take the clones of `mung clones`.
+        if name == "simba" {
+            c
+        } else {
+            c.arg(clap::Arg::new("cnv_clones").long("cnv-clones"))
+        }
     };
     let mut c = clap::Command::new("senna").subcommands(METHODS.map(method));
     c.build();
@@ -32,11 +38,42 @@ fn cli() -> clap::Command {
 fn app(dir: &Path) -> App {
     let mut a = App {
         here: dir.to_path_buf(),
-        ..App::new(cli(), dir.to_path_buf()).unwrap()
+        ..App::new(cli(), Err("no mung".into()), dir.to_path_buf()).unwrap()
     };
     a.browser = None;
     for m in &mut a.rows {
         m.out = free_out(dir, &m.form.name);
+    }
+    a
+}
+
+/// A stand-in for `mung` as `mung describe clones` tells it.
+fn mung() -> clap::Command {
+    let mut c = clap::Command::new("mung").subcommand(
+        clap::Command::new("clones")
+            .about("clones")
+            .arg(clap::Arg::new("query").num_args(1..))
+            .arg(clap::Arg::new("out").long("out").required(true))
+            .arg(clap::Arg::new("gff").long("gff").required(true)),
+    );
+    c.build();
+    c
+}
+
+/// An app whose first row is the `mung clones` step.
+fn app_with_mung(dir: &Path) -> App {
+    let mut a = App {
+        here: dir.to_path_buf(),
+        ..App::new(cli(), Ok(mung()), dir.to_path_buf()).unwrap()
+    };
+    a.browser = None;
+    for m in &mut a.rows {
+        let name = if m.tool == Tool::Mung {
+            "cnv"
+        } else {
+            m.form.name.as_str()
+        };
+        m.out = free_out(dir, name);
     }
     a
 }
@@ -200,12 +237,15 @@ fn the_filter_narrows_the_flags() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
     a.screen = Screen::Params;
-    assert_eq!(a.visible().len(), 1);
+    assert_eq!(a.visible().len(), 2);
     key(&mut a, KeyCode::Char('/'));
+    key(&mut a, KeyCode::Char('s'));
+    key(&mut a, KeyCode::Char('t'));
+    assert_eq!(a.visible().len(), 1);
     key(&mut a, KeyCode::Char('z'));
     assert!(a.visible().is_empty());
     key(&mut a, KeyCode::Esc);
-    assert_eq!(a.visible().len(), 1);
+    assert_eq!(a.visible().len(), 2);
 }
 
 #[test]
@@ -256,7 +296,7 @@ fn an_out_folder_given_with_dotdot_still_finds_the_data() {
 
 #[test]
 fn a_parent_start_folder_is_resolved() {
-    let a = App::new(cli(), PathBuf::from("..")).unwrap();
+    let a = App::new(cli(), Err("no mung".into()), PathBuf::from("..")).unwrap();
     let here = std::env::current_dir().unwrap();
     assert_eq!(a.browse_dir, here.parent().unwrap());
 }
@@ -396,4 +436,85 @@ fn the_parameters_screen_shows_a_queued_method_however_it_is_reached() {
     key(&mut a, KeyCode::Char('3'));
     assert_eq!(a.screen, Screen::Params);
     assert_eq!(a.param_method, bge);
+}
+
+#[test]
+fn without_mung_there_is_no_clones_step_and_the_screen_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = app(dir.path());
+    assert!(a.rows.iter().all(|r| r.tool == Tool::Senna));
+    assert_eq!(a.mung.as_ref().unwrap_err(), "no mung");
+}
+
+#[test]
+fn queued_clones_go_to_every_fit_that_takes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app_with_mung(dir.path());
+    a.pairs = data(dir.path(), &["d.zarr"]);
+    assert_eq!(a.rows[0].tool, Tool::Mung);
+    assert_eq!(a.rows[0].label(), "mung clones");
+    assert_eq!(a.rows[0].out, "cnv");
+    let row = |name: &str| a.rows.iter().position(|r| r.form.name == name).unwrap();
+    let (svd, simba) = (row("svd"), row("simba"));
+    a.rows[svd].on = true;
+    a.rows[simba].on = true;
+    // Without the step, nothing is added.
+    assert!(!a.plan()[0].job.argv.contains(&CLONES_FLAG.to_string()));
+
+    a.rows[0].on = true;
+    let gff = a.rows[0]
+        .form
+        .fields
+        .iter()
+        .position(|f| f.long == "gff")
+        .unwrap();
+    let p = a.plan();
+    assert_eq!(p[0].job.tool, Tool::Mung);
+    assert_eq!(
+        p[0].blamed.as_deref(),
+        Some("gff"),
+        "clap checks mung's line"
+    );
+    a.rows[0].form.fields[gff].value = "g.gtf".into();
+    let p = a.plan();
+    assert_eq!(p[0].problem, None);
+    assert_eq!(p[0].job.argv[..3], ["clones", "d.zarr", "--out"]);
+    assert!(p[0].job.result().ends_with("cnv.clones.parquet"));
+    let svd_job = &p.iter().find(|p| p.job.method == "svd").unwrap().job;
+    assert!(svd_job.clones);
+    assert!(svd_job
+        .argv
+        .ends_with(&[CLONES_FLAG.to_string(), "cnv.clones.parquet".to_string()]));
+    let simba_plan = p.iter().find(|p| p.job.method == "simba").unwrap();
+    assert!(!simba_plan.job.clones);
+    assert!(simba_plan
+        .warning
+        .as_ref()
+        .unwrap()
+        .contains("runs without"));
+    assert!(p.iter().all(|p| p.problem.is_none()));
+
+    // A table given by hand and the step both: one has to go.
+    let by_hand = a.rows[svd]
+        .form
+        .fields
+        .iter()
+        .position(|f| f.long == "cnv-clones")
+        .unwrap();
+    a.rows[svd].form.fields[by_hand].value = "x.parquet".into();
+    let p = a.plan();
+    let svd_plan = p.iter().find(|p| p.job.method == "svd").unwrap();
+    assert!(svd_plan.problem.as_ref().unwrap().contains("reset one"));
+}
+
+#[test]
+fn an_existing_clone_table_is_not_run_over() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cnv.clones.parquet"), "").unwrap();
+    let mut a = app_with_mung(dir.path());
+    assert_eq!(a.rows[0].out, "cnv-2", "a free prefix is offered");
+    a.rows[0].out = "cnv".into();
+    a.rows[0].on = true;
+    a.pairs = data(dir.path(), &["d.zarr"]);
+    assert!(a.plan()[0].problem.as_ref().unwrap().contains("exists"));
 }

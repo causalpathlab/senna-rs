@@ -41,7 +41,6 @@ mod anchor_common;
 mod bge;
 mod cluster_bhc;
 mod clustering;
-mod cnv_pseudobulk;
 mod counterfactual;
 mod deconvolve;
 mod docs;

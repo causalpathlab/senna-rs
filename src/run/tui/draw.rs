@@ -1,7 +1,7 @@
 //! Drawing `senna run`: a tab line, the screen, a message and the keys.
 //! Same page and popups as `senna view`.
 
-use super::jobs::State;
+use super::jobs::{State, Tool, CLONES_FLAG};
 use super::{batches, App, Batch, Kind, Screen, Target};
 use crate::tui::style::{bold, first_row, hint, page, popup, rgb, selected, At, MUTED, TEXT};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -53,6 +53,9 @@ impl App {
         } else if self.confirm.is_some() {
             let rows = usize::from(area.height).saturating_sub(4);
             popup(f, area, self.confirm_lines(rows), 120, At::Middle, TEXT);
+        } else if let Some(i) = self.asking() {
+            let rows = usize::from(area.height).saturating_sub(4);
+            popup(f, area, self.clones_lines(i, rows), 100, At::Middle, TEXT);
         } else if let Some((row, at)) = self.relabel {
             let rows = usize::from(area.height).saturating_sub(10).max(3);
             popup(
@@ -66,7 +69,7 @@ impl App {
         }
         if let Some(e) = &self.editor {
             let what = match e.target {
-                Target::Out(i) => format!(" --out for {}", self.rows[i].form.name),
+                Target::Out(i) => format!(" --out for {}", self.rows[i].label()),
                 Target::Field(m, i) => format!(" --{}", self.rows[m].form.fields[i].long),
                 Target::Filter => " flags containing".to_string(),
                 Target::BatchName(i) => format!(
@@ -95,11 +98,11 @@ impl App {
             });
             spans.push(Span::raw(" "));
         }
-        let queued: Vec<&str> = self
+        let queued: Vec<String> = self
             .rows
             .iter()
             .filter(|r| r.on)
-            .map(|r| r.form.name.as_str())
+            .map(super::Row::label)
             .collect();
         let summary = format!(
             "  {} data · {}",
@@ -275,12 +278,18 @@ impl App {
             .max()
             .unwrap_or(0)
             .min(32);
+        if let Err(why) = &self.mung {
+            lines.push(Line::from(Span::styled(
+                fit(&format!(" mung clones (CNV clones first): {why}"), w),
+                hint(),
+            )));
+        }
         for (i, r) in self.rows.iter().enumerate() {
             let changed = r.form.changed();
             let text = format!(
                 " [{}] {:<13} --out {:<out_w$}  {:<11} {}",
                 if r.on { "x" } else { " " },
-                r.form.name,
+                r.label(),
                 fit(&r.out, out_w),
                 if changed == 0 {
                     "defaults".to_string()
@@ -297,6 +306,13 @@ impl App {
                 Style::default()
             };
             lines.push(Line::from(Span::styled(fit(&text, w), style)));
+            if r.tool == Tool::Mung {
+                lines.push(Line::from(Span::styled(
+                    "      runs first; once it is done you see its clones and choose whether the fits get --cnv-clones",
+                    hint(),
+                )));
+                lines.push(Line::from(""));
+            }
             if r.on {
                 if let Some(warn) = self.shape_warning(&r.form.name) {
                     lines.push(Line::from(Span::styled(format!("      {warn}"), hint())));
@@ -315,7 +331,7 @@ impl App {
         .areas(area);
         let mut tabs = Vec::new();
         for m in self.param_methods() {
-            let name = format!(" {} ", self.rows[m].form.name);
+            let name = format!(" {} ", self.rows[m].label());
             tabs.push(if m == self.param_method {
                 Span::styled(name, selected())
             } else {
@@ -365,7 +381,11 @@ impl App {
                 " "
             };
             let flag = format!("{mark}--{:<width$}", x.long, width = long_w);
-            let value = fit(&x.shown(), 28);
+            let value = if x.is_default() && self.filled_by_clones(x) {
+                "← mung clones".to_string()
+            } else {
+                fit(&x.shown(), 28)
+            };
             let help = x.help.lines().next().unwrap_or_default().to_string();
             if row == self.field_row {
                 let text = format!("{flag} {value:<28}  {help}");
@@ -429,7 +449,8 @@ impl App {
                 return blamed.clone();
             }
         }
-        let blamed = super::form::check(&self.cli, &argv)
+        let cmd = self.command_of(self.rows[m].tool).unwrap_or(&self.cli);
+        let blamed = super::form::check(cmd, &argv)
             .err()
             .and_then(|why| super::form::blamed(&why, &form.fields).map(str::to_string));
         *self.blame.borrow_mut() = Some((m, argv, blamed.clone()));
@@ -469,7 +490,7 @@ impl App {
             let text = format!(
                 " {:<13} {:<24} {said}",
                 j.method,
-                fit(&self.shown(&j.manifest()), 24)
+                fit(&self.shown(&j.result()), 24)
             );
             lines.push(Line::from(Span::styled(fit(&text, w), style)));
         }
@@ -479,6 +500,48 @@ impl App {
                 .map(|l| Line::from(Span::styled(fit(l, w), hint()))),
         );
         f.render_widget(Paragraph::new(lines), area);
+    }
+
+    /// Whether row `x` of the method shown is filled by the queued
+    /// `mung clones` step.
+    fn filled_by_clones(&self, x: &super::Field) -> bool {
+        self.rows[self.param_method].tool == Tool::Senna
+            && x.long == CLONES_FLAG.trim_start_matches('-')
+            && self.clones_planned().is_some()
+    }
+
+    /// The popup the queue waits on after `mung clones` (job `i`).
+    fn clones_lines(&self, i: usize, rows: usize) -> Vec<Line<'static>> {
+        let mut out = vec![
+            Line::from(Span::styled(" mung clones is done: its clones", bold())),
+            Line::from(""),
+        ];
+        let advice = match self.clones_of(i) {
+            Ok(s) => {
+                let lines = s.lines();
+                let room = rows.saturating_sub(7);
+                let cut = lines.len() > room;
+                out.extend(
+                    lines
+                        .into_iter()
+                        .take(room)
+                        .map(|l| Line::from(format!(" {l}"))),
+                );
+                if cut {
+                    out.push(Line::from(Span::styled(" …", hint())));
+                }
+                s.advice().to_string()
+            }
+            Err(why) => format!("cannot read the clones: {why}"),
+        };
+        out.push(Line::from(""));
+        out.push(Line::from(Span::styled(format!(" {advice}"), bold())));
+        out.push(Line::from(""));
+        out.push(Line::from(Span::styled(
+            " y keep them (--cnv-clones)   n run without   s stop",
+            hint(),
+        )));
+        out
     }
 
     fn confirm_lines(&self, rows: usize) -> Vec<Line<'static>> {
@@ -494,7 +557,7 @@ impl App {
                     hint(),
                 ),
             ]));
-            let lines = super::script::command_lines(&p.job.argv);
+            let lines = super::script::command_lines(&p.job.argv, p.job.tool);
             let n = lines.len();
             body.extend(lines.into_iter().enumerate().map(|(k, l)| {
                 let indent = if k == 0 { "   " } else { "     " };

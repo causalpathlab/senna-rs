@@ -4,6 +4,7 @@
 //! Paths in the command are relative to the script's folder and the run
 //! starts there, so the script and the run read the same files.
 
+use super::jobs::Tool;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -92,8 +93,8 @@ pub const LOG_LEVEL: &str = "info";
 /// and method, each data file on its own line, then one flag and its
 /// values per line. The value of `--out` is the script's `$out`.
 #[must_use]
-pub fn command_lines(argv: &[String]) -> Vec<String> {
-    let mut lines: Vec<String> = vec!["\"${SENNA:-senna}\"".to_string()];
+pub fn command_lines(argv: &[String], tool: Tool) -> Vec<String> {
+    let mut lines: Vec<String> = vec![tool.word().to_string()];
     let mut in_flags = false;
     for (k, w) in argv.iter().enumerate() {
         let word = if k > 0 && argv[k - 1] == "--out" {
@@ -114,9 +115,11 @@ pub fn command_lines(argv: &[String]) -> Vec<String> {
     lines
 }
 
-/// The script for `argv` (without the program), whose `--out` is `out`.
+/// The script for `argv` (without the program `tool`), whose `--out` is
+/// `out`.
 #[must_use]
-pub fn text(argv: &[String], out: &str) -> String {
+pub fn text(argv: &[String], out: &str, tool: Tool) -> String {
+    let result = format!("${{out}}.{}", tool.result());
     let mut s = String::new();
     s.push_str("#!/usr/bin/env bash\n");
     s.push_str(&format!(
@@ -128,23 +131,25 @@ pub fn text(argv: &[String], out: &str) -> String {
     s.push_str("cd \"$(dirname \"$0\")\"\n");
     s.push_str(&format!("export RUST_LOG=\"${{RUST_LOG:-{LOG_LEVEL}}}\"\n"));
     s.push_str(&format!("out={}\n", quote(out)));
-    s.push_str("if [ -f \"${out}.senna.json\" ]; then\n");
-    s.push_str("  echo \"${out}.senna.json exists; move it away to run again\" >&2\n");
+    s.push_str(&format!("if [ -f \"{result}\" ]; then\n"));
+    s.push_str(&format!(
+        "  echo \"{result} exists; move it away to run again\" >&2\n"
+    ));
     s.push_str("  exit 1\n");
     s.push_str("fi\n");
-    s.push_str(&command_lines(argv).join(" \\\n  "));
+    s.push_str(&command_lines(argv, tool).join(" \\\n  "));
     s.push('\n');
     s
 }
 
 /// Write the script for `argv` to `path`, never over an existing file.
-pub fn write(path: &Path, out: &str, argv: &[String]) -> anyhow::Result<()> {
+pub fn write(path: &Path, out: &str, argv: &[String], tool: Tool) -> anyhow::Result<()> {
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-    f.write_all(text(argv, out).as_bytes())?;
+    f.write_all(text(argv, out, tool).as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

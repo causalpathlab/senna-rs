@@ -103,16 +103,6 @@ pub struct SvdArgs {
     hvg: HvgCliArgs,
 
     #[command(flatten)]
-    cnv: CnvArgs,
-
-    #[arg(
-        long,
-        default_value_t = 5,
-        help = "Number of k-means cell clusters used as cell-type proxy for CNV."
-    )]
-    cnv_svd_clusters: usize,
-
-    #[command(flatten)]
     qc: QcArgs,
 }
 
@@ -241,12 +231,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    // 4b. Load gene positions for CNV (if requested)
-    let cnv_positions = {
-        let gene_names = data_vec.row_names()?;
-        crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?
-    };
-
     // 5. Nystrom projection
     let x_dn = match collapse_out.mu_adjusted.as_ref() {
         Some(adj) => adj,
@@ -286,8 +270,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         senna::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &output_gene_names)?;
     }
 
-    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
-    // its triplet build never overlaps the live backend in memory.
     let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
 
     // Save selected feature list if feature selection was applied
@@ -300,22 +282,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             sel.selected_names.len(),
             feature_file
         );
-    }
-
-    // 6. Cluster-informed CNV detection (after SVD, using latent for clustering)
-    if let Some(positions) = cnv_positions {
-        let cnv_config = crate::cnv_pseudobulk::build_cnv_config(&args.cnv);
-
-        let cnv_result = crate::cnv_pseudobulk::detect_cnv_cluster_informed(
-            data_vec,
-            &nystrom_out.latent_nk,
-            &batch_membership,
-            &positions,
-            args.cnv_svd_clusters.max(2),
-            &cnv_config,
-        )?;
-
-        crate::cnv_pseudobulk::write_cnv_results(&cnv_result, &args.out, &gene_names)?;
     }
 
     crate::postprocess::viz_prep::write_cell_proj(

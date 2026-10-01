@@ -14,6 +14,7 @@
 )]
 
 pub mod carried_rows;
+pub mod clone_strata;
 pub mod cluster;
 pub mod cluster_aggregation;
 pub mod embed_common;
