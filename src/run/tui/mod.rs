@@ -2,6 +2,7 @@
 //! their flags, a confirm popup with the exact commands, then the queue
 //! running with its log.
 
+mod batches;
 mod data;
 mod draw;
 mod form;
@@ -9,6 +10,7 @@ mod jobs;
 mod script;
 
 use crate::tui::browse::{Browser, Outcome};
+use batches::Batch;
 use data::Pair;
 use data::Pick;
 use form::{Field, Kind, Method};
@@ -68,6 +70,10 @@ enum Target {
     /// Method row, field index.
     Field(usize, usize),
     Filter,
+    /// The batch of data row `usize`, by name.
+    BatchName(usize),
+    /// A new name for label `.1` of data row `.0`'s label file.
+    Label(usize, usize),
 }
 
 struct Editor {
@@ -109,8 +115,11 @@ pub(crate) struct App {
     confirm_max: std::cell::Cell<usize>,
     /// The method, command line and flag clap blamed, as last checked.
     blame: std::cell::RefCell<Option<Blame>>,
-    /// Data files described on worker threads: path, size, gem's rows.
-    described: (Sender<Described>, Receiver<Described>),
+    /// Data files described on worker threads.
+    described: (Sender<Read>, Receiver<Read>),
+    /// The labels of a data row's label file, listed to rename: the row
+    /// and the label under the cursor.
+    relabel: Option<(usize, usize)>,
     /// Data files still being described.
     describing: usize,
     queue: Option<Queue>,
@@ -120,8 +129,8 @@ pub(crate) struct App {
     view: Vec<PathBuf>,
 }
 
-/// A data file, its size, and whether its rows are gem's gene counts.
-type Described = (PathBuf, String, Option<bool>);
+/// A data file and what reading it found.
+type Read = (PathBuf, data::Described);
 
 /// A method row, its command line, and the flag clap blamed in it.
 type Blame = (usize, Vec<String>, Option<String>);
@@ -211,6 +220,7 @@ impl App {
             confirm_max: std::cell::Cell::new(0),
             blame: std::cell::RefCell::new(None),
             described: std::sync::mpsc::channel(),
+            relabel: None,
             describing: 0,
             queue: None,
             message: None,
@@ -244,6 +254,8 @@ impl App {
             self.browser_key(k);
         } else if self.confirm.is_some() {
             self.confirm_key(k);
+        } else if self.relabel.is_some() {
+            self.relabel_key(k);
         } else if !self.global_key(k) {
             match self.screen {
                 Screen::Data => self.data_key(k),
@@ -252,6 +264,19 @@ impl App {
                 Screen::Run => self.run_key(k),
             }
         }
+        self.settle();
+    }
+
+    /// Keep the parameters screen on a queued method and on a listed flag:
+    /// methods are queued and screens reached by more than one key, and a
+    /// reset can drop the advanced flag under the cursor.
+    fn settle(&mut self) {
+        let methods = self.param_methods();
+        if !methods.contains(&self.param_method) {
+            self.param_method = methods[0];
+            self.field_row = 0;
+        }
+        self.field_row = self.field_row.min(self.visible().len().saturating_sub(1));
     }
 
     /// Keys every screen shares. Returns whether `k` was one.
@@ -323,6 +348,32 @@ impl App {
                         }
                     }
                     Target::Filter => {}
+                    Target::BatchName(i) => {
+                        let name = text.trim();
+                        // No name, or senna's own: back to senna's rule.
+                        self.pairs[i].batch = if name.is_empty()
+                            || (self.pairs[i].tags.is_none()
+                                && name == batches::own_name(&self.pairs[i].data))
+                        {
+                            Batch::Own
+                        } else {
+                            Batch::Named(name.to_string())
+                        };
+                    }
+                    Target::Label(i, l) => {
+                        if let Batch::Labels {
+                            counts, renamed, ..
+                        } = &mut self.pairs[i].batch
+                        {
+                            let label = counts[l].0.clone();
+                            let name = text.trim();
+                            if name.is_empty() || name == label {
+                                renamed.remove(&label);
+                            } else {
+                                renamed.insert(label, name.to_string());
+                            }
+                        }
+                    }
                 }
             }
             KeyCode::Backspace | KeyCode::Char(_) => {
@@ -381,21 +432,27 @@ impl App {
             let near = labels
                 .entry(dir)
                 .or_insert_with_key(|d| data::label_files_in(d));
-            pair.batch = data::beside(&pair.data, near);
+            if let Some(file) = data::beside(&pair.data, near) {
+                pair.batch = Batch::labels(file).unwrap_or(Batch::Own);
+            }
             // Opening a large backend takes a while: not here.
             let (tx, path) = (self.described.0.clone(), pair.data.clone());
             std::thread::spawn(move || {
-                let (info, gene) = data::describe(&path);
-                let _ = tx.send((path, info, gene));
+                let d = data::describe(&path);
+                let _ = tx.send((path, d));
             });
             self.describing += 1;
             self.pairs.push(pair);
             added += 1;
         }
         self.pair_row = self.pairs.len().saturating_sub(1);
-        let found = self.pairs.iter().filter(|p| p.batch.is_some()).count();
+        let found = self
+            .pairs
+            .iter()
+            .filter(|p| matches!(p.batch, Batch::Labels { .. }))
+            .count();
         self.message = Some(format!(
-            "{added} data file{} added; {found} of {} with batch labels",
+            "{added} data file{} added; {found} of {} with a label file",
             if added == 1 { "" } else { "s" },
             self.pairs.len()
         ));
@@ -404,34 +461,78 @@ impl App {
     /// One batch file goes to the data row under the cursor; several are
     /// paired with all rows by name.
     fn take_batches(&mut self, paths: &[PathBuf]) {
-        if let [one] = paths {
-            if let Some(p) = self.pairs.get_mut(self.pair_row) {
-                p.batch = Some(one.clone());
+        let row = self.pair_row;
+        let chosen: Vec<Option<PathBuf>> = if let [one] = paths {
+            (0..self.pairs.len())
+                .map(|i| (i == row).then(|| one.clone()))
+                .collect()
+        } else {
+            let data: Vec<PathBuf> = self.pairs.iter().map(|p| p.data.clone()).collect();
+            let (chosen, paired) = data::assign(&data, paths);
+            let n = data.len();
+            self.message = Some(match paired {
+                data::Paired::ByName(_) => format!("{n} batch files paired by name"),
+                data::Paired::InOrder => format!(
+                    "no names match: {n} batch files paired in the order listed; check them"
+                ),
+                data::Paired::Partly(k) => format!(
+                    "{k} of {n} data files matched a batch file by name; b sets the rest one by one"
+                ),
+            });
+            chosen
+        };
+        for (p, file) in self.pairs.iter_mut().zip(chosen) {
+            let Some(file) = file else { continue };
+            match Batch::labels(file.clone()) {
+                Ok(b) => p.batch = b,
+                Err(e) => {
+                    let why = format!("{}: {e}", crate::tui::name(&file));
+                    self.message = Some(match self.message.take() {
+                        Some(m) => format!("{m}; {why}"),
+                        None => why,
+                    });
+                }
             }
+        }
+    }
+
+    /// Keys in the list of a label file's labels: Enter renames one.
+    fn relabel_key(&mut self, k: KeyEvent) {
+        let Some((row, at)) = self.relabel else {
             return;
-        }
-        for p in &mut self.pairs {
-            p.batch = None;
-        }
-        let n = self.pairs.len();
-        self.message = Some(match data::assign(&mut self.pairs, paths) {
-            data::Paired::ByName(_) => format!("{n} batch files paired by name"),
-            data::Paired::InOrder => {
-                format!("no names match: {n} batch files paired in the order listed; check them")
+        };
+        let n = match &self.pairs.get(row).map(|p| &p.batch) {
+            Some(Batch::Labels { counts, .. }) => counts.len(),
+            _ => 0,
+        };
+        let at = match k.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.relabel = None;
+                return;
             }
-            data::Paired::Partly(k) => format!(
-                "{k} of {n} data files matched a batch file by name; b sets the rest one by one"
-            ),
-        });
+            KeyCode::Up => at.saturating_sub(1),
+            KeyCode::Down => (at + 1).min(n.saturating_sub(1)),
+            KeyCode::Enter if at < n => {
+                let now = match &self.pairs[row].batch {
+                    Batch::Labels {
+                        counts, renamed, ..
+                    } => renamed.get(&counts[at].0).unwrap_or(&counts[at].0).clone(),
+                    _ => String::new(),
+                };
+                self.edit(Target::Label(row, at), now);
+                at
+            }
+            _ => at,
+        };
+        self.relabel = Some((row, at));
     }
 
     /// Take in what the workers found out about data files.
     fn poll(&mut self) {
-        while let Ok((path, info, gene)) = self.described.1.try_recv() {
+        while let Ok((path, d)) = self.described.1.try_recv() {
             self.describing = self.describing.saturating_sub(1);
             if let Some(p) = self.pairs.iter_mut().find(|p| p.data == path) {
-                p.info = info;
-                p.gene_counts = gene;
+                p.described(d);
             }
         }
     }
@@ -447,10 +548,31 @@ impl App {
             KeyCode::Char('b') if !self.pairs.is_empty() => self.browse(Pick::Batch),
             KeyCode::Char('x') => {
                 if let Some(p) = self.pairs.get_mut(self.pair_row) {
-                    p.batch = None;
+                    p.batch = Batch::Own;
                 }
             }
-            KeyCode::Char('X') => self.pairs.iter_mut().for_each(|p| p.batch = None),
+            KeyCode::Char('X') => self.pairs.iter_mut().for_each(|p| p.batch = Batch::Own),
+            KeyCode::Char('n') => {
+                if let Some(p) = self.pairs.get(self.pair_row) {
+                    let now = match &p.batch {
+                        Batch::Named(name) => name.clone(),
+                        _ if p.tags.is_none() => batches::own_name(&p.data),
+                        _ => String::new(),
+                    };
+                    self.edit(Target::BatchName(self.pair_row), now);
+                }
+            }
+            KeyCode::Char('e') => {
+                let labelled = self
+                    .pairs
+                    .get(self.pair_row)
+                    .is_some_and(|p| matches!(p.batch, Batch::Labels { .. }));
+                if labelled {
+                    self.relabel = Some((self.pair_row, 0));
+                } else {
+                    self.message = Some("e renames the labels of a label file: b picks one".into());
+                }
+            }
             KeyCode::Char('d') | KeyCode::Delete if !self.pairs.is_empty() => {
                 self.pairs.remove(self.pair_row);
                 self.pair_row = self.pair_row.min(self.pairs.len().saturating_sub(1));
@@ -612,34 +734,35 @@ impl App {
 
     /// The queued fits, each checked.
     fn plan(&self) -> Vec<Planned> {
-        let batch_problem = data::batch_problem(&self.pairs);
         let mut outs: Vec<PathBuf> = Vec::new();
         let mut planned = Vec::new();
         for (i, r) in self.rows.iter().enumerate().filter(|(_, r)| r.on) {
             let (dir, out) = self.out_of(i);
             let rel = |p: &Path| script::relative(p, &dir).to_string_lossy().into_owned();
             let data: Vec<String> = self.pairs.iter().map(|p| rel(&p.data)).collect();
-            let batches: Vec<String> = if r.form.takes_batches() && batch_problem.is_none() {
-                self.pairs
-                    .iter()
-                    .filter_map(|p| p.batch.as_deref().map(rel))
-                    .collect()
+            let (batch_files, labels, batch_problem) = if r.form.takes_batches() {
+                match batches::files(&self.pairs, &dir, &out) {
+                    Ok((passed, written)) => (passed, written, None),
+                    Err(why) => (Vec::new(), Vec::new(), Some(why)),
+                }
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new(), None)
             };
-            let argv = r.form.argv(&data, &batches, &out);
+            let batch_files: Vec<String> = batch_files.iter().map(|p| rel(p)).collect();
+            let argv = r.form.argv(&data, &batch_files, &out);
             let job = Job {
                 method: r.form.name.clone(),
                 dir: dir.clone(),
                 out: out.clone(),
                 argv,
+                labels,
             };
             let mut blamed = None;
             let problem = if self.pairs.is_empty() {
                 Some("no data files: add some on the Data screen".to_string())
             } else if let Some(p) = &batch_problem {
                 Some(p.clone())
-            } else if let Some(there) = [job.manifest(), job.script()]
+            } else if let Some(there) = [job.manifest(), job.script(), job.batches()]
                 .into_iter()
                 .find(|p| p.exists())
             {
@@ -847,7 +970,9 @@ impl App {
 /// manifest or script yet.
 fn free_out(dir: &Path, method: &str) -> String {
     let taken = |p: &str| {
-        dir.join(format!("{p}.senna.json")).exists() || dir.join(format!("{p}.cmd.sh")).exists()
+        ["senna.json", "cmd.sh", "batches"]
+            .iter()
+            .any(|end| dir.join(format!("{p}.{end}")).exists())
     };
     if !taken(method) {
         return method.to_string();

@@ -1,5 +1,6 @@
 //! The data files a session embeds and the batch file of each.
 
+use super::batches::Batch;
 use crate::tui::browse::{is_data, size_of, Header, Wanted};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -61,13 +62,18 @@ fn is_batch(name: &str) -> bool {
     BATCH_ENDINGS.iter().any(|e| name.ends_with(e))
 }
 
-/// A data file and its batch labels.
+/// A data file and the batch of its cells.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pair {
     pub data: PathBuf,
-    pub batch: Option<PathBuf>,
+    pub batch: Batch,
     /// Features × cells, or why the file does not open.
     pub info: String,
+    /// Its cells, once read.
+    pub cells: Option<usize>,
+    /// The `@batch` tag of each cell, when its barcodes carry one: senna's
+    /// own batches for the file then.
+    pub tags: Option<Vec<String>>,
     /// Whether its rows read as gene counts for `gem`
     /// (`{gene}/count/{spliced|unspliced}`); `None` when unknown.
     pub gene_counts: Option<bool>,
@@ -78,32 +84,72 @@ impl Pair {
     pub fn pending(data: PathBuf) -> Self {
         Pair {
             data,
-            batch: None,
+            batch: Batch::Own,
             info: "reading…".into(),
+            cells: None,
+            tags: None,
             gene_counts: None,
         }
     }
+
+    /// Take in what [`describe`] found.
+    pub fn described(&mut self, d: Described) {
+        self.info = d.info;
+        self.cells = d.cells;
+        self.tags = d.tags;
+        self.gene_counts = d.gene_counts;
+    }
 }
 
-/// `2000 features × 5000 cells` and whether the rows are gem's gene
-/// counts, or why the file does not open.
-pub fn describe(path: &Path) -> (String, Option<bool>) {
+/// What reading a data file found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Described {
+    /// `2000 features × 5000 cells`, or why the file does not open.
+    pub info: String,
+    pub cells: Option<usize>,
+    pub tags: Option<Vec<String>>,
+    pub gene_counts: Option<bool>,
+}
+
+/// Its size, its barcodes' `@batch` tags, and whether the rows are gem's
+/// gene counts; or why the file does not open.
+pub fn describe(path: &Path) -> Described {
     use data_beans::sparse_io::open_sparse_matrix_by_path;
-    let opened = open_sparse_matrix_by_path(&path.to_string_lossy());
-    match opened {
-        Ok(m) => {
-            let dims = match (m.num_rows(), m.num_columns()) {
-                (Some(r), Some(c)) => format!("{r} features × {c} cells"),
-                _ => "opens".to_string(),
-            };
-            // gem's own reading of its row grammar decides.
-            let gene = m
-                .row_names()
-                .ok()
-                .map(|names| crate::gem::tracks::assign_tracks(&names).is_ok());
-            (dims, gene)
+    let m = match open_sparse_matrix_by_path(&path.to_string_lossy()) {
+        Ok(m) => m,
+        Err(e) => {
+            return Described {
+                info: format!("does not open: {e}"),
+                ..Described::default()
+            }
         }
-        Err(e) => (format!("does not open: {e}"), None),
+    };
+    let cells = m.num_columns();
+    let info = match (m.num_rows(), cells) {
+        (Some(r), Some(c)) => format!("{r} features × {c} cells"),
+        _ => "opens".to_string(),
+    };
+    // senna reads a batch from the barcodes when the first one carries
+    // `@batch`, the tag after the last `@`.
+    let tags = m
+        .column_names()
+        .ok()
+        .filter(|c| c.first().is_some_and(|n| n.contains('@')));
+    let tags = tags.map(|c| {
+        c.iter()
+            .map(|n| n.rsplit('@').next().unwrap_or(n).to_string())
+            .collect()
+    });
+    // gem's own reading of its row grammar decides.
+    let gene_counts = m
+        .row_names()
+        .ok()
+        .map(|names| crate::gem::tracks::assign_tracks(&names).is_ok());
+    Described {
+        info,
+        cells,
+        tags,
+        gene_counts,
     }
 }
 
@@ -170,38 +216,35 @@ pub enum Paired {
     Partly(usize),
 }
 
-/// Give each pair the one batch file named for its sample. When no name
-/// matches at all and the counts agree, files go in the order listed,
+/// For each data file, the one of `batches` named for its sample. When no
+/// name matches at all and the counts agree, files go in the order listed,
 /// and the caller says so. A data file that two batch files fit, or that
-/// shares its one match with another, is left without one.
-pub fn assign(pairs: &mut [Pair], batches: &[PathBuf]) -> Paired {
-    let fits: Vec<Vec<usize>> = pairs
+/// shares its one match with another, gets none.
+#[must_use]
+pub fn assign(data: &[PathBuf], batches: &[PathBuf]) -> (Vec<Option<PathBuf>>, Paired) {
+    let fits: Vec<Vec<usize>> = data
         .iter()
-        .map(|p| {
+        .map(|d| {
             (0..batches.len())
-                .filter(|&j| same_sample(&p.data, &batches[j]))
+                .filter(|&j| same_sample(d, &batches[j]))
                 .collect()
         })
         .collect();
-    let mut matched = 0;
-    for (i, f) in fits.iter().enumerate() {
-        let shared = |j: usize| fits.iter().filter(|g| g.contains(&j)).count() > 1;
-        if let [j] = f[..] {
-            if !shared(j) {
-                pairs[i].batch = Some(batches[j].clone());
-                matched += 1;
-            }
-        }
-    }
-    if matched == pairs.len() {
-        Paired::ByName(matched)
-    } else if fits.iter().all(Vec::is_empty) && batches.len() == pairs.len() {
-        for (p, b) in pairs.iter_mut().zip(batches) {
-            p.batch = Some(b.clone());
-        }
-        Paired::InOrder
+    let shared = |j: usize| fits.iter().filter(|g| g.contains(&j)).count() > 1;
+    let chosen: Vec<Option<PathBuf>> = fits
+        .iter()
+        .map(|f| match f[..] {
+            [j] if !shared(j) => Some(batches[j].clone()),
+            _ => None,
+        })
+        .collect();
+    let matched = chosen.iter().flatten().count();
+    if matched == data.len() {
+        (chosen, Paired::ByName(matched))
+    } else if fits.iter().all(Vec::is_empty) && batches.len() == data.len() {
+        (batches.iter().cloned().map(Some).collect(), Paired::InOrder)
     } else {
-        Paired::Partly(matched)
+        (chosen, Paired::Partly(matched))
     }
 }
 
@@ -238,19 +281,6 @@ pub fn beside(data: &Path, labels: &[PathBuf]) -> Option<PathBuf> {
         [one] => Some(one.clone()),
         _ => None,
     }
-}
-
-/// Why the batch files as given cannot be passed: senna wants one per
-/// data file, or none.
-#[must_use]
-pub fn batch_problem(pairs: &[Pair]) -> Option<String> {
-    let with = pairs.iter().filter(|p| p.batch.is_some()).count();
-    (with > 0 && with < pairs.len()).then(|| {
-        format!(
-            "{with} of {} data files have batch labels; give each one, or clear them all",
-            pairs.len()
-        )
-    })
 }
 
 #[cfg(test)]

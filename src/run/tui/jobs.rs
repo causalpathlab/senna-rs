@@ -23,6 +23,8 @@ pub struct Job {
     pub out: String,
     /// The command line without the program, paths relative to `dir`.
     pub argv: Vec<String>,
+    /// Batch label files to write before it starts.
+    pub labels: Vec<super::batches::Written>,
 }
 
 impl Job {
@@ -34,6 +36,12 @@ impl Job {
     #[must_use]
     pub fn script(&self) -> PathBuf {
         self.dir.join(format!("{}.cmd.sh", self.out))
+    }
+
+    /// Where the batch label files it writes go.
+    #[must_use]
+    pub fn batches(&self) -> PathBuf {
+        self.dir.join(format!("{}.batches", self.out))
     }
 }
 
@@ -161,6 +169,11 @@ fn run_job(
 ) -> State {
     if job.manifest().exists() {
         return State::Failed(format!("{} exists", job.manifest().display()));
+    }
+    for w in &job.labels {
+        if let Err(e) = super::batches::write(w) {
+            return State::Failed(format!("cannot write the batch labels: {e}"));
+        }
     }
     if let Err(e) = script::write(&job.script(), &job.out, &job.argv) {
         return State::Failed(format!("cannot write the script: {e}"));
