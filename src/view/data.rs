@@ -139,6 +139,8 @@ pub enum LabelKind {
     FineAnnotation,
     Cluster,
     Topic,
+    /// The batch each cell was fitted in.
+    Batch,
     Markers,
     FeatureTopic,
     /// Node type of a feature embedding with several (gene, term, region).
@@ -159,6 +161,7 @@ impl LabelKind {
             LabelKind::FineAnnotation => "fine annotation",
             LabelKind::Cluster => "cluster",
             LabelKind::Topic => "topic",
+            LabelKind::Batch => "batch",
             LabelKind::Markers => "markers",
             LabelKind::FeatureTopic => "feature topics",
             LabelKind::FeatureType => "feature type",
@@ -469,6 +472,41 @@ fn load_spaces(m: &RunManifest, dir: &Path) -> anyhow::Result<Vec<Space>> {
     Ok(spaces)
 }
 
+/// Each cell's batch, as the fit had it: the run's batch files, else each
+/// data file's `@batch` tags or its name (senna's own rule, applied by the
+/// same loader). Opens the data files, not their counts.
+fn read_batch_labels(m: &RunManifest, dir: &Path) -> anyhow::Result<Labels> {
+    use data_beans::aux::data_loading::{
+        read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch,
+    };
+    anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
+    let files = m.data_inputs(dir);
+    if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
+        anyhow::bail!("the data is not here ({gone})");
+    }
+    let batch_files = m.data_batches(dir);
+    let reload = senna::multiome_layout::recorded_layout(m.data.multiome.as_ref(), files.len())?;
+    let SparseDataWithBatch { data, batch, .. } =
+        read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
+            data_files: files,
+            batch_files: (!batch_files.is_empty()).then_some(batch_files),
+            keep_empty_barcodes: true,
+            ..Default::default()
+        })?)?;
+    let cells = data.column_names()?;
+    anyhow::ensure!(
+        cells.len() == batch.len(),
+        "{} cells but {} batch labels",
+        cells.len(),
+        batch.len()
+    );
+    Ok(Labels::new(
+        LabelKind::Batch,
+        cells.into_iter().zip(batch),
+        &[],
+    ))
+}
+
 /// Every grouping the run carries. One that fails to read is skipped with a
 /// warning rather than failing the view.
 /// The run's groupings. `prefix` names its other files (feature types): the
@@ -541,6 +579,11 @@ fn load_labels(
     if let Some(p) = m.outputs.latent.as_deref().filter(|_| latent_is_topics) {
         keep("topics", read_topic_labels(&at(p)));
     }
+    // Only worth a colouring with more than one batch.
+    let batches = read_batch_labels(m, dir);
+    if batches.as_ref().map_or(true, |l| l.levels.len() > 1) {
+        keep("batch", batches);
+    }
     if let Some(p) = &m.annotate.markers {
         keep("markers", read_marker_labels(&at(p)));
     }
@@ -589,3 +632,7 @@ impl Dataset {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "tests/data.rs"]
+mod tests;

@@ -803,7 +803,7 @@ enum Commands {
                       \n\
                       Switch between layout methods (umap / phate / tsne) and spaces:\n\
                       cells, features placed on the cell map, and features on their own.\n\
-                      Colour by annotation, clusters, topics or marker membership,\n\
+                      Colour by annotation, clusters, topics, batch or marker membership,\n\
                       focus one group, zoom and pan. Uses kitty / sixel / iTerm2 images\n\
                       when the terminal supports them, block characters otherwise.\n\
                       \n\
