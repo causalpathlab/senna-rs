@@ -1169,7 +1169,7 @@ impl RunManifest {
             .and_then(|p| p.parent().map(Path::to_path_buf));
         let rebased = trained_in
             .filter(|_| recorded_abs.is_absolute())
-            .map(|old| normalize(&here.join(relative_to(&recorded_abs, &old))))
+            .map(|old| rebase(&recorded_abs, &old, &here))
             .filter(|p| p.exists());
         let found = rebased.or_else(|| {
             let parts: Vec<_> = recorded_abs
@@ -1191,6 +1191,45 @@ impl RunManifest {
             }
             None => given,
         }
+    }
+
+    /// Point data file `index` at `chosen`, and move each other data, null
+    /// or batch file that is not here the way that one moved: to the same
+    /// place relative to `chosen` as it was recorded relative to the file it
+    /// replaces, if a file is there. Paths are recorded relative to
+    /// `manifest_dir`. In memory only; returns how many others moved.
+    pub fn relocate_data(
+        &mut self,
+        manifest_dir: &Path,
+        index: usize,
+        chosen: &Path,
+    ) -> anyhow::Result<usize> {
+        let Some(old) = self.data.input.get(index) else {
+            anyhow::bail!("the manifest lists no data file {}", index + 1);
+        };
+        let old_dir = resolve(manifest_dir, old)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let new_dir = chosen.parent().unwrap_or(Path::new("."));
+        let record = |p: &Path| rel_to_manifest(manifest_dir, &p.to_string_lossy());
+        self.data.input[index] = record(chosen);
+        let before = self.clone();
+        let mut also = 0;
+        let data = &mut self.data;
+        for list in [&mut data.input, &mut data.input_null, &mut data.batch] {
+            for rec in list.iter_mut() {
+                if before.data_file(manifest_dir, rec).exists() {
+                    continue;
+                }
+                let there = rebase(&resolve(manifest_dir, rec), &old_dir, new_dir);
+                if there.exists() {
+                    *rec = record(&there);
+                    also += 1;
+                }
+            }
+        }
+        Ok(also)
     }
 
     /// Read the manifest and return it together with its parent
@@ -1279,12 +1318,13 @@ impl RunManifest {
     }
 }
 
-/// Inverse of [`resolve`]: turn a path given on the command line — relative
-/// to the working directory — into the manifest-relative form for storage.
-/// Canonicalizes both sides so the strip works across symlinks and
-/// `./`-anchored relative paths, and keeps the absolute form when the path
-/// lives outside the manifest dir (e.g. an input file, or `-o /tmp/foo` while
-/// the manifest is in `~/work/`).
+/// Inverse of [`resolve`]: turn a path given on the command line (relative
+/// to the working directory) into the manifest-relative form for storage.
+/// Always relative, with `..` for a path outside the manifest's directory
+/// (an input file elsewhere, or `-o /tmp/foo` while the manifest is in
+/// `~/work/`): an absolute path names this machine's tree and is wrong
+/// wherever the run is copied. Both sides are canonicalized (as far as they
+/// exist) so symlinks and `./`-anchored paths agree.
 #[must_use]
 pub fn rel_to_manifest(manifest_dir: &Path, written_path: &str) -> String {
     match std::env::current_dir() {
@@ -1295,16 +1335,23 @@ pub fn rel_to_manifest(manifest_dir: &Path, written_path: &str) -> String {
 
 /// [`rel_to_manifest`] with the working directory given explicitly.
 fn rel_to_manifest_from(cwd: &Path, manifest_dir: &Path, written_path: &str) -> String {
-    let abs = cwd.join(written_path);
-    let manifest_dir = cwd.join(manifest_dir);
-    let manifest_abs = manifest_dir
-        .canonicalize()
-        .unwrap_or_else(|_| manifest_dir.to_path_buf());
-    let written_abs = abs.canonicalize().unwrap_or(abs);
-    match written_abs.strip_prefix(&manifest_abs) {
-        Ok(rel) => rel.to_string_lossy().into_owned(),
-        Err(_) => written_abs.to_string_lossy().into_owned(),
-    }
+    let manifest_abs = canonical_so_far(&cwd.join(manifest_dir));
+    let written_abs = canonical_so_far(&cwd.join(written_path));
+    relative_to(&written_abs, &manifest_abs)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `p` absolute and normalized, with its longest existing head canonicalized
+/// (a file not written yet still gets its folder's real path).
+fn canonical_so_far(p: &Path) -> PathBuf {
+    let p = normalize(p);
+    p.ancestors()
+        .find_map(|a| {
+            let real = a.canonicalize().ok()?;
+            Some(real.join(p.strip_prefix(a).ok()?))
+        })
+        .unwrap_or(p)
 }
 
 /// The directory a manifest (or any file) sits in, `.` for a bare file name.
@@ -1359,6 +1406,24 @@ fn relative_to(p: &Path, base: &Path) -> PathBuf {
     let mut out: PathBuf = bc[common..].iter().map(|_| "..").collect();
     out.extend(&pc[common..]);
     out
+}
+
+/// Where `path` is after the tree it is in moved from `from_dir` to `to_dir`:
+/// the same place relative to `to_dir` as it was to `from_dir`. Lexical, so
+/// it works for paths that no longer exist.
+#[must_use]
+pub fn rebase(path: &Path, from_dir: &Path, to_dir: &Path) -> PathBuf {
+    let abs = |p: &Path| normalize(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+    normalize(&abs(to_dir).join(relative_to(&abs(path), &abs(from_dir))))
+}
+
+/// A command's output prefix: `out` when given, else beside the manifest
+/// `from` and named after it ([`derive_out_prefix`]). Not the manifest's
+/// recorded `prefix`: one copied from another machine names that machine's
+/// tree.
+#[must_use]
+pub fn out_prefix(out: Option<&str>, from: &str) -> String {
+    out.map_or_else(|| derive_out_prefix(from), String::from)
 }
 
 /// Derive an output prefix from a `--from` manifest path when `--out` was
@@ -1961,16 +2026,89 @@ mod tests {
         std::fs::create_dir_all(&run_dir).unwrap();
         std::fs::write(cwd.join("data/x.zarr.zip"), b"").unwrap();
 
-        // Outside the run directory: stored absolute.
+        // Outside the run directory: still relative, so the tree can move
+        // or be copied to another machine.
         let input = rel_to_manifest_from(&cwd, &run_dir, "data/x.zarr.zip");
-        assert_eq!(input, cwd.join("data/x.zarr.zip").to_string_lossy());
-        assert_eq!(resolve(&run_dir, &input), cwd.join("data/x.zarr.zip"));
+        assert_eq!(input, "../../data/x.zarr.zip");
+        assert_eq!(
+            normalize(&resolve(&run_dir, &input)),
+            cwd.join("data/x.zarr.zip")
+        );
+        let absolute = cwd.join("data/x.zarr.zip");
+        assert_eq!(
+            rel_to_manifest_from(&cwd, &run_dir, &absolute.to_string_lossy()),
+            "../../data/x.zarr.zip"
+        );
 
         // Inside it (a path that need not exist yet): stored relative to it,
         // so the run directory can be moved.
         let inside = rel_to_manifest_from(&cwd, &run_dir, "out/run/y.zarr.zip");
         assert_eq!(inside, "y.zarr.zip");
         assert_eq!(resolve(&run_dir, &inside), run_dir.join("y.zarr.zip"));
+    }
+
+    /// A run folder and a data folder beside it, with a manifest recording
+    /// `input` and `batch` as data files.
+    fn moved_run(input: &[&str], batch: &[&str]) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let (r, d) = (root.path().join("run"), root.path().join("data"));
+        std::fs::create_dir_all(&r).unwrap();
+        std::fs::create_dir_all(&d).unwrap();
+        let mut m = RunManifest::new(RunKind::Svd, "run");
+        m.data.input = input.iter().map(|s| s.to_string()).collect();
+        m.data.batch = batch.iter().map(|s| s.to_string()).collect();
+        m.save(&r.join("run.senna.json")).unwrap();
+        (root, r, d)
+    }
+
+    #[test]
+    fn a_found_data_file_and_its_neighbours_are_recorded_relative() {
+        let (_root, r, d) = moved_run(
+            &[
+                "/elsewhere/x/rna.zarr",
+                "/elsewhere/x/atac.zarr.zip",
+                "kept.h5",
+                "/elsewhere/x/gone.h5",
+            ],
+            &["/elsewhere/x/batch.txt"],
+        );
+        std::fs::create_dir(d.join("rna.zarr")).unwrap();
+        std::fs::write(d.join("atac.zarr.zip"), b"").unwrap();
+        std::fs::write(d.join("batch.txt"), b"").unwrap();
+        std::fs::write(r.join("kept.h5"), b"").unwrap();
+
+        // Chosen as an absolute path; recorded relative to the manifest.
+        let (mut m, dir) = RunManifest::load(&r.join("run.senna.json")).unwrap();
+        assert_eq!(m.relocate_data(&dir, 0, &d.join("rna.zarr")).unwrap(), 2);
+        assert_eq!(
+            m.data.input,
+            [
+                "../data/rna.zarr",
+                "../data/atac.zarr.zip",
+                "kept.h5",
+                "/elsewhere/x/gone.h5"
+            ]
+        );
+        assert_eq!(m.data.batch, ["../data/batch.txt"]);
+    }
+
+    #[test]
+    fn files_of_one_name_in_sibling_folders_keep_their_own_folders() {
+        let (_root, r, d) = moved_run(&["/old/rna/data.zarr.zip", "/old/atac/data.zarr.zip"], &[]);
+        for sub in ["rna", "atac"] {
+            std::fs::create_dir(d.join(sub)).unwrap();
+            std::fs::write(d.join(sub).join("data.zarr.zip"), b"").unwrap();
+        }
+        let (mut m, dir) = RunManifest::load(&r.join("run.senna.json")).unwrap();
+        assert_eq!(
+            m.relocate_data(&dir, 0, &d.join("rna/data.zarr.zip"))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            m.data.input,
+            ["../data/rna/data.zarr.zip", "../data/atac/data.zarr.zip"]
+        );
     }
 
     #[test]

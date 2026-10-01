@@ -1,12 +1,13 @@
-//! Shared plumbing for `senna layout {tsne, phate}`:
-//! - CLI args shared by both layouts.
-//! - Build PBs via the existing batch-corrected collapse pipeline
-//!   (`topic::common::load_and_collapse`), collect raw-gene log1p-CPM
-//!   features, compute PB-PB cosine similarity, apply tail pruning.
-//! - Cheap Nyström cell placement in random-projection space.
+//! Shared plumbing for `senna layout {tsne, phate, umap}`:
+//! - CLI args shared by the layouts.
+//! - The cell table to lay out, from the run's own outputs: its latent (or
+//!   cell embedding), else its cached cell projection. The count data is
+//!   never read, so a run can be laid out where its data is not.
+//! - PBs from landmarks or projection bits, PB-PB similarity, tail pruning.
+//! - Cheap Nyström cell placement.
 //! - Shared output writer.
 //!
-//! Both layout subcommands delegate here for everything except the
+//! Every layout subcommand delegates here for everything except the
 //! actual 2D layout algorithm.
 
 use super::fit_layout_features::{
@@ -18,15 +19,12 @@ use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::similarity::{
     compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
 };
-use crate::topic::common::{
-    load_and_collapse, preferred_posterior_log_mean, LoadCollapseArgs, PreparedData,
-};
 use data_beans::alg::random_projection::binary_sort_columns;
 use rand::{rngs::SmallRng, SeedableRng};
 use rayon::prelude::*;
 use senna::embed_common::*;
-use senna::run_manifest::{self, load_cell_to_pb_raw, LayoutEntry, RunManifest};
-use std::path::{Path, PathBuf};
+use senna::run_manifest::{self, LayoutEntry, RunManifest};
+use std::path::PathBuf;
 
 /// How to pick landmarks for the latent-driven layout path.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
@@ -65,16 +63,14 @@ pub struct LayoutCommonArgs {
         long,
         short = 'f',
         help = "Run manifest JSON from a `senna` topic/svd command",
-        long_help = "Fills in data files and batch files from the manifest.\n\
-                     It also supplies the output prefix when --out is absent.\n\
+        long_help = "The run to lay out. Its latent (or cell embedding), else its cached\n\
+                     cell projection, is what is laid out; the count data is not read.\n\
+                     Without --out, files go beside it, named after it.\n\
                      \n\
-                     The manifest is then updated in place.\n\
-                     Three fields point at the paths just written:\n\
-                     `layout.cell_coords`, `layout.pb_coords`, `layout.pb_gene_mean`.\n\
-                     \n\
-                     Explicit CLI flags still override manifest values."
+                     The manifest is then updated in place: `layout.methods` and\n\
+                     `layout.cell_coords` / `layout.pb_coords` point at the files just written."
     )]
-    pub from: Option<Box<str>>,
+    pub from: Box<str>,
 
     #[arg(
         long,
@@ -108,18 +104,9 @@ pub struct LayoutCommonArgs {
     pub feature_space: FeatureSpace,
 
     #[arg(
-        value_delimiter = ',',
-        help = "Data files (required unless --from supplies them)",
-        long_help = "Sparse backends in `.zarr` or `.h5`. Multiple paths are allowed,\n\
-                     space- or comma-separated.\n\
-                     Leave this empty and pass --from to inherit from the manifest."
-    )]
-    pub data_files: Vec<Box<str>>,
-
-    #[arg(
         long,
         short,
-        help = "Output prefix (defaults to the manifest's `prefix` when --from is used)",
+        help = "Output prefix (defaults to the --from path without `.senna.json`)",
         long_help = "Output header for results.\n\
                      \n\
                      {out}.{method}.pb_coords.parquet: Pseudobulk sample coordinates (n_pb × 2)\n\
@@ -127,36 +114,10 @@ pub struct LayoutCommonArgs {
                      {out}.{method}.cell_coords.parquet:\n\
                      Cell coordinates (n_cells × 2 or 3) with optional pb_id / cluster columns\n\
                      \n\
-                     {out}.pb_gene_mean.parquet:\n\
-                     Batch-corrected log1p-CPM per PB (n_pb × n_genes),\n\
-                     used as the diagnostic feature matrix for the PB-PB similarity step."
+                     {out}.pb_proj_mean.parquet:\n\
+                     Each PB's mean cell features (n_pb × dims), a diagnostic."
     )]
     pub out: Option<Box<str>>,
-
-    #[arg(
-        long,
-        short,
-        value_delimiter(','),
-        help = "Batch membership files",
-        long_help = "Batch membership files (comma-separated names).\n\
-                     Each batch file should correspond to each data file."
-    )]
-    pub batch_files: Option<Vec<Box<str>>>,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Preload all columns data",
-        hide = true
-    )]
-    pub preload_data: bool,
-
-    #[arg(
-        long,
-        default_value_t = 30,
-        help = "Random projection dim used to partition cells into PBs"
-    )]
-    pub proj_dim: usize,
 
     #[arg(
         long,
@@ -166,37 +127,12 @@ pub struct LayoutCommonArgs {
     )]
     pub sort_dim: usize,
 
-    #[arg(long, default_value_t = DEFAULT_KNN, help = "kNN for pb-sample matching")]
-    pub knn_cells: usize,
-
-    #[arg(
-        long,
-        default_value_t = DEFAULT_OPT_ITER,
-        help = "Iterations for the Gamma posterior optimizer"
-    )]
-    pub iter_opt: usize,
-
-    #[arg(
-        long,
-        default_value_t = 1,
-        help = "Number of hierarchical levels (viz uses the finest only)"
-    )]
-    pub num_levels: usize,
-
     #[arg(
         long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)",
         hide = true
     )]
     pub block_size: Option<usize>,
-
-    #[arg(
-        long = "weighting",
-        value_enum,
-        default_value_t = crate::refine_weighting::WeightingArg::NbFisherInfo,
-        help = crate::refine_weighting::WEIGHTING_HELP,
-    )]
-    pub refine_weighting: crate::refine_weighting::WeightingArg,
 
     #[arg(
         long,
@@ -283,7 +219,7 @@ pub struct LayoutCommonArgs {
                      denser PBs, so crisper clusters. Higher values give finer resolution,\n\
                      but blobbier output.\n\
                      \n\
-                     The projection-space fallback path ignores this."
+                     A run laid out from its cell projection ignores this."
     )]
     pub n_landmarks: usize,
 
@@ -359,250 +295,167 @@ impl From<&PhateCliArgs> for crate::geometry::phate::PhateArgs {
     }
 }
 
-// Defaults mirror the clap `default_value_t` annotations on each field
-// above. Used by callers that construct args programmatically (the view's
-// zoom-in layout reads its t-UMAP settings from here). If a clap default
-// changes, update this to match.
-impl Default for LayoutCommonArgs {
-    fn default() -> Self {
-        Self {
-            from: None,
-            target: LayoutTarget::Cells,
-            feature_space: FeatureSpace::Auto,
-            data_files: Vec::new(),
-            out: None,
-            batch_files: None,
-            preload_data: false,
-            proj_dim: 30,
-            sort_dim: 10,
-            knn_cells: DEFAULT_KNN,
-            iter_opt: DEFAULT_OPT_ITER,
-            num_levels: 1,
-            block_size: None,
-            refine_weighting: crate::refine_weighting::WeightingArg::default(),
-            similarity_threshold: 0.0,
-            trim_cell_mads: DEFAULT_TRIM_MADS,
-            local_scale_k: None,
-            knn: 15,
-            kernel_alpha: 10.0,
-            pb_coverage: 0.95,
-            clusters: None,
-            seed: 42,
-            n_landmarks: 1000,
-            theta_temperature: 1.0,
-            landmark_strategy: LandmarkStrategy::PerTopic,
-        }
-    }
-}
-
-impl Default for PhateCliArgs {
-    fn default() -> Self {
-        Self {
-            phate_t: 20,
-            phate_knn: 5,
-            phate_alpha: 40.0,
-            phate_mds_iter: 300,
-            phate_mds_tol: 1e-4,
-        }
-    }
-}
-
-/// Inputs resolved from the merge of CLI flags and an optional
-/// `--from` run manifest. Held by `preprocess_layout_data` / `finalize_viz` in
-/// place of reaching into `LayoutCommonArgs` directly, which keeps
-/// the path-resolution logic out of the pipeline body.
-///
-/// When `manifest` is `Some`, `finalize_viz` updates its `viz{}`
-/// section with the files it just wrote and saves back to
-/// `manifest_path`. Without `--from` both stay `None`.
+/// The run a layout is for, read once: its manifest, where it is, and the
+/// output prefix. The layout's files are recorded back into the manifest.
 pub(crate) struct ResolvedViz {
-    pub data_files: Vec<Box<str>>,
-    pub batch_files: Option<Vec<Box<str>>>,
     pub out: String,
-    pub manifest_path: Option<PathBuf>,
-    pub manifest: Option<RunManifest>,
-    /// Resolved absolute path to the manifest's `outputs.cell_to_pb`,
-    /// when present. Layout's recompute fallback uses this to skip the
-    /// BBKNN + DC-SBM refinement on chained runs.
-    pub cell_to_pb_path: Option<String>,
+    pub manifest_path: PathBuf,
+    pub manifest: RunManifest,
+    /// The manifest's directory, which its paths are relative to.
+    pub dir: PathBuf,
+}
+
+impl ResolvedViz {
+    /// A path the manifest records, resolved against its directory.
+    pub(crate) fn resolve(&self, rel: &str) -> String {
+        run_manifest::resolve(&self.dir, rel)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Record the files just written under `manifest.layout` (relative to
+    /// the manifest's directory, so the run directory can move) and save it.
+    fn record(&mut self, method: &str, written: &LayoutEntry) -> anyhow::Result<()> {
+        record_cell_layout(&mut self.manifest, &self.manifest_path, method, written)
+    }
 }
 
 pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<ResolvedViz> {
-    let (manifest, manifest_dir, manifest_path) = match &args.from {
-        Some(p) => {
-            let path = PathBuf::from(p.as_ref());
-            let (m, dir) = RunManifest::load(&path)?;
-            info!("Loaded run manifest {} (kind: {})", p, m.kind);
-            (Some(m), dir, Some(path))
-        }
-        None => (None, PathBuf::from("."), None),
-    };
-
-    let data_files: Vec<Box<str>> = if !args.data_files.is_empty() {
-        args.data_files.clone()
-    } else if let Some(m) = manifest.as_ref() {
-        m.data_inputs(&manifest_dir)
-    } else {
-        anyhow::bail!(
-            "no data files given and no --from manifest; \
-             pass data files positionally or supply --from PATH"
-        );
-    };
-    if data_files.is_empty() {
-        anyhow::bail!("manifest {manifest_path:?} has no data.input entries");
-    }
-
-    let batch_files: Option<Vec<Box<str>>> = args.batch_files.clone().or_else(|| {
-        manifest.as_ref().and_then(|m| {
-            if m.data.batch.is_empty() {
-                None
-            } else {
-                Some(m.data_batches(&manifest_dir))
-            }
-        })
-    });
-
-    let out: String = args
-        .out
-        .as_deref()
-        .map(String::from)
-        .or_else(|| manifest.as_ref().map(|m| m.prefix.clone()))
-        .ok_or_else(|| {
-            anyhow::anyhow!("no --out given and no manifest prefix available (use --from or -o)")
-        })?;
+    let from = args.from.as_ref();
+    let manifest_path = PathBuf::from(from);
+    let (manifest, dir) = RunManifest::load(&manifest_path)?;
+    info!("Loaded run manifest {from} (kind: {})", manifest.kind);
+    let out = run_manifest::out_prefix(args.out.as_deref(), from);
     mkdir_parent(&out)?;
-
-    let cell_to_pb_path: Option<String> = manifest.as_ref().and_then(|m| {
-        m.outputs.cell_to_pb.as_deref().map(|s| {
-            run_manifest::resolve(&manifest_dir, s)
-                .to_string_lossy()
-                .into_owned()
-        })
-    });
-
     Ok(ResolvedViz {
-        data_files,
-        batch_files,
         out,
         manifest_path,
         manifest,
-        cell_to_pb_path,
+        dir,
     })
 }
 
-/// Shape of the per-PB feature matrix carried by `PbLayoutPrep`.
-/// `Gene` = log1p-CPM in gene space (consumed by `lupin annotate` (enrichment));
-/// `Proj` = proj-space centroids (diagnostic only). Drives output
-/// filename + column naming and whether `manifest.layout.pb_gene_mean`
-/// is populated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PbFeatureKind {
-    Gene,
-    Proj,
-}
-
-/// Output of `preprocess_layout_data`. `PbThenNystrom` is the classic
-/// two-stage pipeline (pseudobulks → PB layout → Nyström cell
-/// placement) used for topic / SVD / cached / recompute paths.
-/// `DirectCells` skips PB summarization entirely — used by
-/// `RunKind::Bge` / `RunKind::Fne`, whose embeddings are already
-/// manifold-aware — and drives cell-level layout straight off
-/// `cell_proj_kn`.
-///
-/// Carrying these as separate variants instead of one struct + sentinel
-/// fields lets each subcommand pattern-match against the exact shape
-/// it can handle; tsne / phate take `&PbLayoutPrep` directly and bail
-/// at the call site for `DirectCells`.
-pub(crate) enum LayoutPrep {
-    PbThenNystrom(PbLayoutPrep),
-    DirectCells(DirectLayoutPrep),
-}
-
+/// The landmark (PB) layout PHATE and t-SNE run on: PBs of the run's cell
+/// table, their similarity, and the cells to place by Nyström.
 pub(crate) struct PbLayoutPrep {
-    /// Cell per column of `cell_proj_kn`.
-    pub cell_names: Vec<Box<str>>,
-    /// Gene per column of `pb_features` when they are in gene space
-    /// (`PbFeatureKind::Gene`); empty otherwise.
-    pub gene_names: Vec<Box<str>>,
+    pub cells: CellTable,
     pub pb_size: Vec<usize>,
     pub pb_membership_kept: Vec<usize>,
-    /// `(n_pb × D)` per-PB feature matrix, row-per-PB. Content depends
-    /// on `pb_feature_kind`.
-    pub pb_features: Mat,
-    pub pb_feature_kind: PbFeatureKind,
     /// `(n_pb × n_pb)` PB-PB similarity, post threshold / local scaling
     /// / diagonal regularization.
     pub pb_similarity: Mat,
-    /// `(D × n_cells)` per-cell feature matrix, column-per-cell.
-    pub cell_proj_kn: Mat,
-    /// `(proj_dim × n_pb)` PB centroid features, matched to
-    /// `pb_features` order.
-    pub pb_proj_kp: Mat,
+    /// `(dims × n_pb)` each PB's mean cell features.
+    pub pb_kp: Mat,
 }
 
-pub(crate) struct DirectLayoutPrep {
-    /// Cell per column of `cell_proj_kn`.
-    pub cell_names: Vec<Box<str>>,
-    /// L2-normalized latent embedding, column-per-cell, fed straight to
-    /// the cell-level kNN graph.
-    pub cell_proj_kn: Mat,
+/// The run's cell table: what every layout lays out, UMAP cell by cell.
+pub(crate) struct CellTable {
+    /// Cell per column of `cells_kn`.
+    pub names: Vec<Box<str>>,
+    /// The cells' layout features (see [`latent_layout_features`]),
+    /// column-per-cell.
+    pub cells_kn: Mat,
 }
 
-/// `allow_direct_cells`: when `true` (UMAP), a graph-trained latent
-/// (`RunKind::Bge`/`Fne`) returns `LayoutPrep::DirectCells` so UMAP runs
-/// cell-level directly on the embedding. When `false` (PHATE / t-SNE, whose
-/// O(n³) MDS / O(n²) repulsion can't take all cells), bge/fne fall through to
-/// the existing PB-then-Nyström landmark path — landmarks sampled from the
-/// embedding, PHATE/t-SNE on their centroids, cells placed by Nyström. No new
-/// layout machinery; just which existing path the embedding takes.
+/// The run's cell table for a cell-level layout: its latent (or cell
+/// embedding) as [`latent_layout_features`] makes it, else its cached cell
+/// projection, z-scored. Never the count data.
+///
+/// `geometry_latent` (not `outputs.latent`): on an embedding run the cell
+/// table is the H-space Z in `cell_embedding`, while `latent` holds log θ,
+/// which [`latent_layout_features`] would misread as raw Euclidean.
+pub(crate) fn cell_table(
+    args: &LayoutCommonArgs,
+    resolved: &ResolvedViz,
+) -> anyhow::Result<CellTable> {
+    let m = &resolved.manifest;
+    let (names, cells_kn) = match m.outputs.geometry_latent() {
+        Some(p) => read_latent_features(args, &resolved.resolve(p), m.kind)?,
+        None => read_cell_proj(args, &cell_proj_path(resolved)?)?,
+    };
+    Ok(CellTable { names, cells_kn })
+}
+
+/// The run's cached cell projection, which a run without a latent lays out.
+fn cell_proj_path(resolved: &ResolvedViz) -> anyhow::Result<String> {
+    resolved
+        .manifest
+        .outputs
+        .cell_proj
+        .as_deref()
+        .map(|p| resolved.resolve(p))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} records no latent, cell embedding or cell projection to lay out; \
+                 train the run again with this senna",
+                resolved.manifest_path.display()
+            )
+        })
+}
+
+/// The latent at `latent_path` as layout features (`dims × cells`) and its
+/// cell names. The latent names its cells, so the data backend is not
+/// opened (it may not even be here).
+fn read_latent_features(
+    args: &LayoutCommonArgs,
+    latent_path: &str,
+    kind: senna::run_manifest::RunKind,
+) -> anyhow::Result<(Vec<Box<str>>, Mat)> {
+    let MatWithNames {
+        rows: cell_names,
+        mat: latent_nk,
+        ..
+    } = Mat::from_parquet_with_row_names(latent_path, Some(0))?;
+    let (feat_kn, latent_desc) = latent_layout_features(
+        kind,
+        &latent_nk,
+        args.theta_temperature,
+        args.trim_cell_mads,
+    );
+    info!(
+        "Loaded latent: {} cells × {} dims ({latent_desc})",
+        feat_kn.ncols(),
+        feat_kn.nrows(),
+    );
+    Ok((cell_names, feat_kn))
+}
+
+/// The cached cell projection at `path` (written as cells × proj_dim) as
+/// `proj_dim × cells`, each dimension z-scored across cells so none
+/// dominates, then winsorized; and its cell names.
+fn read_cell_proj(args: &LayoutCommonArgs, path: &str) -> anyhow::Result<(Vec<Box<str>>, Mat)> {
+    let MatWithNames {
+        rows: cell_names,
+        mat: proj_nk,
+        ..
+    } = Mat::from_parquet_with_row_names(path, Some(0))?;
+    let mut proj_kn: Mat = proj_nk.transpose();
+    info!(
+        "Loaded cell_proj: {} cells × {} proj-dims",
+        proj_kn.ncols(),
+        proj_kn.nrows()
+    );
+    proj_kn.scale_rows_inplace();
+    winsorize_rows_inplace(&mut proj_kn, args.trim_cell_mads);
+    Ok((cell_names, proj_kn))
+}
+
+/// The landmark layout for PHATE and t-SNE, whose O(n³) MDS / O(n²)
+/// repulsion cannot take every cell: landmarks of the run's cell table (its
+/// latent, else its cell projection), laid out on their own, cells then
+/// placed by Nyström.
 pub(crate) fn preprocess_layout_data(
     args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
-    allow_direct_cells: bool,
-) -> anyhow::Result<LayoutPrep> {
-    let resolve_from_manifest = |p: &str| -> String {
-        let manifest_path = resolved.manifest_path.as_ref().expect("manifest present");
-        let manifest_dir = manifest_path
-            .parent()
-            .filter(|q| !q.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        run_manifest::resolve(manifest_dir, p)
-            .to_string_lossy()
-            .into_owned()
-    };
-
-    // `geometry_latent` (not `outputs.latent`): on an embedding run the cell
-    // table to lay out is the H-space Z in `cell_embedding`, while `latent`
-    // holds log θ. Reading `latent` here would feed log-simplex coordinates to
-    // the kind-based transform below, which treats bge/fne as raw Euclidean.
-    let latent_path: Option<(String, senna::run_manifest::RunKind)> = resolved
-        .manifest
-        .as_ref()
-        .and_then(|m| m.outputs.geometry_latent().map(|p| (p.to_string(), m.kind)))
-        .filter(|_| resolved.manifest_path.is_some())
-        .map(|(p, kind)| (resolve_from_manifest(&p), kind));
-
-    if let Some((p, kind)) = latent_path {
-        info!("Layout latent path: PB + similarity from cached latent {p} (kind={kind})");
-        return preprocess_layout_data_from_latent(args, &p, kind, allow_direct_cells);
-    }
-
-    let cell_proj_path: Option<String> = resolved
-        .manifest
-        .as_ref()
-        .and_then(|m| m.outputs.cell_proj.as_ref())
-        .filter(|_| resolved.manifest_path.is_some())
-        .map(|p| resolve_from_manifest(p));
-
-    if let Some(ref p) = cell_proj_path {
-        info!("Layout fast path: PB partition from cached projection {p}");
-        preprocess_layout_data_from_cache(args, p)
+) -> anyhow::Result<PbLayoutPrep> {
+    let cells = cell_table(args, resolved)?;
+    let m = &resolved.manifest;
+    if m.outputs.geometry_latent().is_some() {
+        info!("PBs: landmarks of the latent (kind={})", m.kind);
+        preprocess_layout_data_from_latent(args, cells, m.kind)
     } else {
-        info!(
-            "Layout: no cached latent/cell_proj in manifest; running full load_and_collapse \
-             (slow path, includes batch-correction + Gamma posterior)"
-        );
-        preprocess_layout_data_recompute(args, resolved)
+        info!("PBs: projection bits of the cell projection");
+        preprocess_layout_data_from_cache(args, cells)
     }
 }
 
@@ -658,42 +511,11 @@ pub(crate) fn latent_layout_features(
 /// Hellinger-θ saturates and collapses the layout to rank-1.
 fn preprocess_layout_data_from_latent(
     args: &LayoutCommonArgs,
-    latent_path: &str,
+    cells: CellTable,
     kind: senna::run_manifest::RunKind,
-    allow_direct_cells: bool,
-) -> anyhow::Result<LayoutPrep> {
-    // The latent names its cells, and they are all the layout needs from
-    // the run: the data backend is not opened (it may not even be here).
-    let MatWithNames {
-        rows: cell_names,
-        cols: _,
-        mat: latent_nk,
-    } = Mat::from_parquet_with_row_names(latent_path, Some(0))?;
-
-    let (feat_kn, latent_desc) = latent_layout_features(
-        kind,
-        &latent_nk,
-        args.theta_temperature,
-        args.trim_cell_mads,
-    );
+) -> anyhow::Result<PbLayoutPrep> {
+    let feat_kn = &cells.cells_kn;
     let n_cells = feat_kn.ncols();
-    info!(
-        "Loaded latent: {n_cells} cells × {} dims ({latent_desc})",
-        feat_kn.nrows(),
-    );
-
-    // BGE / FNE embeddings are already manifold-aware (trained on a graph
-    // objective). Skip the PB landmarks / fuzzy-kNN-on-centroids step
-    // entirely and let the layout subcommand work cell-level directly.
-    // Topic / SVD latents are noisier and still benefit from the PB
-    // summarization, so they fall through to the landmark path below.
-    if allow_direct_cells && kind.cell_space() == senna::run_manifest::CellSpace::Embedding {
-        info!("Graph-trained latent → DirectCells mode: skipping PB landmark sampling");
-        return Ok(LayoutPrep::DirectCells(DirectLayoutPrep {
-            cell_names,
-            cell_proj_kn: feat_kn,
-        }));
-    }
 
     let n_pb_target = args.n_landmarks.min(n_cells).max(1);
     let use_per_topic =
@@ -812,12 +634,12 @@ fn preprocess_layout_data_from_latent(
     let pb_size: Vec<usize> = kept_indices.iter().map(|&i| pb_size_full[i]).collect();
 
     let pb_centroids_kp =
-        aggregate_features_by_group(&feat_kn, &pb_membership_kept, kept_indices.len());
+        aggregate_features_by_group(feat_kn, &pb_membership_kept, kept_indices.len());
 
     let n_pb = pb_centroids_kp.ncols();
     let knn = args.knn.clamp(1, n_pb.saturating_sub(1).max(1));
     info!("Building fuzzy kNN graph on PB centroids: n_pb={n_pb}, knn={knn}");
-    let graph = legume_numeric::matrix::knn_graph::KnnGraph::from_columns(
+    let (graph, fuzzy) = legume_numeric::matrix::knn_graph::KnnGraph::from_columns_fuzzy(
         &pb_centroids_kp,
         legume_numeric::matrix::knn_graph::KnnGraphArgs {
             knn,
@@ -825,7 +647,6 @@ fn preprocess_layout_data_from_latent(
             reciprocal: false,
         },
     )?;
-    let fuzzy = graph.fuzzy_kernel_weights();
 
     // √(sᵢ·sⱼ)/mean_size normalises so weighted mean ≈ 1, keeping fuzzy
     // magnitudes comparable to the unweighted case.
@@ -841,49 +662,23 @@ fn preprocess_layout_data_from_latent(
     }
     let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
 
-    Ok(LayoutPrep::PbThenNystrom(PbLayoutPrep {
-        cell_names,
-        gene_names: Vec::new(),
+    Ok(PbLayoutPrep {
+        cells,
         pb_size,
         pb_membership_kept,
-        pb_features: pb_centroids_kp.transpose(),
-        pb_feature_kind: PbFeatureKind::Proj,
         pb_similarity,
-        cell_proj_kn: feat_kn,
-        pb_proj_kp: pb_centroids_kp,
-    }))
+        pb_kp: pb_centroids_kp,
+    })
 }
 
-/// Fast path: given a cached `cell_proj.parquet` from a prior training
-/// run (the data backend is not opened), partition cells by hashing the
-/// cached projection, and build PB
-/// features + similarity directly in projection space. Skips pb-sample
-/// matching and the Gamma posterior optimization that the recompute
-/// path runs — those are training-side concerns the layout doesn't need.
+/// PBs of a run's cached cell projection (a run without a latent): cells
+/// partitioned by hashing the projection, PB features and similarity in
+/// projection space.
 fn preprocess_layout_data_from_cache(
     args: &LayoutCommonArgs,
-    cell_proj_path: &str,
-) -> anyhow::Result<LayoutPrep> {
-    // Load the cached projection (written as cells × proj_dim); its row
-    // names are the cells, so the data backend is not opened. The
-    // transpose lands us in the column-per-cell layout the rest expects.
-    let MatWithNames {
-        rows: cell_names,
-        cols: _,
-        mat: proj_nk,
-    } = Mat::from_parquet_with_row_names(cell_proj_path, Some(0))?;
-    let mut proj_kn: Mat = proj_nk.transpose();
-    info!(
-        "Loaded cell_proj: {} cells × {} proj-dims",
-        proj_kn.ncols(),
-        proj_kn.nrows()
-    );
-
-    // Per-proj-dim z-score across cells so that no single dim dominates
-    // the PB-centroid cosine similarity. (scale_rows_inplace standardizes
-    // each row to zero-mean/unit-variance across columns.)
-    proj_kn.scale_rows_inplace();
-    winsorize_rows_inplace(&mut proj_kn, args.trim_cell_mads);
+    cells: CellTable,
+) -> anyhow::Result<PbLayoutPrep> {
+    let proj_kn = &cells.cells_kn;
 
     // 3. Partition: binary_sort_columns runs RSVD + sign-hashing on the
     //    projection and returns a per-cell bucket code. Canonicalize
@@ -891,11 +686,11 @@ fn preprocess_layout_data_from_cache(
     //    groups needed — the partition is a pure function of proj_kn.
     let n_cells = proj_kn.ncols();
     let kk = args.sort_dim.min(proj_kn.nrows()).min(n_cells);
-    let codes = binary_sort_columns(&proj_kn, kk)?;
+    let codes = binary_sort_columns(proj_kn, kk)?;
     let (membership_full, n_pb_full) = canonicalize_codes(&codes);
     info!("Partitioned {n_cells} cells into {n_pb_full} PBs");
 
-    // 4. Coverage-prune PBs (same policy as the recompute path).
+    // 4. Coverage-prune PBs (same policy as the latent path).
     let pb_size_full: Vec<usize> = {
         let mut counts = vec![0usize; n_pb_full];
         for &g in &membership_full {
@@ -935,7 +730,7 @@ fn preprocess_layout_data_from_cache(
 
     // 5. PB centroids in proj space (kp = proj_dim × n_pb_kept).
     let pb_centroids_kp =
-        aggregate_features_by_group(&proj_kn, &pb_membership_kept, kept_indices.len());
+        aggregate_features_by_group(proj_kn, &pb_membership_kept, kept_indices.len());
 
     // 6. PB-PB cosine similarity directly on the proj-space centroids —
     //    columns of `pb_centroids_kp` are the PB vectors, which is the
@@ -955,177 +750,13 @@ fn preprocess_layout_data_from_cache(
     };
     let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
 
-    Ok(LayoutPrep::PbThenNystrom(PbLayoutPrep {
-        cell_names,
-        gene_names: Vec::new(),
+    Ok(PbLayoutPrep {
+        cells,
         pb_size,
         pb_membership_kept,
-        pb_features: pb_centroids_kp.transpose(),
-        pb_feature_kind: PbFeatureKind::Proj,
         pb_similarity,
-        cell_proj_kn: proj_kn,
-        pb_proj_kp: pb_centroids_kp,
-    }))
-}
-
-/// Slow path (fallback): the original full pipeline. Runs when no
-/// cached projection is available — older manifests, or pure CLI runs
-/// without `--from`. Does the full batch-corrected collapse and
-/// builds gene-space log1p-CPM PB features.
-fn preprocess_layout_data_recompute(
-    args: &LayoutCommonArgs,
-    resolved: &ResolvedViz,
-) -> anyhow::Result<LayoutPrep> {
-    // Inherit the source manifest's cell_to_pb partition when present so
-    // the recompute skips the BBKNN + DC-SBM refinement step. Loading
-    // here (not inside load_and_collapse) keeps the partition's source
-    // path local to layout's resolved-viz state.
-    let prebuilt_partition: Option<senna::run_manifest::InheritedPartition> = resolved
-        .cell_to_pb_path
-        .as_deref()
-        .map(load_cell_to_pb_raw)
-        .transpose()?;
-    if prebuilt_partition.is_some() {
-        info!("--from: layout recompute will reuse the source run's cell→pb partition");
-    }
-
-    let PreparedData {
-        data_vec,
-        collapsed_levels,
-        mut proj_kn,
-        cell_to_pb_per_level: _,
-        pb_tree: _,
-        output_keep_idx: _,
-    } = load_and_collapse(&LoadCollapseArgs {
-        data_files: &resolved.data_files,
-        batch_files: &resolved.batch_files,
-        preload: args.preload_data,
-        proj_dim: args.proj_dim,
-        sort_dim: args.sort_dim,
-        knn_cells: args.knn_cells,
-        num_levels: args.num_levels.max(1),
-        iter_opt: args.iter_opt,
-        block_size: args.block_size,
-        out: &resolved.out,
-        // Layout recompute lays out a fixed cell set — never drop cells.
-        qc: None,
-        qc_block_size: None,
-        qc_report_out: None,
-        // Layout recompute is the legacy path: match training's default
-        // HVG gate so the projection reflects variable biology.
-        max_features: 5000,
-        feature_list_file: None,
-        must_train_file: None,
-        refine: data_beans::alg::refine_multilevel::RefineParams {
-            feature_weighting: args.refine_weighting.into(),
-            ..data_beans::alg::refine_multilevel::RefineParams::default()
-        },
-        // Layout only needs a marginal grid; the training tree is read from
-        // the manifest, never recomputed here.
-        pb_tree: None,
-        ignore_batch: false,
-        feature_mask_fn: None,
-        pb_reference: None,
-        mixture_batches: None,
-        observe_panels: true,
-        row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
-        column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
-        feature_kind: None,
-        want_hierarchy: prebuilt_partition.is_some(),
-        prebuilt_partition,
-        cnv_clones: None,
-    })?;
-    winsorize_rows_inplace(&mut proj_kn, args.trim_cell_mads);
-
-    let finest = collapsed_levels
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("no collapsed levels produced"))?;
-
-    let log_expr_full_dp = preferred_posterior_log_mean(finest);
-    let n_pb_full = log_expr_full_dp.ncols();
-    info!(
-        "Built log-expr PB features: {} PBs × {} genes",
-        n_pb_full,
-        log_expr_full_dp.nrows()
-    );
-
-    let n_cells = data_vec.num_columns();
-    let membership_full = data_vec.get_group_membership(0..n_cells)?;
-    let pb_size_full: Vec<usize> = {
-        let mut counts = vec![0usize; n_pb_full];
-        for &g in &membership_full {
-            if g < n_pb_full {
-                counts[g] += 1;
-            }
-        }
-        counts
-    };
-    let kept_indices = select_pb_coverage(&pb_size_full, args.pb_coverage);
-    let covered: usize = kept_indices.iter().map(|&i| pb_size_full[i]).sum();
-    let total_cells: usize = pb_size_full.iter().sum();
-    info!(
-        "Coverage filter: kept {} / {} PBs covering {} / {} cells ({:.1}%)",
-        kept_indices.len(),
-        n_pb_full,
-        covered,
-        total_cells,
-        100.0 * covered as f32 / total_cells.max(1) as f32
-    );
-
-    let mut log_expr_dp = log_expr_full_dp.select_columns(kept_indices.iter());
-    let pb_size: Vec<usize> = kept_indices.iter().map(|&i| pb_size_full[i]).collect();
-
-    // NB-Fisher gene weighting before cosine similarity downweights
-    // high-mean / low-information genes so noisy housekeepers don't
-    // dominate the PB-PB graph.
-    let fisher_w = crate::empirical_dict::compute_nb_fisher_weights(&data_vec, args.block_size)?;
-    crate::empirical_dict::apply_gene_weights(&mut log_expr_dp, &fisher_w);
-    info!("Applied NB-Fisher gene weights to PB feature matrix");
-
-    let mut old_to_new = vec![usize::MAX; n_pb_full];
-    for (new_i, &old_i) in kept_indices.iter().enumerate() {
-        old_to_new[old_i] = new_i;
-    }
-    let pb_membership_kept: Vec<usize> = membership_full
-        .iter()
-        .map(|&g| {
-            if g < n_pb_full {
-                old_to_new[g]
-            } else {
-                usize::MAX
-            }
-        })
-        .collect();
-
-    let pb_centroids_kn =
-        aggregate_features_by_group(&proj_kn, &pb_membership_kept, kept_indices.len());
-
-    let sim = compute_cosine_similarity(&log_expr_dp);
-    let sim = if args.similarity_threshold > 0.0 {
-        threshold_similarity(&sim, args.similarity_threshold)
-    } else {
-        sim
-    };
-    let sim = if let Some(k) = args.local_scale_k {
-        let scaled = local_scale_similarity(&sim, k);
-        info!("Applied local scaling with k={k}");
-        scaled
-    } else {
-        sim
-    };
-    let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
-
-    Ok(LayoutPrep::PbThenNystrom(PbLayoutPrep {
-        cell_names: data_vec.column_names()?,
-        gene_names: data_vec.row_names()?,
-        pb_size,
-        pb_membership_kept,
-        pb_features: log_expr_dp.transpose(),
-        pb_feature_kind: PbFeatureKind::Gene,
-        pb_similarity,
-        cell_proj_kn: proj_kn,
-        pb_proj_kp: pb_centroids_kn,
-    }))
+        pb_kp: pb_centroids_kp,
+    })
 }
 
 /// Robustly winsorize each feature dimension (row) of a column-per-cell matrix
@@ -1233,31 +864,22 @@ pub(crate) fn random_init_2d(n: usize, seed: u64) -> Mat {
     out
 }
 
-/// Cheap Nyström cell placement. Exposed so subcommands that fine-tune
-/// cell coords (e.g. `layout umap`) can init from here and hand the
-/// refined result to [`write_viz_outputs`] directly.
-pub(crate) fn nystrom_cell_coords(
-    args: &LayoutCommonArgs,
-    prep: &PbLayoutPrep,
-    pb_coords: &Mat,
-) -> Mat {
+/// Cheap Nyström cell placement: each cell from its nearest PBs in the cell
+/// table's space.
+fn nystrom_cell_coords(args: &LayoutCommonArgs, prep: &PbLayoutPrep, pb_coords: &Mat) -> Mat {
     let coords = project_cells_nystrom(
-        &prep.cell_proj_kn,
-        &prep.pb_proj_kp,
+        &prep.cells.cells_kn,
+        &prep.pb_kp,
         pb_coords,
         args.knn,
         args.kernel_alpha,
     );
-    info!("Projected cells to 2D via proj-space Nyström");
+    info!("Placed cells by Nyström");
     coords
 }
 
-/// Finalize the `PbThenNystrom` path: place cells via cheap Nyström,
-/// write the three output parquet files, and — when a manifest was
-/// loaded via `--from` — update its `viz{}` section and save it back
-/// in place.
-///
-/// `DirectCells` outputs go directly through [`write_viz_outputs`].
+/// Finish a landmark layout: place cells by Nyström, write the PB and cell
+/// coordinates, and record them in the run's manifest.
 pub(crate) fn finalize_viz(
     args: &LayoutCommonArgs,
     resolved: &mut ResolvedViz,
@@ -1269,7 +891,7 @@ pub(crate) fn finalize_viz(
     write_viz_outputs_pb(args, resolved, prep, pb_coords, &cell_coords, method)
 }
 
-pub(crate) fn write_viz_outputs_pb(
+fn write_viz_outputs_pb(
     args: &LayoutCommonArgs,
     resolved: &mut ResolvedViz,
     prep: &PbLayoutPrep,
@@ -1280,7 +902,7 @@ pub(crate) fn write_viz_outputs_pb(
     let pb_names: Vec<Box<str>> = (0..pb_coords.nrows())
         .map(|i| format!("PB_{i}").into_boxed_str())
         .collect();
-    let cell_names = &prep.cell_names;
+    let cell_names = &prep.cells.names;
 
     let out = &resolved.out;
     let pb_coords_path = format!("{out}.{method}.pb_coords.parquet");
@@ -1293,21 +915,13 @@ pub(crate) fn write_viz_outputs_pb(
         Some(&coord_cols),
     )?;
 
-    // Only the gene-space recompute path produces a pb_gene_mean that
-    // `lupin annotate` (enrichment) can consume; the fast path emits diagnostic
-    // proj-space centroids that are not advertised in the manifest.
-    let (pb_feat_path, pb_feat_is_gene) = match prep.pb_feature_kind {
-        PbFeatureKind::Gene => (format!("{out}.pb_gene_mean.parquet"), true),
-        PbFeatureKind::Proj => (format!("{out}.pb_proj_mean.parquet"), false),
-    };
-    let feat_col_names: Vec<Box<str>> = if pb_feat_is_gene {
-        prep.gene_names.clone()
-    } else {
-        (0..prep.pb_features.ncols())
-            .map(|i| format!("p{i}").into_boxed_str())
-            .collect()
-    };
-    prep.pb_features.to_parquet_with_names(
+    // Diagnostic: not recorded in the manifest.
+    let pb_feat_path = format!("{out}.pb_proj_mean.parquet");
+    let pb_features = prep.pb_kp.transpose();
+    let feat_col_names: Vec<Box<str>> = (0..pb_features.ncols())
+        .map(|i| format!("p{i}").into_boxed_str())
+        .collect();
+    pb_features.to_parquet_with_names(
         &pb_feat_path,
         (Some(&pb_names), Some("pb")),
         Some(&feat_col_names),
@@ -1353,16 +967,15 @@ pub(crate) fn write_viz_outputs_pb(
 
     let feature_path = place_features_on_cells(
         args,
-        resolved.manifest.as_ref(),
-        resolved.manifest_path.as_ref(),
+        &resolved.manifest,
+        &resolved.manifest_path,
         out,
         method,
-        &prep.cell_proj_kn,
+        &prep.cells.cells_kn,
         cell_coords,
     )?;
 
-    update_manifest_viz(
-        resolved,
+    resolved.record(
         method,
         &LayoutEntry {
             cell_coords: Some(cell_coords_path),
@@ -1370,25 +983,24 @@ pub(crate) fn write_viz_outputs_pb(
             feature_on_cell_coords: feature_path,
             feature_coords: None,
         },
-        pb_feat_is_gene.then_some(pb_feat_path.as_str()),
     )?;
 
     Ok(())
 }
 
-pub(crate) fn write_viz_outputs_direct(
+pub(crate) fn write_cell_layout(
     args: &LayoutCommonArgs,
     resolved: &mut ResolvedViz,
-    prep: &DirectLayoutPrep,
+    prep: &CellTable,
     cell_coords: &Mat,
     method: &str,
     placed_features: Option<(&[Box<str>], &Mat)>,
 ) -> anyhow::Result<()> {
-    let cell_names = &prep.cell_names;
+    let cell_names = &prep.names;
     let n_cells = cell_coords.nrows();
     anyhow::ensure!(
         cell_names.len() == n_cells,
-        "DirectCells: cell_coords rows ({n_cells}) ≠ data columns ({})",
+        "cell_coords rows ({n_cells}) ≠ cells ({})",
         cell_names.len()
     );
 
@@ -1419,7 +1031,7 @@ pub(crate) fn write_viz_outputs_direct(
         Some(&col_names),
     )?;
 
-    info!("Saved {cell_coords_path} (DirectCells; no pb_coords)");
+    info!("Saved {cell_coords_path}");
 
     // Features laid out with the cells (a joint layout) keep their own
     // coordinates; otherwise they are placed on the finished cell map.
@@ -1427,42 +1039,23 @@ pub(crate) fn write_viz_outputs_direct(
         Some((names, coords)) => Some(write_features_on_cells(out, method, names, coords)?),
         None => place_features_on_cells(
             args,
-            resolved.manifest.as_ref(),
-            resolved.manifest_path.as_ref(),
+            &resolved.manifest,
+            &resolved.manifest_path,
             out,
             method,
-            &prep.cell_proj_kn,
+            &prep.cells_kn,
             cell_coords,
         )?,
     };
 
-    update_manifest_viz(
-        resolved,
+    resolved.record(
         method,
         &LayoutEntry {
             cell_coords: Some(cell_coords_path),
             feature_on_cell_coords: feature_path,
             ..Default::default()
         },
-        None,
     )?;
 
     Ok(())
-}
-
-/// When `--from` was used, record the files just written under
-/// `manifest.layout` (paths relative to the manifest's directory, so the run
-/// directory can move) and save it back.
-fn update_manifest_viz(
-    resolved: &mut ResolvedViz,
-    method: &str,
-    written: &LayoutEntry,
-    pb_gene_mean_path: Option<&str>,
-) -> anyhow::Result<()> {
-    let (Some(manifest), Some(manifest_path)) =
-        (resolved.manifest.as_mut(), resolved.manifest_path.as_ref())
-    else {
-        return Ok(());
-    };
-    record_cell_layout(manifest, manifest_path, method, written, pb_gene_mean_path)
 }

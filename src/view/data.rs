@@ -471,7 +471,15 @@ fn load_spaces(m: &RunManifest, dir: &Path) -> anyhow::Result<Vec<Space>> {
 
 /// Every grouping the run carries. One that fails to read is skipped with a
 /// warning rather than failing the view.
-fn load_labels(m: &RunManifest, dir: &Path, round: &super::rounds::Round) -> Vec<Labels> {
+/// The run's groupings. `prefix` names its other files (feature types): the
+/// manifest's own path, not its recorded `prefix`, which in a manifest copied
+/// from another machine names that machine's tree.
+fn load_labels(
+    m: &RunManifest,
+    dir: &Path,
+    round: &super::rounds::Round,
+    prefix: &str,
+) -> Vec<Labels> {
     let at = |rel: &str| run_manifest::resolve(dir, rel);
     let mut labels = Vec::new();
     let mut keep = |what: &str, r: anyhow::Result<Labels>| match r {
@@ -546,8 +554,7 @@ fn load_labels(m: &RunManifest, dir: &Path, round: &super::rounds::Round) -> Vec
         );
     }
     // Only worth a colouring when the embedding mixes types.
-    let prefix = at(&m.prefix).to_string_lossy().into_owned();
-    let types = data_beans::aux::feature_types::read_feature_types(&prefix)
+    let types = data_beans::aux::feature_types::read_feature_types(prefix)
         .map(|rows| Labels::new(LabelKind::FeatureType, rows.unwrap_or_default(), &[]));
     if types.as_ref().map_or(true, |l| l.levels.len() > 1) {
         keep("feature types", types);
@@ -571,9 +578,10 @@ impl Dataset {
             "{from} has no layout yet; run `senna layout umap --from {from}` first"
         );
         let round = super::rounds::Round::load(&m, &dir, &manifest_path);
-        let labels = load_labels(&m, &dir, &round);
+        let prefix = run_manifest::derive_out_prefix(from);
+        let labels = load_labels(&m, &dir, &round, &prefix);
         Ok(Self {
-            prefix: run_manifest::derive_out_prefix(from),
+            prefix,
             spaces,
             labels,
             run: Some((m, dir)),

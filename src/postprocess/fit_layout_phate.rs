@@ -1,10 +1,10 @@
-//! `senna layout phate` — raw-gene-space PB landmarks laid out
-//! with PHATE diffusion embedding over the log1p-CPM PB features.
-//! Cells placed by cheap Nyström in proj space.
+//! `senna layout phate`: PB landmarks of the run's cell table laid out
+//! with PHATE diffusion embedding over their mean features.
+//! Cells placed by cheap Nyström.
 
 use super::fit_layout_common::{
-    finalize_viz, preprocess_layout_data, resolve_inputs, LayoutCommonArgs, LayoutPrep,
-    PbLayoutPrep, PhateCliArgs, ResolvedViz,
+    finalize_viz, preprocess_layout_data, resolve_inputs, LayoutCommonArgs, PbLayoutPrep,
+    PhateCliArgs, ResolvedViz,
 };
 use super::fit_layout_features::{load_feature_layout_input, write_feature_layout, LayoutTarget};
 use super::viz_prep::apply_svd_preprocessing;
@@ -12,7 +12,6 @@ use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::orient::rotate_root_to_bottom;
 use crate::geometry::phate::phate_layout_2d;
 use senna::embed_common::*;
-use senna::run_manifest::resolve;
 
 #[derive(Args, Debug)]
 pub struct LayoutPhateArgs {
@@ -28,13 +27,6 @@ pub struct LayoutPhateArgs {
         help = "SVD preprocessing: keep top N components (0 = skip, use raw features)"
     )]
     svd_dims: usize,
-
-    #[arg(
-        long,
-        default_value_t = 2000,
-        help = "Number of highly variable genes to select (0 = use all genes)"
-    )]
-    n_hvg: usize,
 
     #[arg(
         long,
@@ -64,57 +56,17 @@ pub struct LayoutPhateArgs {
     orient_tip_quantile: f32,
 }
 
-// Defaults mirror clap `default_value_t` on each field above. Used by
-// callers that build the args programmatically.
-impl Default for LayoutPhateArgs {
-    fn default() -> Self {
-        Self {
-            common: LayoutCommonArgs::default(),
-            phate: PhateCliArgs::default(),
-            svd_dims: 0,
-            n_hvg: 2000,
-            orient_by_root: false,
-            root_cell: None,
-            root_node: None,
-            orient_tip_quantile: 0.10,
-        }
-    }
-}
-
 pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
     if args.common.target == LayoutTarget::Features {
         return fit_feature_layout_phate(args);
     }
     let mut resolved = resolve_inputs(&args.common)?;
-    // PHATE is PB-level (diffusion-MDS over landmark features → 2D, O(n³) MDS),
-    // so even a graph-trained latent (bge/fne) goes through the PB-then-Nyström
-    // path: `allow_direct_cells=false` routes the embedding to landmark
-    // sampling + Nyström rather than DirectCells. Only the recompute slow path
-    // (no cached latent/cell_proj) could still yield DirectCells-free; guard it.
-    let LayoutPrep::PbThenNystrom(prep) =
-        preprocess_layout_data(&args.common, &resolved, /*allow_direct_cells=*/ false)?
-    else {
-        // Unreachable: with allow_direct_cells=false, graph-trained latents
-        // (bge/fne) route through landmark sampling and every path returns
-        // PbThenNystrom. A DirectCells here means the routing logic regressed.
-        anyhow::bail!(
-            "internal: `senna layout phate` expected a PB-then-Nyström layout prep but got \
-             DirectCells (allow_direct_cells=false should route bge/fne through landmarks)"
-        );
-    };
+    // PHATE is PB-level (diffusion-MDS over landmark features → 2D, O(n³)
+    // MDS): landmarks of the run's cell table, cells placed by Nyström.
+    let prep = preprocess_layout_data(&args.common, &resolved)?;
 
-    // HVG selection: keep top N genes by residual variance (mean-variance corrected)
-    let features = if args.n_hvg > 0 && args.n_hvg < prep.pb_features.ncols() {
-        info!(
-            "Selecting top {} HVGs from {} genes (mean-variance corrected)",
-            args.n_hvg,
-            prep.pb_features.ncols()
-        );
-        data_beans::alg::hvg::select_hvg(&prep.pb_features, args.n_hvg)
-    } else {
-        prep.pb_features.clone()
-    };
-
+    // Each PB's mean cell features, a row per PB.
+    let features = prep.pb_kp.transpose();
     let features = if args.svd_dims > 0 {
         apply_svd_preprocessing(&features, args.svd_dims)?
     } else {
@@ -173,32 +125,19 @@ fn obtain_pseudotime(
     resolved: &ResolvedViz,
     prep: &PbLayoutPrep,
 ) -> anyhow::Result<Vec<f32>> {
-    let cell_names = prep.cell_names.clone();
-
-    let manifest = resolved.manifest.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "--orient-by-root requires --from <manifest> with \
-             `pseudotime.pseudotime` written by `lupin pseudotime`"
-        )
-    })?;
-    let manifest_dir = resolved
-        .manifest_path
-        .as_ref()
-        .and_then(|p| p.parent())
-        .map_or_else(
-            || std::path::PathBuf::from("."),
-            std::path::Path::to_path_buf,
-        );
-
-    let pt_rel = manifest.pseudotime.pseudotime.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "--orient-by-root needs `manifest.pseudotime.pseudotime`; \
+    let cell_names = &prep.cells.names;
+    let pt_rel = resolved
+        .manifest
+        .pseudotime
+        .pseudotime
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--orient-by-root needs `manifest.pseudotime.pseudotime`; \
              run `lupin pseudotime --from ...` first"
-        )
-    })?;
-    let pt_path = resolve(&manifest_dir, pt_rel)
-        .to_string_lossy()
-        .into_owned();
+            )
+        })?;
+    let pt_path = resolved.resolve(pt_rel);
     info!("Reading cached pseudotime from {pt_path}");
     let MatWithNames {
         rows: pt_cells,
@@ -211,7 +150,7 @@ fn obtain_pseudotime(
         pt_mat.nrows(),
         cell_names.len()
     );
-    if pt_cells != cell_names {
+    if &pt_cells != cell_names {
         log::warn!("pseudotime row names differ from data cell names — using positional alignment");
     }
     Ok((0..pt_mat.nrows()).map(|i| pt_mat[(i, 0)]).collect())
@@ -221,7 +160,7 @@ fn obtain_pseudotime(
 /// by coverage filter or all-NaN inputs). Aligns to `pb_coords` row order
 /// via `prep.pb_membership_kept`.
 fn aggregate_cell_pt_to_pb(pseudotime: &[f32], prep: &PbLayoutPrep) -> Vec<f32> {
-    let n_pb = prep.pb_features.nrows();
+    let n_pb = prep.pb_kp.ncols();
     let mut sum = vec![0.0_f32; n_pb];
     let mut count = vec![0_usize; n_pb];
     for (cell_i, &pb_id) in prep.pb_membership_kept.iter().enumerate() {
