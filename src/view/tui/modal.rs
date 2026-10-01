@@ -11,6 +11,9 @@ pub(super) enum Modal {
     Prompt(Prompt),
     /// Browsing for the marker panel `lupin annotate` reads.
     MarkersFile(Browser),
+    /// Browsing for a data file that is not where the manifest says: its
+    /// place in `data.input`.
+    DataFile(Browser, usize),
     /// Submitting the relabel draft: one line per decision it hands lupin.
     Submit(Vec<String>),
     /// The `r` menu: what to recompute for the run.
@@ -22,7 +25,7 @@ impl Modal {
         match self {
             Modal::Search(..) => Context::Search,
             Modal::Prompt(_) => Context::Prompt,
-            Modal::MarkersFile(..) => Context::MarkersFile,
+            Modal::MarkersFile(..) | Modal::DataFile(..) => Context::File,
             Modal::Submit(_) => Context::Submit,
             Modal::Recompute(..) => Context::Recompute,
         }
@@ -36,7 +39,10 @@ impl Modal {
                 format!("/{q}   {}", shown.join("  "))
             }
             Modal::Prompt(p) => p.line(),
-            Modal::Submit(_) | Modal::Recompute(..) | Modal::MarkersFile(_) => return None,
+            Modal::Submit(_)
+            | Modal::Recompute(..)
+            | Modal::MarkersFile(_)
+            | Modal::DataFile(..) => return None,
         })
     }
 }
@@ -48,6 +54,7 @@ impl App {
             Some(Modal::Search(..)) => self.search_key(k),
             Some(Modal::Prompt(_)) => self.prompt_key(k),
             Some(Modal::MarkersFile(..)) => self.markers_key(k),
+            Some(Modal::DataFile(..)) => self.data_file_key(k),
             Some(Modal::Recompute(..)) => self.recompute_key(k),
             Some(Modal::Submit(_)) => {
                 self.modal = None;

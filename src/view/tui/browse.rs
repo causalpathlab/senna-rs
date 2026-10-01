@@ -1,10 +1,11 @@
 //! A file browser, one directory at a time: folders, and the files that are
-//! what is being looked for — marker panels for `lupin annotate`, or runs
-//! for the view to open.
+//! what is being looked for: marker panels for `lupin annotate`, runs for
+//! the view to open, or a run's data file that is not where it was recorded.
 //!
 //! A marker panel shows how many of its genes the run has; the panel that
 //! covers the most is starred and chosen to begin with. A run shows its kind
-//! and layouts; the newest is chosen to begin with.
+//! and layouts; the newest is chosen to begin with. A data file of the
+//! recorded name is chosen to begin with.
 
 use super::draw::{hint, selected};
 use super::*;
@@ -27,6 +28,8 @@ pub(super) enum Want {
     Panels(Option<GeneIndex>),
     /// Run manifests (`*.senna.json`).
     Runs,
+    /// A data file recorded at this path, which is not there.
+    Data(String),
 }
 
 /// A marker panel's size, and how much of it this run can use.
@@ -45,18 +48,20 @@ pub(super) enum Entry {
     Panel(String, Panel),
     /// A run: its name and a one-line description.
     Run(String, String),
+    /// A data file or store.
+    Data(String),
 }
 
 impl Entry {
     fn name(&self) -> &str {
         match self {
             Entry::Up => "..",
-            Entry::Dir(n) | Entry::Panel(n, _) | Entry::Run(n, _) => n,
+            Entry::Dir(n) | Entry::Panel(n, _) | Entry::Run(n, _) | Entry::Data(n) => n,
         }
     }
 
     fn is_file(&self) -> bool {
-        matches!(self, Entry::Panel(..) | Entry::Run(..))
+        matches!(self, Entry::Panel(..) | Entry::Run(..) | Entry::Data(_))
     }
 }
 
@@ -103,6 +108,13 @@ impl Browser {
         self.best = match self.want {
             Want::Panels(_) => best_panel(&self.entries),
             Want::Runs => newest(&self.dir, &self.entries),
+            Want::Data(ref recorded) => {
+                let name = files::name(Path::new(recorded));
+                self.entries
+                    .iter()
+                    .any(|e| matches!(e, Entry::Data(n) if *n == name))
+                    .then_some(name)
+            }
         };
         self.filter.clear();
         let want = select.map(str::to_string).or_else(|| self.best.clone());
@@ -198,19 +210,36 @@ impl Browser {
     /// The lines of the popup, `rows` entries tall at most.
     pub fn lines(&self, rows: usize) -> Vec<Line<'static>> {
         let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
-        let (title, what, star, none) = match self.want {
+        let (title, what, star, none) = match &self.want {
             Want::Panels(_) => (
-                "Marker panel for lupin annotate",
+                "Marker panel for lupin annotate".to_string(),
                 "marker panels (gene, cell type per line)",
                 Some(" ★ covers the most of this run's genes"),
                 "annotate",
             ),
-            Want::Runs => ("Run to view", "runs (*.senna.json)", None, "open"),
+            Want::Runs => ("Run to view".into(), "runs (*.senna.json)", None, "open"),
+            Want::Data(recorded) => (
+                format!("Where is {}?", files::name(Path::new(recorded))),
+                "data files (.zarr, .zarr.zip, .h5)",
+                Some(" ★ the recorded name"),
+                "use it",
+            ),
         };
-        let mut out = vec![
-            Line::from(Span::styled(format!(" {title}"), bold)),
-            Line::from(Span::styled(format!(" {}", shown(&self.dir)), hint())),
-        ];
+        let mut out = vec![Line::from(Span::styled(format!(" {title}"), bold))];
+        if let Want::Data(recorded) = &self.want {
+            out.push(Line::from(Span::styled(
+                format!(" the run's data is recorded at {recorded}, which is not here;"),
+                hint(),
+            )));
+            out.push(Line::from(Span::styled(
+                " the file chosen is written into the run's manifest",
+                hint(),
+            )));
+        }
+        out.push(Line::from(Span::styled(
+            format!(" {}", shown(&self.dir)),
+            hint(),
+        )));
         if !self.filter.is_empty() {
             out.push(Line::from(format!(" names with “{}”", self.filter)));
         }
@@ -237,6 +266,7 @@ impl Browser {
                 Entry::Dir(n) => format!(" {n}/"),
                 Entry::Panel(n, p) => format!("{mark}{n:<width$}  {}", describe(p)),
                 Entry::Run(n, d) => format!(" {n:<width$}  {d}"),
+                Entry::Data(n) => format!("{mark}{n}"),
             };
             let style = if i == self.row {
                 selected()
@@ -283,7 +313,8 @@ fn describe(p: &Panel) -> String {
 }
 
 /// Folders (not hidden, not a `.zarr` store) and the wanted files, `..`
-/// first, folders before files, each group by name.
+/// first, folders before files, each group by name. Looking for data, a
+/// `.zarr` store is a file to choose.
 fn list_dir(dir: &Path, want: &Want) -> Vec<Entry> {
     let mut dirs = Vec::new();
     let mut found = Vec::new();
@@ -294,10 +325,15 @@ fn list_dir(dir: &Path, want: &Want) -> Vec<Entry> {
         if path.is_dir() {
             if !name.ends_with(".zarr") {
                 dirs.push(Entry::Dir(name));
+            } else if matches!(want, Want::Data(_)) {
+                found.push(Entry::Data(name));
             }
             continue;
         }
         let entry = match want {
+            // A name the data backends read (`.zarr.zip`, `.h5`).
+            Want::Data(_) => (data_beans::hdf5_io::strip_backend_suffix(&name) != name)
+                .then_some(Entry::Data(name)),
             Want::Panels(genes) => read_panel(&path, genes.as_ref()).map(|p| Entry::Panel(name, p)),
             Want::Runs => name
                 .ends_with(".senna.json")
@@ -569,5 +605,30 @@ mod tests {
             panic!("a run")
         };
         assert!(about.starts_with("svd · no layout yet"), "{about}");
+    }
+
+    #[test]
+    fn data_files_and_stores_are_offered_and_the_recorded_name_is_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::create_dir(d.join("rna.zarr")).unwrap();
+        std::fs::create_dir(d.join("sub")).unwrap();
+        for f in [
+            "a.zarr.zip",
+            "b.h5",
+            "c.h5ad",
+            "notes.txt",
+            "run.senna.json",
+        ] {
+            std::fs::write(d.join(f), b"").unwrap();
+        }
+        let b = Browser::open(
+            d.to_path_buf(),
+            Want::Data("/elsewhere/a.zarr.zip".into()),
+            None,
+        );
+        let names: Vec<&str> = b.shown().iter().map(|e| e.name()).collect();
+        assert_eq!(names, ["..", "sub", "a.zarr.zip", "b.h5", "rna.zarr"]);
+        assert_eq!(b.shown()[b.row].name(), "a.zarr.zip");
     }
 }

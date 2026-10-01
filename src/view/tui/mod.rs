@@ -12,6 +12,7 @@ mod draw;
 mod grid;
 mod help;
 mod input;
+mod locate;
 mod modal;
 mod recompute;
 mod relabel;
@@ -226,6 +227,9 @@ struct App {
     rescoring: Option<Rescore>,
     /// A short popup over the map (lupin answered), and when it goes.
     toast: Option<(String, std::time::Instant)>,
+    /// The run's data files as chosen so far while others are still
+    /// missing: recorded only once all are found and checked.
+    data_pending: Option<senna::run_manifest::RunData>,
     quit: bool,
 }
 
@@ -249,6 +253,7 @@ impl App {
             recomputing: None,
             rescoring: None,
             toast: None,
+            data_pending: None,
             modal: None,
             stamp: modified(&from),
             from,
@@ -283,7 +288,8 @@ impl App {
         let mut changed = self.finish_zoom()
             | self.finish_relabel()
             | self.finish_recompute()
-            | self.keep_scores_current();
+            | self.keep_scores_current()
+            | self.ask_missing_data(on_screen);
         // Not while drawing on screen: a reload would restart the picture;
         // nor while senna rewrites the run, which reloads when it is done.
         let idle = (!on_screen || self.job.is_none()) && self.recomputing.is_none();

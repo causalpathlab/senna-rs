@@ -63,13 +63,10 @@ fn write_xy(path: &str, names: &[Box<str>], coords: &Mat, row_label: &str) -> an
 /// interrupted embedding runs, a layout that ran on a projection instead of
 /// Z).
 pub(crate) fn read_coembedding(
-    manifest: Option<&RunManifest>,
-    manifest_path: Option<&PathBuf>,
+    m: &RunManifest,
+    mp: &Path,
     dims: usize,
 ) -> anyhow::Result<Option<(Vec<Box<str>>, Mat)>> {
-    let (Some(m), Some(mp)) = (manifest, manifest_path) else {
-        return Ok(None);
-    };
     if m.kind.cell_space() != CellSpace::Embedding {
         return Ok(None);
     }
@@ -79,6 +76,10 @@ pub(crate) fn read_coembedding(
     let path = run_manifest::resolve(manifest_dir(mp), rel)
         .to_string_lossy()
         .into_owned();
+    anyhow::ensure!(
+        Path::new(&path).exists(),
+        "the run's feature co-embedding is recorded at {path}, which is not here"
+    );
     let MatWithNames {
         rows: feature_names,
         mat: coembed_dh,
@@ -116,15 +117,20 @@ pub(crate) fn write_features_on_cells(
 /// embedding runs, or a layout that ran on a projection instead of Z).
 pub(crate) fn place_features_on_cells(
     args: &LayoutCommonArgs,
-    manifest: Option<&RunManifest>,
-    manifest_path: Option<&PathBuf>,
+    manifest: &RunManifest,
+    manifest_path: &Path,
     out: &str,
     method: &str,
     cell_feat_kn: &Mat,
     cell_coords: &Mat,
 ) -> anyhow::Result<Option<String>> {
+    // Features are extra here: without the co-embedding the cell layout
+    // still stands.
     let Some((feature_names, coembed_dh)) =
-        read_coembedding(manifest, manifest_path, cell_feat_kn.nrows())?
+        read_coembedding(manifest, manifest_path, cell_feat_kn.nrows()).unwrap_or_else(|e| {
+            log::warn!("{e}; features not placed");
+            None
+        })
     else {
         return Ok(None);
     };
@@ -212,19 +218,11 @@ pub(crate) fn read_feature_rows(
 pub(crate) fn load_feature_layout_input(
     args: &LayoutCommonArgs,
 ) -> anyhow::Result<FeatureLayoutInput> {
-    let from = args.from.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "--target features needs --from <run.senna.json> to find the feature embedding"
-        )
-    })?;
-    let manifest_path = PathBuf::from(from);
+    let manifest_path = PathBuf::from(args.from.as_ref());
     let (manifest, dir) = RunManifest::load(&manifest_path)?;
     let (names, rows) = read_feature_rows(&manifest, &dir, args.feature_space)?;
 
-    let out: String = args
-        .out
-        .as_deref()
-        .map_or_else(|| manifest.prefix.clone(), String::from);
+    let out = run_manifest::out_prefix(args.out.as_deref(), &args.from);
     mkdir_parent(&out)?;
 
     let feat_kn = rows.transpose();
@@ -264,27 +262,23 @@ pub(crate) fn write_feature_layout(
 /// Record a cell layout under `manifest.layout.methods[method]` and point the
 /// top-level slots at it. `written` holds the paths just written (as written;
 /// they are made manifest-relative here). A feature layout already recorded
-/// for the method is kept.
-///
-/// `pb_gene_mean` is advertised only from the gene-space recompute path: the
-/// fast path writes a projection-space file that `lupin annotate`
-/// (enrichment) would misread.
+/// for the method is kept. A `pb_gene_mean` recorded by an older senna is
+/// dropped: its PBs are not the new layout's.
 pub(crate) fn record_cell_layout(
     manifest: &mut RunManifest,
     manifest_path: &Path,
     method: &str,
     written: &LayoutEntry,
-    pb_gene_mean: Option<&str>,
 ) -> anyhow::Result<()> {
     let dir = manifest_dir(manifest_path);
     let rel = |p: &Option<String>| p.as_deref().map(|p| rel_to_manifest(dir, p));
 
     let layout = &mut manifest.layout;
     layout.cell_coords = rel(&written.cell_coords);
-    // DirectCells mode emits no pb_coords, so the slot is cleared; callers that
+    // A cell-level layout has no pb_coords, so the slot is cleared; callers that
     // need PB-level coords must branch on `kind`.
     layout.pb_coords = rel(&written.pb_coords);
-    layout.pb_gene_mean = pb_gene_mean.map(|p| rel_to_manifest(dir, p));
+    layout.pb_gene_mean = None;
     layout.current = Some(method.to_string());
 
     let prev = layout.methods.remove(method).unwrap_or_default();
@@ -385,12 +379,12 @@ mod tests {
             cell_coords: Some(p("r.phate.cell_coords.parquet")),
             ..Default::default()
         };
-        record_cell_layout(&mut m, &mp, "phate", &written, None).unwrap();
+        record_cell_layout(&mut m, &mp, "phate", &written).unwrap();
         let written = LayoutEntry {
             cell_coords: Some(p("r.umap.cell_coords.parquet")),
             ..Default::default()
         };
-        record_cell_layout(&mut m, &mp, "umap", &written, None).unwrap();
+        record_cell_layout(&mut m, &mp, "umap", &written).unwrap();
 
         let umap = &m.layout.methods["umap"];
         assert_eq!(
