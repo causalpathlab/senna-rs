@@ -30,6 +30,7 @@ path = "src/main.rs"
 default = ["view"]
 # `senna view`: terminal viewer for layouts, clusters and annotations.
 view = [
+    "dep:base64",
     "dep:ratatui",
     "dep:ratatui-image",
     "dep:image",
@@ -60,6 +61,7 @@ hsblock = { version = "0.1.1", package = "hsblock-rs" }
 enrichment = { version = "0.3.9", package = "legume-enrichment" }
 
 anyhow = "1.0"
+base64 = { version = "0.22", optional = true }
 ratatui = { version = "0.30", optional = true }
 ratatui-image = { version = "11.1", optional = true, default-features = false, features = ["crossterm"] }
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }

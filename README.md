@@ -6,6 +6,8 @@ Stochastic embedding with nearest-neighbourhood adjustment.
 
 Annotation, lineage, pseudotime, and plots live in [`lupin`](https://github.com/causalpathlab/legume-rs) (soon `lupin-rs`); layout/clustering stay here.
 
+**Set up fits in the terminal:** `senna run [DIR]` lets you pick data files and the batch labels of each, queue several methods (topic, masked-topic, masked-vae, masked-sbp, vae, svd, bge, simba, gem), and change any of their flags. Every flag comes with its help, and hidden ones show under `a`. `g` shows the exact commands, checked as senna parses them. They then run in turn with their log on screen, and `v` opens the results in `senna view`. Each command is saved first as `{out}.cmd.sh`, so `bash {out}.cmd.sh` runs it again. The script refuses to run over an existing `{out}.senna.json`, and `senna run` never writes over a script.
+
 ---
 
 # Stochastic data Embedding with Nearest Neighbourhood Adjustment

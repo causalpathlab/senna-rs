@@ -5,7 +5,6 @@
 //! every view. Every view's background work (a zoom, lupin, a reloaded file)
 //! goes on whichever is on screen.
 
-use super::draw::{hint, page, popup, selected, toast, At};
 use super::*;
 use crate::view::deck;
 use crate::view::pdf;

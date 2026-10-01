@@ -17,7 +17,7 @@ mod modal;
 mod recompute;
 mod relabel;
 
-pub use browse::{pick_run, shown};
+pub use browse::pick_run;
 use decisions::Prompt;
 use modal::Modal;
 
@@ -27,6 +27,7 @@ use super::files::{self, modified, same_file};
 use super::render::{Frame, Job, Viewport};
 use super::style::{swatches, Shape};
 use super::{Axis, Graphics, Pick, Scene};
+use crate::tui::style::{first_row, hint, page, popup, rgb, selected, toast, At};
 use image::DynamicImage;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -36,7 +37,7 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::DefaultTerminal;
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::picker::{Picker, ProtocolType};
@@ -48,10 +49,6 @@ use std::time::Duration;
 /// figures are saved unless a path is typed.
 fn here(prefix: &str) -> String {
     files::name(std::path::Path::new(prefix))
-}
-
-fn rgb(c: [u8; 3]) -> Color {
-    Color::Rgb(c[0], c[1], c[2])
 }
 
 /// Open one session per run and hand the terminal to them.

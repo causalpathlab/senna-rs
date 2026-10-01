@@ -133,9 +133,14 @@ impl App {
             popup(f, map, lines, 72, At::Middle, color::TEXT);
         }
 
-        if let Some(Modal::MarkersFile(b) | Modal::DataFile(b, _)) = &self.modal {
-            let rows = usize::from(map.height).saturating_sub(10).max(3);
-            popup(f, map, b.lines(rows), 100, At::Middle, color::TEXT);
+        let tall = usize::from(map.height).saturating_sub(2);
+        let browsing = match &self.modal {
+            Some(Modal::MarkersFile(b)) => Some(b.lines(tall)),
+            Some(Modal::DataFile(b, _)) => Some(b.lines(tall)),
+            _ => None,
+        };
+        if let Some(lines) = browsing {
+            popup(f, map, lines, 100, At::Middle, color::TEXT);
         }
 
         if self.help {
@@ -155,10 +160,7 @@ impl App {
         let r = map;
         let h = r.height;
         let list_rows = h.saturating_sub(chrome).max(1) as usize;
-        let first = menu
-            .row
-            .saturating_sub(list_rows / 2)
-            .min(levels.len().saturating_sub(list_rows));
+        let first = first_row(menu.row, list_rows, levels.len());
 
         let mut lines: Vec<Line> = Vec::new();
         for (g, level) in levels.iter().enumerate().skip(first).take(list_rows) {
@@ -224,68 +226,6 @@ impl App {
             r,
         );
     }
-}
-
-/// The page's colours: ink on the map's background.
-pub(super) fn page() -> Style {
-    Style::default()
-        .bg(rgb(color::BACKGROUND))
-        .fg(rgb(color::TEXT))
-}
-
-/// Key hints and other secondary lines: a step lighter than the text.
-pub(super) fn hint() -> Style {
-    Style::default().fg(rgb(color::HINT))
-}
-
-/// The line under a menu's cursor: a dark bar, so where you are is plain.
-pub(super) fn selected() -> Style {
-    Style::default()
-        .bg(rgb(color::TEXT))
-        .fg(rgb(color::BACKGROUND))
-        .add_modifier(ratatui::style::Modifier::BOLD)
-}
-
-/// Where a popup sits over its area.
-#[derive(Clone, Copy)]
-pub(super) enum At {
-    Top,
-    Middle,
-}
-
-/// A bordered popup of `lines` over `area`, at most `max_w` columns wide
-/// and as tall as its lines.
-pub(super) fn popup(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    lines: Vec<Line<'_>>,
-    max_w: u16,
-    at: At,
-    border: [u8; 3],
-) {
-    let w = max_w.min(area.width);
-    let h = (lines.len() as u16 + 2).min(area.height);
-    let y = match at {
-        At::Top => area.y + 1.min(area.height - h),
-        At::Middle => area.y + (area.height - h) / 2,
-    };
-    let r = Rect::new(area.x + (area.width - w) / 2, y, w, h);
-    f.render_widget(Clear, r);
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(Block::bordered().border_style(Style::default().fg(rgb(border))))
-            .style(page()),
-        r,
-    );
-}
-
-/// A one-line notice at the top of `area`: lupin answered, a file saved.
-pub(super) fn toast(f: &mut ratatui::Frame, area: Rect, text: &str) {
-    let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
-    let line = Line::from(Span::styled(text.to_string(), bold)).centered();
-    let w = text.chars().count() as u16 + 4;
-    popup(f, area, vec![line], w, At::Top, color::TEXT);
 }
 
 /// The sidebar's frame: one thin rule on the map side, nothing else.

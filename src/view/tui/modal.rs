@@ -1,8 +1,9 @@
 //! What is being typed in the status line: at most one at a time.
 
-use super::browse::Browser;
+use super::browse::{Missing, Panels};
 use super::help::Context;
 use super::*;
+use crate::tui::browse::Browser;
 
 pub(super) enum Modal {
     /// Feature search: the query and its current matches.
@@ -10,10 +11,10 @@ pub(super) enum Modal {
     /// A decision: its label, then its rationale.
     Prompt(Prompt),
     /// Browsing for the marker panel `lupin annotate` reads.
-    MarkersFile(Browser),
+    MarkersFile(Browser<Panels>),
     /// Browsing for a data file that is not where the manifest says: its
     /// place in `data.input`.
-    DataFile(Browser, usize),
+    DataFile(Browser<Missing>, usize),
     /// Submitting the relabel draft: one line per decision it hands lupin.
     Submit(Vec<String>),
     /// The `r` menu: what to recompute for the run.
