@@ -562,3 +562,43 @@ fn the_output_header_is_asked_first() {
     assert!(a.editor.is_none() && a.browser.is_some());
     assert!(a.rows.iter().all(|r| r.out.starts_with("exp1_")));
 }
+
+#[test]
+fn a_header_with_a_folder_makes_it_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut a = app(d);
+    a.set_header("results/exp1/");
+    assert!(d.join("results/exp1").is_dir());
+    assert!(a.message.as_deref().unwrap().contains("made results/exp1/"));
+    let svd = METHODS.iter().position(|m| *m == "svd").unwrap();
+    assert_eq!(a.rows[svd].out, "results/exp1/svd");
+
+    // A name after the folder: the folder is made, the name prefixes.
+    a.set_header("deep/a/b/run2");
+    assert!(d.join("deep/a/b").is_dir());
+    assert!(!d.join("deep/a/b/run2").exists());
+    assert_eq!(a.rows[svd].out, "deep/a/b/run2_svd");
+
+    // Again: already there.
+    a.set_header("deep/a/b/run3");
+    assert!(a
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("results go in deep/a/b/"));
+
+    // A file where the folder would be: the header stays as it was.
+    std::fs::write(d.join("taken"), "").unwrap();
+    a.set_header("taken/x");
+    assert_eq!(a.header, "deep/a/b/run3");
+    assert!(a.message.as_deref().unwrap().contains("not a folder"));
+}
+
+#[test]
+fn a_header_from_home_starts_there() {
+    let home = std::env::var("HOME").unwrap();
+    assert_eq!(super::home("~/res/x"), format!("{home}/res/x"));
+    assert_eq!(super::home("~"), format!("{home}/"));
+    assert_eq!(super::home("res/~x"), "res/~x");
+}

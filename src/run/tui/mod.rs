@@ -294,6 +294,38 @@ impl App {
         Ok(app)
     }
 
+    /// Take `text` as the output header, its folder made now: all of it
+    /// when it ends in `/`, else the part before its last `/`. `~/`
+    /// starts at home. A folder that is a file keeps the header as it was.
+    fn set_header(&mut self, text: &str) {
+        let header = home(text.trim());
+        let folder = match header.rfind('/') {
+            Some(at) => &header[..=at],
+            None => "",
+        };
+        if !folder.is_empty() {
+            // Without its last `/`, a file there reads as a file.
+            let at = self.here.join(folder.trim_end_matches('/'));
+            if at.exists() && !at.is_dir() {
+                let shown = self.shown(&at);
+                self.message = Some(format!("{shown} is a file, not a folder: header kept"));
+                return;
+            }
+            let made = !at.exists();
+            if let Err(e) = legume_numeric::matrix::common_io::mkdir(&at.to_string_lossy()) {
+                self.message = Some(format!("cannot make {folder}: {e}; header kept"));
+                return;
+            }
+            self.message = Some(if made {
+                format!("made {folder} for this run's results")
+            } else {
+                format!("results go in {folder}")
+            });
+        }
+        self.header = header;
+        self.refresh_outs();
+    }
+
     /// Every `--out` not typed by hand: under the output header, first
     /// free where the run writes.
     fn refresh_outs(&mut self) {
@@ -413,10 +445,7 @@ impl App {
                             r.typed = true;
                         }
                     }
-                    Target::Header => {
-                        self.header = text.trim().to_string();
-                        self.refresh_outs();
-                    }
+                    Target::Header => self.set_header(&text),
                     Target::Field(m, f) => {
                         let field = &mut self.rows[m].form.fields[f];
                         if text.trim().is_empty() && !field.default.is_empty() {
@@ -1193,6 +1222,21 @@ fn describe_mung(program: &Path) -> Result<clap::Command, String> {
     described::Description::parse(&String::from_utf8_lossy(&out.stdout))
         .map(|d| d.command())
         .map_err(|e| format!("{name} describe: {e}"))
+}
+
+/// `text` with a leading `~/` (or a lone `~`) as the home folder.
+fn home(text: &str) -> String {
+    let rest = match text {
+        "~" => "",
+        _ => match text.strip_prefix("~/") {
+            Some(rest) => rest,
+            None => return text.to_string(),
+        },
+    };
+    match std::env::var_os("HOME") {
+        Some(h) => format!("{}/{rest}", Path::new(&h).display()),
+        None => text.to_string(),
+    }
 }
 
 /// `stem` under the output header `header`: in it when it is a folder
