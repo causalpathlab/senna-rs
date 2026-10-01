@@ -66,10 +66,14 @@ mod probe;
 mod refine_weighting;
 mod resolve_embedding_space;
 mod resolve_topics;
+#[cfg(feature = "view")]
+mod run;
 mod simba;
 mod svd;
 mod topic;
 mod tree_layout;
+#[cfg(feature = "view")]
+mod tui;
 mod update;
 mod vae;
 #[cfg(feature = "view")]
@@ -161,7 +165,8 @@ fn print_logo() {
                   Clustering still needs its own --latent / --out.\n\
                   \n  \
                   1. Train embedding   senna topic | masked-topic | svd | bge | simba\n                       \
-                  senna joint-topic | joint-svd   (multi-modality)\n  \
+                  senna joint-topic | joint-svd   (multi-modality)\n                       \
+                  senna run   (choose data, methods and flags in the terminal)\n  \
                   2. Held-out inference senna predict            (apply trained model)\n  \
                   3. Cluster cells     senna clustering --from run.senna.json --latent L --out O\n  \
                   4. 2D layout         senna layout {phate|tsne|umap} --from run.senna.json\n\
@@ -807,6 +812,25 @@ enum Commands {
                       labels as text) and exits."
     )]
     View(view::ViewArgs),
+
+    #[cfg(feature = "view")]
+    #[command(
+        about = "Set up embedding fits in the terminal and run them.",
+        long_about = "Set up embedding fits in the terminal and run them.\n\
+                      \n\
+                      Pick the data files and the batch labels of each, queue one or\n\
+                      more of topic, masked-topic, masked-vae, masked-sbp, vae, svd,\n\
+                      bge, simba and gem, and change their flags. Every flag a method\n\
+                      has is listed with its help; hidden ones under `a`.\n\
+                      \n\
+                      `g` shows the exact commands, checked as senna would parse them,\n\
+                      and runs them in turn with their log on screen.\n\
+                      Each is saved first as `{out}.cmd.sh`: run it again with\n\
+                      `bash {out}.cmd.sh`. The script refuses to run over an existing\n\
+                      `{out}.senna.json`, and senna run never writes over a script.\n\
+                      When the fits finish, `v` opens them in `senna view`."
+    )]
+    Run(run::RunArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -935,6 +959,13 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "view")]
         Commands::View(args) => view::run_view(args)?,
+        #[cfg(feature = "view")]
+        Commands::Run(args) => {
+            use clap::CommandFactory;
+            let mut cli = Cli::command();
+            cli.build();
+            run::tui::run(cli, args.dir.clone())?;
+        }
     }
 
     info!("Done");

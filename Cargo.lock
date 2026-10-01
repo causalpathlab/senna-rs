@@ -4454,6 +4454,7 @@ name = "senna-rs"
 version = "0.19.10"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "colored",
  "dashmap",

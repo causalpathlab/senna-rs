@@ -3,6 +3,7 @@
 //! `lupin relabel --watch` on the same chain is followed via its status file.
 
 use super::files::{self, modified, read_json, same_file, siblings};
+use crate::tui::child::follow_log;
 use senna::run_manifest;
 use serde_json::Value;
 use std::io::Write;
@@ -280,27 +281,6 @@ pub fn annotate(
     })
 }
 
-/// Read a child's log (its stderr) to the end a line at a time, each line's
-/// "[time LEVEL module] " prefix trimmed (the message is what matters on a
-/// status line), handing every non-empty one to `each`. Returns the last.
-pub(crate) fn follow_log(log: Option<impl std::io::Read>, mut each: impl FnMut(&str)) -> String {
-    use std::io::BufRead;
-    let mut last = String::new();
-    if let Some(err) = log {
-        for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
-            let line = match line.trim().split_once("] ") {
-                Some((head, msg)) if head.starts_with('[') => msg.to_string(),
-                _ => line.trim().to_string(),
-            };
-            if !line.is_empty() {
-                each(&line);
-                last = line;
-            }
-        }
-    }
-    last
-}
-
 fn cannot_run(lupin: &str, e: &std::io::Error) -> String {
     format!("cannot run `{lupin}` ({e}); pass --lupin <path> or set SENNA_LUPIN")
 }
@@ -427,6 +407,7 @@ impl Decision {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

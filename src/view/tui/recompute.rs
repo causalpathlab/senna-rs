@@ -12,7 +12,7 @@ pub(super) struct Recomputing {
     /// The run being rewritten, reloaded when it is done.
     from: std::path::PathBuf,
     progress: std::sync::Arc<std::sync::Mutex<String>>,
-    stopper: std::sync::Arc<recompute::Stopper>,
+    stopper: std::sync::Arc<crate::tui::child::Stopper>,
     done: Pending<()>,
 }
 
@@ -116,7 +116,7 @@ impl App {
             .collect::<Vec<_>>()
             .join(", ");
         let progress: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
-        let stopper = std::sync::Arc::new(recompute::Stopper::default());
+        let stopper = std::sync::Arc::new(crate::tui::child::Stopper::default());
         let (shared, stops) = (progress.clone(), stopper.clone());
         let done = Pending::spawn(move || recompute::run(&target, &chosen, &shared, &stops));
         self.recomputing = Some(Recomputing {
@@ -204,7 +204,7 @@ impl App {
                 .map_or_else(String::new, |said| format!("‹ {said} ›"));
             // The cursor's line is a dark bar; chosen lines stand out in bold.
             let style = match (here, item.on) {
-                (true, _) => super::draw::selected(),
+                (true, _) => selected(),
                 (false, true) => bold,
                 (false, false) => Style::default(),
             };
@@ -214,7 +214,7 @@ impl App {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             " replaces those files of the run; the view reloads when done",
-            super::draw::hint(),
+            hint(),
         )));
         lines.push(Line::from(
             " ↑ ↓ move   space choose   ← → method or resolution   enter run   esc cancel",
@@ -230,7 +230,7 @@ mod tests {
     /// A view whose run senna is recomputing (a job that never answers).
     fn busy() -> (
         App,
-        std::sync::Arc<recompute::Stopper>,
+        std::sync::Arc<crate::tui::child::Stopper>,
         std::sync::mpsc::Sender<Result<(), String>>,
     ) {
         let mut app = App::new(
@@ -240,7 +240,7 @@ mod tests {
             "lupin".into(),
         );
         let (tx, rx) = std::sync::mpsc::channel();
-        let stopper = std::sync::Arc::new(recompute::Stopper::default());
+        let stopper = std::sync::Arc::new(crate::tui::child::Stopper::default());
         app.recomputing = Some(Recomputing {
             started: std::time::Instant::now(),
             what: "cell layout (umap)".into(),
