@@ -2,8 +2,9 @@
 //! is copied from another machine: the view asks where it is, then writes
 //! the answer into the manifest so every later reader finds it too.
 
-use super::browse::{Browser, Outcome, Want};
+use super::browse::Missing;
 use super::*;
+use crate::tui::browse::{Browser, Outcome};
 use crate::view::activity::Activity;
 use senna::run_manifest::{self, RunManifest};
 use std::path::{Component, Path, PathBuf};
@@ -31,7 +32,7 @@ impl App {
     fn ask_for_data(&mut self, index: usize, recorded: String) {
         let dir = start_dir(&self.from, &recorded);
         self.modal = Some(Modal::DataFile(
-            Browser::open(dir, Want::Data(recorded), None),
+            Browser::open(dir, Missing(recorded), None),
             index,
         ));
     }
@@ -43,8 +44,7 @@ impl App {
         };
         let index = *index;
         match b.key(k) {
-            // One data file is chosen here, never several.
-            Outcome::Ignored | Outcome::ChosenMany(_) => return false,
+            Outcome::Ignored => return false,
             Outcome::Moved => {}
             Outcome::Cancelled => {
                 self.modal = None;
@@ -55,9 +55,11 @@ impl App {
                         .into(),
                 );
             }
-            Outcome::Chosen(path, _) => {
+            Outcome::Chosen(paths) => {
                 self.modal = None;
-                self.use_data(&path, index);
+                if let Some(path) = paths.first() {
+                    self.use_data(path, index);
+                }
             }
         }
         true

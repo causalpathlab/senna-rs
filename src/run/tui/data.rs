@@ -1,7 +1,64 @@
 //! The data files a session embeds and the batch file of each.
 
-use crate::view::tui::browse::{is_batch, BATCH_ENDINGS};
+use crate::tui::browse::{is_data, size_of, Header, Wanted};
 use std::path::{Path, PathBuf};
+
+/// What `senna run` browses for: count backends to embed, or batch label
+/// files; several at once either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    Data,
+    Batch,
+}
+
+impl Wanted for Pick {
+    /// The file's size.
+    type About = String;
+
+    fn header(&self) -> Header {
+        let (title, what) = match self {
+            Pick::Data => ("Data to embed", "backends (.zarr, .zarr.zip, .h5)"),
+            Pick::Batch => (
+                "Batch labels, one file per data file",
+                "label files (.txt, .tsv, .csv, gzipped too)",
+            ),
+        };
+        Header {
+            title: title.into(),
+            notes: Vec::new(),
+            what,
+            star: None,
+            verb: "take",
+        }
+    }
+
+    fn file(&self, path: &Path, name: &str) -> Option<String> {
+        let wanted = match self {
+            Pick::Data => is_data(name),
+            Pick::Batch => is_batch(name),
+        };
+        wanted.then(|| size_of(path))
+    }
+
+    fn store(&self, _path: &Path, _name: &str) -> Option<String> {
+        (*self == Pick::Data).then(String::new)
+    }
+
+    fn describe(&self, size: &String) -> String {
+        size.clone()
+    }
+
+    fn many(&self) -> bool {
+        true
+    }
+}
+
+/// Endings of batch label files: plain or gzipped text.
+const BATCH_ENDINGS: &[&str] = &[".txt", ".tsv", ".csv", ".txt.gz", ".tsv.gz", ".csv.gz"];
+
+fn is_batch(name: &str) -> bool {
+    BATCH_ENDINGS.iter().any(|e| name.ends_with(e))
+}
 
 /// A data file and its batch labels.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +109,7 @@ pub fn describe(path: &Path) -> (String, Option<bool>) {
 /// A file name without the endings data and label files carry.
 #[must_use]
 pub fn stem(path: &Path) -> String {
-    let name = crate::view::files::name(path);
+    let name = crate::tui::name(path);
     let mut name = data_beans::hdf5_io::strip_backend_suffix(&name).to_string();
     while let Some(end) = BATCH_ENDINGS
         .iter()

@@ -1,20 +1,16 @@
-//! A file browser, one directory at a time: folders, and the files that are
-//! what is being looked for: marker panels for `lupin annotate`, runs for
-//! the view to open, or a run's data file that is not where it was recorded.
+//! What `senna view` browses for: marker panels for `lupin annotate`, runs
+//! to open, or a run's data file that is not where it was recorded. The
+//! browser itself is [`crate::tui::browse`].
 //!
 //! A marker panel shows how many of its genes the run has; the panel that
 //! covers the most is starred and chosen to begin with. A run shows its kind
 //! and layouts; the newest is chosen to begin with. A data file of the
 //! recorded name is chosen to begin with.
-//!
-//! For `senna run` it also lists count backends and batch label files, and
-//! space marks several to take at once.
 
-use super::draw::{hint, selected};
 use super::*;
+use crate::tui::browse::{is_data, Browser, Header, Outcome, Wanted};
 use data_beans::utilities::name_matching::GeneIndex;
 use senna::run_manifest::RunManifest;
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Files larger than this are not read as marker panels.
@@ -26,469 +22,135 @@ const NOT_PANELS: &[&str] = &[
     "parquet", "zarr", "zip", "h5", "h5ad", "json", "bam", "bai", "png", "pdf", "log",
 ];
 
-/// What the browser looks for.
-pub(crate) enum Want {
-    /// Marker panels, counted against the run's genes when known.
-    Panels(Option<GeneIndex>),
-    /// Run manifests (`*.senna.json`).
-    Runs,
-    /// A data file recorded at this path, which is not there.
-    Data(String),
-    /// Count backends (`.zarr`, `.zarr.zip`, `.h5`) to embed, several at
-    /// once.
-    Counts,
-    /// Batch label files (one label per line), several at once.
-    Batch,
-}
-
-impl Want {
-    /// Whether space marks several files to take together.
-    fn many(&self) -> bool {
-        matches!(self, Want::Counts | Want::Batch)
-    }
-}
-
-/// Endings of batch label files: plain or gzipped text.
-pub(crate) const BATCH_ENDINGS: &[&str] =
-    &[".txt", ".tsv", ".csv", ".txt.gz", ".tsv.gz", ".csv.gz"];
-
-/// Whether `name` is one of the backends senna reads.
-pub(crate) fn is_data(name: &str) -> bool {
-    data_beans::hdf5_io::strip_backend_suffix(name) != name
-}
-
-pub(crate) fn is_batch(name: &str) -> bool {
-    BATCH_ENDINGS.iter().any(|e| name.ends_with(e))
-}
+/// Marker panels, counted against the run's genes when known.
+pub(super) struct Panels(pub Option<GeneIndex>);
 
 /// A marker panel's size, and how much of it this run can use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Panel {
+pub(super) struct Panel {
     pub types: usize,
     pub genes: usize,
     /// Genes this run has, when its feature names are known.
     pub found: Option<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Entry {
-    Up,
-    Dir(String),
-    Panel(String, Panel),
-    /// A run: its name and a one-line description.
-    Run(String, String),
-    /// A data file or store.
-    Data(String),
-    /// A data or batch file to take with others: its name and size.
-    File(String, String),
-}
+impl Wanted for Panels {
+    type About = Panel;
 
-impl Entry {
-    fn name(&self) -> &str {
-        match self {
-            Entry::Up => "..",
-            Entry::Dir(n)
-            | Entry::Panel(n, _)
-            | Entry::Run(n, _)
-            | Entry::Data(n)
-            | Entry::File(n, _) => n,
+    fn header(&self) -> Header {
+        Header {
+            title: "Marker panel for lupin annotate".into(),
+            notes: Vec::new(),
+            what: "marker panels (gene, cell type per line)",
+            star: Some(" ★ covers the most of this run's genes"),
+            verb: "annotate",
         }
     }
 
-    fn is_file(&self) -> bool {
-        matches!(
-            self,
-            Entry::Panel(..) | Entry::Run(..) | Entry::Data(_) | Entry::File(..)
-        )
-    }
-}
-
-/// What a key did in the browser.
-pub(crate) enum Outcome {
-    /// Not a browser key.
-    Ignored,
-    Moved,
-    Cancelled,
-    /// A file was chosen.
-    Chosen(PathBuf, Entry),
-    /// Files taken together: the marked ones, or the one under the cursor.
-    ChosenMany(Vec<PathBuf>),
-}
-
-pub(crate) struct Browser {
-    pub dir: PathBuf,
-    pub want: Want,
-    entries: Vec<Entry>,
-    /// Typed letters narrow the list to names containing them.
-    pub filter: String,
-    /// Position among the shown entries.
-    pub row: usize,
-    /// The file chosen to begin with: the best panel, or the newest run.
-    best: Option<String>,
-    /// Files marked with space, in any folder.
-    pub marked: BTreeSet<PathBuf>,
-}
-
-impl Browser {
-    pub(crate) fn open(dir: PathBuf, want: Want, select: Option<&str>) -> Self {
-        let mut b = Browser {
-            dir,
-            want,
-            entries: Vec::new(),
-            filter: String::new(),
-            row: 0,
-            best: None,
-            marked: BTreeSet::new(),
-        };
-        b.read(select);
-        b
+    fn file(&self, path: &Path, _name: &str) -> Option<Panel> {
+        read_panel(path, self.0.as_ref())
     }
 
-    /// Read the current directory; the cursor goes to `select` if it is
-    /// listed, else to the best file, else to the first entry after `..`.
-    fn read(&mut self, select: Option<&str>) {
-        self.entries = list_dir(&self.dir, &self.want);
-        self.best = match self.want {
-            Want::Panels(_) => best_panel(&self.entries),
-            Want::Runs => newest(&self.dir, &self.entries),
-            Want::Data(ref recorded) => {
-                let name = files::name(Path::new(recorded));
-                self.entries
-                    .iter()
-                    .any(|e| matches!(e, Entry::Data(n) if *n == name))
-                    .then_some(name)
-            }
-            Want::Counts | Want::Batch => None,
-        };
-        self.filter.clear();
-        let want = select.map(str::to_string).or_else(|| self.best.clone());
-        self.row = want
-            .and_then(|w| self.shown().iter().position(|e| e.name() == w))
-            .unwrap_or(usize::from(self.shown().len() > 1));
+    /// `12 types · 340 genes · 301 in this run (89%)`.
+    fn describe(&self, p: &Panel) -> String {
+        let mut s = format!(
+            "{} type{} · {} genes",
+            p.types,
+            if p.types == 1 { "" } else { "s" },
+            p.genes
+        );
+        if let Some(found) = p.found {
+            let pct = 100 * found / p.genes.max(1);
+            s.push_str(&format!(" · {found} in this run ({pct}%)"));
+        }
+        s
     }
 
-    /// The entries the filter lets through, `..` always first. Hidden ones
-    /// only when the filter starts with `.`.
-    pub fn shown(&self) -> Vec<&Entry> {
-        let f = self.filter.to_lowercase();
-        let hidden = f.starts_with('.');
-        self.entries
+    /// The panel with the most genes in this run; with no feature names,
+    /// the one with the most genes. Single-type files do not count:
+    /// annotation needs types to choose between.
+    fn best(&self, _dir: &Path, files: &[(&str, &Panel)]) -> Option<String> {
+        files
             .iter()
-            .filter(|e| {
-                matches!(e, Entry::Up)
-                    || ((hidden || !e.name().starts_with('.'))
-                        && e.name().to_lowercase().contains(&f))
-            })
-            .collect()
+            .filter(|(_, p)| p.types > 1)
+            .map(|(n, p)| (p.found.unwrap_or(p.genes), *n))
+            .max_by(|(a, x), (b, y)| a.cmp(b).then_with(|| y.len().cmp(&x.len())))
+            .filter(|(score, _)| *score > 0)
+            .map(|(_, n)| n.to_string())
     }
+}
 
-    fn go_up(&mut self) {
-        let from = files::name(&self.dir);
-        if let Some(parent) = self.dir.parent().map(Path::to_path_buf) {
-            self.dir = parent;
-            self.read(Some(&from));
-        }
-    }
+/// Run manifests (`*.senna.json`).
+pub(super) struct Runs;
 
-    /// A key: move, open a folder, narrow, cancel, or choose a file.
-    pub fn key(&mut self, k: KeyEvent) -> Outcome {
-        let n = self.shown().len();
-        let last = n.saturating_sub(1);
-        if self.want.many() {
-            if let Some(o) = self.mark_key(k) {
-                return o;
-            }
-        }
-        match k.code {
-            KeyCode::Esc => return Outcome::Cancelled,
-            KeyCode::Up => self.row = self.row.saturating_sub(1),
-            KeyCode::Down => self.row = (self.row + 1).min(last),
-            KeyCode::PageUp => self.row = self.row.saturating_sub(10),
-            KeyCode::PageDown => self.row = (self.row + 10).min(last),
-            KeyCode::Home => self.row = 0,
-            KeyCode::End => self.row = last,
-            KeyCode::Left => self.go_up(),
-            KeyCode::Backspace => {
-                if self.filter.pop().is_none() {
-                    self.go_up();
-                } else {
-                    self.row = usize::from(self.shown().len() > 1);
-                }
-            }
-            KeyCode::Char('~') if self.filter.is_empty() => {
-                if let Ok(home) = std::env::var("HOME") {
-                    self.dir = PathBuf::from(home);
-                    self.read(None);
-                }
-            }
-            KeyCode::Enter | KeyCode::Right => {
-                let Some(entry) = self.shown().get(self.row).map(|e| (*e).clone()) else {
-                    return Outcome::Ignored;
-                };
-                match entry {
-                    Entry::Up => self.go_up(),
-                    Entry::Dir(name) => {
-                        self.dir.push(name);
-                        self.read(None);
-                    }
-                    e if k.code == KeyCode::Enter => {
-                        return Outcome::Chosen(self.dir.join(e.name()), e);
-                    }
-                    _ => return Outcome::Ignored,
-                }
-            }
-            KeyCode::Char(c) => {
-                let on = self.shown().get(self.row).map(|e| e.name().to_string());
-                self.filter.push(c);
-                let shown = self.shown();
-                // Stay where the cursor was if it still shows, else on the
-                // best file, else on the first entry after `..`.
-                let at = |name: &str| shown.iter().position(|e| e.name() == name);
-                self.row = on
-                    .as_deref()
-                    .filter(|n| *n != "..")
-                    .and_then(at)
-                    .or_else(|| self.best.as_deref().and_then(at))
-                    .unwrap_or(usize::from(shown.len() > 1));
-            }
-            _ => return Outcome::Ignored,
-        }
-        Outcome::Moved
-    }
+impl Wanted for Runs {
+    /// `bge · umap, phate · annotated`.
+    type About = String;
 
-    /// The file under the cursor, if it is on one.
-    fn file_here(&self) -> Option<PathBuf> {
-        let e = self
-            .shown()
-            .get(self.row)
-            .copied()
-            .filter(|e| e.is_file())?;
-        Some(self.dir.join(e.name()))
-    }
-
-    /// Space marks or unmarks the file under the cursor and moves on;
-    /// ctrl-a marks every file shown; enter takes the marked files.
-    fn mark_key(&mut self, k: KeyEvent) -> Option<Outcome> {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        match k.code {
-            KeyCode::Char(' ') => {
-                if let Some(path) = self.file_here() {
-                    if !self.marked.remove(&path) {
-                        self.marked.insert(path);
-                    }
-                    self.row = (self.row + 1).min(self.shown().len().saturating_sub(1));
-                }
-                Some(Outcome::Moved)
-            }
-            KeyCode::Char('a') if ctrl => {
-                let files: Vec<PathBuf> = self
-                    .shown()
-                    .iter()
-                    .filter(|e| e.is_file())
-                    .map(|e| self.dir.join(e.name()))
-                    .collect();
-                self.marked.extend(files);
-                Some(Outcome::Moved)
-            }
-            // On a file enter takes the marked ones, or this one when none
-            // is; on a folder it still opens it, so files marked here and
-            // there can be taken together.
-            KeyCode::Enter => {
-                let here = self.file_here()?;
-                let mut taken: Vec<PathBuf> =
-                    std::mem::take(&mut self.marked).into_iter().collect();
-                if taken.is_empty() {
-                    taken.push(here);
-                }
-                Some(Outcome::ChosenMany(taken))
-            }
-            _ => None,
+    fn header(&self) -> Header {
+        Header {
+            title: "Run to view".into(),
+            notes: Vec::new(),
+            what: "runs (*.senna.json)",
+            star: None,
+            verb: "open",
         }
     }
 
-    /// The lines of the popup, `rows` entries tall at most.
-    pub fn lines(&self, rows: usize) -> Vec<Line<'static>> {
-        let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
-        let (title, what, star, none) = match &self.want {
-            Want::Panels(_) => (
-                "Marker panel for lupin annotate".to_string(),
-                "marker panels (gene, cell type per line)",
-                Some(" ★ covers the most of this run's genes"),
-                "annotate",
-            ),
-            Want::Runs => ("Run to view".into(), "runs (*.senna.json)", None, "open"),
-            Want::Data(recorded) => (
-                format!("Where is {}?", files::name(Path::new(recorded))),
-                "data files (.zarr, .zarr.zip, .h5)",
-                Some(" ★ the recorded name"),
-                "use it",
-            ),
-            Want::Counts => (
-                "Data to embed".into(),
-                "backends (.zarr, .zarr.zip, .h5)",
-                None,
-                "take",
-            ),
-            Want::Batch => (
-                "Batch labels, one file per data file".into(),
-                "label files (.txt, .tsv, .csv, gzipped too)",
-                None,
-                "take",
-            ),
-        };
-        let mut out = vec![Line::from(Span::styled(format!(" {title}"), bold))];
-        if let Want::Data(recorded) = &self.want {
-            out.push(Line::from(Span::styled(
-                format!(" the run's data is recorded at {recorded}, which is not here;"),
-                hint(),
-            )));
-            out.push(Line::from(Span::styled(
-                " the file chosen is written into the run's manifest",
-                hint(),
-            )));
-        }
-        out.push(Line::from(Span::styled(
-            format!(" {}", shown(&self.dir)),
-            hint(),
-        )));
-        if !self.filter.is_empty() {
-            out.push(Line::from(format!(" names with “{}”", self.filter)));
-        }
-        out.push(Line::from(""));
-        let shown = self.shown();
-        let first = super::draw::first_row(self.row, rows, shown.len());
-        let width = shown
+    fn file(&self, path: &Path, name: &str) -> Option<String> {
+        name.ends_with(".senna.json").then(|| describe_run(path))
+    }
+
+    fn describe(&self, about: &String) -> String {
+        about.clone()
+    }
+
+    /// The most recently written run here.
+    fn best(&self, dir: &Path, files: &[(&str, &String)]) -> Option<String> {
+        files
             .iter()
-            .map(|e| e.name().chars().count() + 1)
-            .max()
-            .unwrap_or(0)
-            .min(36);
-        for (i, e) in shown.iter().enumerate().skip(first).take(rows) {
-            let mark = if star.is_some() && self.best.as_deref() == Some(e.name()) {
-                "★"
-            } else {
-                " "
-            };
-            let text = match e {
-                Entry::Up => " ../".to_string(),
-                Entry::Dir(n) => format!(" {n}/"),
-                Entry::Panel(n, p) => format!("{mark}{n:<width$}  {}", describe(p)),
-                Entry::Run(n, d) => format!(" {n:<width$}  {d}"),
-                Entry::Data(n) => format!("{mark}{n}"),
-                Entry::File(n, d) => {
-                    let mark = if self.marked.contains(&self.dir.join(n)) {
-                        "●"
-                    } else {
-                        " "
-                    };
-                    format!("{mark}{n:<width$}  {d}")
-                }
-            };
-            let style = if i == self.row {
-                selected()
-            } else if e.is_file() {
-                Style::default()
-            } else {
-                hint()
-            };
-            out.push(Line::from(Span::styled(text, style)));
-        }
-        if !shown.iter().any(|e| e.is_file()) {
-            out.push(Line::from(Span::styled(
-                format!("  no {what} here"),
-                hint(),
-            )));
-        }
-        out.push(Line::from(""));
-        if let (Some(s), Some(_)) = (star, &self.best) {
-            out.push(Line::from(Span::styled(s, hint())));
-        }
-        if self.want.many() {
-            if !self.marked.is_empty() {
-                out.push(Line::from(format!(" {} marked", self.marked.len())));
-            }
-            out.push(Line::from(Span::styled(
-                " space mark   ctrl-a mark all shown   enter take marked (or the one here)",
-                hint(),
-            )));
-        }
-        out.push(Line::from(Span::styled(
-            format!(
-                " ↑ ↓ choose   enter open / {none}   ← or backspace up   type to narrow   ~ home   esc cancel"
-            ),
-            hint(),
-        )));
-        out
+            .max_by_key(|(n, _)| files::modified(&dir.join(n)))
+            .map(|(n, _)| n.to_string())
     }
 }
 
-/// `12 types · 340 genes · 301 in this run (89%)`.
-fn describe(p: &Panel) -> String {
-    let mut s = format!(
-        "{} type{} · {} genes",
-        p.types,
-        if p.types == 1 { "" } else { "s" },
-        p.genes
-    );
-    if let Some(found) = p.found {
-        let pct = 100 * found / p.genes.max(1);
-        s.push_str(&format!(" · {found} in this run ({pct}%)"));
-    }
-    s
-}
+/// A data file recorded at this path, which is not there.
+pub(super) struct Missing(pub String);
 
-/// Folders (not hidden, not a `.zarr` store) and the wanted files, `..`
-/// first, folders before files, each group by name. Looking for data, a
-/// `.zarr` store is a file to choose.
-fn list_dir(dir: &Path, want: &Want) -> Vec<Entry> {
-    let mut dirs = Vec::new();
-    let mut found = Vec::new();
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        // Hidden entries are kept; `shown` lists them only on request.
-        let name = e.file_name().to_string_lossy().into_owned();
-        let path = e.path();
-        if path.is_dir() {
-            if !name.ends_with(".zarr") {
-                dirs.push(Entry::Dir(name));
-            } else if matches!(want, Want::Data(_)) {
-                found.push(Entry::Data(name));
-            } else if matches!(want, Want::Counts) {
-                found.push(Entry::File(name, String::new()));
-            }
-            continue;
+impl Wanted for Missing {
+    type About = ();
+
+    fn header(&self) -> Header {
+        Header {
+            title: format!("Where is {}?", files::name(Path::new(&self.0))),
+            notes: vec![
+                format!(
+                    "the run's data is recorded at {}, which is not here;",
+                    self.0
+                ),
+                "the file chosen is written into the run's manifest".into(),
+            ],
+            what: "data files (.zarr, .zarr.zip, .h5)",
+            star: Some(" ★ the recorded name"),
+            verb: "use it",
         }
-        let entry = match want {
-            // A name the data backends read (`.zarr.zip`, `.h5`).
-            Want::Data(_) => is_data(&name).then_some(Entry::Data(name)),
-            Want::Panels(genes) => read_panel(&path, genes.as_ref()).map(|p| Entry::Panel(name, p)),
-            Want::Runs => name
-                .ends_with(".senna.json")
-                .then(|| Entry::Run(name, describe_run(&path))),
-            Want::Counts => is_data(&name).then(|| Entry::File(name, size_of(&path))),
-            Want::Batch => is_batch(&name).then(|| Entry::File(name, size_of(&path))),
-        };
-        found.extend(entry);
     }
-    dirs.sort_by(|a, b| a.name().cmp(b.name()));
-    found.sort_by(|a, b| a.name().cmp(b.name()));
-    let mut out = vec![Entry::Up];
-    out.extend(dirs);
-    out.extend(found);
-    out
-}
 
-/// A file's size, `12.3 MB`.
-fn size_of(path: &Path) -> String {
-    let bytes = std::fs::metadata(path).map_or(0, |m| m.len()) as f64;
-    let (v, unit) = [("kB", 1e3), ("MB", 1e6), ("GB", 1e9)]
-        .iter()
-        .rev()
-        .find(|(_, s)| bytes >= *s)
-        .map_or((bytes, "B"), |(u, s)| (bytes / s, *u));
-    if unit == "B" {
-        format!("{v:.0} B")
-    } else {
-        format!("{v:.1} {unit}")
+    fn file(&self, _path: &Path, name: &str) -> Option<()> {
+        is_data(name).then_some(())
+    }
+
+    fn store(&self, _path: &Path, _name: &str) -> Option<()> {
+        Some(())
+    }
+
+    fn describe(&self, (): &()) -> String {
+        String::new()
+    }
+
+    fn best(&self, _dir: &Path, files: &[(&str, &())]) -> Option<String> {
+        let name = files::name(Path::new(&self.0));
+        files.iter().any(|(n, _)| *n == name).then_some(name)
     }
 }
 
@@ -510,30 +172,6 @@ fn describe_run(path: &Path) -> String {
         }
         Err(_) => "does not read as a run".into(),
     }
-}
-
-/// The panel with the most genes in this run; with no feature names, the
-/// one with the most genes. Single-type files do not count: annotation
-/// needs types to choose between.
-fn best_panel(entries: &[Entry]) -> Option<String> {
-    entries
-        .iter()
-        .filter_map(|e| match e {
-            Entry::Panel(n, p) if p.types > 1 => Some((p.found.unwrap_or(p.genes), n)),
-            _ => None,
-        })
-        .max_by(|(a, x), (b, y)| a.cmp(b).then_with(|| y.len().cmp(&x.len())))
-        .filter(|(score, _)| *score > 0)
-        .map(|(_, n)| n.clone())
-}
-
-/// The most recently written run here.
-fn newest(dir: &Path, entries: &[Entry]) -> Option<String> {
-    entries
-        .iter()
-        .filter(|e| matches!(e, Entry::Run(..)))
-        .max_by_key(|e| files::modified(&dir.join(e.name())))
-        .map(|e| e.name().to_string())
 }
 
 /// `path` as a marker panel: `gene<TAB>type` or `gene,type` lines, read as
@@ -594,31 +232,20 @@ fn read_panel(path: &Path, genes: Option<&GeneIndex>) -> Option<Panel> {
     })
 }
 
-/// A path as shown: relative to the working directory when it is under it.
-pub fn shown(p: &Path) -> String {
-    std::env::current_dir()
-        .ok()
-        .and_then(|cwd| p.strip_prefix(cwd).ok().map(Path::to_path_buf))
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| p.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
-
 /// Browse for a run before the view opens: the browser alone, full screen.
 /// `None` when cancelled.
 pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
     let here = std::env::current_dir()?;
-    let mut b = Browser::open(here, Want::Runs, None);
+    let mut b = Browser::open(here, Runs, None);
     let level = log::max_level();
     log::set_max_level(log::LevelFilter::Off);
     let mut terminal = ratatui::init();
     let picked = (|| loop {
         terminal.draw(|f| {
             let area = f.area();
-            f.render_widget(Block::default().style(draw::page()), area);
+            f.render_widget(Block::default().style(page()), area);
             let rows = usize::from(area.height).saturating_sub(10).max(3);
-            draw::popup(f, area, b.lines(rows), 110, draw::At::Middle, color::TEXT);
+            popup(f, area, b.lines(rows), 110, At::Middle, color::TEXT);
         })?;
         if let Event::Key(k) = event::read()? {
             if k.kind == KeyEventKind::Release {
@@ -629,8 +256,8 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
             }
             match b.key(k) {
                 Outcome::Cancelled => return Ok(None),
-                Outcome::Chosen(path, _) => return Ok(Some(path)),
-                Outcome::Moved | Outcome::Ignored | Outcome::ChosenMany(_) => {}
+                Outcome::Chosen(paths) => return Ok(paths.into_iter().next()),
+                Outcome::Moved | Outcome::Ignored => {}
             }
         }
     })();
@@ -642,6 +269,7 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::browse::{list_dir, Entry};
 
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::write(dir.join(name), body).unwrap();
@@ -654,24 +282,23 @@ mod tests {
         write(
             d,
             "small.tsv",
-            "gene\tcelltype\nCD3E\tT cell\nCD8A\tT_cell\nMS4A1\tB\nNOPE\tB\n",
+            "gene\tcelltype\nGENE1\tCT1 a\nGENE2\tCT1_a\nGENE3\tCT2\nNOPE\tCT2\n",
         );
         write(
             d,
             "wide.csv",
-            "CD3E,T cell\nCD8A,T cell\nMS4A1,B cell\nLYZ,Mono\n",
+            "GENE1,CT1 a\nGENE2,CT1 a\nGENE3,CT2 b\nGENE4,CT3\n",
         );
-        write(d, "one.tsv", "CD3E\tT\nCD8A\tT\nLYZ\tT\n");
+        write(d, "one.tsv", "GENE1\tCT1\nGENE2\tCT1\nGENE4\tCT1\n");
         write(d, "table.tsv", "a\t1\nb\t2\nc\t3\n");
-        write(d, "run.log", "CD3E\tT\nLYZ\tB\n");
-        write(d, "mouse.tsv", "Cd3e_x\tT\nLyz2_x\tB\n");
+        write(d, "run.log", "GENE1\tCT1\nGENE4\tCT2\n");
+        write(d, "other.tsv", "Gene1_x\tCT1\nGene4_x\tCT2\n");
         std::fs::create_dir(d.join("data.zarr")).unwrap();
         std::fs::create_dir(d.join("sub")).unwrap();
         std::fs::create_dir(d.join(".hidden")).unwrap();
 
-        let names: Vec<Box<str>> = ["CD3E", "CD8A", "MS4A1", "LYZ"].map(Box::from).to_vec();
-        let genes = GeneIndex::build(&names);
-        let want = Want::Panels(Some(genes));
+        let names: Vec<Box<str>> = ["GENE1", "GENE2", "GENE3", "GENE4"].map(Box::from).to_vec();
+        let want = Panels(Some(GeneIndex::build(&names)));
         let entries = list_dir(d, &want);
         let listed: Vec<&str> = entries.iter().map(Entry::name).collect();
         assert_eq!(
@@ -680,7 +307,7 @@ mod tests {
         );
         assert_eq!(
             entries[4],
-            Entry::Panel(
+            Entry::File(
                 "small.tsv".into(),
                 Panel {
                     types: 2,
@@ -690,43 +317,8 @@ mod tests {
             )
         );
         // `one.tsv` finds as many genes but names a single type.
-        assert_eq!(best_panel(&entries).as_deref(), Some("wide.csv"));
-
-        let mut b = Browser::open(d.to_path_buf(), want, None);
-        assert_eq!(b.shown()[b.row].name(), "wide.csv");
-        // Hidden entries show only when asked for with a leading `.`.
-        assert!(b.shown().iter().all(|e| e.name() != ".hidden"));
-        b.filter.push('.');
-        assert!(b.shown().iter().any(|e| e.name() == ".hidden"));
-    }
-
-    #[test]
-    fn enter_on_a_folder_opens_it_with_files_marked() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "a.h5", "");
-        std::fs::create_dir(dir.path().join("more")).unwrap();
-        write(&dir.path().join("more"), "b.h5", "");
-        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
-        let mut b = Browser::open(dir.path().to_path_buf(), Want::Counts, None);
-        let shown = |b: &Browser| {
-            b.shown()
-                .iter()
-                .map(|e| e.name().to_string())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(shown(&b), ["..", "more", "a.h5"]);
-        b.row = 2;
-        b.key(key(KeyCode::Char(' ')));
-        b.row = 1;
-        assert!(matches!(b.key(key(KeyCode::Enter)), Outcome::Moved));
-        assert_eq!(b.dir, dir.path().join("more"));
-        b.row = 1;
-        b.key(key(KeyCode::Char(' ')));
-        b.row = 1;
-        let Outcome::ChosenMany(got) = b.key(key(KeyCode::Enter)) else {
-            panic!("enter on a file takes the marked ones");
-        };
-        assert_eq!(got, [dir.path().join("a.h5"), dir.path().join("more/b.h5")]);
+        let b = Browser::open(d.to_path_buf(), want, None);
+        assert_eq!(b.current().map(Entry::name), Some("wide.csv"));
     }
 
     #[test]
@@ -734,19 +326,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         std::fs::create_dir(d.join("panels")).unwrap();
-        write(&d.join("panels"), "immune.tsv", "CD3E\tT\nMS4A1\tB\n");
-        write(d, "other.tsv", "CD3E\tT\nMS4A1\tB\n");
+        write(&d.join("panels"), "set.tsv", "GENE1\tCT1\nGENE3\tCT2\n");
+        write(d, "other.tsv", "GENE1\tCT1\nGENE3\tCT2\n");
 
-        let mut b = Browser::open(d.to_path_buf(), Want::Panels(None), None);
+        let mut b = Browser::open(d.to_path_buf(), Panels(None), None);
         b.filter.push_str("pan");
         let names: Vec<&str> = b.shown().iter().map(|e| e.name()).collect();
         assert_eq!(names, ["..", "panels"]);
 
         b.dir.push("panels");
         b.read(None);
-        assert_eq!(b.shown()[b.row].name(), "immune.tsv");
+        assert_eq!(b.current().map(Entry::name), Some("set.tsv"));
         b.go_up();
-        assert_eq!(b.shown()[b.row].name(), "panels");
+        assert_eq!(b.current().map(Entry::name), Some("panels"));
     }
 
     #[test]
@@ -767,13 +359,13 @@ mod tests {
             f.set_modified(at(secs)).unwrap();
         }
         write(d, "c.pinto.json", "{}");
-        write(d, "markers.tsv", "CD3E\tT\nMS4A1\tB\n");
+        write(d, "markers.tsv", "GENE1\tCT1\nGENE3\tCT2\n");
 
-        let b = Browser::open(d.to_path_buf(), Want::Runs, None);
+        let b = Browser::open(d.to_path_buf(), Runs, None);
         let names: Vec<&str> = b.shown().iter().map(|e| e.name()).collect();
         assert_eq!(names, ["..", "a.senna.json", "b.senna.json"]);
-        assert_eq!(b.shown()[b.row].name(), "b.senna.json");
-        let Entry::Run(_, about) = b.shown()[1] else {
+        assert_eq!(b.current().map(Entry::name), Some("b.senna.json"));
+        let Entry::File(_, about) = b.shown()[1] else {
             panic!("a run")
         };
         assert!(about.starts_with("svd · no layout yet"), "{about}");
@@ -796,11 +388,11 @@ mod tests {
         }
         let b = Browser::open(
             d.to_path_buf(),
-            Want::Data("/elsewhere/a.zarr.zip".into()),
+            Missing("/elsewhere/a.zarr.zip".into()),
             None,
         );
         let names: Vec<&str> = b.shown().iter().map(|e| e.name()).collect();
         assert_eq!(names, ["..", "sub", "a.zarr.zip", "b.h5", "rna.zarr"]);
-        assert_eq!(b.shown()[b.row].name(), "a.zarr.zip");
+        assert_eq!(b.current().map(Entry::name), Some("a.zarr.zip"));
     }
 }

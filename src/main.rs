@@ -72,6 +72,8 @@ mod simba;
 mod svd;
 mod topic;
 mod tree_layout;
+#[cfg(feature = "view")]
+mod tui;
 mod update;
 mod vae;
 #[cfg(feature = "view")]

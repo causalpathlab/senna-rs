@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use super::script;
-use crate::view::recompute::{run_one, Failed, Stopper};
+use crate::tui::child::{run_one, Failed, Stopper};
 
 /// Log lines kept for the screen.
 const KEEP: usize = 2000;
@@ -168,11 +168,7 @@ fn run_job(
     say(
         s,
         i,
-        format!(
-            "── {} · {}",
-            job.method,
-            crate::view::tui::shown(&job.script())
-        ),
+        format!("── {} · {}", job.method, crate::tui::shown(&job.script())),
     );
     let mut command = Command::new(program);
     command.args(&job.argv).current_dir(&job.dir);

@@ -6,16 +6,10 @@
 
 pub type Rgb = [f32; 3];
 
-/// Page background: a warm light gray.
-pub const BACKGROUND: [u8; 3] = [246, 245, 242];
-/// Points with no group, and points outside the focused group.
-pub const MUTED: [u8; 3] = [200, 199, 196];
+/// The page, its text and points with no group: shared with `senna run`.
+pub use crate::tui::style::{BACKGROUND, MUTED, TEXT};
 /// Text drawn on the map (labels, titles).
 pub const INK: [u8; 3] = [92, 92, 92];
-/// Menus, popups and the status line: near-black, to read at a glance.
-pub const TEXT: [u8; 3] = [30, 30, 32];
-/// Key hints and other secondary lines beside `TEXT`: lighter, still clear.
-pub const HINT: [u8; 3] = [104, 104, 104];
 
 #[must_use]
 pub fn srgb_to_linear(c: u8) -> f32 {
@@ -161,6 +155,7 @@ mod tests {
 
     #[test]
     fn menu_text_and_hints_read_clearly_on_the_page() {
+        use crate::tui::style::HINT;
         assert!(
             contrast(TEXT, BACKGROUND) >= 7.0,
             "{}",

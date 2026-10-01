@@ -3,6 +3,7 @@
 //! `lupin relabel --watch` on the same chain is followed via its status file.
 
 use super::files::{self, modified, read_json, same_file, siblings};
+use crate::tui::child::follow_log;
 use senna::run_manifest;
 use serde_json::Value;
 use std::io::Write;
@@ -280,53 +281,6 @@ pub fn annotate(
     })
 }
 
-/// Read a child's log (its stderr) to the end a line at a time, handing
-/// every non-empty one to `each` as [`log_line`] trims it. A progress bar's
-/// `\r` redraws count as lines of their own. Returns the last.
-pub(crate) fn follow_log(log: Option<impl std::io::Read>, mut each: impl FnMut(&str)) -> String {
-    use std::io::BufRead;
-    let mut last = String::new();
-    if let Some(err) = log {
-        let mut r = std::io::BufReader::new(err);
-        let mut buf = Vec::new();
-        while r.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
-            for part in String::from_utf8_lossy(&buf).split('\r') {
-                let line = log_line(part);
-                if !line.is_empty() {
-                    each(&line);
-                    last = line;
-                }
-            }
-            buf.clear();
-        }
-    }
-    last
-}
-
-/// A log line without terminal colours or its "[time LEVEL module] "
-/// prefix: the message is what matters on a status line.
-pub(crate) fn log_line(line: &str) -> String {
-    let mut plain = String::with_capacity(line.len());
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            plain.push(c);
-        } else if chars.next() == Some('[') {
-            // A CSI sequence runs to its final byte.
-            for c in chars.by_ref() {
-                if ('@'..='~').contains(&c) {
-                    break;
-                }
-            }
-        }
-    }
-    let t = plain.trim();
-    match t.split_once("] ") {
-        Some((head, msg)) if head.starts_with('[') => msg.trim().to_string(),
-        _ => t.to_string(),
-    }
-}
-
 fn cannot_run(lupin: &str, e: &std::io::Error) -> String {
     format!("cannot run `{lupin}` ({e}); pass --lupin <path> or set SENNA_LUPIN")
 }
@@ -454,16 +408,6 @@ impl Decision {
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn log_lines_lose_their_lead_colours_and_redraws() {
-        assert_eq!(log_line("[2026-01-01 INFO senna] fitting"), "fitting");
-        assert_eq!(log_line("\u{1b}[32mok\u{1b}[0m  "), "ok");
-        let mut seen = Vec::new();
-        let log = "step 1\rstep 2\n[t INFO x] done\n".as_bytes();
-        let last = follow_log(Some(log), |l| seen.push(l.to_string()));
-        assert_eq!(seen, ["step 1", "step 2", "done"]);
-        assert_eq!(last, "done");
-    }
     use super::*;
 
     #[test]

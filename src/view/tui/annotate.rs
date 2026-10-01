@@ -1,8 +1,9 @@
 //! A first annotation from the view: browse to a marker panel, then run
 //! `lupin annotate` on this run and open the round it writes.
 
-use super::browse::{Browser, Entry, Outcome, Want};
+use super::browse::Panels;
 use super::*;
+use crate::tui::browse::{Browser, Entry, Outcome};
 use crate::view::decide;
 use data_beans::utilities::name_matching::GeneIndex;
 use std::path::{Path, PathBuf};
@@ -36,7 +37,7 @@ impl App {
         let select = guess.as_deref().map(files::name);
         self.modal = Some(Modal::MarkersFile(Browser::open(
             dir,
-            Want::Panels(genes),
+            Panels(genes),
             select.as_deref(),
         )));
     }
@@ -54,20 +55,23 @@ impl App {
             return false;
         };
         match b.key(k) {
-            // Panels are taken one at a time.
-            Outcome::Ignored | Outcome::ChosenMany(_) => return false,
+            Outcome::Ignored => return false,
             Outcome::Moved => {}
             Outcome::Cancelled => {
                 self.modal = None;
                 self.message = Some("annotation cancelled".into());
             }
-            Outcome::Chosen(_, Entry::Panel(name, p)) if p.types < 2 => {
-                self.message = Some(format!("{name} names one cell type; lupin needs several"));
-            }
-            Outcome::Chosen(path, _) => {
-                self.modal = None;
-                self.run_annotate(path);
-            }
+            Outcome::Chosen(paths) => match b.current() {
+                Some(Entry::File(name, p)) if p.types < 2 => {
+                    self.message = Some(format!("{name} names one cell type; lupin needs several"));
+                }
+                _ => {
+                    self.modal = None;
+                    if let Some(path) = paths.into_iter().next() {
+                        self.run_annotate(path);
+                    }
+                }
+            },
         }
         true
     }

@@ -2,7 +2,8 @@
 //! clusterings, missing ones on open and chosen ones from the `r` menu. One
 //! place builds the commands, so both run the same thing.
 
-use std::process::{Command, Stdio};
+use crate::tui::child::{run_one, Failed, Stopper};
+use std::process::Command;
 
 /// Leiden resolutions the menu steps through for a clustering, 1 (the
 /// clustering default) in the middle; higher gives more clusters.
@@ -283,30 +284,6 @@ impl Menu {
     }
 }
 
-/// Stops a running recompute: the step running is killed, and none after
-/// it starts.
-#[derive(Default)]
-pub(crate) struct Stopper {
-    stopped: std::sync::atomic::AtomicBool,
-    child: std::sync::Mutex<Option<std::process::Child>>,
-}
-
-impl Stopper {
-    pub fn stop(&self) {
-        self.stopped
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Ok(mut c) = self.child.lock() {
-            if let Some(c) = c.as_mut() {
-                let _ = c.kill();
-            }
-        }
-    }
-
-    pub fn is_stopped(&self) -> bool {
-        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
 /// Run each chosen step as `senna …` in turn, its latest log line in
 /// `progress`. Stops at the first that fails, with that step and its last
 /// line, or when `stopper` is stopped.
@@ -352,57 +329,6 @@ fn run_commands(
         }
     }
     Ok(())
-}
-
-/// Why [`run_one`] did not finish well.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Failed {
-    /// `stopper` was stopped.
-    Stopped,
-    /// The command did not start.
-    Start(String),
-    /// It ended badly: the reason it gave last.
-    Exit(String),
-}
-
-/// Run `command` to its end where `stopper` can kill it, each line of its
-/// log (its stderr) to `each`.
-pub(crate) fn run_one(
-    mut command: Command,
-    stopper: &Stopper,
-    each: impl FnMut(&str),
-) -> Result<(), Failed> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Failed::Start(format!("cannot run senna: {e}")))?;
-    let log = child.stderr.take();
-    // Where `stop` can reach it; stopped meanwhile, it goes at once.
-    if let Ok(mut c) = stopper.child.lock() {
-        *c = Some(child);
-    }
-    if stopper.is_stopped() {
-        stopper.stop();
-    }
-    let last = crate::view::decide::follow_log(log, each);
-    let status = stopper
-        .child
-        .lock()
-        .ok()
-        .and_then(|mut c| c.take())
-        .map(|mut c| c.wait());
-    if stopper.is_stopped() {
-        return Err(Failed::Stopped);
-    }
-    match status {
-        Some(Ok(s)) if s.success() => Ok(()),
-        Some(Err(e)) => Err(Failed::Exit(e.to_string())),
-        _ => Err(Failed::Exit(
-            last.strip_prefix("Error: ").unwrap_or(&last).to_string(),
-        )),
-    }
 }
 
 #[cfg(test)]

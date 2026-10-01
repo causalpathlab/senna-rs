@@ -8,8 +8,9 @@ mod form;
 mod jobs;
 mod script;
 
-use crate::view::tui::browse::{Browser, Outcome, Want};
+use crate::tui::browse::{Browser, Outcome};
 use data::Pair;
+use data::Pick;
 use form::{Field, Kind, Method};
 use jobs::{Job, Queue};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -91,7 +92,7 @@ pub(crate) struct App {
     screen: Screen,
     pairs: Vec<Pair>,
     pair_row: usize,
-    browser: Option<Browser>,
+    browser: Option<Browser<Pick>>,
     /// Where the browser opens next.
     browse_dir: PathBuf,
     rows: Vec<Row>,
@@ -196,7 +197,7 @@ impl App {
             screen: Screen::Data,
             pairs: Vec::new(),
             pair_row: 0,
-            browser: Some(Browser::open(start.clone(), Want::Counts, None)),
+            browser: Some(Browser::open(start.clone(), Pick::Data, None)),
             browse_dir: start,
             rows,
             method_row: 0,
@@ -342,7 +343,7 @@ impl App {
 
     // ───────────── the file browser ─────────────
 
-    fn browse(&mut self, want: Want) {
+    fn browse(&mut self, want: Pick) {
         self.browser = Some(Browser::open(self.browse_dir.clone(), want, None));
     }
 
@@ -353,15 +354,14 @@ impl App {
         let paths = match b.key(k) {
             Outcome::Ignored | Outcome::Moved => return,
             Outcome::Cancelled => Vec::new(),
-            Outcome::Chosen(path, _) => vec![path],
-            Outcome::ChosenMany(paths) => paths,
+            Outcome::Chosen(paths) => paths,
         };
         let Some(b) = self.browser.take() else { return };
         self.browse_dir = b.dir;
         if paths.is_empty() {
             return;
         }
-        if matches!(b.want, Want::Batch) {
+        if b.want == Pick::Batch {
             self.take_batches(&paths);
         } else {
             self.take_data(paths);
@@ -444,8 +444,8 @@ impl App {
         match k.code {
             KeyCode::Up => self.pair_row = self.pair_row.saturating_sub(1),
             KeyCode::Down => self.pair_row = (self.pair_row + 1).min(last),
-            KeyCode::Char('a') => self.browse(Want::Counts),
-            KeyCode::Char('b') if !self.pairs.is_empty() => self.browse(Want::Batch),
+            KeyCode::Char('a') => self.browse(Pick::Data),
+            KeyCode::Char('b') if !self.pairs.is_empty() => self.browse(Pick::Batch),
             KeyCode::Char('x') => {
                 if let Some(p) = self.pairs.get_mut(self.pair_row) {
                     p.batch = None;

@@ -3,20 +3,14 @@
 
 use super::jobs::State;
 use super::{App, Kind, Screen, Target};
-use crate::view::color;
-use crate::view::tui::draw::{first_row, hint, page, popup, selected, At};
-use crate::view::tui::rgb;
+use crate::tui::style::{bold, first_row, hint, page, popup, rgb, selected, At, MUTED, TEXT};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-fn bold() -> Style {
-    Style::default().add_modifier(Modifier::BOLD)
-}
-
 fn rule() -> Style {
-    Style::default().fg(rgb(color::MUTED))
+    Style::default().fg(rgb(MUTED))
 }
 
 /// A line too long for `w` columns, cut with an ellipsis.
@@ -55,17 +49,10 @@ impl App {
         f.render_widget(Paragraph::new(self.status()), status);
         if let Some(b) = &self.browser {
             let rows = usize::from(area.height).saturating_sub(12).max(3);
-            popup(f, area, b.lines(rows), 110, At::Middle, color::TEXT);
+            popup(f, area, b.lines(rows), 110, At::Middle, TEXT);
         } else if self.confirm.is_some() {
             let rows = usize::from(area.height).saturating_sub(4);
-            popup(
-                f,
-                area,
-                self.confirm_lines(rows),
-                120,
-                At::Middle,
-                color::TEXT,
-            );
+            popup(f, area, self.confirm_lines(rows), 120, At::Middle, TEXT);
         }
         if let Some(e) = &self.editor {
             let what = match e.target {
@@ -78,7 +65,7 @@ impl App {
                 Line::from(format!(" {}▏", e.text)),
                 Line::from(Span::styled(" enter keep   esc cancel", hint())),
             ];
-            popup(f, area, lines, 90, At::Middle, color::TEXT);
+            popup(f, area, lines, 90, At::Middle, TEXT);
         }
     }
 
