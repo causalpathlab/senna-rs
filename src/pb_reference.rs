@@ -14,7 +14,7 @@
 //! either, from `mu_adjusted` (falling back to `mu_observed` when a run had no
 //! batch structure), zero wherever the posterior has no data support. Columns
 //! a run itself carried in are the exception: the collapse keeps each in its
-//! own singleton finest group and [`write`] re-emits it from `mu_observed` —
+//! own singleton finest group and [`write()`] re-emits it from `mu_observed` —
 //! its stored, already-adjusted values back out — so the reference is
 //! **append-only**: it extends by the new data's groups each round and never
 //! re-averages what earlier rounds summarized. Three consequences:
@@ -97,7 +97,7 @@ pub struct PbReferenceMeta {
 /// files, so this cannot collide unless someone names a batch after it.
 pub const REFERENCE_BATCH: &str = "__pb_reference__";
 
-/// Column-name prefix for carried pseudobulks. Written by [`write`] and relied
+/// Column-name prefix for carried pseudobulks. Written by [`write()`] and relied
 /// on by [`weights_for`] to tell them from real cells, so the
 /// two must agree — hence one constant.
 pub const COLUMN_PREFIX: &str = "PBREF_";
@@ -338,7 +338,7 @@ pub fn write(
 ///
 /// `reference` is the carried input this run actually *loaded* (`None` on a
 /// fresh fit or an exact re-collapse) — its column count identifies the
-/// carried tail so [`write`] can pass those columns through instead of
+/// carried tail so [`write()`] can pass those columns through instead of
 /// re-summarizing them. It is deliberately separate from `parent`: an update
 /// without `--use-pb-reference` has a parent (for the generation counter) but
 /// no carried tail.
