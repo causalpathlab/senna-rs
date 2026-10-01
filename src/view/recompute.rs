@@ -2,7 +2,7 @@
 //! clusterings, missing ones on open and chosen ones from the `r` menu. One
 //! place builds the commands, so both run the same thing.
 
-use crate::tui::child::{run_one, Failed, Stopper};
+use crate::tui::child::{run_one, Failed, Said, Stopper};
 use std::process::Command;
 
 /// Leiden resolutions the menu steps through for a clustering, 1 (the
@@ -321,7 +321,12 @@ fn run_commands(
             return Err("stopped".into());
         }
         say(format!("{label}…"));
-        match run_one(command, stopper, |line| say(format!("{label}: {line}"))) {
+        let each = |said| {
+            if let Said::Line(line) = said {
+                say(format!("{label}: {line}"));
+            }
+        };
+        match run_one(command, stopper, each) {
             Ok(()) => {}
             Err(Failed::Stopped) => return Err("stopped".into()),
             Err(Failed::Start(why)) => return Err(why),

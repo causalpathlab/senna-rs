@@ -225,3 +225,23 @@ fn stopping_answers_the_question() {
     q.join();
     assert_eq!(q.states(), [State::Done, State::Stopped]);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_folder_not_there_yet_is_made_for_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let senna = fake(d, "s", "senna.json");
+    let into = d.join("results/exp1");
+    let q = Queue::start(vec![job(
+        &into,
+        Tool::Senna,
+        &senna,
+        "svd",
+        &["svd", "--out", "svd"],
+    )]);
+    wait(&q, Queue::finished);
+    assert_eq!(q.states(), [State::Done]);
+    assert!(into.join("svd.cmd.sh").exists());
+    assert!(into.join("svd.senna.json").exists());
+}

@@ -803,7 +803,7 @@ enum Commands {
                       \n\
                       Switch between layout methods (umap / phate / tsne) and spaces:\n\
                       cells, features placed on the cell map, and features on their own.\n\
-                      Colour by annotation, clusters, topics or marker membership,\n\
+                      Colour by annotation, clusters, topics, batch or marker membership,\n\
                       focus one group, zoom and pan. Uses kitty / sixel / iTerm2 images\n\
                       when the terminal supports them, block characters otherwise.\n\
                       \n\
@@ -822,7 +822,7 @@ enum Commands {
                       bge, simba and gem, and change their flags. Every flag a method\n\
                       has is listed with its help; hidden ones under `a`.\n\
                       \n\
-                      `g` shows the exact commands, checked as senna would parse them,\n\
+                      `G` shows the exact commands, checked as senna would parse them,\n\
                       and runs them in turn with their log on screen.\n\
                       Each is saved first as `{out}.cmd.sh`: run it again with\n\
                       `bash {out}.cmd.sh`. The script refuses to run over an existing\n\

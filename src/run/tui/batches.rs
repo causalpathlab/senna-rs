@@ -201,9 +201,7 @@ pub fn files(
 
 /// Write `w`, never over an existing file.
 pub fn write(w: &Written) -> anyhow::Result<()> {
-    if let Some(dir) = w.path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
+    legume_numeric::matrix::common_io::mkdir_parent(&w.path.to_string_lossy())?;
     let f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

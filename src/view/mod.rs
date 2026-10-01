@@ -72,7 +72,7 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        help = "Start on this grouping (annotation, cluster, topic, markers)"
+        help = "Start on this grouping (annotation, cluster, topic, batch, markers)"
     )]
     pub colour_by: Option<Box<str>>,
 
