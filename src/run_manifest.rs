@@ -797,7 +797,7 @@ pub struct RunOutputs {
     pub pb_tree: Option<String>,
     /// `{out}.feature_contrast.parquet` — `senna gem` only: one row per
     /// gene-and-modality, the H-space RAW-loading delta between that
-    /// modality's two channel tracks (see [`crate::gem::contrast`]). `None`
+    /// modality's two channel tracks (see `gem::contrast` in the binary). `None`
     /// for every other kind, and for an interrupted gem run whose `after_fit`
     /// hook never ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -826,7 +826,7 @@ pub struct RunOutputs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackEncoderSlot {
     /// The track's name, `{modality}/{channel}` (e.g. `"count/unspliced"`),
-    /// exactly as [`crate::gem::tracks::assign_tracks`] names it. The
+    /// exactly as `gem::tracks::assign_tracks` names it. The
     /// numeric track id is deliberately NOT stored here: it depends on
     /// which tracks a particular axis carries and in what order, which only
     /// the loader's own re-derived axis knows.
