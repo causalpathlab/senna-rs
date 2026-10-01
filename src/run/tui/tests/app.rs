@@ -202,9 +202,9 @@ fn enter_on_a_problem_goes_to_the_flag_clap_blamed() {
     let svd = METHODS.iter().position(|m| *m == "svd").unwrap();
     a.rows[svd].on = true;
     a.rows[svd].form.fields[0].value = "many".into();
-    key(&mut a, KeyCode::Char('g'));
+    key(&mut a, KeyCode::Char('G'));
     assert!(a.confirm.is_some());
-    key(&mut a, KeyCode::Enter);
+    key(&mut a, KeyCode::Char('G'));
     assert!(a.confirm.is_none() && a.queue.is_none());
     assert_eq!(a.screen, Screen::Params);
     assert_eq!(a.param_method, svd);

@@ -3,11 +3,29 @@
 
 use super::jobs::{State, Tool, CLONES_FLAG};
 use super::{batches, App, Batch, Kind, Screen, Target};
+use crate::tui::child::Progress;
 use crate::tui::style::{bold, first_row, hint, page, popup, rgb, selected, At, MUTED, TEXT};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+
+/// A progress bar `width` cells wide with its count and what it counts;
+/// a spinner, with no count, as what it is doing.
+fn gauge(p: &Progress, width: usize) -> String {
+    if p.len == 0 {
+        return format!("… {}", p.what);
+    }
+    let filled = (width as u64 * p.pos.min(p.len) / p.len) as usize;
+    format!(
+        "{}{} {}/{} {}",
+        "█".repeat(filled),
+        "░".repeat(width - filled),
+        p.pos,
+        p.len,
+        p.what
+    )
+}
 
 fn rule() -> Style {
     Style::default().fg(rgb(MUTED))
@@ -122,7 +140,7 @@ impl App {
             Screen::Data => "a add data   n name the batch   b label files (several: paired by name)   e rename labels   x own name   X all own   d remove   J K reorder",
             Screen::Methods => "space queue   enter flags   o change --out",
             Screen::Params => "space / enter change   ← → choices   r reset   R reset all   a advanced   / filter   [ ] method",
-            Screen::Run => "s stop   v open the results in senna view",
+            Screen::Run => "↑ ↓ PgUp PgDn scroll the log   End follow it   s stop   v open the results in senna view",
         };
         vec![
             Line::from(Span::styled(
@@ -131,7 +149,7 @@ impl App {
             )),
             Line::from(Span::styled(format!(" {keys}"), hint())),
             Line::from(Span::styled(
-                " tab / 1-4 screens   g review and run   q quit",
+                " tab / 1-4 screens   G review and run   q quit",
                 hint(),
             )),
         ]
@@ -459,41 +477,81 @@ impl App {
     fn draw_run(&self, f: &mut ratatui::Frame, area: Rect) {
         let Some(q) = &self.queue else { return };
         let rows = usize::from(area.height).saturating_sub(q.jobs.len() + 3);
+        self.log_rows.set(rows);
         // Copied out, so the worker writing the log is not held up.
-        let (states, last, finished, log) = {
+        let (states, last, progress, finished, log, top) = {
             let Ok(s) = q.shared.lock() else { return };
-            let skip = s.log.len().saturating_sub(rows);
-            let log: Vec<String> = s.log.iter().skip(skip).cloned().collect();
-            (s.states.clone(), s.last.clone(), s.finished, log)
+            let end = s.dropped + s.log.len();
+            // Followed to its end, or from the line scrolled to.
+            let top = self.log_top.map_or(end.saturating_sub(rows), |t| {
+                t.clamp(s.dropped, end.saturating_sub(rows).max(s.dropped))
+            });
+            let log: Vec<String> = s
+                .log
+                .iter()
+                .skip(top - s.dropped)
+                .take(rows)
+                .cloned()
+                .collect();
+            let at_end = top + rows >= end;
+            (
+                s.states.clone(),
+                s.last.clone(),
+                s.progress.clone(),
+                s.finished,
+                log,
+                (top, end, at_end),
+            )
         };
         let w = usize::from(area.width);
-        let mut lines = vec![
-            Line::from(Span::styled(
-                if finished {
-                    "Finished"
-                } else {
-                    "Running, one after another"
-                },
-                bold(),
-            )),
-            Line::from(""),
-        ];
-        for ((j, state), last) in q.jobs.iter().zip(&states).zip(&last) {
+        let done = states
+            .iter()
+            .filter(|s| !matches!(s, State::Waiting | State::Running))
+            .count();
+        let head = if finished {
+            "Finished".to_string()
+        } else {
+            let at = states
+                .iter()
+                .position(|s| *s == State::Running)
+                .map_or(done, |i| i + 1);
+            format!("Running {at} of {}, one after another", states.len())
+        };
+        let mut lines = vec![Line::from(Span::styled(head, bold())), Line::from("")];
+        for (((j, state), last), progress) in q.jobs.iter().zip(&states).zip(&last).zip(&progress) {
+            let name = format!(
+                " {:<13} {:<24} ",
+                j.method,
+                fit(&self.shown(&j.result()), 24)
+            );
             let (said, style) = match state {
                 State::Waiting => ("waiting".to_string(), hint()),
-                State::Running => (format!("running  {last}"), bold()),
+                State::Running => match progress {
+                    Some(p) => (gauge(p, 24), bold()),
+                    None => (format!("running  {last}"), bold()),
+                },
                 State::Done => ("done".to_string(), Style::default()),
                 State::Failed(why) => (format!("failed: {why}"), bold()),
                 State::Stopped => ("stopped".to_string(), hint()),
             };
-            let text = format!(
-                " {:<13} {:<24} {said}",
-                j.method,
-                fit(&self.shown(&j.result()), 24)
-            );
-            lines.push(Line::from(Span::styled(fit(&text, w), style)));
+            lines.push(Line::from(Span::styled(
+                fit(&format!("{name}{said}"), w),
+                style,
+            )));
         }
-        lines.push(Line::from(""));
+        let (top, end, at_end) = top;
+        lines.push(Line::from(Span::styled(
+            if at_end {
+                String::new()
+            } else {
+                format!(
+                    " ── lines {}-{} of {end}; End follows the log",
+                    top + 1,
+                    top + log.len()
+                )
+            },
+            hint(),
+        )));
         lines.extend(
             log.iter()
                 .map(|l| Line::from(Span::styled(fit(l, w), hint()))),
@@ -601,9 +659,9 @@ impl App {
         out.extend(body.into_iter().skip(skip).take(room));
         out.push(Line::from(Span::styled(
             if blocked {
-                " enter go to the problem   c copy   ↑ ↓ scroll   esc back"
+                " G go to the problem   c copy   ↑ ↓ scroll   esc back"
             } else {
-                " enter run   c copy the commands   ↑ ↓ scroll   esc back"
+                " G run   c copy the commands   ↑ ↓ scroll   esc back"
             },
             hint(),
         )));

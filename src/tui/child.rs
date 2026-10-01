@@ -1,5 +1,10 @@
-//! The senna and lupin processes a terminal front end starts: run one to
-//! its end where it can be stopped, and follow its log a line at a time.
+//! The senna, mung and lupin processes a terminal front end starts: run
+//! one to its end where it can be stopped, and follow its log a line at a
+//! time.
+//!
+//! A child's stderr is a pseudo-terminal where there is one, so the
+//! progress bars it draws (indicatif hides them from a pipe) reach us:
+//! each frame becomes a [`Progress`], the rest are lines of its log.
 
 use std::process::{Command, Stdio};
 
@@ -38,23 +43,93 @@ pub(crate) enum Failed {
     Exit(String),
 }
 
-/// Run `command` to its end where `stopper` can kill it, each line of its
-/// log (its stderr) to `each`.
+/// What a child said on its stderr.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Said {
+    /// A line of its log.
+    Line(String),
+    /// A frame of a progress bar.
+    Progress(Progress),
+}
+
+/// Where a progress bar stands: `pos` of `len` (0 for a spinner), and
+/// what it counts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Progress {
+    pub pos: u64,
+    pub len: u64,
+    pub what: String,
+}
+
+/// The columns a child's terminal has: wide enough that a bar and its
+/// label are not cut.
+#[cfg(unix)]
+const COLUMNS: u16 = 160;
+
+/// A pseudo-terminal: our end to read, and the child's to write its
+/// stderr to.
+#[cfg(unix)]
+fn terminal() -> std::io::Result<(std::fs::File, std::os::fd::OwnedFd)> {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::io::{fcntl_setfd, FdFlags};
+    use rustix::pty::{grantpt, openpt, ptsname, unlockpt, OpenptFlags};
+    let ours = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+    fcntl_setfd(&ours, FdFlags::CLOEXEC)?;
+    grantpt(&ours)?;
+    unlockpt(&ours)?;
+    let name = ptsname(&ours, Vec::new())?;
+    let theirs = rustix::fs::open(
+        name.as_c_str(),
+        OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    rustix::termios::tcsetwinsize(
+        &theirs,
+        rustix::termios::Winsize {
+            ws_row: 50,
+            ws_col: COLUMNS,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    )?;
+    Ok((std::fs::File::from(ours), theirs))
+}
+
+/// Where the child writes its stderr, and how we read it: a terminal
+/// where we can make one, else a pipe.
+fn stderr_for(command: &mut Command) -> Option<std::fs::File> {
+    #[cfg(unix)]
+    if let Ok((ours, theirs)) = terminal() {
+        command.stderr(Stdio::from(theirs));
+        return Some(ours);
+    }
+    command.stderr(Stdio::piped());
+    None
+}
+
+/// Run `command` to its end where `stopper` can kill it, what it says on
+/// its stderr to `each`.
 pub(crate) fn run_one(
     mut command: Command,
     stopper: &Stopper,
-    each: impl FnMut(&str),
+    each: impl FnMut(Said),
 ) -> Result<(), Failed> {
+    let program = super::name(std::path::Path::new(command.get_program()));
+    let terminal = stderr_for(&mut command);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| {
-            let program = super::name(std::path::Path::new(command.get_program()));
-            Failed::Start(format!("cannot run {program}: {e}"))
-        })?;
-    let log = child.stderr.take();
+        .map_err(|e| Failed::Start(format!("cannot run {program}: {e}")))?;
+    // Our copy of the child's end closes, so its end is the end of the log.
+    drop(command);
+    let log: Option<Box<dyn std::io::Read + Send>> = match terminal {
+        Some(t) => Some(Box::new(t)),
+        None => child
+            .stderr
+            .take()
+            .map(|e| Box::new(e) as Box<dyn std::io::Read + Send>),
+    };
     // Where `stop` can reach it; stopped meanwhile, it goes at once.
     if let Ok(mut c) = stopper.child.lock() {
         *c = Some(child);
@@ -62,7 +137,7 @@ pub(crate) fn run_one(
     if stopper.is_stopped() {
         stopper.stop();
     }
-    let last = follow_log(log, each);
+    let last = follow(log, each);
     let status = stopper
         .child
         .lock()
@@ -81,27 +156,91 @@ pub(crate) fn run_one(
     }
 }
 
-/// Read a child's log (its stderr) to the end a line at a time, handing
-/// every non-empty one to `each` as [`log_line`] trims it. A progress bar's
-/// `\r` redraws count as lines of their own. Returns the last.
-pub(crate) fn follow_log(log: Option<impl std::io::Read>, mut each: impl FnMut(&str)) -> String {
-    use std::io::BufRead;
+/// Read a child's stderr to the end, in pieces split at `\r` and `\n`
+/// (a progress bar redraws after a `\r`, with no new line), each as
+/// [`log_line`] trims it: a bar frame as a [`Said::Progress`], anything
+/// else as a [`Said::Line`]. Returns the last line.
+pub(crate) fn follow(log: Option<impl std::io::Read>, mut each: impl FnMut(Said)) -> String {
     let mut last = String::new();
-    if let Some(err) = log {
-        let mut r = std::io::BufReader::new(err);
-        let mut buf = Vec::new();
-        while r.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
-            for part in String::from_utf8_lossy(&buf).split('\r') {
-                let line = log_line(part);
-                if !line.is_empty() {
-                    each(&line);
-                    last = line;
-                }
+    let Some(mut log) = log else {
+        return last;
+    };
+    let mut said = |piece: &[u8]| {
+        let line = log_line(&String::from_utf8_lossy(piece));
+        if line.is_empty() {
+            return;
+        }
+        match progress_of(&line) {
+            Some(p) => each(Said::Progress(p)),
+            None => {
+                last.clone_from(&line);
+                each(Said::Line(line));
             }
-            buf.clear();
+        }
+    };
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match log.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // A terminal whose child is gone reads as an error.
+            Err(_) => break,
+        };
+        for &b in &buf[..n] {
+            if b == b'\r' || b == b'\n' {
+                said(&pending);
+                pending.clear();
+            } else {
+                pending.push(b);
+            }
         }
     }
+    said(&pending);
     last
+}
+
+/// Read a child's log to the end a line at a time, every line to `each`;
+/// progress bars left out. Returns the last line.
+pub(crate) fn follow_log(log: Option<impl std::io::Read>, mut each: impl FnMut(&str)) -> String {
+    follow(log, |s| {
+        if let Said::Line(l) = s {
+            each(&l);
+        }
+    })
+}
+
+/// Frames of the spinners the workspace draws.
+const SPINNER: &str = "⠁⠂⠄⡀⢀⠠⠐⠈";
+
+/// A progress bar's frame, its elapsed time already gone: the bar of `#`
+/// and `-`, `pos/len`, the time left in brackets, then what it counts. A
+/// spinner's frame starts with one of its ticks.
+pub(crate) fn progress_of(line: &str) -> Option<Progress> {
+    let (head, rest) = line.split_once(char::is_whitespace)?;
+    if head.chars().all(|c| SPINNER.contains(c)) {
+        return Some(Progress {
+            what: rest.trim().to_string(),
+            ..Progress::default()
+        });
+    }
+    if !head.chars().all(|c| c == '#' || c == '-') {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (count, rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let (pos, len) = count.split_once('/')?;
+    let what = rest.trim_start();
+    let what = match what.strip_prefix('(') {
+        Some(w) => w.split_once(')').map_or("", |(_, after)| after),
+        None => what,
+    };
+    Some(Progress {
+        pos: pos.parse().ok()?,
+        len: len.parse().ok()?,
+        what: what.trim().to_string(),
+    })
 }
 
 /// A log line without terminal colours or its "[time LEVEL module] "

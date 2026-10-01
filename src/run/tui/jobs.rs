@@ -13,7 +13,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use super::script;
-use crate::tui::child::{run_one, Failed, Stopper};
+use crate::tui::child::{run_one, Failed, Progress, Said, Stopper};
 
 /// Log lines kept for the screen.
 const KEEP: usize = 2000;
@@ -142,8 +142,13 @@ pub enum State {
 pub struct Shared {
     pub states: Vec<State>,
     pub log: VecDeque<String>,
+    /// How many lines went off the front of `log`: the first kept is line
+    /// `dropped` of all.
+    pub dropped: usize,
     /// The last line each job wrote.
     pub last: Vec<String>,
+    /// Where each job's progress bar stands, while one is drawn.
+    pub progress: Vec<Option<Progress>>,
     pub finished: bool,
     /// What the `mung clones` step waiting for [`Queue::answer`] found.
     pub asking: Option<Told>,
@@ -168,6 +173,7 @@ impl Queue {
         let shared = Arc::new(Mutex::new(Shared {
             states: vec![State::Waiting; jobs.len()],
             last: vec![String::new(); jobs.len()],
+            progress: vec![None; jobs.len()],
             ..Shared::default()
         }));
         let stopper = Arc::new(Stopper::default());
@@ -300,6 +306,7 @@ fn say(s: &Mutex<Shared>, i: usize, line: String) {
     if let Ok(mut s) = s.lock() {
         if s.log.len() >= KEEP {
             s.log.pop_front();
+            s.dropped += 1;
         }
         s.last[i].clone_from(&line);
         s.log.push_back(line);
@@ -330,7 +337,19 @@ fn run_job(job: &Job, i: usize, s: &Mutex<Shared>, stopper: &Stopper) -> State {
     if std::env::var_os("RUST_LOG").is_none() {
         command.env("RUST_LOG", script::LOG_LEVEL);
     }
-    match run_one(command, stopper, |line| say(s, i, line.to_string())) {
+    let each = |said| match said {
+        Said::Line(line) => say(s, i, line),
+        Said::Progress(p) => {
+            if let Ok(mut s) = s.lock() {
+                s.progress[i] = Some(p);
+            }
+        }
+    };
+    let ran = run_one(command, stopper, each);
+    if let Ok(mut s) = s.lock() {
+        s.progress[i] = None;
+    }
+    match ran {
         Ok(()) => State::Done,
         Err(Failed::Stopped) => State::Stopped,
         Err(Failed::Start(why) | Failed::Exit(why)) => State::Failed(why),

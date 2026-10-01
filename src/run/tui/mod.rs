@@ -126,6 +126,11 @@ pub(crate) struct App {
     mung_program: PathBuf,
     /// How far the clones popup is scrolled.
     clones_scroll: usize,
+    /// The log line at the top of the Run screen's log, counted from the
+    /// first line of the run; `None` follows the newest.
+    log_top: Option<usize>,
+    /// How many log lines the Run screen shows, as last drawn.
+    log_rows: std::cell::Cell<usize>,
     here: PathBuf,
     screen: Screen,
     pairs: Vec<Pair>,
@@ -249,6 +254,8 @@ impl App {
             senna_program: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("senna")),
             mung_program: mung_program(),
             clones_scroll: 0,
+            log_top: None,
+            log_rows: std::cell::Cell::new(0),
             here,
             screen: Screen::Data,
             pairs: Vec::new(),
@@ -340,7 +347,7 @@ impl App {
                     self.screen = *s;
                 }
             }
-            KeyCode::Char('g') => self.open_confirm(),
+            KeyCode::Char('G') => self.open_confirm(),
             KeyCode::Char('q') => {
                 if self.running() {
                     self.message =
@@ -947,7 +954,8 @@ impl App {
                     Err(e) => format!("cannot copy: {e}"),
                 });
             }
-            KeyCode::Enter => {
+            // The key that opened the review runs it.
+            KeyCode::Char('G') => {
                 let Some(planned) = self.confirm.take() else {
                     return;
                 };
@@ -1025,7 +1033,7 @@ impl App {
                 self.clones_scroll += 1;
                 return;
             }
-            KeyCode::Char('y') | KeyCode::Enter => Keep::Use,
+            KeyCode::Char('y') => Keep::Use,
             KeyCode::Char('n') => Keep::Without,
             KeyCode::Char('s') => Keep::Stop,
             _ => return,
@@ -1044,7 +1052,14 @@ impl App {
     }
 
     fn run_key(&mut self, k: KeyEvent) {
+        let page = self.log_rows.get().max(1);
         match k.code {
+            KeyCode::Up => self.scroll_log(-1),
+            KeyCode::Down => self.scroll_log(1),
+            KeyCode::PageUp => self.scroll_log(-(page as isize)),
+            KeyCode::PageDown => self.scroll_log(page as isize),
+            KeyCode::Home => self.log_top = Some(0),
+            KeyCode::End => self.log_top = None,
             KeyCode::Char('s') => {
                 if let Some(q) = &self.queue {
                     q.stop();
@@ -1064,6 +1079,21 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Move the Run screen's log by `d` lines; at its end it follows the
+    /// newest again.
+    fn scroll_log(&mut self, d: isize) {
+        let Some(q) = &self.queue else { return };
+        let (first, end) = q
+            .shared
+            .lock()
+            .map(|s| (s.dropped, s.dropped + s.log.len()))
+            .unwrap_or_default();
+        let last_top = end.saturating_sub(self.log_rows.get()).max(first);
+        let top = self.log_top.unwrap_or(last_top).clamp(first, last_top);
+        let top = top.saturating_add_signed(d).clamp(first, last_top);
+        self.log_top = (top < last_top).then_some(top);
     }
 
     /// What is printed once the terminal is given back: each script.
