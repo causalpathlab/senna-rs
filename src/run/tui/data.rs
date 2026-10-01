@@ -1,6 +1,7 @@
 //! The data files a session embeds and the batch file of each.
 
 use crate::tui::browse::{is_data, size_of, Header, Wanted};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// What `senna run` browses for: count backends to embed, or batch label
@@ -44,8 +45,8 @@ impl Wanted for Pick {
         (*self == Pick::Data).then(String::new)
     }
 
-    fn describe(&self, size: &String) -> String {
-        size.clone()
+    fn describe<'a>(&self, size: &'a String) -> Cow<'a, str> {
+        Cow::Borrowed(size)
     }
 
     fn many(&self) -> bool {

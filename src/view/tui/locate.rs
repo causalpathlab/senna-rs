@@ -55,11 +55,9 @@ impl App {
                         .into(),
                 );
             }
-            Outcome::Chosen(paths) => {
+            Outcome::Chosen(c) => {
                 self.modal = None;
-                if let Some(path) = paths.first() {
-                    self.use_data(path, index);
-                }
+                self.use_data(&c.file(), index);
             }
         }
         true
@@ -129,7 +127,7 @@ impl App {
             };
             self.message = Some(format!(
                 "data: {}{more} · recorded in {}",
-                shown(chosen),
+                crate::tui::shown(chosen),
                 files::name(&from)
             ));
         }

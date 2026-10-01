@@ -4,12 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// The last component of `path`, or an empty string.
-#[must_use]
-pub fn name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
-}
+pub use crate::tui::name;
 
 /// Modification time of `path`, if it can be read.
 #[must_use]

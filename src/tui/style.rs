@@ -39,7 +39,7 @@ pub(crate) fn selected() -> Style {
     Style::default()
         .bg(rgb(TEXT))
         .fg(rgb(BACKGROUND))
-        .add_modifier(ratatui::style::Modifier::BOLD)
+        .patch(bold())
 }
 
 /// The first of `n` rows to show in a window `rows` tall so that `row`
@@ -84,8 +84,11 @@ pub(crate) fn popup(
 
 /// A one-line notice at the top of `area`: lupin answered, a file saved.
 pub(crate) fn toast(f: &mut ratatui::Frame, area: Rect, text: &str) {
-    let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
-    let line = Line::from(Span::styled(text.to_string(), bold)).centered();
+    let line = Line::from(Span::styled(text.to_string(), bold())).centered();
     let w = text.chars().count() as u16 + 4;
     popup(f, area, vec![line], w, At::Top, TEXT);
 }
+
+#[cfg(test)]
+#[path = "tests/style.rs"]
+mod tests;

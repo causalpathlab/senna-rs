@@ -500,7 +500,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         let Some(path) = tui::pick_run()? else {
             return Ok(());
         };
-        picked = vec![tui::shown(&path).into()];
+        picked = vec![crate::tui::shown(&path).into()];
         &picked
     } else {
         &args.from

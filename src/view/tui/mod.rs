@@ -17,7 +17,6 @@ mod modal;
 mod recompute;
 mod relabel;
 
-pub use crate::tui::shown;
 pub use browse::pick_run;
 use decisions::Prompt;
 use modal::Modal;

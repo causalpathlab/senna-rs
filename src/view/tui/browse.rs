@@ -11,6 +11,7 @@ use super::*;
 use crate::tui::browse::{is_data, Browser, Header, Outcome, Wanted};
 use data_beans::utilities::name_matching::GeneIndex;
 use senna::run_manifest::RunManifest;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// Files larger than this are not read as marker panels.
@@ -52,7 +53,7 @@ impl Wanted for Panels {
     }
 
     /// `12 types · 340 genes · 301 in this run (89%)`.
-    fn describe(&self, p: &Panel) -> String {
+    fn describe<'a>(&self, p: &'a Panel) -> Cow<'a, str> {
         let mut s = format!(
             "{} type{} · {} genes",
             p.types,
@@ -63,7 +64,12 @@ impl Wanted for Panels {
             let pct = 100 * found / p.genes.max(1);
             s.push_str(&format!(" · {found} in this run ({pct}%)"));
         }
-        s
+        Cow::Owned(s)
+    }
+
+    /// Annotation needs types to choose between.
+    fn refuse(&self, name: &str, p: &Panel) -> Option<String> {
+        (p.types < 2).then(|| format!("{name} names one cell type; lupin needs several"))
     }
 
     /// The panel with the most genes in this run; with no feature names,
@@ -101,8 +107,8 @@ impl Wanted for Runs {
         name.ends_with(".senna.json").then(|| describe_run(path))
     }
 
-    fn describe(&self, about: &String) -> String {
-        about.clone()
+    fn describe<'a>(&self, about: &'a String) -> Cow<'a, str> {
+        Cow::Borrowed(about)
     }
 
     /// The most recently written run here.
@@ -144,8 +150,8 @@ impl Wanted for Missing {
         Some(())
     }
 
-    fn describe(&self, (): &()) -> String {
-        String::new()
+    fn describe<'a>(&self, (): &'a ()) -> Cow<'a, str> {
+        Cow::Borrowed("")
     }
 
     fn best(&self, _dir: &Path, files: &[(&str, &())]) -> Option<String> {
@@ -256,7 +262,7 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
             }
             match b.key(k) {
                 Outcome::Cancelled => return Ok(None),
-                Outcome::Chosen(paths) => return Ok(paths.into_iter().next()),
+                Outcome::Chosen(c) => return Ok(Some(c.file())),
                 Outcome::Moved | Outcome::Ignored => {}
             }
         }

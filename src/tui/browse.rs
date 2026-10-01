@@ -10,6 +10,7 @@ use super::style::{bold, first_row, hint, selected};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -31,7 +32,12 @@ pub(crate) trait Wanted {
     }
 
     /// One line about a file.
-    fn describe(&self, about: &Self::About) -> String;
+    fn describe<'a>(&self, about: &'a Self::About) -> Cow<'a, str>;
+
+    /// Why file `name` cannot be taken, though it is listed.
+    fn refuse(&self, _name: &str, _about: &Self::About) -> Option<String> {
+        None
+    }
 
     /// The file to start on among those listed in `dir`.
     fn best(&self, _dir: &Path, _files: &[(&str, &Self::About)]) -> Option<String> {
@@ -84,9 +90,36 @@ pub(crate) enum Outcome {
     Ignored,
     Moved,
     Cancelled,
-    /// Files chosen: the one under the cursor, or, where several can be
-    /// taken, the marked ones.
-    Chosen(Vec<PathBuf>),
+    Chosen(Chosen),
+}
+
+/// Files chosen, never none: the one under the cursor, or, where several
+/// can be taken, the marked ones.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Chosen {
+    first: PathBuf,
+    rest: Vec<PathBuf>,
+}
+
+impl Chosen {
+    fn one(path: PathBuf) -> Self {
+        Chosen {
+            first: path,
+            rest: Vec::new(),
+        }
+    }
+
+    /// The file, where one is taken at a time.
+    #[must_use]
+    pub fn file(self) -> PathBuf {
+        self.first
+    }
+
+    /// Every file taken, in order.
+    #[must_use]
+    pub fn files(self) -> Vec<PathBuf> {
+        std::iter::once(self.first).chain(self.rest).collect()
+    }
 }
 
 pub(crate) struct Browser<W: Wanted> {
@@ -101,6 +134,8 @@ pub(crate) struct Browser<W: Wanted> {
     best: Option<String>,
     /// Files marked with space, in any folder.
     pub marked: BTreeSet<PathBuf>,
+    /// Why the file just chosen was refused.
+    pub refused: Option<String>,
 }
 
 impl<W: Wanted> Browser<W> {
@@ -113,6 +148,7 @@ impl<W: Wanted> Browser<W> {
             row: 0,
             best: None,
             marked: BTreeSet::new(),
+            refused: None,
         };
         b.read(select);
         b
@@ -172,8 +208,22 @@ impl<W: Wanted> Browser<W> {
         Some(self.dir.join(e.name()))
     }
 
+    /// Take the file under the cursor, unless the caller refuses it: then
+    /// say why and stay.
+    fn take_here(&mut self) -> Outcome {
+        let Some(Entry::File(name, about)) = self.current() else {
+            return Outcome::Ignored;
+        };
+        if let Some(why) = self.want.refuse(name, about) {
+            self.refused = Some(why);
+            return Outcome::Moved;
+        }
+        Outcome::Chosen(Chosen::one(self.dir.join(name)))
+    }
+
     /// A key: move, open a folder, narrow, mark, cancel, or choose.
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
+        self.refused = None;
         if self.want.many() {
             if let Some(o) = self.mark_key(k) {
                 return o;
@@ -210,9 +260,7 @@ impl<W: Wanted> Browser<W> {
                     self.dir.push(name);
                     self.read(None);
                 }
-                Some(Entry::File(name, _)) if k.code == KeyCode::Enter => {
-                    return Outcome::Chosen(vec![self.dir.join(name)]);
-                }
+                Some(Entry::File(..)) if k.code == KeyCode::Enter => return self.take_here(),
                 Some(Entry::File(..)) => return Outcome::Ignored,
             },
             KeyCode::Char(c) => {
@@ -261,13 +309,15 @@ impl<W: Wanted> Browser<W> {
                 Some(Outcome::Moved)
             }
             KeyCode::Enter => {
-                let here = self.file_here()?;
-                let mut taken: Vec<PathBuf> =
-                    std::mem::take(&mut self.marked).into_iter().collect();
-                if taken.is_empty() {
-                    taken.push(here);
-                }
-                Some(Outcome::Chosen(taken))
+                self.file_here()?;
+                let mut marked = std::mem::take(&mut self.marked).into_iter();
+                Some(match marked.next() {
+                    Some(first) => Outcome::Chosen(Chosen {
+                        first,
+                        rest: marked.collect(),
+                    }),
+                    None => self.take_here(),
+                })
             }
             _ => None,
         }
@@ -316,7 +366,7 @@ impl<W: Wanted> Browser<W> {
                         " "
                     };
                     let about = self.want.describe(about);
-                    format!("{mark}{n:<width$}  {about}").trim_end().to_string()
+                    format!("{mark}{n:<width$}  {about}")
                 }
             };
             let style = if i == self.row {
@@ -335,6 +385,9 @@ impl<W: Wanted> Browser<W> {
             )));
         }
         out.push(Line::from(""));
+        if let Some(why) = &self.refused {
+            out.push(Line::from(Span::styled(format!(" {why}"), bold())));
+        }
         if let (Some(s), Some(_)) = (h.star, &self.best) {
             out.push(Line::from(Span::styled(s, hint())));
         }

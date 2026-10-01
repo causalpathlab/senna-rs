@@ -354,7 +354,7 @@ impl App {
         let paths = match b.key(k) {
             Outcome::Ignored | Outcome::Moved => return,
             Outcome::Cancelled => Vec::new(),
-            Outcome::Chosen(paths) => paths,
+            Outcome::Chosen(c) => c.files(),
         };
         let Some(b) = self.browser.take() else { return };
         self.browse_dir = b.dir;

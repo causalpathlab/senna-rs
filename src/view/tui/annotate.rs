@@ -3,7 +3,7 @@
 
 use super::browse::Panels;
 use super::*;
-use crate::tui::browse::{Browser, Entry, Outcome};
+use crate::tui::browse::{Browser, Outcome};
 use crate::view::decide;
 use data_beans::utilities::name_matching::GeneIndex;
 use std::path::{Path, PathBuf};
@@ -61,17 +61,10 @@ impl App {
                 self.modal = None;
                 self.message = Some("annotation cancelled".into());
             }
-            Outcome::Chosen(paths) => match b.current() {
-                Some(Entry::File(name, p)) if p.types < 2 => {
-                    self.message = Some(format!("{name} names one cell type; lupin needs several"));
-                }
-                _ => {
-                    self.modal = None;
-                    if let Some(path) = paths.into_iter().next() {
-                        self.run_annotate(path);
-                    }
-                }
-            },
+            Outcome::Chosen(c) => {
+                self.modal = None;
+                self.run_annotate(c.file());
+            }
         }
         true
     }

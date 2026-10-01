@@ -50,7 +50,10 @@ pub(crate) fn run_one(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| Failed::Start(format!("cannot run senna: {e}")))?;
+        .map_err(|e| {
+            let program = command.get_program().to_string_lossy();
+            Failed::Start(format!("cannot run {program}: {e}"))
+        })?;
     let log = child.stderr.take();
     // Where `stop` can reach it; stopped meanwhile, it goes at once.
     if let Ok(mut c) = stopper.child.lock() {

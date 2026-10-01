@@ -5,6 +5,29 @@ struct Txt {
     many: bool,
 }
 
+/// Text files, refusing any named `no.txt`.
+struct Picky;
+
+impl Wanted for Picky {
+    type About = ();
+
+    fn header(&self) -> Header {
+        Txt { many: false }.header()
+    }
+
+    fn file(&self, _path: &Path, name: &str) -> Option<()> {
+        name.ends_with(".txt").then_some(())
+    }
+
+    fn describe<'a>(&self, (): &'a ()) -> std::borrow::Cow<'a, str> {
+        "".into()
+    }
+
+    fn refuse(&self, name: &str, (): &()) -> Option<String> {
+        (name == "no.txt").then(|| format!("{name} will not do"))
+    }
+}
+
 impl Wanted for Txt {
     type About = String;
 
@@ -26,8 +49,8 @@ impl Wanted for Txt {
         Some(String::new())
     }
 
-    fn describe(&self, about: &String) -> String {
-        about.clone()
+    fn describe<'a>(&self, about: &'a String) -> std::borrow::Cow<'a, str> {
+        std::borrow::Cow::Borrowed(about)
     }
 
     fn many(&self) -> bool {
@@ -41,6 +64,14 @@ fn write(dir: &Path, name: &str) {
 
 fn key(c: KeyCode) -> KeyEvent {
     KeyEvent::new(c, KeyModifiers::NONE)
+}
+
+/// The files a key took; none when it took none.
+fn taken(o: Outcome) -> Vec<PathBuf> {
+    match o {
+        Outcome::Chosen(c) => c.files(),
+        _ => Vec::new(),
+    }
 }
 
 fn names<W: Wanted>(b: &Browser<W>) -> Vec<String> {
@@ -78,8 +109,8 @@ fn enter_chooses_one_file_and_opens_folders() {
     assert_eq!(b.filter, " ");
     b.key(key(KeyCode::Backspace));
     assert_eq!(
-        b.key(key(KeyCode::Enter)),
-        Outcome::Chosen(vec![dir.path().join("sub/a.txt")])
+        taken(b.key(key(KeyCode::Enter))),
+        [dir.path().join("sub/a.txt")]
     );
     b.go_up();
     assert_eq!(b.current().map(Entry::name), Some("sub"));
@@ -106,11 +137,8 @@ fn marked_files_in_several_folders_are_taken_together() {
     b.key(key(KeyCode::Char(' ')));
     b.row = 1;
     assert_eq!(
-        b.key(key(KeyCode::Enter)),
-        Outcome::Chosen(vec![
-            dir.path().join("a.txt"),
-            dir.path().join("more/b.txt")
-        ])
+        taken(b.key(key(KeyCode::Enter))),
+        [dir.path().join("a.txt"), dir.path().join("more/b.txt")]
     );
     assert!(b.marked.is_empty());
 }
@@ -123,4 +151,24 @@ fn sizes_read_in_their_unit() {
     assert_eq!(size_of(&p), "1.5 kB");
     std::fs::write(&p, b"abc").unwrap();
     assert_eq!(size_of(&p), "3 B");
+}
+
+#[test]
+fn a_refused_file_is_not_taken_and_the_popup_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "no.txt");
+    write(dir.path(), "yes.txt");
+    let mut b = Browser::open(dir.path().to_path_buf(), Picky, Some("no.txt"));
+    assert_eq!(b.key(key(KeyCode::Enter)), Outcome::Moved);
+    let said: Vec<String> = b.lines(10).iter().map(ToString::to_string).collect();
+    assert!(
+        said.iter().any(|l| l.contains("no.txt will not do")),
+        "{said:?}"
+    );
+    b.key(key(KeyCode::Down));
+    assert!(b.refused.is_none());
+    assert_eq!(
+        taken(b.key(key(KeyCode::Enter))),
+        [dir.path().join("yes.txt")]
+    );
 }
