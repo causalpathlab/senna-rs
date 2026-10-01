@@ -21,7 +21,7 @@ use graph_embedding_util as ge;
 use legume_numeric::matrix::common_io::basename;
 use log::info;
 
-use crate::gem::sample_id::{strip_any_suffix, COUNT_SUFFIX, LEGACY_COUNT_SUFFIX};
+use crate::gem::sample_id::{strip_any_suffix, COUNT_SUFFIX};
 use crate::gem::tracks::{assign_tracks, TrackPlan};
 
 /// One resolved gem input: every file to load, and its matched sample id.
@@ -86,7 +86,7 @@ pub(crate) fn resolve_inputs(
                 if mods.len() == 1 { "y" } else { "ies" },
                 mods
             );
-            let sid = sample_id_for(&ax.file, strip, &[COUNT_SUFFIX, LEGACY_COUNT_SUFFIX])?;
+            let sid = sample_id_for(&ax.file, strip, &[COUNT_SUFFIX])?;
             gene_sample_ids.insert(sid.clone());
             files.push(ax.file.clone());
             sample_ids.push(sid);
