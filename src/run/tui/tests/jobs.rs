@@ -17,6 +17,7 @@ fn jobs_run_in_turn_and_leave_their_scripts() {
         dir: dir.path().to_path_buf(),
         out: m.into(),
         argv: vec![m.into(), "d.zarr".into(), "--out".into(), m.into()],
+        labels: Vec::new(),
     };
     let q = Queue::start(vec![job("svd"), job("bge")], fake);
     while !q.finished() {
@@ -40,6 +41,7 @@ fn a_job_whose_result_exists_does_not_run() {
         dir: dir.path().to_path_buf(),
         out: "r".into(),
         argv: vec!["svd".into(), "--out".into(), "r".into()],
+        labels: Vec::new(),
     };
     let q = Queue::start(vec![job], PathBuf::from("/bin/false"));
     while !q.finished() {
@@ -65,6 +67,7 @@ fn a_stopped_queue_is_waited_for_and_its_fit_killed() {
         dir: dir.path().to_path_buf(),
         out: m.into(),
         argv: vec![m.into(), "--out".into(), m.into()],
+        labels: Vec::new(),
     };
     let q = Queue::start(vec![job("a"), job("b")], slow);
     while q.shared.lock().unwrap().states[0] != State::Running {

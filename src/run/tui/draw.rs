@@ -2,7 +2,7 @@
 //! Same page and popups as `senna view`.
 
 use super::jobs::State;
-use super::{App, Kind, Screen, Target};
+use super::{batches, App, Batch, Kind, Screen, Target};
 use crate::tui::style::{bold, first_row, hint, page, popup, rgb, selected, At, MUTED, TEXT};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -53,12 +53,27 @@ impl App {
         } else if self.confirm.is_some() {
             let rows = usize::from(area.height).saturating_sub(4);
             popup(f, area, self.confirm_lines(rows), 120, At::Middle, TEXT);
+        } else if let Some((row, at)) = self.relabel {
+            let rows = usize::from(area.height).saturating_sub(10).max(3);
+            popup(
+                f,
+                area,
+                self.relabel_lines(row, at, rows),
+                90,
+                At::Middle,
+                TEXT,
+            );
         }
         if let Some(e) = &self.editor {
             let what = match e.target {
                 Target::Out(i) => format!(" --out for {}", self.rows[i].form.name),
                 Target::Field(m, i) => format!(" --{}", self.rows[m].form.fields[i].long),
                 Target::Filter => " flags containing".to_string(),
+                Target::BatchName(i) => format!(
+                    " batch of {} (empty: its own name)",
+                    crate::tui::name(&self.pairs[i].data)
+                ),
+                Target::Label(..) => " new name for this label (empty: as it was)".to_string(),
             };
             let lines = vec![
                 Line::from(Span::styled(what, bold())),
@@ -101,7 +116,7 @@ impl App {
 
     fn status(&self) -> Vec<Line<'static>> {
         let keys = match self.screen {
-            Screen::Data => "a add data   b batch files (several: paired by name)   x clear batch   X clear all   d remove   J K reorder   enter methods",
+            Screen::Data => "a add data   n name the batch   b label files (several: paired by name)   e rename labels   x own name   X all own   d remove   J K reorder",
             Screen::Methods => "space queue   enter flags   o change --out",
             Screen::Params => "space / enter change   ← → choices   r reset   R reset all   a advanced   / filter   [ ] method",
             Screen::Run => "s stop   v open the results in senna view",
@@ -121,7 +136,7 @@ impl App {
 
     fn draw_data(&self, f: &mut ratatui::Frame, area: Rect) {
         let mut lines = vec![Line::from(Span::styled(
-            "Data files, with the batch labels of each",
+            "Data files, and the batch of their cells",
             bold(),
         ))];
         lines.push(Line::from(""));
@@ -140,10 +155,26 @@ impl App {
             .unwrap_or(0)
             .min(w / 2);
         for (i, p) in self.pairs.iter().enumerate() {
-            let batch = p
-                .batch
-                .as_deref()
-                .map_or_else(|| "no batch labels".to_string(), |b| self.shown(b));
+            let batch = match &p.batch {
+                Batch::Own if p.tags.is_some() => "its barcodes' @batch tags".to_string(),
+                Batch::Own => format!("{} (its name)", batches::own_name(&p.data)),
+                Batch::Named(name) => format!("{name} (named)"),
+                Batch::Labels {
+                    file,
+                    renamed,
+                    counts,
+                } => format!(
+                    "{}: {} label{}{}",
+                    self.shown(file),
+                    counts.len(),
+                    if counts.len() == 1 { "" } else { "s" },
+                    if renamed.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {} renamed", renamed.len())
+                    }
+                ),
+            };
             let text = format!(
                 " {:<name_w$}  {}  ·  {}",
                 fit(&self.shown(&p.data), name_w),
@@ -157,11 +188,75 @@ impl App {
             };
             lines.push(Line::from(Span::styled(fit(&text, w), style)));
         }
-        if let Some(why) = super::data::batch_problem(&self.pairs) {
+        let summary = batches::summary(&self.pairs);
+        if !summary.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(why, bold())));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} batch{}",
+                    summary.len(),
+                    if summary.len() == 1 { "" } else { "es" }
+                ),
+                bold(),
+            )));
+            for (name, files, cells) in summary {
+                let cells = cells.map_or_else(|| "…".to_string(), |c| c.to_string());
+                let text = format!(
+                    "  {name:<24} {cells:>8} cells  {files} file{}",
+                    if files == 1 { "" } else { "s" }
+                );
+                lines.push(Line::from(Span::styled(fit(&text, w), hint())));
+            }
         }
         f.render_widget(Paragraph::new(lines), area);
+    }
+
+    /// The labels of data row `row`'s label file, `at` under the cursor.
+    fn relabel_lines(&self, row: usize, at: usize, rows: usize) -> Vec<Line<'static>> {
+        let Some(Batch::Labels {
+            file,
+            counts,
+            renamed,
+        }) = self.pairs.get(row).map(|p| &p.batch)
+        else {
+            return Vec::new();
+        };
+        let mut out = vec![
+            Line::from(Span::styled(
+                format!(" Labels of {}", self.shown(file)),
+                bold(),
+            )),
+            Line::from(""),
+        ];
+        let width = counts
+            .iter()
+            .map(|(l, _)| l.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(30);
+        for (i, (label, n)) in counts
+            .iter()
+            .enumerate()
+            .skip(first_row(at, rows, counts.len()))
+            .take(rows)
+        {
+            let to = renamed
+                .get(label)
+                .map_or_else(String::new, |r| format!("→ {r}"));
+            let text = format!(" {label:<width$}  {n:>8} cells  {to}");
+            let style = if i == at {
+                selected()
+            } else {
+                Style::default()
+            };
+            out.push(Line::from(Span::styled(text, style)));
+        }
+        out.push(Line::from(""));
+        out.push(Line::from(Span::styled(
+            " ↑ ↓ choose   enter rename (empty: as it was)   esc back",
+            hint(),
+        )));
+        out
     }
 
     fn draw_methods(&self, f: &mut ratatui::Frame, area: Rect) {

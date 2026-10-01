@@ -53,12 +53,27 @@ fn data(dir: &Path, names: &[&str]) -> Vec<Pair> {
             std::fs::write(&p, "").unwrap();
             Pair {
                 data: p,
-                batch: None,
+                batch: Batch::Own,
                 info: String::new(),
+                cells: Some(3),
+                tags: None,
                 gene_counts: None,
             }
         })
         .collect()
+}
+
+/// A label file `name` in `dir` with `labels`, one per line, as a batch.
+fn labels(dir: &Path, name: &str, labels: &[&str]) -> Batch {
+    let path = dir.join(name);
+    std::fs::write(&path, labels.join("\n") + "\n").unwrap();
+    Batch::labels(path).unwrap()
+}
+
+fn typed(a: &mut App, text: &str) {
+    for c in text.chars() {
+        key(a, KeyCode::Char(c));
+    }
 }
 
 #[test]
@@ -75,8 +90,8 @@ fn queued_methods_share_the_data_and_write_their_own_out() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
     a.pairs = data(dir.path(), &["d1.zarr.zip", "d2.zarr.zip"]);
-    a.pairs[0].batch = Some(dir.path().join("b1.tsv"));
-    a.pairs[1].batch = Some(dir.path().join("b2.tsv"));
+    a.pairs[0].batch = labels(dir.path(), "b1.tsv", &["x", "x", "y"]);
+    a.pairs[1].batch = labels(dir.path(), "b2.tsv", &["x", "z", "z"]);
     a.screen = Screen::Methods;
     a.method_row = METHODS.iter().position(|m| *m == "svd").unwrap();
     key(&mut a, KeyCode::Char(' '));
@@ -110,9 +125,14 @@ fn what_would_overwrite_or_misparse_is_stopped_before_running() {
     assert!(a.plan()[0].problem.as_ref().unwrap().contains("no data"));
 
     a.pairs = data(dir.path(), &["d1.zarr", "d2.zarr"]);
-    a.pairs[0].batch = Some(dir.path().join("b1.tsv"));
-    assert!(a.plan()[0].problem.as_ref().unwrap().contains("batch"));
-    a.pairs[0].batch = None;
+    a.pairs[0].batch = Batch::Named("b".into());
+    a.pairs[1].cells = None;
+    assert!(a.plan()[0]
+        .problem
+        .as_ref()
+        .unwrap()
+        .contains("not counted yet"));
+    a.pairs[0].batch = Batch::Own;
 
     std::fs::write(dir.path().join("svd.senna.json"), "{}").unwrap();
     assert!(a.plan()[0].problem.as_ref().unwrap().contains("exists"));
@@ -274,10 +294,106 @@ fn batch_files_are_described_as_paired() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
     a.pairs = data(dir.path(), &["s1.zarr", "s2.zarr"]);
+    for f in ["x.tsv", "y.tsv"] {
+        std::fs::write(dir.path().join(f), "a\nb\nc\n").unwrap();
+    }
     a.take_batches(&[dir.path().join("x.tsv"), dir.path().join("y.tsv")]);
     assert!(a
         .message
         .as_deref()
         .unwrap()
         .contains("in the order listed"));
+}
+
+#[test]
+fn files_named_alike_are_one_batch_written_beside_the_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.pairs = data(dir.path(), &["d1.zarr", "d2.zarr", "d3.zarr"]);
+    let svd = METHODS.iter().position(|m| *m == "svd").unwrap();
+    a.rows[svd].on = true;
+    // Every file on its own name: senna's rule, no label files.
+    let p = &a.plan()[0];
+    assert!(!p.job.argv.contains(&"--batch-files".to_string()));
+    assert!(p.job.labels.is_empty());
+
+    a.screen = Screen::Data;
+    for row in [0, 1] {
+        a.pair_row = row;
+        key(&mut a, KeyCode::Char('n'));
+        for _ in 0..10 {
+            key(&mut a, KeyCode::Backspace);
+        }
+        typed(&mut a, "b1");
+        key(&mut a, KeyCode::Enter);
+    }
+    assert_eq!(a.pairs[0].batch, Batch::Named("b1".into()));
+    assert_eq!(
+        batches::summary(&a.pairs),
+        [
+            ("b1".to_string(), 2, Some(6)),
+            ("d3".to_string(), 1, Some(3))
+        ]
+    );
+    let p = &a.plan()[0];
+    assert_eq!(p.problem, None);
+    let at = p
+        .job
+        .argv
+        .iter()
+        .position(|w| w == "--batch-files")
+        .unwrap();
+    assert_eq!(
+        p.job.argv[at + 1],
+        "svd.batches/d1.txt,svd.batches/d2.txt,svd.batches/d3.txt"
+    );
+    assert_eq!(p.job.labels.len(), 3);
+
+    // An empty name goes back to the file's own.
+    a.pair_row = 1;
+    key(&mut a, KeyCode::Char('n'));
+    for _ in 0..10 {
+        key(&mut a, KeyCode::Backspace);
+    }
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(a.pairs[1].batch, Batch::Own);
+}
+
+#[test]
+fn labels_are_renamed_from_their_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.pairs = data(dir.path(), &["d1.zarr"]);
+    a.pairs[0].batch = labels(dir.path(), "b1.tsv", &["x", "y", "x"]);
+    a.screen = Screen::Data;
+    key(&mut a, KeyCode::Char('e'));
+    assert_eq!(a.relabel, Some((0, 0)));
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Enter);
+    key(&mut a, KeyCode::Backspace);
+    typed(&mut a, "x");
+    key(&mut a, KeyCode::Enter);
+    key(&mut a, KeyCode::Esc);
+    assert!(a.relabel.is_none());
+    assert_eq!(batches::summary(&a.pairs), [("x".to_string(), 1, Some(3))]);
+    let svd = METHODS.iter().position(|m| *m == "svd").unwrap();
+    a.rows[svd].on = true;
+    let p = &a.plan()[0];
+    assert!(matches!(
+        p.job.labels[0].content,
+        batches::Content::Renamed { .. }
+    ));
+}
+
+#[test]
+fn the_parameters_screen_shows_a_queued_method_however_it_is_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.screen = Screen::Methods;
+    let bge = METHODS.iter().position(|m| *m == "bge").unwrap();
+    a.method_row = bge;
+    key(&mut a, KeyCode::Char(' '));
+    key(&mut a, KeyCode::Char('3'));
+    assert_eq!(a.screen, Screen::Params);
+    assert_eq!(a.param_method, bge);
 }
