@@ -114,7 +114,7 @@ pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
 /// legacy `bge --skip-etm` slot. Which of the first two a prefix probe
 /// prefers is decided by [`resolve_feature_embedding`] from what else sits
 /// beside them; the last is shared with the topic β and needs the scale check.
-const RHO_TABLE_SUFFIXES: [&str; 3] = [
+pub const RHO_TABLE_SUFFIXES: [&str; 3] = [
     ".feature_embedding.parquet",
     ".feature_loading.parquet",
     ".dictionary.parquet",

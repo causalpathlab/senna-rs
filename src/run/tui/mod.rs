@@ -99,13 +99,15 @@ impl Row {
 }
 
 /// What a line being typed will become.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Target {
     Out(usize),
     /// What every `--out` not typed by hand starts with.
     Header,
     /// Method row, field index.
     Field(usize, usize),
+    /// A flag of the shared page, by name: in every queued fit that has it.
+    Shared(String),
     Filter,
     /// The batch of data row `usize`, by name.
     BatchName(usize),
@@ -157,6 +159,11 @@ pub(crate) struct App {
     method_row: usize,
     /// The method whose flags the parameters screen shows.
     param_method: usize,
+    /// The parameters screen shows the flags the queued methods share,
+    /// where a change sets every one of them.
+    shared_page: bool,
+    /// The flag a single-file browser fills when a file is chosen.
+    browsing: Option<Target>,
     field_row: usize,
     advanced: bool,
     /// Whether the terminal tells shift-enter from enter. When it cannot,
@@ -287,6 +294,8 @@ impl App {
             rows,
             method_row: 0,
             param_method: 0,
+            shared_page: false,
+            browsing: None,
             field_row: 0,
             advanced: true,
             shift_enter: true,
@@ -318,10 +327,7 @@ impl App {
     /// starts at home. A folder that is a file keeps the header as it was.
     fn set_header(&mut self, text: &str) {
         let header = crate::tui::home(text.trim());
-        let folder = match header.rfind('/') {
-            Some(at) => &header[..=at],
-            None => "",
-        };
+        let folder = header_folder(&header);
         if !folder.is_empty() {
             // Without its last `/`, a file there reads as a file.
             let at = self.here.join(folder.trim_end_matches('/'));
@@ -400,6 +406,10 @@ impl App {
         let methods = self.param_methods();
         if !methods.contains(&self.param_method) {
             self.param_method = methods[0];
+            self.field_row = 0;
+        }
+        if self.shared_page && self.shared_rows().len() < 2 {
+            self.shared_page = false;
             self.field_row = 0;
         }
         self.field_row = self.field_row.min(self.visible().len().saturating_sub(1));
@@ -484,19 +494,7 @@ impl App {
                         }
                     }
                     Target::Header => self.set_header(&text),
-                    Target::Field(m, f) => {
-                        let field = &mut self.rows[m].form.fields[f];
-                        if text.trim().is_empty() && !field.default.is_empty() {
-                            // Leaving it out means clap's default, so say that.
-                            field.reset();
-                            self.message = Some(format!(
-                                "--{} cannot be left unset: back to its default {}",
-                                field.long, field.default
-                            ));
-                        } else {
-                            field.value = text;
-                        }
-                    }
+                    Target::Field(..) | Target::Shared(_) => self.set_text(&target, &text),
                     Target::Filter => {}
                     Target::BatchName(i) => {
                         let name = text.trim();
@@ -559,13 +557,35 @@ impl App {
             Outcome::Chosen(c) => Some(c.files()),
         };
         let Some(b) = self.browser.take() else { return };
-        self.browse_dir = b.dir;
-        let Some(paths) = chosen else { return };
-        if b.want == Pick::Batch {
-            self.take_batches(&paths);
-        } else {
-            self.take_data(paths);
+        let target = self.browsing.take();
+        // Browsing for data remembers the folder, chosen from or not.
+        if matches!(b.want, Pick::Data | Pick::Batch) {
+            self.browse_dir = b.dir;
         }
+        let Some(paths) = chosen else { return };
+        match (b.want, target) {
+            (Pick::Batch, _) => self.take_batches(&paths),
+            (Pick::Data, _) => self.take_data(paths),
+            // In full: each fit runs in its own output folder.
+            (Pick::Table | Pick::File, Some(target)) => {
+                self.set_text(&target, &paths[0].to_string_lossy());
+            }
+            (Pick::Table | Pick::File, None) => {}
+        }
+    }
+
+    /// Browse for one file to fill flag `target`: an earlier run's feature
+    /// table, or any file. It opens where the results go, else where the
+    /// data was found.
+    fn browse_for(&mut self, target: Target, want: Pick) {
+        let results = self.here.join(header_folder(&self.header));
+        let dir = if want == Pick::Table && results.is_dir() {
+            results
+        } else {
+            self.browse_dir.clone()
+        };
+        self.browsing = Some(target);
+        self.browser = Some(Browser::open(dir, want, None));
     }
 
     fn take_data(&mut self, paths: Vec<PathBuf>) {
@@ -768,11 +788,171 @@ impl App {
     }
 
     fn show_params(&mut self, m: usize) {
-        if self.param_method != m {
+        if self.param_method != m || self.shared_page {
             self.field_row = 0;
         }
         self.param_method = m;
+        self.shared_page = false;
         self.screen = Screen::Params;
+    }
+
+    /// Queued senna fits: what the shared page sets together.
+    fn shared_rows(&self) -> Vec<usize> {
+        (0..self.rows.len())
+            .filter(|&i| self.rows[i].on && self.rows[i].tool == Tool::Senna)
+            .collect()
+    }
+
+    /// The flags at least two queued fits have, in the order first met, as
+    /// a form: each with the value they all hold, or none where they
+    /// differ (see [`Self::shared_values`]).
+    fn shared_form(&self) -> Method {
+        let rows = self.shared_rows();
+        // Each flag's first field, and the values the fits hold it at.
+        let mut seen: std::collections::HashMap<&str, usize> = Default::default();
+        let mut found: Vec<(&Field, Vec<&str>)> = Vec::new();
+        for &r in &rows {
+            for f in &self.rows[r].form.fields {
+                match seen.get(f.long.as_str()) {
+                    Some(&at) => found[at].1.push(&f.value),
+                    None => {
+                        seen.insert(&f.long, found.len());
+                        found.push((f, vec![&f.value]));
+                    }
+                }
+            }
+        }
+        let fields = found
+            .into_iter()
+            .filter(|(_, values)| values.len() > 1)
+            .map(|(f, values)| {
+                let mut x = f.clone();
+                x.value = if values.iter().all(|v| *v == values[0]) {
+                    values[0].to_string()
+                } else {
+                    String::new()
+                };
+                x
+            })
+            .collect();
+        let mut form = self.rows[rows[0]].form.clone();
+        form.name = "shared".into();
+        form.fields = fields;
+        form
+    }
+
+    /// Flag `long` in each queued fit that has it: the fit and its value.
+    fn shared_values(&self, long: &str) -> Vec<(String, String)> {
+        self.shared_rows()
+            .into_iter()
+            .filter_map(|r| {
+                let f = self.rows[r].form.fields.iter().find(|f| f.long == long)?;
+                Some((self.rows[r].label.clone(), f.value.clone()))
+            })
+            .collect()
+    }
+
+    /// Whether the queued fits hold flag `long` at different values.
+    fn differs(&self, long: &str) -> bool {
+        let values = self.shared_values(long);
+        values.iter().any(|(_, v)| *v != values[0].1)
+    }
+
+    /// The form the parameters screen shows: the method's, or the shared
+    /// page's.
+    fn page_form(&self) -> std::borrow::Cow<'_, Method> {
+        if self.shared_page {
+            std::borrow::Cow::Owned(self.shared_form())
+        } else {
+            std::borrow::Cow::Borrowed(&self.rows[self.param_method].form)
+        }
+    }
+
+    /// The field `target` names, as the page shows it: on the shared page
+    /// with the value every fit holds, or none where they differ.
+    fn field_of(&self, target: &Target) -> Option<Field> {
+        match target {
+            Target::Field(m, i) => self.rows.get(*m)?.form.fields.get(*i).cloned(),
+            Target::Shared(long) => {
+                let values = self.shared_values(long);
+                let mut x = self
+                    .shared_rows()
+                    .into_iter()
+                    .find_map(|r| self.rows[r].form.fields.iter().find(|f| f.long == *long))?
+                    .clone();
+                if values.iter().any(|(_, v)| *v != values[0].1) {
+                    x.value.clear();
+                }
+                Some(x)
+            }
+            _ => None,
+        }
+    }
+
+    /// Change the flag `target` names with `change`: a shared flag in every
+    /// queued fit that has it, each taking the changed value.
+    fn change_field(&mut self, target: &Target, change: impl Fn(&mut Field)) {
+        match target {
+            Target::Field(m, i) => change(&mut self.rows[*m].form.fields[*i]),
+            Target::Shared(long) => {
+                let Some(mut x) = self.field_of(target) else {
+                    return;
+                };
+                change(&mut x);
+                self.each_shared(long, |f| f.value.clone_from(&x.value));
+            }
+            _ => {}
+        }
+    }
+
+    /// The flag `target` names back to its default: a shared flag to each
+    /// fit's own, as defaults differ between methods.
+    fn reset_field(&mut self, target: &Target) {
+        match target {
+            Target::Field(m, i) => self.rows[*m].form.fields[*i].reset(),
+            Target::Shared(long) => self.each_shared(long, Field::reset),
+            _ => {}
+        }
+    }
+
+    /// Flag `long` in every queued fit that has it.
+    fn each_shared(&mut self, long: &str, mut change: impl FnMut(&mut Field)) {
+        for r in self.shared_rows() {
+            if let Some(f) = self.rows[r].form.fields.iter_mut().find(|f| f.long == long) {
+                change(f);
+            }
+        }
+    }
+
+    /// Take `text` as the value of the flag `target` names. Left empty, a
+    /// flag with a default goes back to it, since leaving it out means that.
+    fn set_text(&mut self, target: &Target, text: &str) {
+        let Some(field) = self.field_of(target) else {
+            return;
+        };
+        if !text.trim().is_empty() {
+            self.change_field(target, |f| f.value = text.to_string());
+            return;
+        }
+        match target {
+            // Nothing typed over values that differ: each fit keeps its own.
+            Target::Shared(long) if self.differs(long) => {
+                self.message = Some(format!("--{long}: nothing typed, each fit keeps its value"));
+            }
+            // Each fit back to its own default, which may differ.
+            Target::Shared(long) => {
+                self.reset_field(target);
+                self.message = Some(format!("--{long} back to each fit's default"));
+            }
+            _ if !field.default.is_empty() => {
+                self.reset_field(target);
+                self.message = Some(format!(
+                    "--{} cannot be left unset: back to its default {}",
+                    field.long, field.default
+                ));
+            }
+            _ => self.change_field(target, |f| f.value.clear()),
+        }
     }
 
     /// Methods the parameters screen steps through: the queued ones, or
@@ -792,8 +972,7 @@ impl App {
     /// when asked for or changed, narrowed by the filter.
     fn visible(&self) -> Vec<usize> {
         let f = self.filter.to_lowercase();
-        self.rows[self.param_method]
-            .form
+        self.page_form()
             .fields
             .iter()
             .enumerate()
@@ -803,9 +982,20 @@ impl App {
             .collect()
     }
 
-    fn field(&mut self) -> Option<(usize, &mut Field)> {
-        let i = *self.visible().get(self.field_row)?;
-        Some((i, &mut self.rows[self.param_method].form.fields[i]))
+    /// The field under the cursor, by index on the page shown.
+    fn field(&self) -> Option<usize> {
+        self.visible().get(self.field_row).copied()
+    }
+
+    /// What a key on field `i` of the page shown changes: that flag of the
+    /// method shown, or on the shared page, by name, that flag of every
+    /// queued fit.
+    fn target(&self, i: usize) -> Target {
+        if self.shared_page {
+            Target::Shared(self.page_form().fields[i].long.clone())
+        } else {
+            Target::Field(self.param_method, i)
+        }
     }
 
     fn params_key(&mut self, k: KeyEvent) {
@@ -819,17 +1009,29 @@ impl App {
             KeyCode::Home => self.field_row = 0,
             KeyCode::End => self.field_row = last,
             KeyCode::Char('[' | ']') => {
-                let ms = self.param_methods();
-                let at = ms.iter().position(|&m| m == self.param_method).unwrap_or(0);
+                // The shared page first, when two fits or more are queued.
+                let mut pages: Vec<Option<usize>> = Vec::new();
+                if self.shared_rows().len() > 1 {
+                    pages.push(None);
+                }
+                pages.extend(self.param_methods().into_iter().map(Some));
+                let here = (!self.shared_page).then_some(self.param_method);
+                let at = pages.iter().position(|&p| p == here).unwrap_or(0);
                 let d = if k.code == KeyCode::Char(']') {
                     1
                 } else {
-                    ms.len() - 1
+                    pages.len() - 1
                 };
-                self.show_params(ms[(at + d) % ms.len()]);
+                match pages[(at + d) % pages.len()] {
+                    Some(m) => self.show_params(m),
+                    None => {
+                        self.shared_page = true;
+                        self.field_row = 0;
+                    }
+                }
             }
             KeyCode::Char('a') => {
-                let on = self.field().map(|(i, _)| i);
+                let on = self.field();
                 self.advanced = !self.advanced;
                 // Stay on the same flag when it is still listed.
                 self.field_row = on.and_then(|i| self.row_of(i)).unwrap_or(0);
@@ -843,27 +1045,58 @@ impl App {
                 self.field_row = 0;
             }
             KeyCode::Char('r') => {
-                if let Some((_, f)) = self.field() {
-                    f.reset();
+                if let Some(i) = self.field() {
+                    self.reset_field(&self.target(i));
                 }
             }
             KeyCode::Char('R') => {
-                for f in &mut self.rows[self.param_method].form.fields {
-                    f.reset();
+                let targets: Vec<Target> = if self.shared_page {
+                    let form = self.shared_form();
+                    form.fields
+                        .into_iter()
+                        .map(|f| Target::Shared(f.long))
+                        .collect()
+                } else {
+                    let n = self.rows[self.param_method].form.fields.len();
+                    (0..n)
+                        .map(|i| Target::Field(self.param_method, i))
+                        .collect()
+                };
+                for t in &targets {
+                    self.reset_field(t);
                 }
-                self.message = Some("every flag back to its default".into());
+                self.message = Some(if self.shared_page {
+                    "every shared flag back to each fit's default".into()
+                } else {
+                    "every flag back to its default".into()
+                });
+            }
+            KeyCode::Char('e' | 'f') => {
+                let Some(i) = self.field() else { return };
+                if self.page_form().fields[i].kind != Kind::Text {
+                    return;
+                }
+                if k.code == KeyCode::Char('f') {
+                    self.browse_for(self.target(i), Pick::File);
+                } else {
+                    let text = self.page_form().fields[i].value.clone();
+                    self.edit(self.target(i), text);
+                }
             }
             KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right | KeyCode::Enter => {
-                let m = self.param_method;
-                let Some((i, f)) = self.field() else { return };
-                match (&f.kind, k.code) {
-                    (Kind::Flag { .. }, KeyCode::Char(' ') | KeyCode::Enter) => f.toggle(),
-                    (Kind::Choice(_), KeyCode::Left) => f.cycle(-1),
-                    (Kind::Choice(_), _) => f.cycle(1),
-                    (Kind::Text, KeyCode::Enter) => {
-                        let text = f.value.clone();
-                        self.edit(Target::Field(m, i), text);
+                let Some(i) = self.field() else { return };
+                let x = self.page_form().fields[i].clone();
+                let t = self.target(i);
+                match (&x.kind, k.code) {
+                    (Kind::Flag { .. }, KeyCode::Char(' ') | KeyCode::Enter) => {
+                        self.change_field(&t, Field::toggle);
                     }
+                    (Kind::Choice(_), KeyCode::Left) => self.change_field(&t, |f| f.cycle(-1)),
+                    (Kind::Choice(_), _) => self.change_field(&t, |f| f.cycle(1)),
+                    (Kind::Text, KeyCode::Enter) if x.takes_table() => {
+                        self.browse_for(self.target(i), Pick::Table);
+                    }
+                    (Kind::Text, KeyCode::Enter) => self.edit(self.target(i), x.value),
                     _ => {}
                 }
             }
@@ -1260,6 +1493,12 @@ fn describe_mung(program: &Path) -> Result<clap::Command, String> {
     described::Description::parse(&String::from_utf8_lossy(&out.stdout))
         .map(|d| d.command())
         .map_err(|e| format!("{name} describe: {e}"))
+}
+
+/// The folder part of an output header: all of it when it ends in `/`, else
+/// what comes before its last `/`; empty for a bare name.
+fn header_folder(header: &str) -> &str {
+    header.rfind('/').map_or("", |at| &header[..=at])
 }
 
 /// `stem` under the output header `header`: in it when it is a folder

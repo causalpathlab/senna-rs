@@ -86,19 +86,20 @@ impl App {
             );
         }
         if let Some(e) = &self.editor {
-            let what = match e.target {
+            let what = match &e.target {
                 Target::Out(i) => format!(
                     " --out for {} (empty: under the output header)",
-                    self.rows[i].label
+                    self.rows[*i].label
                 ),
                 Target::Header => {
                     " Output header: what every result of this run is named after".to_string()
                 }
-                Target::Field(m, i) => format!(" --{}", self.rows[m].form.fields[i].long),
+                Target::Field(m, i) => format!(" --{}", self.rows[*m].form.fields[*i].long),
+                Target::Shared(long) => format!(" --{long} for every queued fit that has it"),
                 Target::Filter => " flags containing".to_string(),
                 Target::BatchName(i) => format!(
                     " batch of {} (empty: its own name)",
-                    crate::tui::name(&self.pairs[i].data)
+                    crate::tui::name(&self.pairs[*i].data)
                 ),
                 Target::Label(..) => " new name for this label (empty: as it was)".to_string(),
             };
@@ -160,7 +161,7 @@ impl App {
         let keys = match self.screen {
             Screen::Data => "a add data   n name the batch   b label files (several: paired by name)   e rename labels   x own name   X all own   d remove   J K reorder",
             Screen::Methods => "space queue   enter flags   o change --out   O output header",
-            Screen::Params => "space / enter change   ← → choices   r reset   R reset all   a advanced   / filter   [ ] method",
+            Screen::Params => "space / enter change   e type   f pick a file   ← → choices   r reset   R reset all   a advanced   / filter   [ ] method (shared first)",
             Screen::Run => "↑ ↓ PgUp PgDn scroll the log   End follow it   s stop   v open the results in senna view",
         };
         vec![
@@ -382,9 +383,17 @@ impl App {
         ])
         .areas(area);
         let mut tabs = Vec::new();
+        if self.shared_rows().len() > 1 {
+            let name = " shared ".to_string();
+            tabs.push(if self.shared_page {
+                Span::styled(name, selected())
+            } else {
+                Span::styled(name, hint())
+            });
+        }
         for m in self.param_methods() {
             let name = format!(" {} ", self.rows[m].label);
-            tabs.push(if m == self.param_method {
+            tabs.push(if m == self.param_method && !self.shared_page {
                 Span::styled(name, selected())
             } else {
                 Span::styled(name, hint())
@@ -407,8 +416,13 @@ impl App {
         tabs.push(Span::styled(sub, hint()));
         f.render_widget(Paragraph::new(vec![Line::from(tabs), Line::from("")]), head);
 
-        let form = &self.rows[self.param_method].form;
-        let blamed = self.blamed_here();
+        let form = self.page_form();
+        // The shared page changes several fits: clap checks each one's own.
+        let blamed = if self.shared_page {
+            None
+        } else {
+            self.blamed_here()
+        };
         let visible = self.visible();
         let rows = usize::from(list.height);
         let start = first_row(self.field_row, rows, visible.len());
@@ -433,7 +447,10 @@ impl App {
                 " "
             };
             let flag = format!("{mark}--{:<width$}", x.long, width = long_w);
-            let value = if x.is_default() && self.filled_by_clones(x) {
+            let differs = self.shared_page && self.differs(&x.long);
+            let value = if differs {
+                "(differs)".to_string()
+            } else if x.is_default() && self.filled_by_clones(x) {
                 "← mung clones".to_string()
             } else {
                 fit(&x.shown(), 28)
@@ -443,7 +460,11 @@ impl App {
                 let text = format!("{flag} {value:<28}  {help}");
                 lines.push(Line::from(Span::styled(fit(&text, w), selected())));
             } else {
-                let vstyle = if x.is_default() { hint() } else { bold() };
+                let vstyle = if x.is_default() && !differs {
+                    hint()
+                } else {
+                    bold()
+                };
                 let rest = w.saturating_sub(flag.chars().count() + 31);
                 lines.push(Line::from(vec![
                     Span::raw(flag),
@@ -480,6 +501,23 @@ impl App {
                 Span::styled(format!("--{}", x.long), bold()),
                 Span::styled(format!("   {kind}   default {default}"), hint()),
             ]));
+            if self.shared_page {
+                let each: Vec<String> = self
+                    .shared_values(&x.long)
+                    .into_iter()
+                    .map(|(m, v)| format!("{m} {}", if v.is_empty() { "(unset)" } else { &v }))
+                    .collect();
+                text.push(Line::from(Span::styled(
+                    format!("now: {}   (a change here sets every one)", each.join(" · ")),
+                    hint(),
+                )));
+            }
+            if x.takes_table() {
+                text.push(Line::from(Span::styled(
+                    "enter picks an earlier run's feature table or manifest; e types a prefix",
+                    hint(),
+                )));
+            }
             text.extend(x.long_help.lines().map(|l| Line::from(l.to_string())));
         }
         f.render_widget(
