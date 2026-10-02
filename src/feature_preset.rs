@@ -115,7 +115,6 @@ pub(crate) fn load_preset_rows(
         !ids.is_empty(),
         "{flag} {prefix}: no gene of this feature axis has a row in {dictionary_path}"
     );
-    mode.validate(h)?;
     info!(
         "Feature side from {dictionary_path} (H={h}): {} of {} features {}",
         ids.len(),
@@ -134,19 +133,75 @@ pub(crate) fn load_preset_rows(
     Ok((ge::PresetRows { ids, rows, mode }, carried))
 }
 
-/// `--embedding-dim` against the preset's width, the loader having refused an
-/// empty match (so the division is exact).
+/// The width H of a run given `preset`: the larger of `--embedding-dim`
+/// (`auto` is the table's own width) and the table's width, so a table
+/// narrower than the command's default never refuses the run. A table
+/// narrower than H has its rows — given, carried and per-track offsets —
+/// widened with zero columns: under `--init-` and `--lora-` those columns
+/// train like the rest; under `--freeze-` a pinned gene keeps zeros there,
+/// and the extra dimensions are the cells' and the free genes'.
 pub(crate) fn resolve_dim(
     cli_embedding_dim: ge::EmbeddingDim,
-    preset: Option<&ge::PresetRows>,
+    preset: &mut Option<ge::PresetRows>,
+    carried: &mut Option<CarriedRows>,
+    offsets: &mut [ge::PresetOffsets],
 ) -> anyhow::Result<usize> {
-    cli_embedding_dim
-        .resolve(preset.map(ge::PresetRows::width))?
-        .ok_or_else(|| {
+    let Some(h) = preset.as_ref().map(ge::PresetRows::width) else {
+        return cli_embedding_dim.resolve(None)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "--embedding-dim auto takes H from a given feature embedding; none was given"
             )
-        })
+        });
+    };
+    anyhow::ensure!(h > 0, "the given feature embedding has no columns");
+    let width = match cli_embedding_dim {
+        ge::EmbeddingDim::Auto => h,
+        ge::EmbeddingDim::Fixed(d) => d.max(h),
+    };
+    // A LoRA rank is low against the width the run trains at, not the table's.
+    if let Some(p) = preset.as_ref() {
+        p.mode.validate(width)?;
+    }
+    if width == h {
+        info!("H = {h}, the given feature embedding's width");
+        return Ok(h);
+    }
+    let pad = width - h;
+    if preset
+        .as_ref()
+        .is_some_and(|p| matches!(p.mode, PresetMode::Freeze))
+    {
+        // Pinned rows stay zero there: only the cells and the free genes
+        // can use the extra dimensions.
+        log::warn!(
+            "H = {width}: the given feature embedding is {h} wide; its pinned rows keep zeros \
+             in the {pad} extra column(s), which only the free genes can fill. \
+             --embedding-dim {h} (or auto) keeps the table's width"
+        );
+    } else {
+        info!("H = {width}: the given feature embedding is {h} wide; its rows get {pad} zero column(s)");
+    }
+    if let Some(p) = preset.as_mut() {
+        p.rows = zero_pad_rows(&p.rows, h, width);
+    }
+    for o in offsets.iter_mut() {
+        o.rows = zero_pad_rows(&o.rows, h, width);
+    }
+    if let Some(c) = carried.as_mut() {
+        let rows = std::mem::replace(&mut c.rows, nalgebra::DMatrix::zeros(0, 0));
+        c.rows = rows.resize_horizontally(width, 0.0);
+    }
+    Ok(width)
+}
+
+/// Row-major `[n × h]` rows as `[n × width]`, the new columns zero.
+fn zero_pad_rows(rows: &[f32], h: usize, width: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(rows.len() / h.max(1) * width);
+    for row in rows.chunks_exact(h) {
+        out.extend_from_slice(row);
+        out.resize(out.len() + width - h, 0.0);
+    }
+    out
 }
 
 #[cfg(test)]
