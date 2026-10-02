@@ -197,9 +197,9 @@ fn enter_on_a_problem_goes_to_the_flag_clap_blamed() {
     let svd = METHODS.iter().position(|m| *m == "svd").unwrap();
     a.rows[svd].on = true;
     a.rows[svd].form.fields[0].value = "many".into();
-    key(&mut a, KeyCode::Char('G'));
+    a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
     assert!(a.confirm.is_some());
-    key(&mut a, KeyCode::Char('G'));
+    key(&mut a, KeyCode::Enter);
     assert!(a.confirm.is_none() && a.queue.is_none());
     assert_eq!(a.screen, Screen::Params);
     assert_eq!(a.param_method, svd);
@@ -601,4 +601,41 @@ fn a_header_from_home_starts_there() {
     assert_eq!(super::home("~/res/x"), format!("{home}/res/x"));
     assert_eq!(super::home("~"), format!("{home}/"));
     assert_eq!(super::home("res/~x"), "res/~x");
+}
+
+#[test]
+fn every_method_of_senna_takes_threads() {
+    use clap::CommandFactory;
+    let mut cli = crate::Cli::command();
+    cli.build();
+    for m in METHODS {
+        let form = Method::new(&cli, m).unwrap();
+        assert!(form
+            .fields
+            .iter()
+            .any(|f| f.long == "threads" && !f.advanced));
+    }
+}
+
+#[test]
+fn hidden_flags_are_listed_until_a_hides_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    let svd = METHODS.iter().position(|m| *m == "svd").unwrap();
+    a.show_params(svd);
+    a.rows[svd].form.fields[0].advanced = true;
+    assert!(a.visible().contains(&0));
+    key(&mut a, KeyCode::Char('a'));
+    assert!(!a.visible().contains(&0));
+}
+
+#[test]
+fn g_reviews_and_runs_where_shift_enter_cannot_be_told() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.shift_enter = false;
+    a.pairs = data(dir.path(), &["d.zarr"]);
+    a.rows[0].on = true;
+    key(&mut a, KeyCode::Char('G'));
+    assert!(a.confirm.is_some());
 }

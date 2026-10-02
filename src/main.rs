@@ -194,6 +194,9 @@ struct Cli {
     #[arg(short = 'v', long, global = true, help = "Verbose logging")]
     verbose: bool,
 
+    #[arg(long, global = true, help = "Worker threads (default: all cores)")]
+    threads: Option<usize>,
+
     #[command(subcommand)]
     commands: Commands,
 }
@@ -874,6 +877,12 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     logging::init_logger(cli.verbose);
+
+    if let Some(n) = cli.threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()?;
+    }
 
     match &cli.commands {
         Commands::Svd(args) => {

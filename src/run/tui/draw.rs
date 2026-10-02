@@ -170,7 +170,10 @@ impl App {
             )),
             Line::from(Span::styled(format!(" {keys}"), hint())),
             Line::from(Span::styled(
-                " tab / 1-4 screens   G review and run   q quit",
+                format!(
+                    " tab / 1-4 screens   {} review and run   q quit",
+                    self.go_key()
+                ),
                 hint(),
             )),
         ]
@@ -390,7 +393,7 @@ impl App {
         let mut sub = format!(
             "{}{}",
             if self.advanced {
-                "all flags"
+                "all flags (a hides advanced ones, marked ·)"
             } else {
                 "flags (a shows advanced ones)"
             },
@@ -690,9 +693,9 @@ impl App {
         out.extend(body.into_iter().skip(skip).take(room));
         out.push(Line::from(Span::styled(
             if blocked {
-                " G go to the problem   c copy   ↑ ↓ scroll   esc back"
+                " enter go to the problem   c copy   ↑ ↓ scroll   esc back"
             } else {
-                " G run   c copy the commands   ↑ ↓ scroll   esc back"
+                " enter run   c copy the commands   ↑ ↓ scroll   esc back"
             },
             hint(),
         )));
