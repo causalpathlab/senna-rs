@@ -19,6 +19,7 @@ fn job(
         argv: argv.iter().map(ToString::to_string).collect(),
         labels: Vec::new(),
         clones: None,
+        pb_from: None,
     }
 }
 
@@ -244,4 +245,37 @@ fn a_folder_not_there_yet_is_made_for_the_run() {
     assert_eq!(q.states(), [State::Done]);
     assert!(into.join("svd.cmd.sh").exists());
     assert!(into.join("svd.senna.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fit_collapsing_on_an_unfinished_fit_does_not_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let builder = job(
+        dir.path(),
+        Tool::Senna,
+        Path::new("/bin/false"),
+        "topic",
+        &["topic", "--out", "topic"],
+    );
+    let mut user = job(
+        dir.path(),
+        Tool::Senna,
+        Path::new("/bin/true"),
+        "vae",
+        &["vae", "--out", "vae"],
+    );
+    user.pb_from = Some("topic.senna.json".into());
+    let q = Queue::start(vec![builder, user]);
+    while !q.finished() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let s = q.shared.lock().unwrap();
+    assert!(matches!(s.states[0], State::Failed(_)));
+    match &s.states[1] {
+        State::Failed(why) => assert!(why.contains("topic did not finish"), "{why}"),
+        other => panic!("vae should not start: {other:?}"),
+    }
+    drop(s);
+    assert!(!dir.path().join("vae.cmd.sh").exists());
 }

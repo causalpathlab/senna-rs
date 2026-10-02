@@ -169,13 +169,20 @@ pub(crate) fn write_cell_to_pb(
         .map(|i| format!("level_{i}").into_boxed_str())
         .collect();
     let path = format!("{prefix}.cell_to_pb.parquet");
+    // Every cell trained on, for a fit that collapses on this partition
+    // (`--pb-from`, `--from`): the per-cell table leaves out the near-empty
+    // cells QC holds back from the outputs, which such a fit still loads.
+    let all = senna::run_manifest::cell_to_pb_all_path(&path);
     let n_emitted =
         if let Some((m, names)) = senna::output_helpers::cell_subset(&mat, cell_names, keep_idx) {
             let n = m.nrows();
             m.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&col_names))?;
+            mat.to_parquet_with_names(&all, (Some(cell_names), Some("cell")), Some(&col_names))?;
             n
         } else {
             mat.to_parquet_with_names(&path, (Some(cell_names), Some("cell")), Some(&col_names))?;
+            // A table left by an earlier run to this prefix would be stale.
+            let _ = std::fs::remove_file(&all);
             n_cells
         };
     info!("Wrote cell→pb membership: {n_emitted} cells × {num_levels} levels → {path}");
@@ -364,4 +371,34 @@ pub(super) fn apply_svd_preprocessing(mat: &Mat, n_components: usize) -> anyhow:
 
     info!("SVD done, reduced to {n_components} dims");
     Ok(reduced)
+}
+
+#[cfg(test)]
+mod cell_to_pb_tests {
+    use super::*;
+
+    /// What a run writes, a later fit reads back level for level (finest
+    /// last); with cells held out of the per-cell table, the full partition
+    /// is what it reads.
+    #[test]
+    fn a_partition_reads_back_as_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("run").to_string_lossy().into_owned();
+        let names: Vec<Box<str>> = ["a", "b", "c", "d"].map(Box::from).to_vec();
+        // Coarse first, finest last: 2 groups, then 4.
+        let levels = vec![vec![0, 0, 1, 1], vec![0, 1, 2, 3]];
+        let path = write_cell_to_pb(&prefix, &levels, &names, None).unwrap();
+        let (back, cells) = senna::run_manifest::load_cell_to_pb_raw(&path).unwrap();
+        assert_eq!(back, levels);
+        assert_eq!(cells, names);
+        let all = senna::run_manifest::cell_to_pb_all_path(&path);
+        assert!(!std::path::Path::new(&all).exists());
+
+        // Cell `b` held back from the outputs: the full table has it.
+        write_cell_to_pb(&prefix, &levels, &names, Some(&[0, 2, 3])).unwrap();
+        let (short, _) = senna::run_manifest::load_cell_to_pb_raw(&path).unwrap();
+        assert_eq!(short[1], [0, 2, 3]);
+        let (full, cells) = senna::run_manifest::load_cell_to_pb_raw(&all).unwrap();
+        assert_eq!((full, cells), (levels, names));
+    }
 }

@@ -127,6 +127,10 @@ pub struct MaskedTopicArgs {
     #[command(flatten)]
     collapse: crate::refine_weighting::CollapseArgs,
 
+    #[command(flatten)]
+    #[serde(flatten)]
+    pb_from: crate::refine_weighting::PbFromArgs,
+
     #[arg(
         long = "init-from",
         help = "Initialize encoder + decoder weights from a previously trained model",
@@ -845,11 +849,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         mode.validate(h)?;
     }
 
-    let prebuilt_partition = inherited
-        .as_ref()
-        .map(senna::run_manifest::InheritedFromManifest::load_cell_to_pb)
-        .transpose()?
-        .flatten();
+    let prebuilt_partition = args.pb_from.partition(inherited.as_ref())?;
 
     let effective_hvg =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, data_files.len(), &args.hvg);
@@ -1667,6 +1667,7 @@ impl crate::update::Updatable for MaskedTopicArgs {
         // (Here `--from` also carries --freeze-feature-embedding, which a warm
         // start supersedes: the weights already contain that ρ.)
         self.from = None;
+        self.pb_from = Default::default();
         if let Some(e) = r.epochs {
             self.epochs = e;
         }

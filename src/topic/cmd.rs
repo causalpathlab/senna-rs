@@ -98,6 +98,10 @@ pub struct TopicArgs {
     #[command(flatten)]
     pub(crate) collapse: crate::refine_weighting::CollapseArgs,
 
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) pb_from: crate::refine_weighting::PbFromArgs,
+
     #[arg(
         long = "init-from",
         help = "Initialize encoder + decoder weights from a previously trained model",
@@ -338,11 +342,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         inherited.as_ref(),
         args.batch_files.as_deref(),
     );
-    let prebuilt_partition = inherited
-        .as_ref()
-        .map(senna::run_manifest::InheritedFromManifest::load_cell_to_pb)
-        .transpose()?
-        .flatten();
+    let prebuilt_partition = args.pb_from.partition(inherited.as_ref())?;
 
     let PreparedData {
         data_vec,
@@ -1224,8 +1224,9 @@ impl crate::update::Updatable for TopicArgs {
         }
         // NOT inherited: `--from` would pull the parent's cell→pb partition,
         // and `align_cell_to_pb_to_cells` bails on any cell absent from the
-        // source — which every newly absorbed cell is.
+        // source — which every newly absorbed cell is. `--pb-from` likewise.
         self.from = None;
+        self.pb_from = Default::default();
         if let Some(e) = r.epochs {
             self.epochs = e;
         }

@@ -57,6 +57,8 @@ impl Tool {
 /// The flag that hands the clones of `mung clones` to a senna fit, as
 /// its form lists it.
 pub const CLONES_FLAG: &str = "cnv-clones";
+/// The flag a fit collapses on another's pseudobulk partition with.
+pub const PB_FROM_FLAG: &str = "pb-from";
 
 /// After `mung clones`: what the fits after it do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +91,9 @@ pub struct Job {
     /// The clone table of the `mung clones` step queued before it, as
     /// passed: relative to `dir`.
     pub clones: Option<String>,
+    /// The manifest of a fit queued before it whose pseudobulk partition it
+    /// collapses on, as passed: relative to `dir`.
+    pub pb_from: Option<String>,
 }
 
 impl Job {
@@ -100,12 +105,15 @@ impl Job {
     }
 
     /// The command it runs and records, without the program: `argv`, then
-    /// the clones.
+    /// the clones and the partition it collapses on.
     #[must_use]
     pub fn command(&self) -> Vec<String> {
         let mut c = self.argv.clone();
         if let Some(table) = &self.clones {
             c.extend([format!("--{CLONES_FLAG}"), table.clone()]);
+        }
+        if let Some(run) = &self.pb_from {
+            c.extend([format!("--{PB_FROM_FLAG}"), run.clone()]);
         }
         c
     }
@@ -182,17 +190,31 @@ impl Queue {
         let worker = std::thread::spawn(move || {
             // Why the fits that wanted the clones cannot have them.
             let mut no_clones: Option<String> = None;
+            // The results of fits that did not finish, and their names: a
+            // fit collapsing on one of their partitions cannot run.
+            let mut unfinished: Vec<(std::path::PathBuf, String)> = Vec::new();
             for i in 0..js.len() {
                 let job = &js[i];
+                let missing = job.pb_from.as_ref().and_then(|run| {
+                    let run = super::script::normalize(&job.dir.join(run));
+                    unfinished.iter().find(|(r, _)| *r == run)
+                });
                 let state = if st.is_stopped() {
                     State::Stopped
                 } else if let (Some(_), Some(why)) = (&job.clones, &no_clones) {
                     State::Failed(why.clone())
+                } else if let Some((_, method)) = missing {
+                    State::Failed(format!(
+                        "{method} did not finish: no pseudobulks to collapse on"
+                    ))
                 } else {
                     set(&s, i, State::Running);
                     run_job(job, i, &s, &st)
                 };
                 let done = state == State::Done;
+                if !done {
+                    unfinished.push((super::script::normalize(&job.result()), job.method.clone()));
+                }
                 set(&s, i, state);
                 if !job.asks() {
                     continue;

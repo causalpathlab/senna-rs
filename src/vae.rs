@@ -67,6 +67,10 @@ pub struct VaeArgs {
     #[command(flatten)]
     pub(crate) collapse: crate::refine_weighting::CollapseArgs,
 
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) pb_from: crate::refine_weighting::PbFromArgs,
+
     #[arg(
         long = "init-from",
         help = "Initialize weights from a previously trained `senna vae` model",
@@ -244,11 +248,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         inherited.as_ref(),
         args.batch_files.as_deref(),
     );
-    let prebuilt_partition = inherited
-        .as_ref()
-        .map(senna::run_manifest::InheritedFromManifest::load_cell_to_pb)
-        .transpose()?
-        .flatten();
+    let prebuilt_partition = args.pb_from.partition(inherited.as_ref())?;
 
     let PreparedData {
         data_vec,
@@ -652,6 +652,7 @@ impl crate::update::Updatable for VaeArgs {
         self.pb_reference = r.reference;
         // See `TopicArgs::rebase` — the inherited partition cannot cover new cells.
         self.from = None;
+        self.pb_from = Default::default();
         if let Some(e) = r.epochs {
             self.epochs = e;
         }
