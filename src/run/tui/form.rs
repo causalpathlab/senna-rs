@@ -43,6 +43,8 @@ pub struct Field {
     /// The value clap would use when the flag is not given; `""` for none.
     pub default: String,
     pub value: String,
+    /// What clap calls its value (`PREFIX`, `FILE`, …); `""` for none.
+    pub value_name: String,
     /// Hidden from `--help`: shown only with the advanced rows.
     pub advanced: bool,
     pub required: bool,
@@ -101,6 +103,11 @@ impl Field {
                 .unwrap_or_default(),
             value: default.clone(),
             default,
+            value_name: a
+                .get_value_names()
+                .and_then(|v| v.first())
+                .map(ToString::to_string)
+                .unwrap_or_default(),
             advanced: a.is_hide_set(),
             required: a.is_required_set(),
             kind,
@@ -113,6 +120,13 @@ impl Field {
     #[must_use]
     pub fn is_default(&self) -> bool {
         self.value.trim() == self.default
+    }
+
+    /// Whether the value names an earlier run's feature table
+    /// (`--{freeze,init,lora}-feature-embedding`), so enter browses for one.
+    #[must_use]
+    pub fn takes_table(&self) -> bool {
+        self.kind == Kind::Text && self.value_name == "PREFIX"
     }
 
     /// Back to what clap would use.

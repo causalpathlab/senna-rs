@@ -6,11 +6,14 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// What `senna run` browses for: count backends to embed, or batch label
-/// files; several at once either way.
+/// files, several at once either way; or one file for a flag: an earlier
+/// run's feature table, or any file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pick {
     Data,
     Batch,
+    Table,
+    File,
 }
 
 impl Wanted for Pick {
@@ -24,6 +27,11 @@ impl Wanted for Pick {
                 "Batch labels, one file per data file",
                 "label files (.txt, .tsv, .csv, gzipped too)",
             ),
+            Pick::Table => (
+                "An earlier run's feature table",
+                "feature tables (.feature_embedding / .dictionary .parquet, .senna.json)",
+            ),
+            Pick::File => ("A file for this flag", "files"),
         };
         Header {
             title: title.into(),
@@ -38,12 +46,20 @@ impl Wanted for Pick {
         let wanted = match self {
             Pick::Data => is_data(name),
             Pick::Batch => is_batch(name),
+            // A run's feature table, or its manifest.
+            Pick::Table => {
+                name.ends_with(".senna.json")
+                    || senna::run_manifest::RHO_TABLE_SUFFIXES
+                        .iter()
+                        .any(|e| name.ends_with(e))
+            }
+            Pick::File => true,
         };
         wanted.then(|| size_of(path))
     }
 
     fn store(&self, _path: &Path, _name: &str) -> Option<String> {
-        (*self == Pick::Data).then(String::new)
+        matches!(self, Pick::Data | Pick::File).then(String::new)
     }
 
     fn describe<'a>(&self, size: &'a String) -> Cow<'a, str> {
@@ -51,7 +67,25 @@ impl Wanted for Pick {
     }
 
     fn many(&self) -> bool {
-        true
+        matches!(self, Pick::Data | Pick::Batch)
+    }
+
+    /// The newest feature table here, as the likely one: a run's ρ table or
+    /// manifest before a `.dictionary.parquet`, which a topic run writes as
+    /// a log-simplex β the flags refuse.
+    fn best(&self, dir: &Path, files: &[(&str, &String)]) -> Option<String> {
+        if *self != Pick::Table {
+            return None;
+        }
+        let modified = |n: &str| {
+            std::fs::metadata(dir.join(n))
+                .and_then(|m| m.modified())
+                .ok()
+        };
+        files
+            .iter()
+            .max_by_key(|(n, _)| (!n.ends_with(".dictionary.parquet"), modified(n)))
+            .map(|(n, _)| n.to_string())
     }
 }
 

@@ -23,6 +23,16 @@ fn cli() -> clap::Command {
                     .default_value("10")
                     .value_parser(clap::value_parser!(usize)),
             );
+        // One takes an earlier run's feature table.
+        let c = if name == "bge" {
+            c.arg(
+                clap::Arg::new("lora")
+                    .long("lora-feature-embedding")
+                    .value_name("PREFIX"),
+            )
+        } else {
+            c
+        };
         // All but one take the clones of `mung clones`.
         if name == "simba" {
             c
@@ -638,4 +648,106 @@ fn g_reviews_and_runs_where_shift_enter_cannot_be_told() {
     a.rows[0].on = true;
     key(&mut a, KeyCode::Char('G'));
     assert!(a.confirm.is_some());
+}
+
+/// The row index of method `name`.
+fn row_of(a: &App, name: &str) -> usize {
+    a.rows.iter().position(|r| r.label == name).unwrap()
+}
+
+#[test]
+fn the_shared_page_sets_a_flag_in_every_queued_fit_that_has_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    let (topic, simba) = (row_of(&a, "topic"), row_of(&a, "simba"));
+    a.rows[topic].on = true;
+    a.rows[simba].on = true;
+    a.show_params(topic);
+    // The shared page is listed first: `[` from the first method.
+    key(&mut a, KeyCode::Char('['));
+    assert!(a.shared_page);
+    // `--steps` is shared; `--cnv-clones` is topic's alone.
+    let shared: Vec<String> = a
+        .shared_form()
+        .fields
+        .iter()
+        .map(|f| f.long.clone())
+        .collect();
+    assert_eq!(shared, ["steps"]);
+
+    key(&mut a, KeyCode::Char('e'));
+    key(&mut a, KeyCode::Backspace);
+    key(&mut a, KeyCode::Backspace);
+    typed(&mut a, "7");
+    key(&mut a, KeyCode::Enter);
+    let steps = |a: &App, r: usize| {
+        a.rows[r]
+            .form
+            .fields
+            .iter()
+            .find(|f| f.long == "steps")
+            .unwrap()
+            .value
+            .clone()
+    };
+    assert_eq!(
+        (steps(&a, topic), steps(&a, simba)),
+        ("7".into(), "7".into())
+    );
+
+    // Set apart on one method, the shared page says they differ, and an
+    // edit with nothing typed leaves each its own.
+    a.rows[simba].form.fields[0].value = "3".into();
+    assert!(a.differs("steps"));
+    assert_eq!(a.shared_form().fields[0].value, "");
+    key(&mut a, KeyCode::Char('e'));
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(
+        (steps(&a, topic), steps(&a, simba)),
+        ("7".into(), "3".into())
+    );
+    key(&mut a, KeyCode::Char('r'));
+    assert_eq!(
+        (steps(&a, topic), steps(&a, simba)),
+        ("10".into(), "10".into())
+    );
+
+    // With one fit queued there is nothing to share.
+    a.rows[simba].on = false;
+    a.settle();
+    assert!(!a.shared_page);
+}
+
+#[test]
+fn enter_on_a_feature_table_flag_picks_the_newest_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    std::fs::write(dir.path().join("old.feature_embedding.parquet"), b"").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
+    // A topic run's β, written later, is not what the flag takes.
+    std::fs::write(dir.path().join("topic.dictionary.parquet"), b"").unwrap();
+    let bge = row_of(&a, "bge");
+    a.rows[bge].on = true;
+    a.show_params(bge);
+    let i = a.rows[bge]
+        .form
+        .fields
+        .iter()
+        .position(|f| f.long == "lora-feature-embedding")
+        .unwrap();
+    a.field_row = a.visible().iter().position(|&v| v == i).unwrap();
+    key(&mut a, KeyCode::Enter);
+    let b = a.browser.as_ref().expect("a browser opens");
+    let listed: Vec<&str> = b.shown().iter().map(|e| e.name()).collect();
+    assert!(listed.contains(&"old.feature_embedding.parquet"));
+    assert!(!listed.contains(&"notes.txt"));
+    key(&mut a, KeyCode::Enter);
+    assert!(a.browser.is_none());
+    // In full: the fit runs in its own output folder.
+    assert_eq!(
+        a.rows[bge].form.fields[i].value,
+        dir.path()
+            .join("old.feature_embedding.parquet")
+            .to_string_lossy()
+    );
 }
