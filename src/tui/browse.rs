@@ -48,6 +48,12 @@ pub(crate) trait Wanted {
     fn many(&self) -> bool {
         false
     }
+
+    /// A key of the caller's own, such as an option it offers while
+    /// browsing (its header says which). Returns whether it was one.
+    fn key(&mut self, _k: &KeyEvent) -> bool {
+        false
+    }
 }
 
 /// What the popup says about what is wanted.
@@ -245,6 +251,9 @@ impl<W: Wanted> Browser<W> {
     }
 
     fn handle(&mut self, k: KeyEvent) -> Outcome {
+        if self.want.key(&k) {
+            return Outcome::Moved;
+        }
         if self.want.many() {
             if let Some(o) = self.mark_key(k) {
                 return o;

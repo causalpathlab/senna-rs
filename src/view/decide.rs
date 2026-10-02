@@ -233,8 +233,9 @@ impl Drop for Rescore {
     }
 }
 
-/// Run `lupin annotate -f <run> -m <markers> -o <out> --method enrichment`:
-/// the run's first annotation round, written as `{out}.senna.json`.
+/// Run `lupin annotate -f <run> -m <markers> -o <out> --method enrichment`,
+/// with `--go` to test GO terms on each cluster as well: the run's first
+/// annotation round, written as `{out}.senna.json`.
 /// Enrichment, not lupin's default of projection for co-embedded runs (bge,
 /// fne, gem), because only enrichment writes the per-cluster gene evidence
 /// relabel mode reads. Each line lupin logs is
@@ -244,6 +245,7 @@ pub fn annotate(
     lupin: &str,
     run: &Path,
     markers: &Path,
+    go: bool,
     out: &Path,
     progress: &std::sync::Mutex<String>,
 ) -> Result<Reply, String> {
@@ -255,6 +257,7 @@ pub fn annotate(
         .arg("-o")
         .arg(out)
         .args(["--method", "enrichment"])
+        .args(go.then_some("--go"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

@@ -86,7 +86,7 @@ pub fn run(
             .into_iter()
             .map(|(scene, from)| App::new(scene, picker.clone(), from, lupin.clone()))
             .collect();
-        grid::Deck::new(apps, picker).run(&mut terminal)
+        grid::Deck::new(apps, picker, crate::view::saved::Gallery::here()).run(&mut terminal)
     })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();

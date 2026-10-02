@@ -7,7 +7,7 @@ use super::*;
 use crate::tui::browse::{Browser, Outcome};
 use crate::view::activity::Activity;
 use senna::run_manifest::{self, RunManifest};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 impl App {
     /// Ask where the first missing data file is, when the scene found one
@@ -30,7 +30,7 @@ impl App {
 
     /// Open the browser on data file `index`, recorded at `recorded`.
     fn ask_for_data(&mut self, index: usize, recorded: String) {
-        let dir = start_dir(&self.from, &recorded);
+        let dir = start_dir(&self.from);
         self.modal = Some(Modal::DataFile(
             Browser::open(dir, Missing(recorded), None),
             index,
@@ -139,51 +139,11 @@ impl App {
     }
 }
 
-/// Where to start looking for `recorded` (absolute, or relative to the run's
-/// folder): the deepest folder on its path that is here, when that is more
-/// than a top-level one (`/data/project`, not `/` or `/Users`); else the
+/// Where to start looking: the folder the viewer runs from, else the
 /// run's own folder.
-fn start_dir(from: &Path, recorded: &str) -> PathBuf {
-    let run_dir = run_manifest::manifest_dir(from);
-    let recorded = std::path::absolute(run_manifest::resolve(run_dir, recorded))
-        .unwrap_or_else(|_| PathBuf::from(recorded));
-    let deep = |p: &PathBuf| {
-        p.components()
-            .filter(|c| matches!(c, Component::Normal(_)))
-            .count()
-            >= 2
-    };
-    // Canonical, so a relative path's `..` is resolved before it is judged.
-    recorded
-        .ancestors()
-        .skip(1)
-        .filter_map(|p| p.canonicalize().ok())
-        .find(|p| deep(p) && p.is_dir())
-        .or_else(|| std::fs::canonicalize(run_dir).ok())
-        .or_else(|| std::env::current_dir().ok())
+fn start_dir(from: &Path) -> PathBuf {
+    std::env::current_dir()
+        .ok()
+        .or_else(|| std::fs::canonicalize(run_manifest::manifest_dir(from)).ok())
         .unwrap_or_else(|| PathBuf::from("/"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn looking_starts_where_the_recorded_path_still_is() {
-        let root = tempfile::tempdir().unwrap();
-        let (run, project) = (root.path().join("run"), root.path().join("project"));
-        std::fs::create_dir_all(&run).unwrap();
-        std::fs::create_dir_all(&project).unwrap();
-        let from = run.join("r.senna.json");
-        let project = project.canonicalize().unwrap();
-        let recorded = project.join("gone/x.zarr.zip");
-        assert_eq!(start_dir(&from, &recorded.to_string_lossy()), project);
-        // Recorded relative to the run's folder, as manifests now are.
-        assert_eq!(start_dir(&from, "../project/gone/x.zarr.zip"), project);
-        // Nothing of it here but the root: the run's folder.
-        assert_eq!(
-            start_dir(&from, "/no-such-top/at/all/x.zarr.zip"),
-            run.canonicalize().unwrap()
-        );
-    }
 }

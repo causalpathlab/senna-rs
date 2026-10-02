@@ -23,8 +23,12 @@ const NOT_PANELS: &[&str] = &[
     "parquet", "zarr", "zip", "h5", "h5ad", "json", "bam", "bai", "png", "pdf", "log",
 ];
 
-/// Marker panels, counted against the run's genes when known.
-pub(super) struct Panels(pub Option<GeneIndex>);
+/// Marker panels, counted against the run's genes when known, and whether
+/// lupin also tests GO terms on the clusters (tab turns it on and off).
+pub(super) struct Panels {
+    pub genes: Option<GeneIndex>,
+    pub go: bool,
+}
 
 /// A marker panel's size, and how much of it this run can use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +45,11 @@ impl Wanted for Panels {
     fn header(&self) -> Header {
         Header {
             title: "Marker panel for lupin annotate".into(),
-            notes: Vec::new(),
+            notes: vec![if self.go {
+                "with GO terms: lupin tests them on each cluster too (tab: without)".into()
+            } else {
+                "without GO terms (tab: test them on each cluster too)".into()
+            }],
             what: "marker panels (gene, cell type per line)",
             star: Some(" ★ covers the most of this run's genes"),
             verb: "annotate",
@@ -49,7 +57,14 @@ impl Wanted for Panels {
     }
 
     fn file(&self, path: &Path, _name: &str) -> Option<Panel> {
-        read_panel(path, self.0.as_ref())
+        read_panel(path, self.genes.as_ref())
+    }
+
+    /// Tab turns GO terms on and off.
+    fn key(&mut self, k: &KeyEvent) -> bool {
+        let tab = k.code == KeyCode::Tab;
+        self.go ^= tab;
+        tab
     }
 
     /// `12 types · 340 genes · 301 in this run (89%)`.
@@ -135,6 +150,7 @@ impl Wanted for Missing {
                     self.0
                 ),
                 "the file chosen is written into the run's manifest".into(),
+                "looking from the folder senna view runs in (~ goes home)".into(),
             ],
             what: "data files (.zarr, .zarr.zip, .h5)",
             star: Some(" ★ the recorded name"),
@@ -304,7 +320,10 @@ mod tests {
         std::fs::create_dir(d.join(".hidden")).unwrap();
 
         let names: Vec<Box<str>> = ["GENE1", "GENE2", "GENE3", "GENE4"].map(Box::from).to_vec();
-        let want = Panels(Some(GeneIndex::build(&names)));
+        let want = Panels {
+            genes: Some(GeneIndex::build(&names)),
+            go: false,
+        };
         let entries = list_dir(d, &want);
         let listed: Vec<&str> = entries.iter().map(Entry::name).collect();
         assert_eq!(
@@ -335,7 +354,14 @@ mod tests {
         write(&d.join("panels"), "set.tsv", "GENE1\tCT1\nGENE3\tCT2\n");
         write(d, "other.tsv", "GENE1\tCT1\nGENE3\tCT2\n");
 
-        let mut b = Browser::open(d.to_path_buf(), Panels(None), None);
+        let mut b = Browser::open(
+            d.to_path_buf(),
+            Panels {
+                genes: None,
+                go: false,
+            },
+            None,
+        );
         b.filter.push_str("pan");
         let names: Vec<&str> = b.shown().iter().map(|e| e.name()).collect();
         assert_eq!(names, ["..", "panels"]);

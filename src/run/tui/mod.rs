@@ -317,7 +317,7 @@ impl App {
     /// when it ends in `/`, else the part before its last `/`. `~/`
     /// starts at home. A folder that is a file keeps the header as it was.
     fn set_header(&mut self, text: &str) {
-        let header = home(text.trim());
+        let header = crate::tui::home(text.trim());
         let folder = match header.rfind('/') {
             Some(at) => &header[..=at],
             None => "",
@@ -1260,21 +1260,6 @@ fn describe_mung(program: &Path) -> Result<clap::Command, String> {
     described::Description::parse(&String::from_utf8_lossy(&out.stdout))
         .map(|d| d.command())
         .map_err(|e| format!("{name} describe: {e}"))
-}
-
-/// `text` with a leading `~/` (or a lone `~`) as the home folder.
-fn home(text: &str) -> String {
-    let rest = match text {
-        "~" => "",
-        _ => match text.strip_prefix("~/") {
-            Some(rest) => rest,
-            None => return text.to_string(),
-        },
-    };
-    match std::env::var_os("HOME") {
-        Some(h) => format!("{}/{rest}", Path::new(&h).display()),
-        None => text.to_string(),
-    }
 }
 
 /// `stem` under the output header `header`: in it when it is a folder

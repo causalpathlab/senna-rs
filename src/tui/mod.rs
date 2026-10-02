@@ -15,6 +15,38 @@ pub fn name(path: &Path) -> String {
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
 
+/// `text` with a leading `~/` (or a lone `~`) as the home folder.
+#[must_use]
+pub fn home(text: &str) -> String {
+    let rest = match text {
+        "~" => "",
+        _ => match text.strip_prefix("~/") {
+            Some(rest) => rest,
+            None => return text.to_string(),
+        },
+    };
+    match std::env::var_os("HOME") {
+        Some(h) => format!("{}/{rest}", Path::new(&h).display()),
+        None => text.to_string(),
+    }
+}
+
+/// Edit a one-line text field with key `k`: type, backspace, ctrl-u clears.
+/// Returns whether it was an editing key.
+pub fn edit_line(text: &mut String, k: &ratatui::crossterm::event::KeyEvent) -> bool {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    match k.code {
+        KeyCode::Char('u') if ctrl => text.clear(),
+        KeyCode::Backspace => {
+            text.pop();
+        }
+        KeyCode::Char(c) if !ctrl => text.push(c),
+        _ => return false,
+    }
+    true
+}
+
 /// A path as shown: relative to the working directory when it is under it.
 #[must_use]
 pub fn shown(p: &Path) -> String {

@@ -188,6 +188,14 @@ impl Scene {
             });
         }
         out.extend(self.live_lines());
+        // What the cluster's genes do, beside which type they mark.
+        if let Some(round) = self.data.round.as_ref() {
+            let terms = round.term_lines(&id.to_string(), 3);
+            if !terms.is_empty() {
+                out.push(String::new());
+                out.extend(terms);
+            }
+        }
         out.push(String::new());
         // Which type a mark edits, said once: `+` the working type, `−` the
         // type listing the feature.
