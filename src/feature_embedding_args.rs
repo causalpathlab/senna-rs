@@ -44,8 +44,12 @@ pub struct FeatureEmbeddingArgs {
                      into the output ρ table, after the trained rows, so the result is\n\
                      the full table; `{out}.feature_types.parquet` names each row's type.\n\
                      \n\
-                     H is taken from the table when `--embedding-dim` is `auto`;\n\
-                     an explicit `--embedding-dim` must agree with it."
+                     bge, simba, fne and gem: H is the larger of `--embedding-dim`\n\
+                     and the table's width (`auto` takes the table's). A table\n\
+                     narrower than H gets zero columns: they train under\n\
+                     `--init-`/`--lora-`; a pinned gene keeps zeros there under\n\
+                     `--freeze-`. The masked models take H from the table: an\n\
+                     explicit `--embedding-dim` must agree with it."
     )]
     pub freeze_feature_embedding: Option<Box<str>>,
 

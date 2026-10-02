@@ -94,12 +94,13 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     //////////////
     // Training //
     //////////////
-    let (preset, carried) = crate::feature_preset::resolve_preset(
+    let (mut preset, mut carried) = crate::feature_preset::resolve_preset(
         args.feature_embedding.resolve()?,
         &feature_names,
         &ge::FeatureNameKind::Gene { delim: '_' },
     )?;
-    let dim = crate::feature_preset::resolve_dim(args.embedding_dim, preset.as_ref())?;
+    let dim =
+        crate::feature_preset::resolve_dim(args.embedding_dim, &mut preset, &mut carried, &mut [])?;
     let cfg = SimbaConfig {
         dim,
         epochs: args.train.epochs,

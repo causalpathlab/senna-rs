@@ -180,13 +180,17 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(senna::multiome_layout::RunMultiome::from_plan);
 
-    let (preset_features, carried) = crate::feature_preset::resolve_preset(
+    let (mut preset_features, mut carried) = crate::feature_preset::resolve_preset(
         args.feature_embedding.resolve()?,
         &unified.feature_names,
         &feature_kind,
     )?;
-    let embedding_dim =
-        crate::feature_preset::resolve_dim(args.embedding_dim, preset_features.as_ref())?;
+    let embedding_dim = crate::feature_preset::resolve_dim(
+        args.embedding_dim,
+        &mut preset_features,
+        &mut carried,
+        &mut [],
+    )?;
 
     driver::fit_embed_family(driver::EmbedPlan {
         kind: senna::run_manifest::RunKind::Bge,

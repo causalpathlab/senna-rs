@@ -42,13 +42,17 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     let (unified, plan) = load_gem_data(&inputs, batch_files, args.preload_data)?;
     let hvg_weights = gem_hvg_row_weights(&unified, &plan, &args.hvg, args.block_size)?;
 
-    let preset = crate::gem::preset::resolve_gem_preset(
+    let mut preset = crate::gem::preset::resolve_gem_preset(
         args.feature_embedding.resolve()?,
         &unified.feature_names,
         &plan,
     )?;
-    let embedding_dim =
-        crate::feature_preset::resolve_dim(args.embedding_dim, preset.base.as_ref())?;
+    let embedding_dim = crate::feature_preset::resolve_dim(
+        args.embedding_dim,
+        &mut preset.base,
+        &mut preset.carried,
+        &mut preset.offsets,
+    )?;
     anyhow::ensure!(embedding_dim > 0, "--embedding-dim must be > 0");
     validate_offset_rank(args.offset_rank, embedding_dim)?;
 

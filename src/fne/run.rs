@@ -188,12 +188,17 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         .iter()
         .map(|&i| graph.node_names[i as usize].clone())
         .collect();
-    let (preset_genes, carried) = crate::feature_preset::resolve_preset(
+    let (mut preset_genes, mut carried) = crate::feature_preset::resolve_preset(
         args.feature_embedding.resolve()?,
         &gene_names,
         &args.name_kind(),
     )?;
-    let dim = crate::feature_preset::resolve_dim(args.embedding_dim, preset_genes.as_ref())?;
+    let dim = crate::feature_preset::resolve_dim(
+        args.embedding_dim,
+        &mut preset_genes,
+        &mut carried,
+        &mut [],
+    )?;
     let preset = preset_genes.map(|p| p.map_ids(|g| gene_nodes[g as usize]));
     let stop = setup_stop_handler();
     let cfg = FneConfig {

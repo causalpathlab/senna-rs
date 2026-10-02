@@ -113,18 +113,29 @@ fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
             mode
         );
     }
-    // The table is H = 3 wide: rank 3 is no residual.
-    assert!(load_preset_genes(
-        &prefix,
-        PresetMode::Lora(LoraSpec {
-            rank: 3,
-            lr_ratio: 1.0,
-            ridge: 0.0
-        }),
-        &axis,
-        &kind
-    )
-    .is_err());
+    // The table is H = 3 wide: rank 3 is no residual at that width, but is
+    // low-rank once the run trains wider.
+    let rank3 = || {
+        Some(
+            load_preset_genes(
+                &prefix,
+                PresetMode::Lora(LoraSpec {
+                    rank: 3,
+                    lr_ratio: 1.0,
+                    ridge: 0.0,
+                }),
+                &axis,
+                &kind,
+            )
+            .unwrap()
+            .0,
+        )
+    };
+    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut rank3(), &mut None, &mut []).is_err());
+    assert_eq!(
+        resolve_dim(ge::EmbeddingDim::Fixed(8), &mut rank3(), &mut None, &mut []).unwrap(),
+        8
+    );
 }
 
 /// Under a pinning mode the source rows that matched nothing come back to be
@@ -317,4 +328,44 @@ fn appending_skips_a_superseded_name_and_refuses_a_width_mismatch() {
     assert!(data_beans::aux::feature_types::read_feature_types(&out2)
         .unwrap()
         .is_none());
+}
+
+/// H is the larger of `--embedding-dim` and the table's width: a narrower
+/// table is widened with zero columns, given and carried rows alike, and a
+/// smaller H (or `auto`) takes the table's.
+#[test]
+fn the_width_is_the_larger_of_the_flag_and_the_table() {
+    let preset = || {
+        Some(ge::PresetRows {
+            ids: vec![0, 3],
+            rows: vec![0.5, 1.0, 1.5, -1.0, -0.5, 0.0],
+            mode: PresetMode::Freeze,
+        })
+    };
+    let mut p = preset();
+    let mut c = Some(carried_fixture());
+    let h = resolve_dim(ge::EmbeddingDim::Fixed(5), &mut p, &mut c, &mut []).unwrap();
+    assert_eq!(h, 5);
+    assert_eq!(
+        p.unwrap().rows,
+        vec![0.5, 1.0, 1.5, 0.0, 0.0, -1.0, -0.5, 0.0, 0.0, 0.0]
+    );
+    let c = c.unwrap().rows;
+    assert_eq!(c.shape(), (2, 5));
+    assert_eq!(
+        c.row(1).iter().copied().collect::<Vec<_>>(),
+        [-1.0, -2.0, -3.0, 0.0, 0.0]
+    );
+
+    for flag in [ge::EmbeddingDim::Fixed(2), ge::EmbeddingDim::Auto] {
+        let mut p = preset();
+        assert_eq!(resolve_dim(flag, &mut p, &mut None, &mut []).unwrap(), 3);
+        assert_eq!(p.unwrap().rows.len(), 6);
+    }
+    // Without a table the flag is the width, and `auto` has nothing to take.
+    assert_eq!(
+        resolve_dim(ge::EmbeddingDim::Fixed(7), &mut None, &mut None, &mut []).unwrap(),
+        7
+    );
+    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut None, &mut None, &mut []).is_err());
 }
