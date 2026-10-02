@@ -16,3 +16,4 @@ docs/text-anchored-gene-space-plan.md
 
 # Not tracked; resolved fresh on each build
 Cargo.lock
+.senna-view/
