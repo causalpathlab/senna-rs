@@ -42,3 +42,20 @@ pub fn siblings(path: &Path, suffix: &str) -> Vec<PathBuf> {
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
+
+/// Whether `name` ends in `.pdf`, in any case.
+#[must_use]
+pub fn has_pdf(name: &str) -> bool {
+    name.trim().to_ascii_lowercase().ends_with(".pdf")
+}
+
+/// `name`, trimmed, with `.pdf` added when it lacks it.
+#[must_use]
+pub fn with_pdf(name: &str) -> PathBuf {
+    let name = name.trim();
+    if has_pdf(name) {
+        name.into()
+    } else {
+        format!("{name}.pdf").into()
+    }
+}

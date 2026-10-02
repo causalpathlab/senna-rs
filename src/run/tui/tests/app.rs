@@ -598,9 +598,9 @@ fn a_header_with_a_folder_makes_it_at_once() {
 #[test]
 fn a_header_from_home_starts_there() {
     let home = std::env::var("HOME").unwrap();
-    assert_eq!(super::home("~/res/x"), format!("{home}/res/x"));
-    assert_eq!(super::home("~"), format!("{home}/"));
-    assert_eq!(super::home("res/~x"), "res/~x");
+    assert_eq!(crate::tui::home("~/res/x"), format!("{home}/res/x"));
+    assert_eq!(crate::tui::home("~"), format!("{home}/"));
+    assert_eq!(crate::tui::home("res/~x"), "res/~x");
 }
 
 #[test]

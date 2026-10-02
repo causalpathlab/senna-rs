@@ -59,11 +59,18 @@ pub(super) struct Deck {
     /// `None` for one that could not be read, so it is not read again.
     thumbs: std::collections::HashMap<std::path::PathBuf, Option<Protocol>>,
     thumb_rows: u16,
+    /// The first save the strip shows, as it scrolls.
+    saved_top: usize,
+    /// The save chosen in the strip, while keys go to it.
+    saved_at: Option<usize>,
+    /// Moving a save: where to, as typed.
+    moving: Option<MoveDialog>,
     quit: bool,
 }
 
 impl Deck {
-    pub(super) fn new(apps: Vec<App>, picker: Picker) -> Self {
+    /// The views `apps`, beside the figures saved in `gallery`.
+    pub(super) fn new(apps: Vec<App>, picker: Picker, gallery: Gallery) -> Self {
         let f = picker.font_size();
         Self {
             apps,
@@ -79,10 +86,13 @@ impl Deck {
             toast: None,
             note: None,
             drawn: None,
-            gallery: Gallery::here(),
+            gallery,
             show_saved: true,
             thumbs: Default::default(),
             thumb_rows: 0,
+            saved_top: 0,
+            saved_at: None,
+            moving: None,
             quit: false,
         }
     }
@@ -194,6 +204,9 @@ impl Deck {
             if let Some(d) = &self.save {
                 self.draw_save(f, d);
             }
+            if let Some(m) = &self.moving {
+                draw_move(f, m);
+            }
         })?;
         Ok(())
     }
@@ -212,6 +225,37 @@ impl Deck {
                 }
             }
             return Ok(true);
+        }
+        if self.moving.is_some() {
+            if let Event::Key(k) = ev {
+                if k.kind != KeyEventKind::Release {
+                    self.move_key(k);
+                }
+            }
+            return Ok(true);
+        }
+        let size = terminal.size()?;
+        let full = Rect::new(0, 0, size.width, size.height);
+        if self.strip(full).is_none() {
+            // Hidden, or too narrow a screen to show it.
+            self.saved_at = None;
+        }
+        if let Event::Mouse(m) = ev {
+            if let Some(changed) = self.strip_mouse(full, m) {
+                return Ok(changed);
+            }
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                // A click elsewhere hands the keys back.
+                self.saved_at = None;
+            }
+        }
+        if self.saved_at.is_some() {
+            if let Event::Key(k) = ev {
+                if k.kind != KeyEventKind::Release {
+                    self.strip_key(full, k);
+                }
+                return Ok(true);
+            }
         }
         if self.grid {
             return Ok(self.grid_event(ev));
@@ -273,6 +317,7 @@ impl Deck {
             }
             KeyCode::Char('s') => self.save = Some(self.new_save_dialog(Scope::View)),
             KeyCode::Char('f') => self.toggle_saved(),
+            KeyCode::Char('F') => self.focus_saved(),
             _ => return false,
         }
         self.apps[self.at].help = false;
@@ -513,6 +558,7 @@ impl Deck {
                     KeyCode::BackTab => self.hover = (h + n - 1) % n,
                     KeyCode::Char('s') => self.save = Some(self.new_save_dialog(Scope::Grid)),
                     KeyCode::Char('f') => self.toggle_saved(),
+                    KeyCode::Char('F') => self.focus_saved(),
                     KeyCode::Char('d') => self.duplicate(h),
                     KeyCode::Char('X') | KeyCode::Delete => self.note = self.close(h),
                     KeyCode::Char('x') => {
@@ -628,9 +674,40 @@ impl Deck {
 
     fn toggle_saved(&mut self) {
         self.show_saved = !self.show_saved;
-        // Everything moves over: lay out and draw afresh.
+        if !self.show_saved {
+            self.saved_at = None;
+        }
+        self.relayout();
+    }
+
+    /// Everything moves over, or the strip's pictures do: lay out and draw
+    /// afresh, so no image lingers where it was.
+    fn relayout(&mut self) {
         self.area = Rect::default();
         self.drawn = None;
+    }
+
+    /// Keys go to the strip, on the save at its top: it shows if hidden.
+    fn focus_saved(&mut self) {
+        if self.gallery.entries().is_empty() {
+            self.say("no figures saved here yet · s saves one".into());
+            return;
+        }
+        if !self.show_saved {
+            self.show_saved = true;
+            self.relayout();
+        }
+        self.saved_at = Some(self.saved_top.min(self.gallery.entries().len() - 1));
+    }
+
+    /// Say `msg` where the screen shows it: a toast over the grid, else the
+    /// view's own.
+    fn say(&mut self, msg: String) {
+        if self.grid {
+            self.toast = Some((msg, std::time::Instant::now() + TOAST_FOR));
+        } else {
+            self.apps[self.at].pop(msg);
+        }
     }
 
     /// Rows a thumbnail takes in the strip, at the typical 4:3 of a map.
@@ -639,20 +716,203 @@ impl Deck {
         (px_wide * 0.75 / self.cell.1).round().clamp(3.0, 12.0) as u16
     }
 
+    /// How many saves the strip shows at once on a `full` screen.
+    fn saved_shown(&self, full: Rect) -> usize {
+        self.strip(full).map_or(0, |strip| {
+            thumbs_that_fit(
+                self.saved_block().inner(strip).height,
+                self.rows_per_thumb(),
+            )
+        })
+    }
+
+    /// The furthest the strip scrolls, showing `shown` saves at once.
+    fn last_top(&self, shown: usize) -> usize {
+        self.gallery.entries().len().saturating_sub(shown.max(1))
+    }
+
+    /// Scroll so the strip starts at `top`, kept in range. Returns whether
+    /// it moved.
+    fn scroll_saved(&mut self, top: usize, shown: usize) -> bool {
+        let top = top.min(self.last_top(shown));
+        if top == self.saved_top {
+            return false;
+        }
+        self.saved_top = top;
+        self.drawn = None;
+        true
+    }
+
+    /// Choose save `k`, scrolling the strip to show it.
+    fn choose_saved(&mut self, k: usize, shown: usize) {
+        let n = self.gallery.entries().len();
+        if n == 0 {
+            self.saved_at = None;
+            return;
+        }
+        let k = k.min(n - 1);
+        self.saved_at = Some(k);
+        let shown = shown.max(1);
+        if k < self.saved_top {
+            self.scroll_saved(k, shown);
+        } else if k >= self.saved_top + shown {
+            self.scroll_saved(k + 1 - shown, shown);
+        }
+    }
+
+    /// The save drawn at screen row `row` of the strip, if any.
+    fn saved_at_row(&self, full: Rect, row: u16) -> Option<usize> {
+        let inner = self.saved_block().inner(self.strip(full)?);
+        let each = self.rows_per_thumb() + 3;
+        let k = usize::from(row.checked_sub(inner.y + 1)? / each);
+        (k < self.saved_shown(full))
+            .then_some(self.saved_top + k)
+            .filter(|&k| k < self.gallery.entries().len())
+    }
+
+    /// The mouse over the strip: the wheel scrolls it, a click chooses a
+    /// save. `None` when the pointer is not on the strip.
+    fn strip_mouse(
+        &mut self,
+        full: Rect,
+        m: ratatui::crossterm::event::MouseEvent,
+    ) -> Option<bool> {
+        let strip = self.strip(full)?;
+        if !strip.contains(ratatui::layout::Position::new(m.column, m.row)) {
+            return None;
+        }
+        let shown = self.saved_shown(full);
+        Some(match m.kind {
+            MouseEventKind::ScrollUp => self.scroll_saved(self.saved_top.saturating_sub(1), shown),
+            MouseEventKind::ScrollDown => self.scroll_saved(self.saved_top + 1, shown),
+            MouseEventKind::Down(MouseButton::Left) => match self.saved_at_row(full, m.row) {
+                Some(k) => {
+                    self.choose_saved(k, shown);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        })
+    }
+
+    /// A key while the strip has them: choose, move or remove a save.
+    fn strip_key(&mut self, full: Rect, k: KeyEvent) {
+        let Some(at) = self.saved_at else { return };
+        let shown = self.saved_shown(full);
+        let page = shown.max(1);
+        let Some(e) = self.gallery.entries().get(at).cloned() else {
+            self.saved_at = None;
+            return;
+        };
+        match k.code {
+            KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.quit = true;
+            }
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Esc | KeyCode::Char('F') | KeyCode::Tab => self.saved_at = None,
+            KeyCode::Up | KeyCode::Char('k') => self.choose_saved(at.saturating_sub(1), shown),
+            KeyCode::Down | KeyCode::Char('j') => self.choose_saved(at + 1, shown),
+            KeyCode::PageUp => self.choose_saved(at.saturating_sub(page), shown),
+            KeyCode::PageDown => self.choose_saved(at + page, shown),
+            KeyCode::Home => self.choose_saved(0, shown),
+            KeyCode::End => self.choose_saved(usize::MAX, shown),
+            KeyCode::Char('f') => self.toggle_saved(),
+            KeyCode::Char('m') | KeyCode::Enter => {
+                self.moving = Some(MoveDialog {
+                    from: e.path.clone(),
+                    to: crate::tui::shown(&e.path),
+                    status: None,
+                });
+            }
+            KeyCode::Char('x' | 'X') | KeyCode::Delete => {
+                let delete = k.code == KeyCode::Char('X');
+                let msg = match self.gallery.remove(&e.path, delete) {
+                    Ok(()) if delete => format!("deleted {}", e.path.display()),
+                    Ok(()) => format!(
+                        "{} taken off the list · the PDF stays (X deletes it too)",
+                        e.name()
+                    ),
+                    Err(e) => format!("not removed: {e}"),
+                };
+                self.say(msg);
+                self.after_change(at, shown);
+            }
+            _ => {}
+        }
+    }
+
+    /// The list changed under the strip: keep the choice in range. The
+    /// views are laid out afresh only when the strip goes with the last
+    /// save; else the strip alone is drawn again.
+    fn after_change(&mut self, at: usize, shown: usize) {
+        self.saved_top = self.saved_top.min(self.last_top(shown));
+        self.choose_saved(at, shown);
+        if self.gallery.entries().is_empty() {
+            self.relayout();
+        } else {
+            self.drawn = None;
+        }
+    }
+
+    /// A key in the move popup: type where to, enter moves.
+    fn move_key(&mut self, k: KeyEvent) {
+        let Some(m) = self.moving.as_mut() else {
+            return;
+        };
+        m.status = None;
+        if crate::tui::edit_line(&mut m.to, &k) {
+            return;
+        }
+        match k.code {
+            KeyCode::Esc => self.moving = None,
+            KeyCode::Enter => {
+                let to = crate::tui::home(m.to.trim());
+                if to.is_empty() {
+                    m.status = Some("type where to".into());
+                    return;
+                }
+                let to = std::path::PathBuf::from(to);
+                let from = m.from.clone();
+                match self.gallery.relocate(&from, &to) {
+                    Ok(now) => {
+                        self.moving = None;
+                        self.say(format!("moved to {}", crate::tui::shown(&now)));
+                        self.drawn = None;
+                    }
+                    Err(e) => {
+                        if let Some(m) = self.moving.as_mut() {
+                            m.status = Some(format!("not moved: {e}"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Thumbnail images for the saves the strip shows, built once each
     /// (again when their size in rows changes); none while it is hidden.
     fn prepare_thumbs(&mut self, full: Rect) {
-        let Some(strip) = self.strip(full) else {
+        if self.strip(full).is_none() {
             return;
-        };
+        }
         let rows = self.rows_per_thumb();
         if rows != self.thumb_rows {
             self.thumbs.clear();
             self.thumb_rows = rows;
         }
-        let shown = thumbs_that_fit(self.saved_block().inner(strip).height, rows);
+        let shown = self.saved_shown(full);
+        // A smaller list, or a taller screen, may leave the top past the end.
+        self.saved_top = self.saved_top.min(self.last_top(shown));
         let area = Rect::new(0, 0, SAVED_WIDTH - 2, rows);
-        for e in self.gallery.entries().iter().take(shown) {
+        for e in self
+            .gallery
+            .entries()
+            .iter()
+            .skip(self.saved_top)
+            .take(shown)
+        {
             let path = self.gallery.thumb(e);
             if !self.thumbs.contains_key(&path) {
                 let p = image::open(&path)
@@ -663,20 +923,29 @@ impl Deck {
         }
     }
 
-    /// The strip's frame: a rule on the map side, and its title.
+    /// The strip's frame: a rule on the map side, its title, and its keys
+    /// along the bottom.
     fn saved_block(&self) -> Block<'static> {
+        let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+        let (keys, style) = if self.saved_at.is_some() {
+            (" ↑↓ m move x drop esc ", bold)
+        } else {
+            (" F choose · wheel scrolls ", hint())
+        };
         Block::new()
-            .borders(ratatui::widgets::Borders::RIGHT)
+            .borders(ratatui::widgets::Borders::RIGHT | ratatui::widgets::Borders::BOTTOM)
             .border_style(Style::default().fg(rgb(color::MUTED)))
             .title(Span::styled(
                 format!(" saved ({}) · f hides ", self.gallery.entries().len()),
-                Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+                bold,
             ))
+            .title_bottom(Span::styled(keys, style))
             .style(page())
     }
 
     /// The saved figures, newest first: thumbnail, file name, how long ago
-    /// and what was saved; as many as fit.
+    /// and what was saved; as many as fit from the top of the scroll, and
+    /// how many more lie above and below.
     fn draw_saved(&self, f: &mut ratatui::Frame, strip: Rect) {
         let block = self.saved_block();
         let inner = block.inner(strip);
@@ -686,16 +955,29 @@ impl Deck {
             .map_or(0, |d| d.as_secs());
         let rows = self.thumb_rows;
         let shown = thumbs_that_fit(inner.height, rows);
+        let n = self.gallery.entries().len();
         let mut y = inner.y + 1;
-        for e in self.gallery.entries().iter().take(shown) {
+        for (k, e) in self
+            .gallery
+            .entries()
+            .iter()
+            .enumerate()
+            .skip(self.saved_top)
+            .take(shown)
+        {
             let pic = Rect::new(inner.x + 1, y, inner.width.saturating_sub(1), rows);
             if let Some(Some(p)) = self.thumbs.get(&self.gallery.thumb(e)) {
                 f.render_widget(Image::new(p), pic);
             }
+            let chosen = self.saved_at == Some(k);
             let text = vec![
                 Line::from(Span::styled(
-                    format!(" {}", e.name()),
-                    Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+                    format!("{}{}", if chosen { "▸" } else { " " }, e.name()),
+                    if chosen {
+                        selected()
+                    } else {
+                        Style::default().add_modifier(ratatui::style::Modifier::BOLD)
+                    },
                 )),
                 Line::from(Span::styled(
                     format!(" {} · {}", ago(e.when, now), e.what),
@@ -708,7 +990,54 @@ impl Deck {
             );
             y += rows + 3;
         }
+        // Above and below what fits, in the top row and under the last.
+        let mut more = |text: String, y: u16| {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(text, hint()))).style(page()),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
+        };
+        if self.saved_top > 0 {
+            more(format!(" ↑ {} more", self.saved_top), inner.y);
+        }
+        let below = n.saturating_sub(self.saved_top + shown);
+        if below > 0 && y < inner.y + inner.height {
+            more(format!(" ↓ {below} more"), y.saturating_sub(1));
+        }
     }
+}
+
+/// Moving a saved PDF: from where, to where as typed, and what went wrong.
+struct MoveDialog {
+    from: std::path::PathBuf,
+    to: String,
+    status: Option<String>,
+}
+
+fn draw_move(f: &mut ratatui::Frame, m: &MoveDialog) {
+    let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" Move {}", files::name(&m.from)),
+            bold,
+        )),
+        Line::from(Span::styled(
+            format!(" now {}", crate::tui::shown(&m.from)),
+            hint(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(format!(" to  {}▏", m.to), selected())),
+        Line::from(""),
+        match &m.status {
+            Some(s) => Line::from(Span::styled(format!(" {s}"), bold)),
+            None => Line::from(Span::styled(
+                " a folder (ending in /) keeps the name · folders are made as needed",
+                hint(),
+            )),
+        },
+        Line::from(" type the path (ctrl-u clears)   enter move   esc cancel"),
+    ];
+    popup(f, f.area(), lines, 76, At::Middle, color::TEXT);
 }
 
 /// How many saves the strip shows in `height` rows, each a thumbnail
@@ -731,10 +1060,6 @@ fn free_stem(stem: &str) -> String {
         .map(|k| format!("{stem}-{k}"))
         .find(|s| !taken(s))
         .expect("some number is free")
-}
-
-fn has_pdf(name: &str) -> bool {
-    name.trim().to_ascii_lowercase().ends_with(".pdf")
 }
 
 /// What a PDF takes in.
@@ -821,12 +1146,7 @@ impl SaveDialog {
     }
 
     fn path(&self) -> std::path::PathBuf {
-        let name = self.name.trim();
-        if has_pdf(name) {
-            name.into()
-        } else {
-            format!("{name}.pdf").into()
-        }
+        files::with_pdf(&self.name)
     }
 }
 
@@ -887,10 +1207,7 @@ impl Deck {
             self.draw(terminal)?;
             let d = self.save.take().expect("the dialog is open");
             match self.write_pdf(&d) {
-                Ok(msg) if self.grid => {
-                    self.toast = Some((msg, std::time::Instant::now() + TOAST_FOR));
-                }
-                Ok(msg) => self.apps[self.at].pop(msg),
+                Ok(msg) => self.say(msg),
                 Err(e) => {
                     self.save = Some(SaveDialog {
                         status: Some(format!("not saved: {e}")),
@@ -938,22 +1255,12 @@ impl Deck {
                 2 => d.dpi = cycle(d.dpi, DPIS.len()),
                 _ => {}
             },
-            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                d.field = 3;
-                d.typed = true;
-                d.name.clear();
+            _ => {
+                if crate::tui::edit_line(&mut d.name, &k) {
+                    d.field = 3;
+                    d.typed = true;
+                }
             }
-            KeyCode::Backspace => {
-                d.field = 3;
-                d.typed = true;
-                d.name.pop();
-            }
-            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
-                d.field = 3;
-                d.typed = true;
-                d.name.push(c);
-            }
-            _ => {}
         }
         if let Some(scope) = rename {
             let name = self.default_name(scope);
@@ -977,7 +1284,11 @@ impl Deck {
                 "‹ {} ›  the points' resolution; text stays text",
                 DPIS[d.dpi]
             ),
-            format!("{}▏{}", d.name, if has_pdf(&d.name) { "" } else { ".pdf" }),
+            format!(
+                "{}▏{}",
+                d.name,
+                if files::has_pdf(&d.name) { "" } else { ".pdf" }
+            ),
         ];
         let mut lines = vec![
             Line::from(Span::styled(" Save as PDF", bold)),
@@ -1143,6 +1454,52 @@ mod tests {
         assert!(!d.ready());
         d.changed();
         assert!(!d.ready());
+    }
+
+    #[test]
+    fn the_strip_scrolls_to_the_chosen_save_and_drops_it() {
+        let work = tempfile::tempdir().unwrap();
+        let mut gallery = Gallery::open(&work.path().join(".senna-view"));
+        let picture = image::RgbaImage::from_pixel(40, 30, image::Rgba([1, 2, 3, 255]));
+        for k in 0..10 {
+            let pdf = work.path().join(format!("{k}.pdf"));
+            std::fs::write(&pdf, b"%PDF").unwrap();
+            gallery.add(&pdf, "a view", &picture).unwrap();
+        }
+        let mut deck = Deck::new(Vec::new(), Picker::halfblocks(), gallery);
+        // Over the grid, so what is said goes in a toast.
+        deck.grid = true;
+        let full = Rect::new(0, 0, 160, 50);
+        let shown = deck.saved_shown(full);
+        assert!((1..10).contains(&shown), "{shown} of 10 fit");
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        deck.focus_saved();
+        assert_eq!(deck.saved_at, Some(0));
+        // Down past the last one shown scrolls it into view.
+        for _ in 0..shown {
+            deck.strip_key(full, key(KeyCode::Down));
+        }
+        assert_eq!(deck.saved_at, Some(shown));
+        assert_eq!(deck.saved_top, 1);
+        deck.strip_key(full, key(KeyCode::End));
+        assert_eq!(deck.saved_at, Some(9));
+        assert_eq!(deck.saved_top, 10 - shown);
+        // The wheel stops at either end.
+        assert!(!deck.scroll_saved(99, shown));
+        assert!(deck.scroll_saved(0, shown));
+
+        // x takes the last off the list but keeps its PDF; the choice stays
+        // in range.
+        deck.strip_key(full, key(KeyCode::End));
+        let last = deck.gallery.entries()[9].path.clone();
+        deck.strip_key(full, key(KeyCode::Char('x')));
+        assert_eq!(deck.gallery.entries().len(), 9);
+        assert!(last.exists());
+        assert_eq!(deck.saved_at, Some(8));
+        // Esc hands the keys back.
+        deck.strip_key(full, key(KeyCode::Esc));
+        assert_eq!(deck.saved_at, None);
     }
 
     #[test]

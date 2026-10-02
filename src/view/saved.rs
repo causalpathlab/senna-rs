@@ -82,10 +82,7 @@ impl Gallery {
     /// replacing an earlier save of the same file.
     pub fn add(&mut self, path: &Path, what: &str, picture: &RgbaImage) -> anyhow::Result<()> {
         let path = path.canonicalize()?;
-        // Another viewer in this directory may have saved since: build on
-        // the log as it is on disk, not on what this one read at start.
-        self.entries = Self::open(&self.dir).entries;
-        if let Some(i) = self.entries.iter().position(|e| e.path == path) {
+        if let Ok(i) = self.reload_find(&path) {
             let old = self.entries.remove(i);
             let _ = std::fs::remove_file(self.thumb(&old));
         }
@@ -106,11 +103,71 @@ impl Gallery {
         for old in self.entries.split_off(self.entries.len().min(KEEP)) {
             let _ = std::fs::remove_file(self.thumb(&old));
         }
+        self.write()
+    }
+
+    /// Take the save of `path` off the list, with its thumbnail; with
+    /// `delete`, the PDF itself goes too.
+    pub fn remove(&mut self, path: &Path, delete: bool) -> anyhow::Result<()> {
+        let i = self.reload_find(path)?;
+        if delete {
+            std::fs::remove_file(path)?;
+        }
+        let old = self.entries.remove(i);
+        let _ = std::fs::remove_file(self.thumb(&old));
+        self.write()
+    }
+
+    /// Move the saved PDF at `path` to `to`, keeping its place in the list.
+    /// `to` may be a folder (one that exists, or ends in `/`): the file
+    /// keeps its name there. A name without `.pdf` gets it; a file already
+    /// at `to` is never replaced. Returns where the PDF is now.
+    pub fn relocate(&mut self, path: &Path, to: &Path) -> anyhow::Result<PathBuf> {
+        let i = self.reload_find(path)?;
+        let to = destination(path, to);
+        anyhow::ensure!(!to.exists(), "{} exists", to.display());
+        if let Some(parent) = to.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Across file systems a rename fails: copy, then remove.
+        if std::fs::rename(path, &to).is_err() {
+            std::fs::copy(path, &to)?;
+            std::fs::remove_file(path)?;
+        }
+        let to = to.canonicalize()?;
+        self.entries[i].path = to.clone();
+        self.write()?;
+        Ok(to)
+    }
+
+    /// Where `path` is listed, in the log as it is on disk: another viewer
+    /// in this directory may have saved since, so a change builds on that,
+    /// not on what this one read at start.
+    fn reload_find(&mut self, path: &Path) -> anyhow::Result<usize> {
+        self.entries = Self::open(&self.dir).entries;
+        self.entries
+            .iter()
+            .position(|e| e.path == path)
+            .ok_or_else(|| anyhow::anyhow!("{} is no longer listed", files::name(path)))
+    }
+
+    fn write(&self) -> anyhow::Result<()> {
         std::fs::write(
             self.dir.join("saved.json"),
             serde_json::to_string_pretty(&self.entries)?,
         )?;
         Ok(())
+    }
+}
+
+/// Where a file at `from` goes when moved to `to`: into `to` under its own
+/// name when `to` is a folder, else `to` with `.pdf` added when it lacks it.
+fn destination(from: &Path, to: &Path) -> PathBuf {
+    let typed = to.to_string_lossy();
+    if to.is_dir() || typed.ends_with('/') {
+        to.join(from.file_name().unwrap_or_default())
+    } else {
+        files::with_pdf(&typed)
     }
 }
 
@@ -251,6 +308,56 @@ mod tests {
         let thumbs: Vec<_> = std::fs::read_dir(store.join("thumbs")).unwrap().collect();
         assert_eq!(thumbs.len(), 1);
         assert!(again.thumb(&again.entries()[0]).exists());
+    }
+
+    #[test]
+    fn a_save_taken_off_the_list_keeps_its_pdf_unless_deleted() {
+        let work = tempfile::tempdir().unwrap();
+        let store = work.path().join(".senna-view");
+        let (a, b) = (file(work.path(), "a.pdf"), file(work.path(), "b.pdf"));
+        let mut g = Gallery::open(&store);
+        g.add(&a, "a", &picture(100, 100)).unwrap();
+        g.add(&b, "b", &picture(100, 100)).unwrap();
+        let listed_a = g.entries()[1].path.clone();
+        g.remove(&listed_a, false).unwrap();
+        assert!(a.exists());
+        let listed_b = g.entries()[0].path.clone();
+        g.remove(&listed_b, true).unwrap();
+        assert!(!b.exists());
+        assert!(Gallery::open(&store).entries().is_empty());
+        let thumbs = std::fs::read_dir(store.join("thumbs")).unwrap().count();
+        assert_eq!(thumbs, 0);
+    }
+
+    #[test]
+    fn a_moved_save_keeps_its_place_and_its_thumbnail() {
+        let work = tempfile::tempdir().unwrap();
+        let store = work.path().join(".senna-view");
+        let (a, b) = (file(work.path(), "a.pdf"), file(work.path(), "b.pdf"));
+        let mut g = Gallery::open(&store);
+        g.add(&a, "a", &picture(100, 100)).unwrap();
+        g.add(&b, "b", &picture(100, 100)).unwrap();
+        let listed_a = g.entries()[1].path.clone();
+
+        // Into a folder that is not there yet: the name stays.
+        let figs = work.path().join("figs");
+        let to = g
+            .relocate(&listed_a, Path::new(&format!("{}/", figs.display())))
+            .unwrap();
+        assert_eq!(to, figs.canonicalize().unwrap().join("a.pdf"));
+        assert!(!a.exists() && to.exists());
+
+        // A new name gets `.pdf`; an existing file is never replaced.
+        let to = g.relocate(&to, &figs.join("final")).unwrap();
+        assert_eq!(files::name(&to), "final.pdf");
+        let listed_b = g.entries()[0].path.clone();
+        assert!(g.relocate(&listed_b, &to).is_err());
+        assert!(b.exists());
+
+        let again = Gallery::open(&store);
+        let names: Vec<String> = again.entries().iter().map(|e| e.name()).collect();
+        assert_eq!(names, ["b.pdf", "final.pdf"]);
+        assert!(again.thumb(&again.entries()[1]).exists());
     }
 
     #[test]

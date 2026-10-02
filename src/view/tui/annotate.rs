@@ -35,11 +35,25 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("/"));
         let dir = dir.canonicalize().unwrap_or(dir);
         let select = guess.as_deref().map(files::name);
+        let go = self.go_guess();
         self.modal = Some(Modal::MarkersFile(Browser::open(
             dir,
-            Panels(genes),
+            Panels { genes, go },
             select.as_deref(),
         )));
+    }
+
+    /// Whether to ask for GO terms to begin with: as the run's last
+    /// annotation did.
+    fn go_guess(&self) -> bool {
+        self.scene.data.run.as_ref().is_some_and(|(m, _)| {
+            m.annotate
+                .unknown
+                .get("settings")
+                .and_then(|s| s.pointer("/enrichment/go"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
     }
 
     /// The run's recorded marker panel, if it is still there.
@@ -62,14 +76,15 @@ impl App {
                 self.message = Some("annotation cancelled".into());
             }
             Outcome::Chosen(c) => {
+                let go = b.want.go;
                 self.modal = None;
-                self.run_annotate(c.file());
+                self.run_annotate(c.file(), go);
             }
         }
         true
     }
 
-    fn run_annotate(&mut self, markers: PathBuf) {
+    fn run_annotate(&mut self, markers: PathBuf, go: bool) {
         let run = self
             .from
             .canonicalize()
@@ -78,7 +93,8 @@ impl App {
         let lupin = self.lupin.clone();
         let progress: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
         let shared = progress.clone();
-        let done = Pending::spawn(move || decide::annotate(&lupin, &run, &markers, &out, &shared));
+        let done =
+            Pending::spawn(move || decide::annotate(&lupin, &run, &markers, go, &out, &shared));
         self.relabeling = Some(Relabeling {
             job: RelabelJob::Annotate,
             started: std::time::Instant::now(),

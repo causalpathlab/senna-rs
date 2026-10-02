@@ -104,7 +104,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             (",  .", "previous (source) / next annotation round"),
             (
                 "A",
-                "annotate this run with lupin: browse to a marker panel (★ fits the run best)",
+                "annotate this run with lupin: browse to a marker panel (★ fits the run best); tab adds GO terms",
             ),
         ],
     ),
@@ -122,7 +122,11 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("{  }", "previous / next view"),
             (
                 "f",
-                "saved figures on the left, newest first, kept in .senna-view/ here",
+                "saved figures on the left, newest first, kept in .senna-view/ here; the wheel scrolls them",
+            ),
+            (
+                "F",
+                "choose a saved figure (or click one): ↑↓, m moves its PDF, x takes it off the list, X deletes it",
             ),
             ("X  (grid)", "close the view under the pointer (shift: it cannot be undone)"),
         ],

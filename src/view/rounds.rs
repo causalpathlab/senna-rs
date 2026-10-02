@@ -327,6 +327,47 @@ impl Round {
         out
     }
 
+    /// Cluster `id`'s top `n` GO (or GMT) terms, as lupin ranks them by
+    /// effect, under a heading; none when the round tested no terms. Each
+    /// with its effect, and its NES and q when lupin tested it as it tests
+    /// the cell types.
+    #[must_use]
+    pub fn term_lines(&self, id: &str, n: usize) -> Vec<String> {
+        let terms: Vec<&Value> = self
+            .summary
+            .get(id)
+            .and_then(|s| s.get("terms"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(n)
+            .collect();
+        let Some(first) = terms.first() else {
+            return Vec::new();
+        };
+        let source = first
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("go")
+            .to_uppercase();
+        let num = |t: &Value, k: &str| t.get(k).and_then(Value::as_f64).filter(|x| x.is_finite());
+        let mut out = vec![format!("{source} terms (top {}, by effect)", terms.len())];
+        for t in terms {
+            let term = t.get("term").and_then(Value::as_str).unwrap_or("-");
+            out.push(format!("  {term}"));
+            let stats: Vec<String> = [
+                num(t, "effect").map(|x| format!("effect {x:.3}")),
+                num(t, "nes").map(|x| format!("NES {x:.3}")),
+                num(t, "q").map(|x| format!("q {x:.2e}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            out.push(format!("    {}", stats.join("  ")));
+        }
+        out
+    }
+
     /// Text for the panel shown when a cell of cluster `id` is clicked: the
     /// summary lupin wrote for it, then its decision history, newest first.
     #[must_use]
@@ -344,7 +385,6 @@ impl Round {
                 out.push(format!("  {}", members.join(", ")));
             }
             let fmt = |x: Option<f64>| x.map_or("-".to_string(), |x| format!("{x:.3}"));
-            let num = |v: &Value, k: &str| fmt(v.get(k).and_then(Value::as_f64));
             let list = |k: &str| {
                 s.get(k)
                     .and_then(Value::as_array)
@@ -386,19 +426,7 @@ impl Round {
                 out.push(heading);
                 out.push(format!("  no cell type passes FDR (q < {})", self.alpha));
             }
-            let terms = list("terms");
-            if !terms.is_empty() {
-                out.push("terms".into());
-                for t in terms.iter().take(3) {
-                    let src = t.get("source").and_then(Value::as_str).unwrap_or("-");
-                    let term = t.get("term").and_then(Value::as_str).unwrap_or("-");
-                    out.push(format!(
-                        "  [{src}] {term}  effect {}  q {}",
-                        num(t, "effect"),
-                        num(t, "q")
-                    ));
-                }
-            }
+            out.extend(self.term_lines(id, 5));
             if let Some(cl) = s.get("cl") {
                 let name = cl.get("name").and_then(Value::as_str).unwrap_or("-");
                 let abstained = cl
@@ -626,6 +654,41 @@ mod tests {
         let lines = round.cluster_lines("5");
         assert_eq!(lines[2], "  no cell type passes FDR (q < 0.1)");
         assert_eq!(round.candidates("5"), ["CT1"]);
+    }
+
+    #[test]
+    fn go_terms_are_listed_with_their_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "s.json",
+            r#"{"4":{"size":10,"label":"CT1","calls":[],"terms":[
+                {"source":"go","term":"T cell activation","effect":0.42,"q":0.0012,"p":0.0001,"nes":2.1},
+                {"source":"go","term":"cell cycle","effect":0.2,"q":null}]},
+                "5":{"size":3,"label":"CT2","calls":[],"terms":[]}}"#,
+        );
+        let path = write(
+            dir.path(),
+            "r.senna.json",
+            r#"{"version":2,"kind":"bge","prefix":"r","annotate":{"cluster_summary":"s.json"}}"#,
+        );
+        let (m, d) = RunManifest::load(&path).unwrap();
+        let round = Round::load(&m, &d, &path);
+        assert_eq!(
+            round.term_lines("4", 5),
+            [
+                "GO terms (top 2, by effect)",
+                "  T cell activation",
+                "    effect 0.420  NES 2.100  q 1.20e-3",
+                "  cell cycle",
+                "    effect 0.200",
+            ]
+        );
+        assert_eq!(round.term_lines("4", 1).len(), 3);
+        assert!(round.term_lines("5", 5).is_empty());
+        assert!(round
+            .cluster_lines("4")
+            .contains(&"  cell cycle".to_string()));
     }
 
     #[test]
