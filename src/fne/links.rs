@@ -34,7 +34,7 @@ use super::graph::{
 };
 use genomic_data::coordinates::{chr_stripped, PeakCoord};
 use genomic_data::e2g::E2gRelease;
-use genomic_data::variant::{parse_locus, parse_variant_id, GenomeBuild};
+use genomic_data::variant::{parse_variant_id, GenomeBuild};
 use genomic_data::vcf::VcfReader;
 use legume_numeric::matrix::common_io::file_stem;
 use legume_numeric::matrix::table::TableReader;
@@ -881,7 +881,7 @@ fn add_eqtl_catalogue(
     for row in t.rows(&cols)? {
         let row = row?;
         n.rows += 1;
-        let Some(locus) = parse_locus(&row[0]) else {
+        let Some(locus) = super::graph::outside_locus(&row[0]) else {
             n.no_locus += 1;
             continue;
         };
@@ -1099,7 +1099,9 @@ fn add_positions(
     // A headerless list: the "header" is itself a locus row.
     let headerless = locus_col.is_none()
         && (chr_col.is_none() || pos_col.is_none())
-        && t.header().first().is_some_and(|h| parse_locus(h).is_some());
+        && t.header()
+            .first()
+            .is_some_and(|h| super::graph::outside_locus(h).is_some());
     enum Shape {
         Locus(usize),
         ChrPos(usize, usize, Option<usize>),
@@ -1136,7 +1138,7 @@ fn add_positions(
     let mut handle = |row: &[Box<str>], n: &mut Tally, b: &mut TypedGraphBuilder| {
         n.rows += 1;
         let locus = if n_loc == 1 {
-            parse_locus(&row[0])
+            super::graph::outside_locus(&row[0])
         } else {
             let pos = row[1].trim().parse::<i64>().ok();
             let end = if n_loc == 3 {

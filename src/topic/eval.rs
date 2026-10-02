@@ -147,7 +147,7 @@ pub(crate) struct ReconciledNames {
     /// spells names the way the axis does — `Exact::canonicalize` is the
     /// identity, so one keying rule covers both cases.
     kind: data_beans::aux::feature_names::FeatureNameKind,
-    keys: rustc_hash::FxHashSet<String>,
+    keys: rustc_hash::FxHashSet<Box<str>>,
 }
 
 impl ReconciledNames {
@@ -157,9 +157,16 @@ impl ReconciledNames {
         I: IntoIterator<Item = &'a str> + Clone,
     {
         use data_beans::aux::feature_names::FeatureNameKind;
-        let keys: rustc_hash::FxHashSet<String> =
-            names.clone().into_iter().map(str::to_lowercase).collect();
-        if axis.iter().any(|a| keys.contains(&a.to_lowercase())) {
+        use senna::embed_common::match_key;
+        let keys: rustc_hash::FxHashSet<Box<str>> = names
+            .clone()
+            .into_iter()
+            .map(|n| match_key(&FeatureNameKind::Exact, n))
+            .collect();
+        if axis
+            .iter()
+            .any(|a| keys.contains(&match_key(&FeatureNameKind::Exact, a)))
+        {
             return Self {
                 kind: FeatureNameKind::Exact,
                 keys,
@@ -172,16 +179,13 @@ impl ReconciledNames {
         log::info!(
             "gene list: no name matches the axis as spelled; matching under the {kind:?} rule"
         );
-        let keys = listed
-            .iter()
-            .map(|n| kind.canonicalize(n).to_lowercase())
-            .collect();
+        let keys = listed.iter().map(|n| match_key(&kind, n)).collect();
         Self { kind, keys }
     }
 
     /// The lookup key for one name, under whichever rule was resolved.
-    fn key(&self, name: &str) -> String {
-        self.kind.canonicalize(name).to_lowercase()
+    fn key(&self, name: &str) -> Box<str> {
+        senna::embed_common::match_key(&self.kind, name)
     }
 
     /// Does the list name this axis entry?
@@ -200,7 +204,7 @@ impl ReconciledNames {
 /// below and what this replaced.
 pub(crate) fn resolve_positions(axis: &[Box<str>], names: &[Box<str>]) -> Vec<Option<usize>> {
     let matcher = ReconciledNames::new(axis, names.iter().map(AsRef::as_ref));
-    let index: rustc_hash::FxHashMap<String, usize> = axis
+    let index: rustc_hash::FxHashMap<Box<str>, usize> = axis
         .iter()
         .enumerate()
         .map(|(i, a)| (matcher.key(a), i))
@@ -275,11 +279,14 @@ pub(crate) fn build_gene_remap_with(
 ) -> GeneRemap {
     use senna::marker_support::flexible_gene_match;
 
-    // Lowercased exact-match index — fast path for matching name sets.
-    let train_pos: rustc_hash::FxHashMap<String, usize> = training_genes
+    use data_beans::aux::feature_names::FeatureNameKind;
+    use senna::embed_common::{is_locus, match_key};
+
+    // Exact-match index on the shared key: the fast path.
+    let train_pos: rustc_hash::FxHashMap<Box<str>, usize> = training_genes
         .iter()
         .enumerate()
-        .map(|(i, g)| (g.to_lowercase(), i))
+        .map(|(i, g)| (match_key(&FeatureNameKind::Exact, g), i))
         .collect();
 
     let mut n_exact = 0usize;
@@ -316,10 +323,13 @@ pub(crate) fn build_gene_remap_with(
             // (2) name-kind canonicalization (Gene → bare symbol, etc.)
             let key = opts.kind.canonicalize(base);
 
-            // (3) resolve: lowercased exact, then flexible fallback
-            if let Some(&i) = train_pos.get(&key.to_lowercase()) {
+            // (3) resolve: exact on the shared key, then for a gene name
+            // the flexible fallback; a locus matches exactly or not at all.
+            if let Some(&i) = train_pos.get(&match_key(&FeatureNameKind::Exact, &key)) {
                 n_exact += 1;
                 Some(i)
+            } else if is_locus(&key) {
+                None
             } else if let Some(i) = training_genes
                 .iter()
                 .position(|t| flexible_gene_match(&key, t))
@@ -512,6 +522,21 @@ where
 mod tests {
     use super::*;
     use data_beans::aux::feature_names::FeatureNameKind;
+
+    #[test]
+    fn a_locus_matches_exactly_or_not_at_all() {
+        let train: Vec<Box<str>> = ["chrX:0-100", "chr1:100-200", "GENE1"]
+            .map(Into::into)
+            .to_vec();
+        // A peak spelled as trained maps; a peak the model never saw does
+        // not borrow a neighbour through the fuzzy gene fallback, and a
+        // gene still matches whatever its case.
+        let query: Vec<Box<str>> = ["chrX:0-100", "chr2:0-100", "gene1"]
+            .map(Into::into)
+            .to_vec();
+        let remap = build_gene_remap(&train, &query);
+        assert_eq!(remap.new_to_train, [Some(0), None, Some(2)]);
+    }
 
     fn names(xs: &[&str]) -> Vec<Box<str>> {
         xs.iter().map(|s| (*s).into()).collect()

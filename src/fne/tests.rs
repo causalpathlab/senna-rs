@@ -621,7 +621,7 @@ fn region_links_tile_onto_windows_and_carry_their_score() {
     let p = write(
         dir.path(),
         "abc.tsv",
-        "# region\tgene\tscore\nchr1:4000-6000\tTP53\t0.8\n1_5500\tTP53\nchrX:100-200\tMYC\t0.2\nnot_a_region\tMYC\n",
+        "# region\tgene\tscore\nchr1:4000-6000\tGENE1\t0.8\n1:5500\tGENE1\nchrX:100-200\tGENE2\t0.2\nchr2_7000_7500\tGENE2\t0.4\nnot_a_region\tGENE2\n",
     );
     let mut b = TypedGraphBuilder::new(gene_kind());
     b.add_region_file(&p, 5000).unwrap();
@@ -633,9 +633,18 @@ fn region_links_tile_onto_windows_and_carry_their_score() {
     let windows: Vec<&str> = (g.types.range(region_t))
         .map(|i| g.node_names[i as usize].as_ref())
         .collect();
-    assert_eq!(windows, vec!["1:0-5000", "1:5000-10000", "X:0-5000"]);
-    // chr1:4000-6000 → two windows at 0.8; 1_5500 → the second window at 1.0,
-    // which wins over 0.8 for that pair; chrX → one window at 0.2.
+    assert_eq!(
+        windows,
+        vec!["1:0-5000", "1:5000-10000", "X:0-5000", "2:5000-10000"]
+    );
+    // A window's name is its locus key, so it equals a peak row's name.
+    for w in &windows {
+        assert_eq!(genomic_data::coordinates::locus_key(w).as_deref(), Some(*w));
+    }
+    // chr1:4000-6000 → two windows at 0.8; the position 1:5500 → the second
+    // window at 1.0, which wins over 0.8 for that pair; chrX → one window at
+    // 0.2; chr2_7000_7500, as another tool writes it, is read at the file's
+    // edge into one window at 0.4.
     let mut edges: Vec<(&str, &str, f32)> = (0..g.edges.len())
         .map(|i| {
             (
@@ -649,9 +658,10 @@ fn region_links_tile_onto_windows_and_carry_their_score() {
     assert_eq!(
         edges,
         vec![
-            ("1:0-5000", "TP53", 0.8),
-            ("1:5000-10000", "TP53", 1.0),
-            ("X:0-5000", "MYC", 0.2),
+            ("1:0-5000", "GENE1", 0.8),
+            ("1:5000-10000", "GENE1", 1.0),
+            ("2:5000-10000", "GENE2", 0.4),
+            ("X:0-5000", "GENE2", 0.2),
         ]
     );
 }

@@ -343,6 +343,26 @@ pub struct BulkDataOut {
     pub data: Mat,
 }
 
+/// The key `name` is matched on under `kind`: data-beans' canonical form,
+/// and for a gene name also its case folded, since symbols differ in case
+/// between sources (`Cd8a`, `CD8A`). A locus keeps its case: by the shared
+/// rule (`feature_names::parse_locus`) case can tell scaffolds apart.
+#[must_use]
+pub fn match_key(kind: &data_beans::aux::feature_names::FeatureNameKind, name: &str) -> Box<str> {
+    let key = kind.canonicalize(name);
+    if is_locus(name) || is_locus(&key) {
+        key
+    } else {
+        key.to_lowercase().into()
+    }
+}
+
+/// Whether `name` is a genomic locus, by the shared rule.
+#[must_use]
+pub fn is_locus(name: &str) -> bool {
+    data_beans::aux::feature_names::parse_locus(name).is_some()
+}
+
 /// Pick the naming rule that bridges a reference gene axis and one or more
 /// other axes.
 ///
@@ -402,11 +422,11 @@ impl OrientationArg {
 /// informative, so one rule chosen off the sample IDs could depress the gene
 /// axis's count and flip the answer.
 fn genes_matched(axis: &[Box<str>], model_genes: &[Box<str>]) -> usize {
-    // Lowercased after canonicalizing, the same key `build_gene_remap_with`
-    // aligns on, so the axis this picks is the axis the remap will match.
+    // The same key `build_gene_remap_with` aligns on, so the axis this
+    // picks is the axis the remap will match.
     let kind = reconcile_name_kind(model_genes, &[axis]);
-    let key = |g: &str| kind.canonicalize(g).to_lowercase();
-    let model: std::collections::HashSet<String> = model_genes.iter().map(|g| key(g)).collect();
+    let key = |g: &str| match_key(&kind, g);
+    let model: std::collections::HashSet<Box<str>> = model_genes.iter().map(|g| key(g)).collect();
     axis.iter().filter(|l| model.contains(&key(l))).count()
 }
 
@@ -534,7 +554,7 @@ pub fn read_bulk_data_aligned(
     let gene_to_position: HashMap<Box<str>, usize> = HashMap::new();
     for (i, g) in genes.iter().enumerate() {
         gene_to_position
-            .entry(name_kind.canonicalize(g))
+            .entry(match_key(&name_kind, g))
             .or_insert(i);
     }
 
@@ -556,7 +576,7 @@ pub fn read_bulk_data_aligned(
         let mut padded_ds = Mat::zeros(ngenes, ncols);
         let mut matched = 0usize;
         for (i, g) in raw_genes.iter().enumerate() {
-            if let Some(r) = gene_to_position.get(&name_kind.canonicalize(g)) {
+            if let Some(r) = gene_to_position.get(&match_key(&name_kind, g)) {
                 // ADD rather than overwrite: canonicalization is many-to-one
                 // (several bulk rows can collapse onto one reference gene), and
                 // these are counts, so the contributions sum.

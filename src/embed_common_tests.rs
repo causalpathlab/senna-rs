@@ -382,3 +382,24 @@ fn a_parquet_with_no_string_column_is_refused() {
     };
     assert!(err.contains("name column"), "{err}");
 }
+
+#[test]
+fn match_key_folds_gene_case_but_keeps_a_locus_as_is() {
+    use super::{is_locus, match_key};
+    use data_beans::aux::feature_names::FeatureNameKind;
+    let exact = FeatureNameKind::Exact;
+    assert_eq!(&*match_key(&exact, "Cd8a"), &*match_key(&exact, "CD8A"));
+    // A locus keeps its case: by the shared rule it can tell scaffolds apart.
+    assert!(is_locus("chrX:0-100"));
+    assert_ne!(
+        &*match_key(&exact, "chrX:0-100"),
+        &*match_key(&exact, "chrx:0-100")
+    );
+    // Under the locus rule both spellings of one peak share a key.
+    let mixed = FeatureNameKind::Mixed;
+    assert_eq!(
+        &*match_key(&mixed, "chrX:0-100"),
+        &*match_key(&mixed, "X:0-100")
+    );
+    assert!(!is_locus("GENE1"));
+}

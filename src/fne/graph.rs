@@ -12,7 +12,7 @@
 use data_beans::aux::feature_names::FeatureNameKind;
 use data_beans::aux::gene_sets::{read_membership_pairs, GeneSets};
 use data_beans::aux::ontology::{Ontology, Rel};
-use genomic_data::coordinates::{parse_region, PeakCoord};
+use genomic_data::coordinates::{chr_stripped, import_interval, PeakCoord};
 pub(crate) use genomic_data::gff::{is_ensembl_gene_id, strip_ensembl_version};
 use graph_embedding_util::fne::{
     NodeTypeTable, Relation, RelationPolarity, RelationTable, TypedEdgeList,
@@ -656,7 +656,7 @@ impl TypedGraphBuilder {
             if line.len() < 2 || line[0].starts_with('#') {
                 continue;
             }
-            let Some(region) = parse_region(&line[0]) else {
+            let Some(region) = outside_locus(&line[0]) else {
                 n_bad += 1;
                 continue;
             };
@@ -699,9 +699,10 @@ impl TypedGraphBuilder {
 
     /// Local ids of the `window`-bp windows `region` overlaps (see
     /// [`genomic_data::coordinates::tile_windows`]), inserting new ones, into
-    /// `out`. A window's name is
-    /// written into a reused buffer, so a window already seen costs a lookup
-    /// and no allocation.
+    /// `out`. A window is named by its locus key, `chr:start-end` with the
+    /// `chr` prefix dropped (`region` comes from [`outside_locus`]), written
+    /// into a reused buffer, so a window already seen costs a lookup and no
+    /// allocation.
     pub(crate) fn windows(&mut self, region: &PeakCoord, window: i64, out: &mut Vec<u32>) {
         use std::fmt::Write;
         out.clear();
@@ -1158,4 +1159,18 @@ fn distinct_per_node(mut pairs: Vec<(u32, u32)>, n: usize) -> Vec<usize> {
         count[i as usize] += 1;
     }
     count
+}
+
+/// A region or locus as an outside file spells it, read once where the
+/// file enters: the shared spellings (`chr:start-end`, a position, a
+/// variant id), else an interval as other tools write it (`chr_start_end`,
+/// `chr-start-end`), read by `import_interval`. The `chr` prefix is
+/// dropped, so a window named from it is its locus key.
+pub(crate) fn outside_locus(name: &str) -> Option<PeakCoord> {
+    genomic_data::variant::parse_locus(name).or_else(|| {
+        import_interval(name).map(|mut l| {
+            l.chr = chr_stripped(&l.chr).into();
+            l
+        })
+    })
 }
