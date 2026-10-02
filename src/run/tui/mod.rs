@@ -14,6 +14,7 @@ mod draw;
 mod form;
 mod jobs;
 mod script;
+mod share;
 
 use crate::tui::browse::{Browser, Outcome};
 use batches::Batch;
@@ -118,6 +119,12 @@ enum Target {
 struct Editor {
     target: Target,
     text: String,
+}
+
+/// The queued fit that builds a pseudobulk partition others collapse on.
+struct Builder {
+    manifest: PathBuf,
+    method: String,
 }
 
 /// One queued fit as the confirm popup shows it.
@@ -1171,6 +1178,9 @@ impl App {
             let (dir, out) = self.out_of(i);
             dir.join(format!("{out}.{}", Tool::Mung.result()))
         });
+        // Each partition a queued fit builds: the first fit to build it, by
+        // its manifest and name.
+        let mut builders: Vec<(Vec<(String, String)>, Builder)> = Vec::new();
         for (i, r) in self.rows.iter().enumerate().filter(|(_, r)| r.on) {
             let (dir, out) = self.out_of(i);
             let rel = |p: &Path| script::relative(p, &dir).to_string_lossy().into_owned();
@@ -1189,7 +1199,30 @@ impl App {
                 (Tool::Senna, Some(t)) => Self::clones_for(r, &rel(t)),
                 _ => (None, None, None),
             };
-            let warning = warning.or_else(|| self.shape_warning(r));
+            let mut warning = warning.or_else(|| self.shape_warning(r));
+            // A partition another queued fit builds is collapsed on, not
+            // built again.
+            let mut pb_from = None;
+            if let Some(key) = share::key(&r.form, clones.is_some()) {
+                match builders.iter().find(|(k, _)| *k == key) {
+                    Some((_, b)) => {
+                        pb_from = Some(rel(&b.manifest));
+                        warning = warning.or_else(|| {
+                            Some(format!(
+                                "collapses on {}'s pseudobulks (--pb-from)",
+                                b.method
+                            ))
+                        });
+                    }
+                    None => builders.push((
+                        key,
+                        Builder {
+                            manifest: dir.join(format!("{out}.{}", Tool::Senna.result())),
+                            method: r.label.clone(),
+                        },
+                    )),
+                }
+            }
             let job = Job {
                 tool: r.tool,
                 program: self.program_of(r.tool),
@@ -1200,6 +1233,7 @@ impl App {
                 argv: r.form.argv(&data, &batch_files, &out),
                 labels,
                 clones,
+                pb_from,
             };
             let mut blamed = None;
             let problem = if self.pairs.is_empty() {

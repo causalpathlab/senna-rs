@@ -71,6 +71,17 @@ type Mat = nalgebra::DMatrix<f32>;
 /// caller's data axis.
 pub type InheritedPartition = (Vec<Vec<usize>>, Vec<Box<str>>);
 
+/// Beside a run's `{prefix}.cell_to_pb.parquet`, the same partition over every
+/// cell it trained on: written only when QC held some cells back from the
+/// per-cell outputs, which a fit collapsing on the partition still loads.
+#[must_use]
+pub fn cell_to_pb_all_path(cell_to_pb: &str) -> String {
+    match cell_to_pb.strip_suffix(".cell_to_pb.parquet") {
+        Some(prefix) => format!("{prefix}.cell_to_pb_all.parquet"),
+        None => format!("{cell_to_pb}.all"),
+    }
+}
+
 /// Read `{prefix}.cell_to_pb.parquet` (N × `num_levels` f32, cell-name
 /// rows, `level_0..level_{L-1}` columns) into the same
 /// [`InheritedPartition`] shape that
@@ -94,10 +105,10 @@ pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
         cell_names_src.len(),
         n_src
     );
-    // Parquet columns are level_0..level_{L-1} (finest-first); emit
-    // finest-last to match `PreparedData.collapsed_levels`.
+    // Parquet columns are level_0..level_{L-1} in the writer's order,
+    // finest-last as `PreparedData.collapsed_levels` (`write_cell_to_pb`).
     let mut cell_to_pb_per_level: Vec<Vec<usize>> = Vec::with_capacity(num_levels);
-    for lvl in (0..num_levels).rev() {
+    for lvl in 0..num_levels {
         let mut col: Vec<usize> = Vec::with_capacity(n_src);
         for i in 0..n_src {
             col.push(mat[(i, lvl)] as usize);
@@ -1462,13 +1473,24 @@ pub fn load_for(from: &str) -> anyhow::Result<(RunManifest, PathBuf)> {
     if direct.is_file() {
         return RunManifest::load(direct);
     }
-    let derived = default_path(&derive_out_prefix(from));
+    let derived = manifest_path_for(from);
     RunManifest::load(Path::new(&derived)).map_err(|e| {
         anyhow::anyhow!(
             "{e}\n\nNeither `{from}` nor `{derived}` is a readable senna manifest. \
              Re-run the producer to get `{derived}`."
         )
     })
+}
+
+/// The manifest a `--from`-like flag names: `from` itself when it is a file,
+/// else the manifest of the run prefix it is (see [`load_for`]).
+#[must_use]
+pub fn manifest_path_for(from: &str) -> String {
+    if Path::new(from).is_file() {
+        from.to_string()
+    } else {
+        default_path(&derive_out_prefix(from))
+    }
 }
 
 /// Default manifest filename given a run `--out` prefix.
@@ -1661,7 +1683,17 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
     let data_files = m.data_inputs(&dir);
     let batch_files = m.data_batches(&dir);
     let feature_embedding_prefix: Box<str> = to_box(&m.prefix);
-    let cell_to_pb_path: Option<Box<str>> = m.outputs.cell_to_pb.as_deref().map(to_box);
+    // The partition of every cell trained on, when the run wrote one beside
+    // its per-cell table (QC held cells back from the outputs).
+    let cell_to_pb_path: Option<Box<str>> = m.outputs.cell_to_pb.as_deref().map(|p| {
+        let full = to_box(p);
+        let all = cell_to_pb_all_path(&full);
+        if Path::new(&all).is_file() {
+            all.into()
+        } else {
+            full
+        }
+    });
     let reload =
         crate::multiome_layout::recorded_layout(m.data.multiome.as_ref(), m.data.input.len())?;
     Ok(InheritedFromManifest {

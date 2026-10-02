@@ -129,6 +129,52 @@ pub(crate) enum PbTreeArg {
     Marginal,
 }
 
+/// `--pb-from`: collapse on another run's pseudobulk partition instead of
+/// building one, for fits of one data set that would build the same one.
+#[derive(Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PbFromArgs {
+    #[arg(
+        long,
+        value_name = "RUN",
+        conflicts_with_all = ["from", "cnv_clones"],
+        help = "Collapse on another run's pseudobulk partition instead of building one",
+        long_help = "Reuse the cell → pseudobulk partition of an earlier topic-family run\n\
+                     (its prefix, or its .senna.json) on the same cells: the cell\n\
+                     reassignment, the --pb-tree and the BBKNN + DC-SBM refinement are\n\
+                     skipped; the counts are aggregated and the batch effects estimated\n\
+                     on that partition. Its number of levels must be this run's\n\
+                     --num-levels, and every cell of this run must be in it.\n\
+                     `senna run` passes it to fits queued with the same collapse settings,\n\
+                     so the partition is built once. Not with --from (which inherits one)\n\
+                     or --cnv-clones."
+    )]
+    pub(crate) pb_from: Option<Box<str>>,
+}
+
+impl PbFromArgs {
+    /// The partition to collapse on: `--pb-from`'s, else the one `--from`
+    /// inherits, else none (a fresh collapse).
+    pub(crate) fn partition(
+        &self,
+        inherited: Option<&senna::run_manifest::InheritedFromManifest>,
+    ) -> anyhow::Result<Option<senna::run_manifest::InheritedPartition>> {
+        let Some(run) = self.pb_from.as_deref() else {
+            return Ok(inherited
+                .map(senna::run_manifest::InheritedFromManifest::load_cell_to_pb)
+                .transpose()?
+                .flatten());
+        };
+        let manifest = senna::run_manifest::manifest_path_for(run);
+        let path = senna::run_manifest::inherit_from(&manifest)?
+            .cell_to_pb_path
+            .ok_or_else(|| {
+                anyhow::anyhow!("--pb-from {run}: that run recorded no cell → pb partition")
+            })?;
+        log::info!("--pb-from: collapsing on the partition in {path}");
+        Ok(Some(senna::run_manifest::load_cell_to_pb_raw(&path)?))
+    }
+}
+
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]
 pub(crate) struct CollapseArgs {

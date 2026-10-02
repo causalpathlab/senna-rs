@@ -22,6 +22,11 @@ fn cli() -> clap::Command {
                     .long("steps")
                     .default_value("10")
                     .value_parser(clap::value_parser!(usize)),
+            )
+            .arg(
+                clap::Arg::new("sort_dim")
+                    .long("sort-dim")
+                    .default_value("10"),
             );
         // One takes an earlier run's feature table.
         let c = if name == "bge" {
@@ -30,6 +35,12 @@ fn cli() -> clap::Command {
                     .long("lora-feature-embedding")
                     .value_name("PREFIX"),
             )
+        } else {
+            c
+        };
+        // The pseudobulk family takes another fit's partition.
+        let c = if ["topic", "vae", "masked-topic", "masked-vae", "masked-sbp"].contains(&name) {
+            c.arg(clap::Arg::new("pb_from").long("pb-from"))
         } else {
             c
         };
@@ -239,7 +250,7 @@ fn the_filter_narrows_the_flags() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
     a.screen = Screen::Params;
-    assert_eq!(a.visible().len(), 2);
+    assert_eq!(a.visible().len(), 4);
     key(&mut a, KeyCode::Char('/'));
     key(&mut a, KeyCode::Char('s'));
     key(&mut a, KeyCode::Char('t'));
@@ -247,7 +258,7 @@ fn the_filter_narrows_the_flags() {
     key(&mut a, KeyCode::Char('z'));
     assert!(a.visible().is_empty());
     key(&mut a, KeyCode::Esc);
-    assert_eq!(a.visible().len(), 2);
+    assert_eq!(a.visible().len(), 4);
 }
 
 #[test]
@@ -666,14 +677,14 @@ fn the_shared_page_sets_a_flag_in_every_queued_fit_that_has_it() {
     // The shared page is listed first: `[` from the first method.
     key(&mut a, KeyCode::Char('['));
     assert!(a.shared_page);
-    // `--steps` is shared; `--cnv-clones` is topic's alone.
+    // `--steps` and `--sort-dim` are shared; `--cnv-clones` is topic's alone.
     let shared: Vec<String> = a
         .shared_form()
         .fields
         .iter()
         .map(|f| f.long.clone())
         .collect();
-    assert_eq!(shared, ["steps"]);
+    assert_eq!(shared, ["steps", "sort-dim"]);
 
     key(&mut a, KeyCode::Char('e'));
     key(&mut a, KeyCode::Backspace);
@@ -749,5 +760,55 @@ fn enter_on_a_feature_table_flag_picks_the_newest_table() {
         dir.path()
             .join("old.feature_embedding.parquet")
             .to_string_lossy()
+    );
+}
+
+#[test]
+fn fits_with_the_same_collapse_share_one_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.pairs = data(dir.path(), &["a.zarr"]);
+    let at = |a: &App, name: &str| a.rows.iter().position(|r| r.label == name).unwrap();
+    let (topic, vae, masked, svd) = (
+        at(&a, "topic"),
+        at(&a, "vae"),
+        at(&a, "masked-topic"),
+        at(&a, "svd"),
+    );
+    for r in [topic, vae, masked, svd] {
+        a.rows[r].on = true;
+    }
+    // Training flags differ; the collapse does not, but for masked-topic's.
+    a.rows[vae].form.fields[0].value = "99".into();
+    let sort_dim = |a: &mut App, r: usize| {
+        a.rows[r]
+            .form
+            .fields
+            .iter_mut()
+            .find(|f| f.long == "sort-dim")
+            .unwrap()
+            .value = "8".into();
+    };
+    sort_dim(&mut a, masked);
+    let plan = a.plan();
+    let by = |name: &str| plan.iter().find(|p| p.job.method == name).unwrap();
+    assert_eq!(by("topic").job.pb_from, None);
+    assert_eq!(by("vae").job.pb_from.as_deref(), Some("topic.senna.json"));
+    assert!(by("vae")
+        .job
+        .command()
+        .ends_with(&["--pb-from".into(), "topic.senna.json".into()]));
+    assert!(by("vae")
+        .warning
+        .as_deref()
+        .unwrap()
+        .contains("topic's pseudobulks"));
+    assert_eq!(by("masked-topic").job.pb_from, None);
+    // svd builds no partition.
+    assert_eq!(by("svd").job.pb_from, None);
+    assert!(
+        plan.iter().all(|p| p.problem.is_none()),
+        "{:?}",
+        plan.iter().map(|p| &p.problem).collect::<Vec<_>>()
     );
 }
