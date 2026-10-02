@@ -99,7 +99,7 @@ pub fn read_data_on_shared_columns(
 
             let mut data = try_open_or_convert(data_file)?;
 
-            if args.preload {
+            if args.preload || data_beans::sparse_io::auto_preload_enabled() {
                 data.preload_columns()?;
             }
             // Use basename (not file index) so the `@<basename>` suffix
