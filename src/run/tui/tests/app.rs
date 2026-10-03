@@ -40,7 +40,12 @@ fn cli() -> clap::Command {
         };
         // The pseudobulk family takes another fit's partition.
         let c = if ["topic", "vae", "masked-topic", "masked-vae", "masked-sbp"].contains(&name) {
-            c.arg(clap::Arg::new("pb_from").long("pb-from"))
+            c.arg(clap::Arg::new("pb_from").long("pb-from")).arg(
+                clap::Arg::new("feature_name_kind")
+                    .long("feature-name-kind")
+                    .value_parser(["auto", "exact", "gene"])
+                    .default_value("auto"),
+            )
         } else {
             c
         };
@@ -250,7 +255,7 @@ fn the_filter_narrows_the_flags() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
     a.screen = Screen::Params;
-    assert_eq!(a.visible().len(), 4);
+    assert_eq!(a.visible().len(), 5);
     key(&mut a, KeyCode::Char('/'));
     key(&mut a, KeyCode::Char('s'));
     key(&mut a, KeyCode::Char('t'));
@@ -258,7 +263,7 @@ fn the_filter_narrows_the_flags() {
     key(&mut a, KeyCode::Char('z'));
     assert!(a.visible().is_empty());
     key(&mut a, KeyCode::Esc);
-    assert_eq!(a.visible().len(), 4);
+    assert_eq!(a.visible().len(), 5);
 }
 
 #[test]
@@ -773,6 +778,50 @@ fn the_parameters_open_on_the_shared_page() {
     assert!(!a.shared_page);
 }
 
+/// A flag the fits hold at different values is listed even when advanced,
+/// and a choice offers only the values every fit takes.
+#[test]
+fn the_shared_page_shows_differences_and_common_choices() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    let (topic, vae) = (row_of(&a, "topic"), row_of(&a, "vae"));
+    a.rows[topic].on = true;
+    a.rows[vae].on = true;
+    fn kind_of(a: &mut App, r: usize) -> &mut Field {
+        a.rows[r]
+            .form
+            .fields
+            .iter_mut()
+            .find(|f| f.long == "feature-name-kind")
+            .unwrap()
+    }
+    kind_of(&mut a, topic).advanced = true;
+    kind_of(&mut a, vae).kind = Kind::Choice(vec!["auto".into(), "gene".into()]);
+    let shared = |a: &App| {
+        a.shared_form()
+            .fields
+            .into_iter()
+            .find(|f| f.long == "feature-name-kind")
+            .unwrap()
+    };
+    assert_eq!(
+        shared(&a).kind,
+        Kind::Choice(vec!["auto".into(), "gene".into()])
+    );
+    assert!(shared(&a).advanced, "the same in both: advanced as it is");
+
+    // Cycling on the shared page steps through those values only.
+    let target = Target::Shared("feature-name-kind".into());
+    a.change_field(&target, |f| f.cycle(1));
+    assert_eq!(kind_of(&mut a, topic).value, "gene");
+    assert_eq!(kind_of(&mut a, vae).value, "gene");
+
+    kind_of(&mut a, vae).value = "auto".into();
+    let f = shared(&a);
+    assert_eq!(f.value, "");
+    assert!(!f.advanced, "they differ: listed");
+}
+
 #[test]
 fn enter_on_a_feature_table_flag_picks_the_newest_table() {
     let dir = tempfile::tempdir().unwrap();
@@ -886,4 +935,16 @@ fn fits_with_the_same_collapse_share_one_partition() {
         "{:?}",
         plan.iter().map(|p| &p.problem).collect::<Vec<_>>()
     );
+
+    // Row names matched another way make another feature axis: no sharing.
+    a.rows[vae]
+        .form
+        .fields
+        .iter_mut()
+        .find(|f| f.long == "feature-name-kind")
+        .unwrap()
+        .value = "gene".into();
+    let plan = a.plan();
+    let by = |name: &str| plan.iter().find(|p| p.job.method == name).unwrap();
+    assert_eq!(by("vae").job.pb_from, None);
 }

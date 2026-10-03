@@ -342,7 +342,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         inherited.as_ref(),
         args.batch_files.as_deref(),
     );
-    let prebuilt_partition = args.pb_from.partition(inherited.as_ref())?;
+    let prebuilt_partition = args.pb_from.partition(
+        inherited.as_ref(),
+        &crate::refine_weighting::partition_settings(args),
+    )?;
 
     let PreparedData {
         data_vec,

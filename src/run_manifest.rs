@@ -116,7 +116,7 @@ pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
         cell_to_pb_per_level.push(col);
     }
     log::info!(
-        "--from: loaded inherited cell_to_pb {path} (num_levels={num_levels}, N_src={n_src})",
+        "loaded the inherited cell → pb partition {path} (num_levels={num_levels}, N_src={n_src})",
     );
     Ok((cell_to_pb_per_level, cell_names_src))
 }
@@ -1403,6 +1403,18 @@ impl RunManifest {
         }
     }
 
+    /// The run's cell → pb partition, resolved against `manifest_dir`: of
+    /// every cell it trained on, when it wrote that beside its per-cell
+    /// table (QC held cells back from the outputs).
+    #[must_use]
+    pub fn cell_to_pb_path(&self, manifest_dir: &Path) -> Option<String> {
+        let full = resolve(manifest_dir, self.outputs.cell_to_pb.as_deref()?)
+            .to_string_lossy()
+            .into_owned();
+        let all = cell_to_pb_all_path(&full);
+        Some(if Path::new(&all).is_file() { all } else { full })
+    }
+
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let s = serde_json::to_string_pretty(self)?;
         fs::write(path, s).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
@@ -1717,7 +1729,7 @@ impl InheritedFromManifest {
         data_cell_names: &[Box<str>],
     ) -> anyhow::Result<Vec<Vec<usize>>> {
         if cell_names_src == data_cell_names {
-            log::info!("--from: cell-name order matches data axis (no cell_to_pb reorder)");
+            log::info!("inherited partition: cell-name order matches data axis (no reorder)");
             return Ok(cell_to_pb_per_level_src);
         }
         let src_index: rustc_hash::FxHashMap<&str, usize> = cell_names_src
@@ -1736,8 +1748,9 @@ impl InheritedFromManifest {
         if !missing.is_empty() {
             let preview: Vec<&str> = missing.iter().copied().take(5).collect();
             anyhow::bail!(
-                "--from: {} of {} data cells are absent from the inherited cell_to_pb \
-                 (e.g. {:?}); the source run was trained on a different cell set",
+                "{} of {} data cells are absent from the inherited cell → pb partition \
+                 (e.g. {:?}); the source run (--from / --pb-from) was trained on a \
+                 different cell set",
                 missing.len(),
                 data_cell_names.len(),
                 preview,
@@ -1753,12 +1766,46 @@ impl InheritedFromManifest {
             out.push(col);
         }
         log::info!(
-            "--from: reordered inherited cell_to_pb by cell name ({}→{} cells aligned)",
+            "inherited partition: reordered by cell name ({}→{} cells aligned)",
             cell_names_src.len(),
             n_data,
         );
         Ok(out)
     }
+}
+
+/// The recorded settings in which `here` differs from `there` (two
+/// serialized argument structs, or parts of them), as `path: there →
+/// here`. A setting `there` does not record (an older senna's) is passed;
+/// numbers are compared as the f32 most settings are, since a JSON round
+/// trip need not give back the same f64.
+#[must_use]
+pub fn settings_differences(there: &serde_json::Value, here: &serde_json::Value) -> Vec<String> {
+    fn walk(there: &serde_json::Value, here: &serde_json::Value, path: &str) -> Vec<String> {
+        use serde_json::Value;
+        match (there, here) {
+            (Value::Object(a), Value::Object(b)) => b
+                .iter()
+                .filter_map(|(k, v)| a.get(k).map(|w| (k, w, v)))
+                .flat_map(|(k, w, v)| {
+                    let p = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    walk(w, v, &p)
+                })
+                .collect(),
+            (Value::Number(a), Value::Number(b))
+                if a.as_f64().map(|x| x as f32) == b.as_f64().map(|x| x as f32) =>
+            {
+                Vec::new()
+            }
+            _ if there == here => Vec::new(),
+            _ => vec![format!("{path}: {there} there, {here} here")],
+        }
+    }
+    walk(there, here, "")
 }
 
 /// Load a `senna.json` manifest and extract the fields a downstream
@@ -1799,17 +1846,7 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
     let data_files = m.data_inputs(&dir);
     let batch_files = m.data_batches(&dir);
     let feature_embedding_prefix: Box<str> = to_box(&m.prefix);
-    // The partition of every cell trained on, when the run wrote one beside
-    // its per-cell table (QC held cells back from the outputs).
-    let cell_to_pb_path: Option<Box<str>> = m.outputs.cell_to_pb.as_deref().map(|p| {
-        let full = to_box(p);
-        let all = cell_to_pb_all_path(&full);
-        if Path::new(&all).is_file() {
-            all.into()
-        } else {
-            full
-        }
-    });
+    let cell_to_pb_path: Option<Box<str>> = m.cell_to_pb_path(&dir).map(Into::into);
     let reload =
         crate::multiome_layout::recorded_layout(m.data.multiome.as_ref(), m.data.input.len())?;
     Ok(InheritedFromManifest {

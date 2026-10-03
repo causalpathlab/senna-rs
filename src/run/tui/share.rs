@@ -31,14 +31,13 @@ fn shapes(long: &str) -> bool {
             .filter_map(|a| a.get_long().map(str::to_string))
             .collect()
     });
-    // The masked models' feature-axis restriction (a feature network, or
-    // the genes of a given feature table) and multiome load change the
-    // cells' sketch too.
-    set.contains(long)
-        || long == "multiome"
-        || long.starts_with("feature-network")
-        || long.starts_with("no-feature-network")
-        || long.ends_with("-feature-embedding")
+    // Named as `--pb-from` checks them, from the same lists.
+    let name = long.replace('-', "_");
+    // Outputs only: they write something, but cut cells no differently.
+    if crate::refine_weighting::OUTPUT_ONLY.contains(&name.as_str()) {
+        return false;
+    }
+    set.contains(long) || crate::refine_weighting::cuts_cells(&name)
 }
 
 /// What decides the partition `form` builds: its partition-shaping flags
@@ -68,6 +67,11 @@ pub fn key(form: &Method, clones: bool) -> Option<Vec<(String, String)>> {
         .map(|f| (f.long.clone(), f.value.trim().to_string()))
         .collect();
     key.push(("proj-dim".into(), sketch_dim(form).to_string()));
+    // How row names line up across data files decides the merged feature
+    // axis; compared as set, since its default may differ between methods.
+    if let Some(f) = form.fields.iter().find(|f| f.long == "feature-name-kind") {
+        key.push((f.long.clone(), f.value.trim().to_string()));
+    }
     key.sort();
     Some(key)
 }
@@ -84,8 +88,9 @@ fn sketch_dim(form: &Method) -> usize {
             .parse()
             .ok()
     };
-    let k = value("n-latent-topics")
-        .or_else(|| value("n-latent"))
+    let k = crate::refine_weighting::LATENT_COUNTS
+        .iter()
+        .find_map(|n| value(&n.replace('_', "-")))
         .unwrap_or(0);
     value("proj-dim").unwrap_or(0).max(k)
 }

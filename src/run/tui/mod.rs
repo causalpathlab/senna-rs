@@ -833,34 +833,42 @@ impl App {
     }
 
     /// The flags at least two queued fits have, in the order first met, as
-    /// a form: each with the value they all hold, or none where they
-    /// differ (see [`Self::shared_values`]).
+    /// a form: each with the value they all hold, or none (and listed even
+    /// when advanced) where they differ; a choice offers only the values
+    /// every fit takes.
     fn shared_form(&self) -> Method {
         let rows = self.shared_rows();
-        // Each flag's first field, and the values the fits hold it at.
+        // Each flag's fields across the fits, in the order first met.
         let mut seen: std::collections::HashMap<&str, usize> = Default::default();
-        let mut found: Vec<(&Field, Vec<&str>)> = Vec::new();
+        let mut found: Vec<Vec<&Field>> = Vec::new();
         for &r in &rows {
             for f in &self.rows[r].form.fields {
                 match seen.get(f.long.as_str()) {
-                    Some(&at) => found[at].1.push(&f.value),
+                    Some(&at) => found[at].push(f),
                     None => {
                         seen.insert(&f.long, found.len());
-                        found.push((f, vec![&f.value]));
+                        found.push(vec![f]);
                     }
                 }
             }
         }
         let fields = found
             .into_iter()
-            .filter(|(_, values)| values.len() > 1)
-            .map(|(f, values)| {
-                let mut x = f.clone();
-                x.value = if values.iter().all(|v| *v == values[0]) {
-                    values[0].to_string()
-                } else {
-                    String::new()
-                };
+            .filter(|each| each.len() > 1)
+            .map(|each| {
+                let mut x = each[0].clone();
+                // A choice the page sets in every fit: only values all take.
+                if let Kind::Choice(values) = &mut x.kind {
+                    values.retain(|v| {
+                        each.iter()
+                            .all(|f| matches!(&f.kind, Kind::Choice(vs) if vs.contains(v)))
+                    });
+                }
+                if each.iter().any(|f| f.value != x.value) {
+                    x.value = String::new();
+                    // Where the fits differ the page says so, advanced or not.
+                    x.advanced = false;
+                }
                 x
             })
             .collect();
@@ -902,18 +910,11 @@ impl App {
     fn field_of(&self, target: &Target) -> Option<Field> {
         match target {
             Target::Field(m, i) => self.rows.get(*m)?.form.fields.get(*i).cloned(),
-            Target::Shared(long) => {
-                let values = self.shared_values(long);
-                let mut x = self
-                    .shared_rows()
-                    .into_iter()
-                    .find_map(|r| self.rows[r].form.fields.iter().find(|f| f.long == *long))?
-                    .clone();
-                if values.iter().any(|(_, v)| *v != values[0].1) {
-                    x.value.clear();
-                }
-                Some(x)
-            }
+            Target::Shared(long) => self
+                .shared_form()
+                .fields
+                .into_iter()
+                .find(|f| f.long == *long),
             _ => None,
         }
     }
@@ -1218,7 +1219,7 @@ impl App {
                 (Tool::Senna, Some(t)) => Self::clones_for(r, &rel(t)),
                 _ => (None, None, None),
             };
-            let mut warning = warning.or_else(|| self.shape_warning(r));
+            let mut notes: Vec<String> = warning.into_iter().chain(self.shape_warning(r)).collect();
             // A partition another queued fit builds is collapsed on, not
             // built again.
             let mut pb_from = None;
@@ -1226,12 +1227,10 @@ impl App {
                 match builders.iter().find(|(k, _)| *k == key) {
                     Some((_, b)) => {
                         pb_from = Some(rel(&b.manifest));
-                        warning = warning.or_else(|| {
-                            Some(format!(
-                                "collapses on {}'s pseudobulks (--pb-from)",
-                                b.method
-                            ))
-                        });
+                        notes.push(format!(
+                            "collapses on {}'s pseudobulks (--pb-from; its pb tree stays there)",
+                            b.method
+                        ));
                     }
                     None => builders.push((
                         key,
@@ -1281,7 +1280,7 @@ impl App {
             };
             outs.push(dir.join(&out));
             planned.push(Planned {
-                warning,
+                warning: (!notes.is_empty()).then(|| notes.join("; ")),
                 job,
                 problem,
                 blamed,

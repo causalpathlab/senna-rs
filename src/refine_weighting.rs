@@ -142,8 +142,10 @@ pub(crate) struct PbFromArgs {
                      (its prefix, or its .senna.json) on the same cells: the cell\n\
                      reassignment, the --pb-tree and the BBKNN + DC-SBM refinement are\n\
                      skipped; the counts are aggregated and the batch effects estimated\n\
-                     on that partition. Its number of levels must be this run's\n\
-                     --num-levels, and every cell of this run must be in it.\n\
+                     on that partition. That run must have built it as this one would:\n\
+                     the same collapse, QC, HVG and feature-name settings and sketch\n\
+                     width (output flags aside), not cut by --cnv-clones, over every\n\
+                     cell of this run. Its pb tree is not copied: no {out}.pb_tree.json.\n\
                      `senna run` passes it to fits queued with the same collapse settings,\n\
                      so the partition is built once. Not with --from (which inherits one)\n\
                      or --cnv-clones."
@@ -153,10 +155,13 @@ pub(crate) struct PbFromArgs {
 
 impl PbFromArgs {
     /// The partition to collapse on: `--pb-from`'s, else the one `--from`
-    /// inherits, else none (a fresh collapse).
+    /// inherits, else none (a fresh collapse). `built_with` is what this run
+    /// would build its own from ([`partition_settings`]): `--pb-from`'s run
+    /// must have built its partition from the same.
     pub(crate) fn partition(
         &self,
         inherited: Option<&senna::run_manifest::InheritedFromManifest>,
+        built_with: &serde_json::Value,
     ) -> anyhow::Result<Option<senna::run_manifest::InheritedPartition>> {
         let Some(run) = self.pb_from.as_deref() else {
             return Ok(inherited
@@ -164,15 +169,110 @@ impl PbFromArgs {
                 .transpose()?
                 .flatten());
         };
-        let manifest = senna::run_manifest::manifest_path_for(run);
-        let path = senna::run_manifest::inherit_from(&manifest)?
-            .cell_to_pb_path
-            .ok_or_else(|| {
-                anyhow::anyhow!("--pb-from {run}: that run recorded no cell → pb partition")
-            })?;
+        let (m, dir) = senna::run_manifest::load_for(run)?;
+        match m.train_args.as_ref() {
+            Some(rec) => {
+                let args = &rec.args;
+                anyhow::ensure!(
+                    args.pointer("/collapse/cnv_clones")
+                        .is_none_or(serde_json::Value::is_null),
+                    "--pb-from {run}: that run cut its partition by CNV clone (--cnv-clones)"
+                );
+                if args.get("from").is_some_and(|v| !v.is_null()) {
+                    log::warn!(
+                        "--pb-from {run}: that run inherited its partition with --from, so \
+                         its own settings are what is compared"
+                    );
+                }
+                let differ =
+                    senna::run_manifest::settings_differences(&source_settings(args), built_with);
+                anyhow::ensure!(
+                    differ.is_empty(),
+                    "--pb-from {run}: that run built its partition with other settings \
+                     ({}); without --pb-from this run builds its own",
+                    differ.join("; ")
+                );
+            }
+            None => log::warn!(
+                "--pb-from {run}: its manifest records no fit settings, so whether it \
+                 built its partition as this run would cannot be checked"
+            ),
+        }
+        let path = m.cell_to_pb_path(&dir).ok_or_else(|| {
+            anyhow::anyhow!("--pb-from {run}: that run recorded no cell → pb partition")
+        })?;
         log::info!("--pb-from: collapsing on the partition in {path}");
         Ok(Some(senna::run_manifest::load_cell_to_pb_raw(&path)?))
     }
+}
+
+/// Settings that write something out but do not change how cells are
+/// partitioned, by their recorded (snake_case) names.
+pub(crate) const OUTPUT_ONLY: &[&str] = &[
+    "emit_pb_reference",
+    "no_emit_pb_reference",
+    "qc_report",
+    "qc_histogram",
+];
+
+/// Settings, by recorded (snake_case) name, outside the collapse, QC and HVG
+/// groups that change the cells' sketch: multiome load, and the masked
+/// models' feature-axis restriction (a feature network, or the genes of a
+/// given feature table).
+pub(crate) fn cuts_cells(name: &str) -> bool {
+    name == "multiome"
+        || name.starts_with("feature_network")
+        || name.starts_with("no_feature_network")
+        || name.ends_with("_feature_embedding")
+}
+
+/// The names a fit's number of latent topics goes by. The sketch cells are
+/// partitioned on is `--proj-dim` wide, or this number when larger.
+pub(crate) const LATENT_COUNTS: [&str; 2] = ["n_latent_topics", "n_latent"];
+
+/// What a fit builds its partition from, out of its argument struct as its
+/// manifest's `train_args` records it: the collapse, cell QC, HVG and
+/// feature-name settings, multiome load and the masked models' feature-axis
+/// restriction, and the width of the sketch cells are partitioned on
+/// (`--proj-dim`, or the number of latent topics when larger).
+pub(crate) fn partition_settings(args: &impl serde::Serialize) -> serde_json::Value {
+    source_settings(&serde_json::to_value(args).unwrap_or_default())
+}
+
+/// [`partition_settings`] of a serialized argument struct.
+fn source_settings(args: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::json!({});
+    let Some(args) = args.as_object() else {
+        return out;
+    };
+    let shaping =
+        |k: &str| matches!(k, "collapse" | "qc" | "hvg" | "feature_name_kind") || cuts_cells(k);
+    for (k, v) in args.iter().filter(|(k, _)| shaping(k)) {
+        out[k] = v.clone();
+    }
+    let proj_dim = out
+        .pointer("/collapse/proj_dim")
+        .and_then(serde_json::Value::as_u64);
+    for group in ["collapse", "qc"] {
+        if let Some(g) = out
+            .get_mut(group)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            // The sketch width is compared below; a clone cut is refused
+            // apart; outputs do not shape the partition.
+            for k in ["proj_dim", "cnv_clones"].iter().chain(OUTPUT_ONLY) {
+                g.remove(*k);
+            }
+        }
+    }
+    let k = LATENT_COUNTS
+        .iter()
+        .find_map(|k| args.get(*k).and_then(serde_json::Value::as_u64))
+        .unwrap_or(0);
+    if let Some(p) = proj_dim {
+        out["sketch_dim"] = p.max(k).into();
+    }
+    out
 }
 
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
