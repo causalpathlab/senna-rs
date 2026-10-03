@@ -810,7 +810,13 @@ fn the_shared_page_shows_differences_and_common_choices() {
     );
     assert!(shared(&a).advanced, "the same in both: advanced as it is");
 
-    kind_of(&mut a, vae).value = "gene".into();
+    // Cycling on the shared page steps through those values only.
+    let target = Target::Shared("feature-name-kind".into());
+    a.change_field(&target, |f| f.cycle(1));
+    assert_eq!(kind_of(&mut a, topic).value, "gene");
+    assert_eq!(kind_of(&mut a, vae).value, "gene");
+
+    kind_of(&mut a, vae).value = "auto".into();
     let f = shared(&a);
     assert_eq!(f.value, "");
     assert!(!f.advanced, "they differ: listed");

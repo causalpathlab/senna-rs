@@ -34,6 +34,10 @@ fn shapes(long: &str) -> bool {
     // The masked models' feature-axis restriction (a feature network, or
     // the genes of a given feature table) and multiome load change the
     // cells' sketch too.
+    // Outputs only: they write something, but cut cells no differently.
+    if crate::refine_weighting::OUTPUT_ONLY.contains(&long.replace('-', "_").as_str()) {
+        return false;
+    }
     set.contains(long)
         || long == "multiome"
         || long.starts_with("feature-network")

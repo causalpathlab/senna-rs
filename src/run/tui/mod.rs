@@ -856,25 +856,17 @@ impl App {
             .filter(|each| each.len() > 1)
             .map(|each| {
                 let mut x = each[0].clone();
-                if each.iter().all(|f| f.value == x.value) {
-                    return x;
-                }
-                x.value = String::new();
-                // Where the fits differ the page says so, advanced or not.
-                x.advanced = false;
-                x
-            })
-            .map(|mut x| {
                 // A choice the page sets in every fit: only values all take.
                 if let Kind::Choice(values) = &mut x.kind {
                     values.retain(|v| {
-                        rows.iter().all(|&r| {
-                            self.rows[r].form.fields.iter().all(|f| {
-                                f.long != x.long
-                                    || matches!(&f.kind, Kind::Choice(vs) if vs.contains(v))
-                            })
-                        })
+                        each.iter()
+                            .all(|f| matches!(&f.kind, Kind::Choice(vs) if vs.contains(v)))
                     });
+                }
+                if each.iter().any(|f| f.value != x.value) {
+                    x.value = String::new();
+                    // Where the fits differ the page says so, advanced or not.
+                    x.advanced = false;
                 }
                 x
             })
@@ -917,18 +909,11 @@ impl App {
     fn field_of(&self, target: &Target) -> Option<Field> {
         match target {
             Target::Field(m, i) => self.rows.get(*m)?.form.fields.get(*i).cloned(),
-            Target::Shared(long) => {
-                let values = self.shared_values(long);
-                let mut x = self
-                    .shared_rows()
-                    .into_iter()
-                    .find_map(|r| self.rows[r].form.fields.iter().find(|f| f.long == *long))?
-                    .clone();
-                if values.iter().any(|(_, v)| *v != values[0].1) {
-                    x.value.clear();
-                }
-                Some(x)
-            }
+            Target::Shared(long) => self
+                .shared_form()
+                .fields
+                .into_iter()
+                .find(|f| f.long == *long),
             _ => None,
         }
     }
@@ -1233,10 +1218,7 @@ impl App {
                 (Tool::Senna, Some(t)) => Self::clones_for(r, &rel(t)),
                 _ => (None, None, None),
             };
-            let mut warning = match (warning, self.shape_warning(r)) {
-                (Some(a), Some(b)) => Some(format!("{a}; {b}")),
-                (a, b) => a.or(b),
-            };
+            let mut notes: Vec<String> = warning.into_iter().chain(self.shape_warning(r)).collect();
             // A partition another queued fit builds is collapsed on, not
             // built again.
             let mut pb_from = None;
@@ -1244,11 +1226,10 @@ impl App {
                 match builders.iter().find(|(k, _)| *k == key) {
                     Some((_, b)) => {
                         pb_from = Some(rel(&b.manifest));
-                        let note = format!("collapses on {}'s pseudobulks (--pb-from)", b.method);
-                        warning = Some(match warning {
-                            Some(w) => format!("{w}; {note}"),
-                            None => note,
-                        });
+                        notes.push(format!(
+                            "collapses on {}'s pseudobulks (--pb-from; its pb tree stays there)",
+                            b.method
+                        ));
                     }
                     None => builders.push((
                         key,
@@ -1298,7 +1279,7 @@ impl App {
             };
             outs.push(dir.join(&out));
             planned.push(Planned {
-                warning,
+                warning: (!notes.is_empty()).then(|| notes.join("; ")),
                 job,
                 problem,
                 blamed,

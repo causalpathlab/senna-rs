@@ -344,13 +344,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     );
     let prebuilt_partition = args.pb_from.partition(
         inherited.as_ref(),
-        &crate::refine_weighting::partition_settings(
-            &args.collapse,
-            &args.qc,
-            &args.hvg,
-            &args.feature_name_kind,
-            args.n_latent_topics,
-        ),
+        &crate::refine_weighting::partition_settings(&args),
     )?;
 
     let PreparedData {
@@ -630,7 +624,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &gene_names)?;
         true
     } else {
-        args.pb_from.copy_pb_tree(&args.out)?
+        false
     };
 
     let pb_reference_suffix = senna::pb_reference::emit_if_requested(

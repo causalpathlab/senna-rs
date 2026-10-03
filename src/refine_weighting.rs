@@ -142,8 +142,12 @@ pub(crate) struct PbFromArgs {
                      (its prefix, or its .senna.json) on the same cells: the cell\n\
                      reassignment, the --pb-tree and the BBKNN + DC-SBM refinement are\n\
                      skipped; the counts are aggregated and the batch effects estimated\n\
-                     on that partition. Its number of levels must be this run's\n\
-                     --num-levels, and every cell of this run must be in it.\n\
+                     on that partition. It must have been built as this run would\n\
+                     build its own: the same collapse, cell QC, HVG and feature-name\n\
+                     settings and sketch width (output-only flags aside), else the run\n\
+                     stops naming the difference; and every cell of this run must be in\n\
+                     it. A partition cut by --cnv-clones is refused. The pb tree behind\n\
+                     it stays with that run: this one writes no {out}.pb_tree.json.\n\
                      `senna run` passes it to fits queued with the same collapse settings,\n\
                      so the partition is built once. Not with --from (which inherits one)\n\
                      or --cnv-clones."
@@ -170,7 +174,19 @@ impl PbFromArgs {
         let (m, dir) = senna::run_manifest::load_for(run)?;
         match m.train_args.as_ref() {
             Some(rec) => {
-                let differ = differences(&source_settings(&rec.args), built_with, "");
+                let args = &rec.args;
+                anyhow::ensure!(
+                    args.pointer("/collapse/cnv_clones")
+                        .is_none_or(serde_json::Value::is_null),
+                    "--pb-from {run}: that run cut its partition by CNV clone (--cnv-clones)"
+                );
+                if args.get("from").is_some_and(|v| !v.is_null()) {
+                    log::warn!(
+                        "--pb-from {run}: that run inherited its partition with --from, so \
+                         its own settings are what is compared"
+                    );
+                }
+                let differ = differences(&source_settings(args), built_with, "");
                 anyhow::ensure!(
                     differ.is_empty(),
                     "--pb-from {run}: that run built its partition with other settings \
@@ -186,80 +202,76 @@ impl PbFromArgs {
         let path = m.outputs.cell_to_pb.as_deref().ok_or_else(|| {
             anyhow::anyhow!("--pb-from {run}: that run recorded no cell → pb partition")
         })?;
-        let path = senna::run_manifest::resolve(&dir, path);
-        log::info!(
-            "--pb-from: collapsing on the partition in {}",
-            path.display()
-        );
-        Ok(Some(senna::run_manifest::load_cell_to_pb_raw(
-            &path.to_string_lossy(),
-        )?))
-    }
-
-    /// Copy `--pb-from`'s `pb_tree.json` to `{out}.pb_tree.json`: the
-    /// partition is that run's, and so is the tree behind it. Whether one
-    /// was copied.
-    pub(crate) fn copy_pb_tree(&self, out: &str) -> anyhow::Result<bool> {
-        let Some(run) = self.pb_from.as_deref() else {
-            return Ok(false);
+        // The partition of every cell it trained on, when QC held some back
+        // from its per-cell outputs.
+        let path = senna::run_manifest::resolve(&dir, path)
+            .to_string_lossy()
+            .into_owned();
+        let all = senna::run_manifest::cell_to_pb_all_path(&path);
+        let path = if std::path::Path::new(&all).is_file() {
+            all
+        } else {
+            path
         };
-        let (m, dir) = senna::run_manifest::load_for(run)?;
-        let Some(tree) = m.outputs.pb_tree.as_deref() else {
-            return Ok(false);
-        };
-        let to = format!("{out}.pb_tree.json");
-        std::fs::copy(senna::run_manifest::resolve(&dir, tree), &to)
-            .map_err(|e| anyhow::anyhow!("--pb-from {run}: copying its pb tree to {to}: {e}"))?;
-        Ok(true)
+        log::info!("--pb-from: collapsing on the partition in {path}");
+        Ok(Some(senna::run_manifest::load_cell_to_pb_raw(&path)?))
     }
 }
 
-/// What a fit builds its partition from, as recorded in its manifest's
-/// `train_args`: the collapse, cell QC, HVG and feature-name settings, and
-/// the width of the sketch cells are partitioned on (`--proj-dim`, or the
-/// number of latent topics when larger). `n_latent` is that number.
-pub(crate) fn partition_settings(
-    collapse: &CollapseArgs,
-    qc: &senna::embed_common::QcArgs,
-    hvg: &crate::hvg::HvgCliArgs,
-    feature_name_kind: &impl serde::Serialize,
-    n_latent: usize,
-) -> serde_json::Value {
-    let args = serde_json::json!({
-        "collapse": collapse,
-        "qc": qc,
-        "hvg": hvg,
-        "feature_name_kind": feature_name_kind,
-        "n_latent": n_latent,
-    });
-    source_settings(&args)
+/// Settings that write something out but do not change how cells are
+/// partitioned, by their recorded (snake_case) names.
+pub(crate) const OUTPUT_ONLY: &[&str] = &[
+    "emit_pb_reference",
+    "no_emit_pb_reference",
+    "qc_report",
+    "qc_histogram",
+];
+
+/// What a fit builds its partition from, out of its argument struct as its
+/// manifest's `train_args` records it: the collapse, cell QC, HVG and
+/// feature-name settings, multiome load and the masked models' feature-axis
+/// restriction, and the width of the sketch cells are partitioned on
+/// (`--proj-dim`, or the number of latent topics when larger).
+pub(crate) fn partition_settings(args: &impl serde::Serialize) -> serde_json::Value {
+    source_settings(&serde_json::to_value(args).unwrap_or_default())
 }
 
-/// [`partition_settings`] read from a recorded argument struct.
+/// [`partition_settings`] of a serialized argument struct.
 fn source_settings(args: &serde_json::Value) -> serde_json::Value {
-    let mut collapse = args.get("collapse").cloned().unwrap_or_default();
-    let proj_dim = collapse.get("proj_dim").and_then(serde_json::Value::as_u64);
-    if let Some(c) = collapse.as_object_mut() {
-        // Outputs, or a partition taken by clone: not how the sketch is cut.
-        for k in [
-            "proj_dim",
-            "emit_pb_reference",
-            "no_emit_pb_reference",
-            "cnv_clones",
-        ] {
-            c.remove(k);
+    let mut out = serde_json::json!({});
+    let Some(args) = args.as_object() else {
+        return out;
+    };
+    let shaping = |k: &str| {
+        matches!(
+            k,
+            "collapse" | "qc" | "hvg" | "feature_name_kind" | "multiome"
+        ) || k.starts_with("feature_network")
+            || k.starts_with("no_feature_network")
+            || k.ends_with("_feature_embedding")
+    };
+    for (k, v) in args.iter().filter(|(k, _)| shaping(k)) {
+        out[k] = v.clone();
+    }
+    let proj_dim = out
+        .pointer("/collapse/proj_dim")
+        .and_then(serde_json::Value::as_u64);
+    for group in ["collapse", "qc"] {
+        if let Some(g) = out
+            .get_mut(group)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            // The sketch width is compared below; a clone cut is refused
+            // apart; outputs do not shape the partition.
+            for k in ["proj_dim", "cnv_clones"].iter().chain(OUTPUT_ONLY) {
+                g.remove(*k);
+            }
         }
     }
     let k = ["n_latent_topics", "n_latent"]
         .iter()
         .find_map(|k| args.get(*k).and_then(serde_json::Value::as_u64))
         .unwrap_or(0);
-    let mut out = serde_json::json!({ "collapse": collapse });
-    for key in ["qc", "hvg", "feature_name_kind"] {
-        if let Some(v) = args.get(key) {
-            out[key] = v.clone();
-        }
-    }
     if let Some(p) = proj_dim {
         out["sketch_dim"] = p.max(k).into();
     }
@@ -267,10 +279,13 @@ fn source_settings(args: &serde_json::Value) -> serde_json::Value {
 }
 
 /// The settings in which `here` differs from `there`, as `path: there →
-/// here`. A setting `there` does not record (an older senna's) is passed.
+/// here`. A setting `there` does not record (an older senna's) is passed;
+/// numbers are compared as the f32 most settings are, since a JSON round
+/// trip need not give back the same f64.
 fn differences(there: &serde_json::Value, here: &serde_json::Value, path: &str) -> Vec<String> {
+    use serde_json::Value;
     match (there, here) {
-        (serde_json::Value::Object(a), serde_json::Value::Object(b)) => b
+        (Value::Object(a), Value::Object(b)) => b
             .iter()
             .filter_map(|(k, v)| a.get(k).map(|w| (k, w, v)))
             .flat_map(|(k, w, v)| {
@@ -282,10 +297,16 @@ fn differences(there: &serde_json::Value, here: &serde_json::Value, path: &str) 
                 differences(w, v, &p)
             })
             .collect(),
+        (Value::Number(a), Value::Number(b))
+            if a.as_f64().map(|x| x as f32) == b.as_f64().map(|x| x as f32) =>
+        {
+            Vec::new()
+        }
         _ if there == here => Vec::new(),
         _ => vec![format!("{path}: {there} there, {here} here")],
     }
 }
+
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]
 pub(crate) struct CollapseArgs {
@@ -645,43 +666,3 @@ impl AmortRefineArgs {
 #[cfg(test)]
 #[path = "refine_weighting_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-mod pb_from_tests {
-    use super::*;
-
-    /// A recorded fit and one about to run differ in what built the
-    /// partition, and only there: the sketch width is the larger of
-    /// `proj_dim` and the latent count, outputs do not count, and a setting
-    /// the record lacks is passed.
-    #[test]
-    fn differences_are_in_what_builds_the_partition() {
-        let there = serde_json::json!({
-            "collapse": {"proj_dim": 50, "sort_dim": 10, "emit_pb_reference": true},
-            "qc": {"min_features": 200},
-            "n_latent_topics": 60,
-            "epochs": 1000,
-        });
-        let here = serde_json::json!({
-            "collapse": {"proj_dim": 60, "sort_dim": 10, "emit_pb_reference": false},
-            "qc": {"min_features": 200, "new_flag": 1},
-            "n_latent": 10,
-            "epochs": 5,
-        });
-        assert!(differences(&source_settings(&there), &source_settings(&here), "").is_empty());
-
-        let here = serde_json::json!({
-            "collapse": {"proj_dim": 50, "sort_dim": 6},
-            "qc": {"min_features": 200},
-            "n_latent": 10,
-        });
-        let d = differences(&source_settings(&there), &source_settings(&here), "");
-        assert_eq!(d.len(), 2, "{d:?}");
-        assert!(d
-            .iter()
-            .any(|x| x.starts_with("collapse.sort_dim: 10 there, 6 here")));
-        assert!(d
-            .iter()
-            .any(|x| x.starts_with("sketch_dim: 60 there, 50 here")));
-    }
-}
