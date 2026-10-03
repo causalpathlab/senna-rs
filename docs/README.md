@@ -9,6 +9,12 @@ it were a description of the code is how people end up debugging things that wer
 |---|---|
 | [`deconvolve.md`](deconvolve.md) | The `senna deconvolve` model and its inputs. |
 
+## Plans — not built
+
+| doc | what it is |
+|---|---|
+| [`peer-critique-plan.md`](peer-critique-plan.md) | Fits that correct each other through peer-mined pairs on two channels (pseudobulk pairs and gene pairs). A count-based referee labels the pairs, and rounds run through `senna update`. |
+
 ## Moved to lupin
 
 Cell-type annotation and lineage live in [`lupin`](https://github.com/causalpathlab/lupin-rs),
