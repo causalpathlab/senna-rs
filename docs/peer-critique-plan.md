@@ -118,8 +118,10 @@ random halves of each pseudobulk). On BMMNC it showed three problems:
 
 ### 3.4 Labels
 
-- A merge becomes a **negative** (−1) for the merging model; a split becomes a **positive** (+1)
-  for the splitting model.
+- **Only merges become labels:** a **negative** (−1) for the merging model, pushing the pair apart.
+- **Splits are reported, never used as positives.** Checked against expert labels (§10), a split
+  usually means the lone model saw a difference the others share a blind spot on. A positive
+  label would teach a correct model to merge.
 - The weight grows with agreement: the more other models agree, and the wider the rank gap
   between the model and the consensus, the larger.
 - A model is never labelled where the others disagree among themselves (`ambiguous`).
@@ -345,12 +347,30 @@ Each stage can be checked on its own before the next one is built.
 | 6 | A ↔ B | channel coupling (§5) | Coupled candidates are charged at a higher rate than mined ones. |
 | 7 | A | (optional) the partition takes critique | — |
 
-**Stage 0a, first look (BMMNC, topic + vae + svd).** The topic model's merge share was above 0.9
-at every level, the VAE's rose to 0.99 at level 1, and SVD's stayed near 0.5 with the most
-charges in both directions.
+**Stage 0a results.**
+
+- *BMMNC, topic + vae + svd + bge.* The topic model has the highest merge share at every level
+  (0.83–0.86 at the two finer levels), the VAE follows (0.74–0.81), SVD is charged most in both
+  directions (≈ 0.55–0.6), and bge leans to splits (≈ 0.4).
+- *HCA bone marrow, donor BM1, the same four models, checked against the study's expert cell
+  types (`evaluate_critique.py` beside the outputs in `paper-senna/results/critique-hca-bm1/`).*
+  - **Merges are right.** The two pseudobulks of a merged pair have different majority types in
+    84–100 % of merges (24 broad types; 100 % with the 55 fine types). Among the same model's
+    other near pairs the rate is 18–30 % at the finer levels.
+  - **Splits are mostly wrong as charges.** For topic, vae and bge, 0–7 % of split pairs share a
+    broad type: the lone model that separated the pair was right, and the consensus held a
+    shared merge. SVD's splits share a type in 28–45 % of cases (base 14–32 %): some of its
+    separations are over-splitting.
+  - Hence §3.4: merges become labels, splits do not. The labels come from clustering in a
+    PCA-like space, so they share some bias with separating models.
 
 ## 11. Open questions
 
+- **§3.1** Views ignore how a pseudobulk's cells are spread: they average cell latents. A view
+  built from each model's **cell-level kNN graph** (PAGA-style connectivity between pseudobulks,
+  Wolf et al., Genome Biology 2019) would count two pseudobulks near when their cells mix. Each
+  pseudobulk's spread in each model would also flag pseudobulks one model sees as heterogeneous
+  (§8.2).
 - **§3.3** *k* and the far threshold, and how both should scale with the number of pseudobulks.
 - **§3.3** With three models, one model is half of every other model's consensus. How many
   families are needed before the consensus is trustworthy, and how to weight near-duplicates.
