@@ -154,49 +154,130 @@ const COEMBED_SUFFIX: &str = ".feature_coembedding.parquet";
 ///    the topic dictionary β**, so it is accepted only after [`ArtifactScale`]
 ///    confirms it is signed rather than a log-simplex.
 ///
+/// The run's manifest, when there is one, decides first: the ρ it records
+/// stands while that file exists. Otherwise the candidates are probed under
+/// the prefix as given (else the one the manifest records, for a renamed
+/// manifest), passing over the co-embed it records, and the legacy slot only
+/// for a kind that wrote ρ there ([`RunKind::dictionary_may_hold_rho`]) —
+/// another kind's signed `dictionary` (svd loadings, say) is not ρ.
+///
 /// `prefix` may also name the table itself (any of the three) or the run's
-/// `run.senna.json`, so a path pasted from a listing works as well as the
-/// stem. A manifest that exists is read for its recorded ρ (see
-/// [`resolve_feature_embedding_for`]); otherwise its name gives the prefix.
+/// manifest, so a path pasted from a listing works as well as the stem. A
+/// named table must be the one its run resolves to, when the run has a
+/// manifest: by name alone a v1 co-embed or a stale `feature_loading`
+/// passes for ρ.
 ///
 /// Returns `(rho_path, bias_path)`; the bias is `None` when absent (callers
 /// default it to zero).
 pub fn resolve_feature_embedding(prefix: &str) -> anyhow::Result<(String, Option<String>)> {
-    // A table path given directly: the same candidate as probing would find
-    // under its stem, so route it through the stem and the same scale check.
     if let Some((stem, suf)) = strip_table_suffix(prefix) {
         anyhow::ensure!(
             Path::new(prefix).exists(),
             "no per-gene embedding ρ at `{prefix}`: the file does not exist"
         );
-        let rho = prefix.to_string();
-        let bias = bias_beside(stem);
+        let manifest = default_path(stem);
+        if let Some((m, dir)) = readable_manifest(&manifest) {
+            let (rho, bias) = rho_of_run(&m, &dir, Some(stem))?;
+            anyhow::ensure!(
+                same_file(Path::new(&rho), Path::new(prefix)),
+                "`{prefix}` is not the run's ρ: by {manifest} it is `{rho}`"
+            );
+            // The caller's spelling of the same file.
+            return Ok((prefix.to_string(), bias));
+        }
         if suf == RHO_TABLE_SUFFIXES[2] {
-            let m = Mat::from_parquet(&rho)?;
+            let m = Mat::from_parquet(prefix)?;
             anyhow::ensure!(
                 ArtifactScale::detect(&m.mat) == ArtifactScale::Signed,
-                "{rho} holds a log-simplex dictionary, not ρ"
+                "{prefix} holds a log-simplex dictionary, not ρ"
             );
         }
-        return Ok((rho, bias));
+        return Ok((prefix.to_string(), bias_beside(stem)));
     }
-    if prefix.ends_with(".senna.json") {
-        if Path::new(prefix).is_file() {
-            let (m, dir) = RunManifest::load(Path::new(prefix))?;
-            return resolve_feature_embedding_for(&m, &dir);
-        }
-        return resolve_feature_embedding(&derive_out_prefix(prefix));
+    let stem = prefix.strip_suffix(".senna.json").unwrap_or(prefix);
+    match readable_manifest(&default_path(stem)) {
+        Some((m, dir)) => rho_of_run(&m, &dir, Some(stem)),
+        None => probe_feature_embedding(stem, None, true),
     }
+}
 
+/// The manifest at `path`, when there is one this binary reads; one it
+/// cannot is warned about and left out, as if absent.
+fn readable_manifest(path: &str) -> Option<(RunManifest, PathBuf)> {
+    if !Path::new(path).is_file() {
+        return None;
+    }
+    RunManifest::load(Path::new(path))
+        .map_err(|e| log::warn!("{e}; going by the tables beside it"))
+        .ok()
+}
+
+/// ρ of the run `m` describes: the table it records while that exists,
+/// else probed under `given` (the prefix the caller named), then under the
+/// manifest's own prefix. See [`resolve_feature_embedding`].
+fn rho_of_run(
+    m: &RunManifest,
+    manifest_dir: &Path,
+    given: Option<&str>,
+) -> anyhow::Result<(String, Option<String>)> {
+    if let Some(rel) = m.outputs.feature_embedding.as_deref() {
+        let rho = resolve(manifest_dir, rel).to_string_lossy().into_owned();
+        if Path::new(&rho).exists() {
+            let bias = strip_table_suffix(&rho).and_then(|(stem, _)| bias_beside(stem));
+            return Ok((rho, bias));
+        }
+    }
+    let coembed = m
+        .outputs
+        .feature_coembedding
+        .as_deref()
+        .map(|rel| resolve(manifest_dir, rel));
+    let legacy_slot = m.kind.dictionary_may_hold_rho();
+    let own = resolve(manifest_dir, &m.prefix)
+        .to_string_lossy()
+        .into_owned();
+    let probe = |p: &str| probe_feature_embedding(p, coembed.as_deref(), legacy_slot);
+    match given {
+        Some(g) if g != own => probe(g).or_else(|e| probe(&own).map_err(|_| e)),
+        _ => probe(&own),
+    }
+}
+
+/// Whether `a` and `b` are one existing file, however each is spelled.
+#[must_use]
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return a.exists();
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Find ρ under `prefix` by which tables sit there (see
+/// [`resolve_feature_embedding`]), passing over `coembed` — a run's recorded
+/// co-embed, which by name alone passes for ρ — and over the legacy
+/// `dictionary` slot unless `legacy_slot`.
+fn probe_feature_embedding(
+    prefix: &str,
+    coembed: Option<&Path>,
+    legacy_slot: bool,
+) -> anyhow::Result<(String, Option<String>)> {
     let bias = bias_beside(prefix);
 
+    let coembed = coembed.and_then(|c| c.canonicalize().ok());
     let exists = |suffix: &str| {
         let cand = format!("{prefix}{suffix}");
-        Path::new(&cand).exists().then_some(cand)
+        let found = Path::new(&cand).exists()
+            && coembed
+                .as_ref()
+                .is_none_or(|c| Path::new(&cand).canonicalize().ok().as_ref() != Some(c));
+        found.then_some(cand)
     };
     let v2 = exists(RHO_TABLE_SUFFIXES[0]);
     let v1 = exists(RHO_TABLE_SUFFIXES[1]);
-    let is_v2_run = exists(COEMBED_SUFFIX).is_some();
+    let is_v2_run = Path::new(&format!("{prefix}{COEMBED_SUFFIX}")).exists();
     // Both ρ names hold a signed table, so neither needs the content check;
     // the question is only which one is ρ. A `feature_loading` beside a
     // `feature_embedding` means a v1 run (the latter is its co-embed) —
@@ -213,7 +294,7 @@ pub fn resolve_feature_embedding(prefix: &str) -> anyhow::Result<(String, Option
     // verified: loading a log-simplex β as a feature embedding trains on the
     // wrong object with no shape mismatch to catch it.
     let mut rejected: Vec<String> = Vec::new();
-    if let Some(cand) = exists(RHO_TABLE_SUFFIXES[2]) {
+    if let Some(cand) = exists(RHO_TABLE_SUFFIXES[2]).filter(|_| legacy_slot) {
         let m = Mat::from_parquet(&cand)?;
         if ArtifactScale::detect(&m.mat) == ArtifactScale::Signed {
             return Ok((cand, bias));
@@ -260,9 +341,9 @@ fn bias_beside(stem: &str) -> Option<String> {
 ///
 /// The manifest's `outputs.feature_embedding` is authoritative when present —
 /// a recorded path beats probing (a v1 manifest's `feature_loading` has
-/// already been moved there by [`RunManifest::load`]). Only a manifest with
-/// no ρ slot falls through to [`resolve_feature_embedding`], which probes the
-/// run prefix.
+/// already been moved there by [`RunManifest::load`]). A manifest with no ρ
+/// slot, or one whose recorded table is gone, falls through to probing the
+/// run prefix, as [`resolve_feature_embedding`] describes.
 ///
 /// This is the entry point for manifest-holding consumers;
 /// [`resolve_feature_embedding`] is the one for callers handed a path (a
@@ -271,15 +352,7 @@ pub fn resolve_feature_embedding_for(
     m: &RunManifest,
     manifest_dir: &Path,
 ) -> anyhow::Result<(String, Option<String>)> {
-    if let Some(rel) = m.outputs.feature_embedding.as_deref() {
-        let rho = resolve(manifest_dir, rel).to_string_lossy().into_owned();
-        let bias = strip_table_suffix(&rho).and_then(|(stem, _)| bias_beside(stem));
-        return Ok((rho, bias));
-    }
-    let prefix = resolve(manifest_dir, &m.prefix)
-        .to_string_lossy()
-        .into_owned();
-    resolve_feature_embedding(&prefix)
+    rho_of_run(m, manifest_dir, None)
 }
 
 /// Manifest keys outside this version's schema, carried through verbatim.
@@ -485,6 +558,27 @@ impl RunKind {
             | RunKind::JointSvd
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace => false,
+        }
+    }
+
+    /// Whether a `{prefix}.dictionary.parquet` of this kind can be ρ: only a
+    /// legacy `bge --skip-etm` put it there. Every other kind's is β or
+    /// loadings, signed or not. A full `match`, so a new kind must answer.
+    #[must_use]
+    pub fn dictionary_may_hold_rho(self) -> bool {
+        match self {
+            RunKind::Bge => true,
+            RunKind::Topic
+            | RunKind::Itopic
+            | RunKind::MaskedVae
+            | RunKind::JointTopic
+            | RunKind::Vae
+            | RunKind::Svd
+            | RunKind::JointSvd
+            | RunKind::Fne
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Gem
+            | RunKind::Simba => false,
         }
     }
 
@@ -2208,10 +2302,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("run").to_string_lossy().into_owned();
         let rho = format!("{prefix}.feature_embedding.parquet");
-        let m = Mat::from_fn(2, 2, |i, j| if (i + j) % 2 == 0 { 0.5 } else { -0.5 });
-        let genes: Vec<Box<str>> = vec!["A".into(), "B".into()];
-        m.to_parquet_with_names(&rho, (Some(&genes), Some("gene")), None)
-            .unwrap();
+        write_signed(&rho);
         // A manifest that records no ρ, and one not yet written: both probe
         // the prefix.
         let manifest = default_path(&prefix);
@@ -2230,15 +2321,113 @@ mod tests {
         recorded.save(Path::new(&renamed)).unwrap();
         assert_eq!(resolve_feature_embedding(&renamed).unwrap().0, rho);
         assert!(resolve_feature_embedding(&format!("{prefix}.dictionary.parquet")).is_err());
+    }
 
-        // A v1 `feature_loading` beside it: that is ρ, and `feature_embedding`
-        // is the v1 co-embed...
-        let v1 = format!("{prefix}.feature_loading.parquet");
-        std::fs::copy(&rho, &v1).unwrap();
-        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, v1);
-        // ...unless the run also wrote a v2 co-embed, which marks the
-        // `feature_loading` as a stale leftover of an earlier run.
-        std::fs::copy(&rho, format!("{prefix}.feature_coembedding.parquet")).unwrap();
-        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, rho);
+    /// A signed 2×2 table at `path`.
+    fn write_signed(path: &str) {
+        let m = Mat::from_fn(2, 2, |i, j| if (i + j) % 2 == 0 { 0.5 } else { -0.5 });
+        let genes: Vec<Box<str>> = vec!["A".into(), "B".into()];
+        m.to_parquet_with_names(path, (Some(&genes), Some("gene")), None)
+            .unwrap();
+    }
+
+    /// `run` in a fresh directory, with a signed table under each suffix.
+    fn run_with(dir: &Path, suffixes: &[&str]) -> String {
+        let prefix = dir.join("run").to_string_lossy().into_owned();
+        for suf in suffixes {
+            write_signed(&format!("{prefix}{suf}"));
+        }
+        prefix
+    }
+
+    /// Which of `feature_embedding` and `feature_loading` is ρ: the run's
+    /// manifest says when there is one; without it the tables beside them
+    /// decide, and a table named directly is taken as given.
+    #[test]
+    fn the_manifest_decides_which_table_is_rho() {
+        let (fe, fl) = (".feature_embedding.parquet", ".feature_loading.parquet");
+
+        // No manifest: a v1 `feature_loading` beside `feature_embedding` is
+        // ρ, unless a v2 co-embed marks it a stale leftover.
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = run_with(dir.path(), &[fe, fl]);
+        let (e, l) = (format!("{prefix}{fe}"), format!("{prefix}{fl}"));
+        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, l);
+        assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
+        write_signed(&format!("{prefix}{COEMBED_SUFFIX}"));
+        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, e);
+
+        // A v1 bge manifest: its co-embed, named directly, is refused and
+        // ρ named instead.
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = run_with(dir.path(), &[fe, fl]);
+        let (e, l) = (format!("{prefix}{fe}"), format!("{prefix}{fl}"));
+        // `feature_loading` is never written now, so put it in by hand.
+        let mut v1 = RunManifest::new(RunKind::Bge, &prefix);
+        v1.version = 1;
+        v1.outputs.feature_embedding = Some(e.clone());
+        let mut json = serde_json::to_value(&v1).unwrap();
+        json["outputs"]["feature_loading"] = l.clone().into();
+        std::fs::write(default_path(&prefix), json.to_string()).unwrap();
+        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, l);
+        let err = resolve_feature_embedding(&e).unwrap_err().to_string();
+        assert!(err.contains(&l), "{err}");
+        assert_eq!(resolve_feature_embedding(&l).unwrap().0, l);
+
+        // A v2 fne run writes no co-embed; an old `feature_loading` beside
+        // its ρ is a leftover, which the manifest says.
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = run_with(dir.path(), &[fe, fl]);
+        let (e, l) = (format!("{prefix}{fe}"), format!("{prefix}{fl}"));
+        let mut fne = RunManifest::new(RunKind::Fne, &prefix);
+        fne.outputs.feature_embedding = Some(e.clone());
+        fne.save(Path::new(&default_path(&prefix))).unwrap();
+        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, e);
+        assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
+        let err = resolve_feature_embedding(&l).unwrap_err().to_string();
+        assert!(err.contains(&e), "{err}");
+
+        // An older v1 bge --skip-etm run: the co-embed as `feature_embedding`,
+        // ρ in `dictionary`. The co-embed is passed over.
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = run_with(dir.path(), &[fe, ".dictionary.parquet"]);
+        let mut v1 = RunManifest::new(RunKind::Bge, &prefix);
+        v1.version = 1;
+        v1.outputs.feature_embedding = Some(format!("{prefix}{fe}"));
+        v1.save(Path::new(&default_path(&prefix))).unwrap();
+        let dict = format!("{prefix}.dictionary.parquet");
+        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, dict);
+        // Named directly, its co-embed is refused for the same reason.
+        let err = resolve_feature_embedding(&format!("{prefix}{fe}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&dict), "{err}");
+
+        // A moved run whose manifest records no ρ: probed where it is now,
+        // not under the prefix it was trained at.
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = run_with(dir.path(), &[fe]);
+        RunManifest::new(RunKind::Bge, "/nowhere/run")
+            .save(Path::new(&default_path(&prefix)))
+            .unwrap();
+        assert_eq!(
+            resolve_feature_embedding(&prefix).unwrap().0,
+            format!("{prefix}{fe}")
+        );
+
+        // An svd run's signed loadings in `dictionary` are not ρ.
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = run_with(dir.path(), &[".dictionary.parquet"]);
+        write_kind_only(&prefix, RunKind::Svd).unwrap();
+        assert!(resolve_feature_embedding(&prefix).is_err());
+        assert!(resolve_feature_embedding(&format!("{prefix}.dictionary.parquet")).is_err());
+
+        // A manifest this binary cannot read is gone by the tables beside it.
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = run_with(dir.path(), &[fe]);
+        std::fs::write(default_path(&prefix), "{\"kind\": \"from-the-future\"}").unwrap();
+        let e = format!("{prefix}{fe}");
+        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, e);
+        assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
     }
 }

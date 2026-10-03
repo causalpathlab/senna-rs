@@ -12,14 +12,7 @@ pub fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Whether two paths name the same existing file.
-#[must_use]
-pub fn same_file(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => false,
-    }
-}
+pub use senna::run_manifest::same_file;
 
 /// Files next to `path` whose name ends with `suffix`, sorted.
 #[must_use]

@@ -70,22 +70,33 @@ impl Wanted for Pick {
         matches!(self, Pick::Data | Pick::Batch)
     }
 
-    /// The newest feature table here, as the likely one: a run's ρ table or
-    /// manifest before a `.dictionary.parquet`, which a topic run writes as
-    /// a log-simplex β the flags refuse.
+    /// The newest feature table here that the flags take, as the likely one:
+    /// not a run's co-embed, or a manifest with no ρ. A `.dictionary.parquet`
+    /// is never the likely one: telling a legacy ρ from a topic run's β means
+    /// reading it, which the folder listing should not wait on.
     fn best(&self, dir: &Path, files: &[(&str, &String)]) -> Option<String> {
         if *self != Pick::Table {
             return None;
         }
-        let modified = |n: &str| {
-            std::fs::metadata(dir.join(n))
-                .and_then(|m| m.modified())
-                .ok()
-        };
-        files
+        let mut names: Vec<&str> = files
             .iter()
-            .max_by_key(|(n, _)| (!n.ends_with(".dictionary.parquet"), modified(n)))
-            .map(|(n, _)| n.to_string())
+            .map(|(n, _)| *n)
+            .filter(|n| !n.ends_with(".dictionary.parquet"))
+            .collect();
+        names.sort_by_cached_key(|n| {
+            std::cmp::Reverse(
+                std::fs::metadata(dir.join(n))
+                    .and_then(|m| m.modified())
+                    .ok(),
+            )
+        });
+        names
+            .into_iter()
+            .find(|n| {
+                senna::run_manifest::resolve_feature_embedding(&dir.join(n).to_string_lossy())
+                    .is_ok()
+            })
+            .map(str::to_string)
     }
 }
 
