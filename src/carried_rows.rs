@@ -129,9 +129,10 @@ impl CarriedRows {
                 let data = src_types
                     .get(*i)
                     .is_none_or(|(_, t)| is_data_feature_type(t));
-                !used.contains(i)
-                    && !taken_exact.contains(*n)
-                    && !(data && taken.contains(&kind.canonicalize(n)))
+                let matched_or_taken = used.contains(i)
+                    || taken_exact.contains(*n)
+                    || data && taken.contains(&kind.canonicalize(n));
+                !matched_or_taken
             })
             .map(|(i, _)| i)
             .collect();
