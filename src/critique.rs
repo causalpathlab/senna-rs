@@ -105,6 +105,25 @@ pub struct CritiqueArgs {
         help = "Levels with more pseudobulks than this are skipped"
     )]
     max_pb: usize,
+
+    #[arg(
+        long,
+        requires = "label_column",
+        help = "Per-cell labels to check the critique against (TSV, may be gzipped)",
+        long_help = "A table with a header; the first column names the cell, as in the\n\
+                     partition. Each pseudobulk is described by its label composition,\n\
+                     and each pair by the overlap of the two compositions:\n\
+                     1 for the same mix of labels, 0 for no label in common.\n\
+                     A merge charge is borne out when its pair's overlap is low."
+    )]
+    cell_labels: Option<Box<str>>,
+
+    #[arg(
+        long,
+        requires = "cell_labels",
+        help = "Column of --cell-labels holding the label (e.g. CellType)"
+    )]
+    label_column: Option<Box<str>>,
 }
 
 pub(crate) fn check_params(knn: usize, far_frac: f64, min_cells: usize) -> anyhow::Result<()> {
@@ -291,6 +310,118 @@ pub(crate) fn unique_names(bases: Vec<String>) -> Vec<String> {
             name
         })
         .collect()
+}
+
+/// `cell → label` from a delimited table with a header: the first column names
+/// the cell, `column` holds the label. Empty and `NA` labels are left out.
+pub(crate) fn parse_cell_labels(
+    reader: impl std::io::BufRead,
+    column: &str,
+) -> anyhow::Result<FxHashMap<Box<str>, Box<str>>> {
+    let mut lines = reader.lines();
+    let header = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("the label table is empty"))??;
+    let at = header
+        .split('\t')
+        .position(|h| h.trim() == column)
+        .ok_or_else(|| anyhow::anyhow!("no column `{column}` in the label table's header"))?;
+    let mut out = FxHashMap::default();
+    for line in lines {
+        let line = line?;
+        let fields: Vec<&str> = line.split('\t').collect();
+        let (Some(cell), Some(label)) = (fields.first(), fields.get(at)) else {
+            continue;
+        };
+        let label = label.trim();
+        if !label.is_empty() && label != "NA" {
+            out.insert(Box::from(cell.trim()), Box::from(label));
+        }
+    }
+    Ok(out)
+}
+
+/// Per pseudobulk, the fraction of its labelled cells carrying each label;
+/// `None` for a pseudobulk with no labelled cell.
+pub(crate) fn label_composition(
+    pb_of_cell: &[usize],
+    label_of_cell: &[Option<u32>],
+    n_pb: usize,
+    n_labels: usize,
+) -> Vec<Option<Vec<f32>>> {
+    let mut count = vec![vec![0u32; n_labels]; n_pb];
+    for (&pb, label) in pb_of_cell.iter().zip(label_of_cell) {
+        if let (true, Some(k)) = (pb != usize::MAX, label) {
+            count[pb][*k as usize] += 1;
+        }
+    }
+    count
+        .into_iter()
+        .map(|c| {
+            let total: u32 = c.iter().sum();
+            (total > 0).then(|| c.iter().map(|&n| n as f32 / total as f32).collect())
+        })
+        .collect()
+}
+
+/// The shared mass of two label compositions, `Σ_k min(a_k, b_k)`: 1 for the
+/// same mix, 0 for no label in common.
+pub(crate) fn overlap(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x.min(*y)).sum()
+}
+
+/// Mean of the finite `values` where `pick`; `NaN` when there is none.
+pub(crate) fn mean_over(values: &[f32], pick: &[bool]) -> f32 {
+    let (sum, n) = values
+        .iter()
+        .zip(pick)
+        .filter(|&(v, &p)| p && v.is_finite())
+        .fold((0.0f32, 0usize), |(s, n), (v, _)| (s + v, n + 1));
+    if n == 0 {
+        f32::NAN
+    } else {
+        sum / n as f32
+    }
+}
+
+/// The partition cells' labels, as indices into a sorted vocabulary.
+struct CellLabels {
+    of_cell: Vec<Option<u32>>,
+    n_labels: usize,
+}
+
+fn load_cell_labels(
+    path: &str,
+    column: &str,
+    part_cells: &[Box<str>],
+) -> anyhow::Result<CellLabels> {
+    let map = parse_cell_labels(
+        legume_numeric::matrix::common_io::open_buf_reader(path)?,
+        column,
+    )?;
+    let mut vocab: Vec<Box<str>> = map.values().cloned().collect();
+    vocab.sort_unstable();
+    vocab.dedup();
+    let index: FxHashMap<&str, u32> = vocab
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.as_ref(), i as u32))
+        .collect();
+    let of_cell: Vec<Option<u32>> = part_cells
+        .iter()
+        .map(|c| map.get(c).map(|l| index[l.as_ref()]))
+        .collect();
+    let n = of_cell.iter().filter(|l| l.is_some()).count();
+    info!(
+        "Cell labels `{column}`: {} labels; {n} of the partition's {} cells labelled",
+        vocab.len(),
+        part_cells.len()
+    );
+    anyhow::ensure!(n > 0, "no partition cell is named in {path}");
+    Ok(CellLabels {
+        of_cell,
+        n_labels: vocab.len(),
+    })
 }
 
 /// The pseudobulks kept at one level.
@@ -511,6 +642,10 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
     );
 
     let (part_path, (assignments, part_cells)) = load_partition(args, &manifests)?;
+    let labels = match (args.cell_labels.as_deref(), args.label_column.as_deref()) {
+        (Some(path), Some(column)) => Some(load_cell_labels(path, column, &part_cells)?),
+        _ => None,
+    };
     let levels: Vec<Level> = assignments
         .iter()
         .map(|a| Level::new(a, args.min_cells))
@@ -567,6 +702,20 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
         let ranks: Vec<Vec<u32>> = views.iter().map(|v| v.pair_ranks(&pairs)).collect();
         let sorted: Vec<Vec<u32>> = (0..pairs.len()).map(|c| sorted_known(&ranks, c)).collect();
         let label_count = pair_tab.push_level(l, lv, b, &pairs, &ranks, &sorted);
+        // With cell labels: each pair's composition overlap, NaN where unknown.
+        let overlaps: Option<Vec<f32>> = labels.as_ref().map(|cl| {
+            let comp = label_composition(&lv.pb_of_cell, &cl.of_cell, lv.n_pb(), cl.n_labels);
+            pairs
+                .iter()
+                .map(|&(a, b_)| match (&comp[a as usize], &comp[b_ as usize]) {
+                    (Some(x), Some(y)) => overlap(x, y),
+                    _ => f32::NAN,
+                })
+                .collect()
+        });
+        if let Some(ov) = &overlaps {
+            pair_tab.label_overlap.extend_from_slice(ov);
+        }
 
         for (mi, name) in names.iter().enumerate() {
             let ch = charges(&ranks[mi], &sorted, b);
@@ -580,6 +729,16 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
             ));
             let row = summary_tab.push(l, name, lv.n_pb(), b, near_count(&ranks[mi], b), &ch);
             info!("Level {l}, {name}: merges {}, splits {}", row.0, row.1);
+            if let Some(ov) = &overlaps {
+                let merged: Vec<bool> = ch.iter().map(|&c| c == Charge::Merge).collect();
+                let near: Vec<bool> = ranks[mi].iter().map(|&r| r <= b.near).collect();
+                let (m, n) = (mean_over(ov, &merged), mean_over(ov, &near));
+                summary_tab.merge_overlap.push(m);
+                summary_tab.near_overlap.push(n);
+                info!(
+                    "Level {l}, {name}: label overlap of merges {m:.2}, of its near pairs {n:.2}"
+                );
+            }
         }
 
         info!(
@@ -625,6 +784,8 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
             "knn": args.knn,
             "far_frac": args.far_frac,
             "min_cells": args.min_cells,
+            "cell_labels": args.cell_labels,
+            "label_column": args.label_column,
         },
         "levels": level_json,
     });
@@ -751,6 +912,8 @@ struct PairTable {
     /// are `rank_{model}`, and a run named `spread` would collide.
     spread: Vec<f32>,
     label: Vec<Box<str>>,
+    /// With `--cell-labels`: the overlap of the two label compositions.
+    label_overlap: Vec<f32>,
 }
 
 impl PairTable {
@@ -812,6 +975,9 @@ impl PairTable {
         cols.push(("median_rank".into(), Column::F32(&self.median_rank)));
         cols.push(("spread".into(), Column::F32(&self.spread)));
         cols.push(("label".into(), Column::Str(&self.label)));
+        if !self.label_overlap.is_empty() {
+            cols.push(("label_overlap".into(), Column::F32(&self.label_overlap)));
+        }
         write_named_table(path, "pair", &key, &cols)
     }
 }
@@ -827,6 +993,10 @@ struct SummaryTable {
     merges: Vec<i32>,
     splits: Vec<i32>,
     merge_share: Vec<f32>,
+    /// With `--cell-labels`: mean label overlap of the merged pairs, and of
+    /// all the model's near pairs (the base a merge is judged against).
+    merge_overlap: Vec<f32>,
+    near_overlap: Vec<f32>,
 }
 
 impl SummaryTable {
@@ -858,7 +1028,7 @@ impl SummaryTable {
     }
 
     fn write(&self, path: &str) -> anyhow::Result<()> {
-        let cols: Vec<(Box<str>, Column)> = vec![
+        let mut cols: Vec<(Box<str>, Column)> = vec![
             ("level".into(), Column::I32(&self.level)),
             ("n_pb".into(), Column::I32(&self.n_pb)),
             ("far_rank".into(), Column::I32(&self.far_rank)),
@@ -867,6 +1037,10 @@ impl SummaryTable {
             ("splits".into(), Column::I32(&self.splits)),
             ("merge_share".into(), Column::F32(&self.merge_share)),
         ];
+        if !self.merge_overlap.is_empty() {
+            cols.push(("merge_overlap".into(), Column::F32(&self.merge_overlap)));
+            cols.push(("near_overlap".into(), Column::F32(&self.near_overlap)));
+        }
         write_named_table(path, "model", &self.model, &cols)
     }
 }

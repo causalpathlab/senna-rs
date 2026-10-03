@@ -211,3 +211,43 @@ fn non_finite_rows_leave_the_view() {
     );
     assert!(view.top_k_pairs(3).iter().all(|&(a, b)| a != 1 && b != 1));
 }
+
+// ---- Cell labels: a known answer to check the critique against -----------------
+
+#[test]
+fn cell_labels_read_the_named_column() {
+    let tsv = "barcode\tDonor\tCellType\nc1\tBM1\tB\nc2\tBM1\tNA\nc3\tBM1\tT\nc4\tBM1\t\n";
+    let m = parse_cell_labels(tsv.as_bytes(), "CellType").unwrap();
+    assert_eq!(m.get("c1").map(AsRef::as_ref), Some("B"));
+    assert_eq!(m.get("c3").map(AsRef::as_ref), Some("T"));
+    assert_eq!(m.len(), 2, "NA and empty labels are left out");
+    assert!(parse_cell_labels(tsv.as_bytes(), "Missing").is_err());
+}
+
+/// pb 0 holds B, B, T; pb 1 holds T; pb 2's one cell has no label.
+#[test]
+fn composition_is_the_fraction_of_each_label() {
+    let pb_of_cell = [0, 0, 0, 1, 2, usize::MAX];
+    let label_of_cell = [Some(0), Some(0), Some(1), Some(1), None, Some(0)];
+    let comp = label_composition(&pb_of_cell, &label_of_cell, 3, 2);
+    let close = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+    assert!(close(comp[0].as_ref().unwrap(), &[2.0 / 3.0, 1.0 / 3.0]));
+    assert!(close(comp[1].as_ref().unwrap(), &[0.0, 1.0]));
+    assert!(comp[2].is_none());
+}
+
+/// The shared mass of two compositions: 1 for the same mix, 0 for no shared label.
+#[test]
+fn overlap_is_the_shared_mass() {
+    assert!((overlap(&[0.5, 0.5, 0.0], &[0.5, 0.0, 0.5]) - 0.5).abs() < 1e-6);
+    assert_eq!(overlap(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
+    assert!((overlap(&[0.25, 0.75], &[0.25, 0.75]) - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn mean_over_skips_unknown_overlaps() {
+    let ov = [0.0, f32::NAN, 0.5, 1.0];
+    let pick = [true, true, true, false];
+    assert!((mean_over(&ov, &pick) - 0.25).abs() < 1e-6);
+    assert!(mean_over(&ov, &[false; 4]).is_nan());
+}
