@@ -116,7 +116,7 @@ pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
         cell_to_pb_per_level.push(col);
     }
     log::info!(
-        "--from: loaded inherited cell_to_pb {path} (num_levels={num_levels}, N_src={n_src})",
+        "loaded the inherited cell → pb partition {path} (num_levels={num_levels}, N_src={n_src})",
     );
     Ok((cell_to_pb_per_level, cell_names_src))
 }
@@ -1717,7 +1717,7 @@ impl InheritedFromManifest {
         data_cell_names: &[Box<str>],
     ) -> anyhow::Result<Vec<Vec<usize>>> {
         if cell_names_src == data_cell_names {
-            log::info!("--from: cell-name order matches data axis (no cell_to_pb reorder)");
+            log::info!("inherited partition: cell-name order matches data axis (no reorder)");
             return Ok(cell_to_pb_per_level_src);
         }
         let src_index: rustc_hash::FxHashMap<&str, usize> = cell_names_src
@@ -1736,8 +1736,9 @@ impl InheritedFromManifest {
         if !missing.is_empty() {
             let preview: Vec<&str> = missing.iter().copied().take(5).collect();
             anyhow::bail!(
-                "--from: {} of {} data cells are absent from the inherited cell_to_pb \
-                 (e.g. {:?}); the source run was trained on a different cell set",
+                "{} of {} data cells are absent from the inherited cell → pb partition \
+                 (e.g. {:?}); the source run (--from / --pb-from) was trained on a \
+                 different cell set",
                 missing.len(),
                 data_cell_names.len(),
                 preview,
@@ -1753,7 +1754,7 @@ impl InheritedFromManifest {
             out.push(col);
         }
         log::info!(
-            "--from: reordered inherited cell_to_pb by cell name ({}→{} cells aligned)",
+            "inherited partition: reordered by cell name ({}→{} cells aligned)",
             cell_names_src.len(),
             n_data,
         );

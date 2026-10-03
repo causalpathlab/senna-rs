@@ -855,7 +855,16 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         mode.validate(h)?;
     }
 
-    let prebuilt_partition = args.pb_from.partition(inherited.as_ref())?;
+    let prebuilt_partition = args.pb_from.partition(
+        inherited.as_ref(),
+        &crate::refine_weighting::partition_settings(
+            &args.collapse,
+            &args.qc,
+            &args.hvg,
+            &args.feature_name_kind,
+            args.n_latent_topics,
+        ),
+    )?;
 
     let effective_hvg =
         crate::hvg::resolve_multiome_with_hvg(args.multiome, data_files.len(), &args.hvg);
@@ -1529,7 +1538,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &gene_names)?;
         true
     } else {
-        false
+        args.pb_from.copy_pb_tree(&args.out)?
     };
 
     let pb_reference_suffix = senna::pb_reference::emit_if_requested(

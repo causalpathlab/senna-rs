@@ -839,28 +839,43 @@ impl App {
         let rows = self.shared_rows();
         // Each flag's first field, and the values the fits hold it at.
         let mut seen: std::collections::HashMap<&str, usize> = Default::default();
-        let mut found: Vec<(&Field, Vec<&str>)> = Vec::new();
+        let mut found: Vec<Vec<&Field>> = Vec::new();
         for &r in &rows {
             for f in &self.rows[r].form.fields {
                 match seen.get(f.long.as_str()) {
-                    Some(&at) => found[at].1.push(&f.value),
+                    Some(&at) => found[at].push(f),
                     None => {
                         seen.insert(&f.long, found.len());
-                        found.push((f, vec![&f.value]));
+                        found.push(vec![f]);
                     }
                 }
             }
         }
         let fields = found
             .into_iter()
-            .filter(|(_, values)| values.len() > 1)
-            .map(|(f, values)| {
-                let mut x = f.clone();
-                x.value = if values.iter().all(|v| *v == values[0]) {
-                    values[0].to_string()
-                } else {
-                    String::new()
-                };
+            .filter(|each| each.len() > 1)
+            .map(|each| {
+                let mut x = each[0].clone();
+                if each.iter().all(|f| f.value == x.value) {
+                    return x;
+                }
+                x.value = String::new();
+                // Where the fits differ the page says so, advanced or not.
+                x.advanced = false;
+                x
+            })
+            .map(|mut x| {
+                // A choice the page sets in every fit: only values all take.
+                if let Kind::Choice(values) = &mut x.kind {
+                    values.retain(|v| {
+                        rows.iter().all(|&r| {
+                            self.rows[r].form.fields.iter().all(|f| {
+                                f.long != x.long
+                                    || matches!(&f.kind, Kind::Choice(vs) if vs.contains(v))
+                            })
+                        })
+                    });
+                }
                 x
             })
             .collect();
@@ -1218,7 +1233,10 @@ impl App {
                 (Tool::Senna, Some(t)) => Self::clones_for(r, &rel(t)),
                 _ => (None, None, None),
             };
-            let mut warning = warning.or_else(|| self.shape_warning(r));
+            let mut warning = match (warning, self.shape_warning(r)) {
+                (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+                (a, b) => a.or(b),
+            };
             // A partition another queued fit builds is collapsed on, not
             // built again.
             let mut pb_from = None;
@@ -1226,11 +1244,10 @@ impl App {
                 match builders.iter().find(|(k, _)| *k == key) {
                     Some((_, b)) => {
                         pb_from = Some(rel(&b.manifest));
-                        warning = warning.or_else(|| {
-                            Some(format!(
-                                "collapses on {}'s pseudobulks (--pb-from)",
-                                b.method
-                            ))
+                        let note = format!("collapses on {}'s pseudobulks (--pb-from)", b.method);
+                        warning = Some(match warning {
+                            Some(w) => format!("{w}; {note}"),
+                            None => note,
                         });
                     }
                     None => builders.push((

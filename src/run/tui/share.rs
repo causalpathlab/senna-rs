@@ -68,6 +68,11 @@ pub fn key(form: &Method, clones: bool) -> Option<Vec<(String, String)>> {
         .map(|f| (f.long.clone(), f.value.trim().to_string()))
         .collect();
     key.push(("proj-dim".into(), sketch_dim(form).to_string()));
+    // How row names line up across data files decides the merged feature
+    // axis; compared as set, since its default may differ between methods.
+    if let Some(f) = form.fields.iter().find(|f| f.long == "feature-name-kind") {
+        key.push((f.long.clone(), f.value.trim().to_string()));
+    }
     key.sort();
     Some(key)
 }

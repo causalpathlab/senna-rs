@@ -248,7 +248,16 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         inherited.as_ref(),
         args.batch_files.as_deref(),
     );
-    let prebuilt_partition = args.pb_from.partition(inherited.as_ref())?;
+    let prebuilt_partition = args.pb_from.partition(
+        inherited.as_ref(),
+        &crate::refine_weighting::partition_settings(
+            &args.collapse,
+            &args.qc,
+            &args.hvg,
+            &args.feature_name_kind,
+            args.n_latent,
+        ),
+    )?;
 
     let PreparedData {
         data_vec,
@@ -573,7 +582,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &gene_names)?;
         true
     } else {
-        false
+        args.pb_from.copy_pb_tree(&args.out)?
     };
 
     let input: Vec<String> = data_files
