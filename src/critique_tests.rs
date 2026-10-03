@@ -172,8 +172,9 @@ fn a_model_without_cells_is_not_charged() {
 fn pseudobulk_labels_combine_their_charges() {
     let pairs = [(0, 1), (1, 2), (3, 4)];
     let charges = [Charge::Merge, Charge::Split, Charge::None];
+    let seen = [true; 5];
     assert_eq!(
-        pb_labels(5, &pairs, &charges),
+        pb_labels(&pairs, &charges, &seen),
         ["merge", "merge+split", "split", "consistent", "consistent"]
     );
 }
@@ -187,4 +188,26 @@ fn names_stay_unique_after_suffixing() {
     assert_eq!(sorted.len(), 4, "{names:?}");
     assert_eq!(names[0], "a");
     assert_eq!(names[3], "b");
+}
+
+/// A pseudobulk the model has no cells in was never judged: not "consistent".
+#[test]
+fn unseen_pseudobulks_are_labelled_unseen() {
+    let seen = [true, true, false];
+    assert_eq!(
+        pb_labels(&[(0, 1)], &[Charge::None], &seen),
+        ["consistent", "consistent", "unseen"]
+    );
+}
+
+/// A non-finite averaged latent says nothing about distance: its pseudobulk
+/// leaves the view instead of becoming everyone's nearest neighbour.
+#[test]
+fn non_finite_rows_leave_the_view() {
+    let view = line_view(&[0.0, f32::NAN, 1.0, 5.0], &[true; 4]);
+    assert_eq!(
+        view.pair_ranks(&[(0, 1), (1, 3), (0, 2)]),
+        vec![u32::MAX, u32::MAX, 1]
+    );
+    assert!(view.top_k_pairs(3).iter().all(|&(a, b)| a != 1 && b != 1));
 }

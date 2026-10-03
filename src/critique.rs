@@ -246,13 +246,13 @@ pub(crate) fn near_count(own: &[u32], b: Bounds) -> usize {
 }
 
 /// Per kept pseudobulk: `merge`, `split`, `merge+split` or `consistent`, from
-/// the charged pairs it belongs to.
+/// the charged pairs it belongs to; `unseen` where the model has no view of it.
 pub(crate) fn pb_labels(
-    n_pb: usize,
     pairs: &[(u32, u32)],
     charges: &[Charge],
+    seen: &[bool],
 ) -> Vec<&'static str> {
-    let mut flag = vec![0u8; n_pb];
+    let mut flag = vec![0u8; seen.len()];
     for (&(a, b), &ch) in pairs.iter().zip(charges) {
         let bit = match ch {
             Charge::None => continue,
@@ -263,10 +263,12 @@ pub(crate) fn pb_labels(
         flag[b as usize] |= bit;
     }
     flag.iter()
-        .map(|f| match f {
-            1 => "merge",
-            2 => "split",
-            3 => "merge+split",
+        .zip(seen)
+        .map(|(f, &seen)| match (seen, f) {
+            (false, _) => "unseen",
+            (true, 1) => "merge",
+            (true, 2) => "split",
+            (true, 3) => "merge+split",
             _ => "consistent",
         })
         .collect()
@@ -350,9 +352,12 @@ pub(crate) struct View {
 }
 
 impl View {
-    /// Keep the rows marked `valid` of a `P × d` matrix.
+    /// Keep the rows of a `P × d` matrix that are marked `valid` and finite. A
+    /// non-finite row says nothing about distance, so it leaves the view.
     pub(crate) fn compact(full: Mat, valid: &[bool]) -> Self {
-        let pbs: Vec<usize> = (0..valid.len()).filter(|&i| valid[i]).collect();
+        let pbs: Vec<usize> = (0..valid.len())
+            .filter(|&i| valid[i] && full.row(i).iter().all(|v| v.is_finite()))
+            .collect();
         let mut slot = vec![usize::MAX; valid.len()];
         for (row, &pb) in pbs.iter().enumerate() {
             slot[pb] = row;
@@ -400,6 +405,11 @@ impl View {
             }
         }
         view
+    }
+
+    /// Which kept pseudobulks the view holds.
+    fn seen(&self) -> Vec<bool> {
+        self.slot.iter().map(|&r| r != usize::MAX).collect()
     }
 
     /// Every row's top-`k` pairs, as `(min, max)` kept indices.
@@ -560,7 +570,7 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
 
         for (mi, name) in names.iter().enumerate() {
             let ch = charges(&ranks[mi], &sorted, b);
-            let pb_label = pb_labels(lv.n_pb(), &pairs, &ch);
+            let pb_label = pb_labels(&pairs, &ch, &views[mi].seen());
             cell_cols.push((
                 format!("{name}.L{l}").into(),
                 lv.pb_of_cell
