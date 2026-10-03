@@ -29,6 +29,37 @@ Critique runs on two channels, one on each side of the cell × gene matrix:
 
 The channels feed each other (§5).
 
+### In plain terms
+
+**A model is critiqued when it puts two groups of cells close together that the other models
+clearly keep apart, and the critique is always "push these two apart".**
+
+1. **Every model is a witness.** Each has its own picture of the cells; none is trusted alone.
+2. **They describe the same groups.** All models are asked about the same pseudobulks, and each
+   says which groups are its nearest neighbours.
+3. **Close and far are ranks, not distances.** Each model measures in its own units, so the
+   question is "is B among A's 15 nearest?" (close) or "is B far down the list?" (far). The gap
+   between the two means rank 15 against rank 16 is never a disagreement.
+4. **A model is judged by the others, never by itself:** the median rank of the other models.
+5. **One kind of critique.**
+
+   | this model says | the others say | critique |
+   |---|---|---|
+   | close | clearly far | **merge**: "push these apart" |
+   | far | close | **split**: reported, no critique |
+
+6. **Why only "push apart".** Against expert cell types (§10), a merged pair is two different
+   cell types 84–100 % of the time. A split usually means the lone model saw a difference the
+   others share a blind spot on; telling it to pull the pair together would teach it the
+   majority's mistake. **Separation is evidence; closeness is not.**
+
+Example: topic ranks pseudobulks 36 and 58 at 52, svd at 60, bge at 48, and the VAE at 15. The
+VAE alone keeps them together and is told to push them apart. They are B cells and non-B cells.
+
+A model's **merge share**, merges / (merges + splits), is its report card: high, and it lumps
+groups the others separate (a topic model's resolution limit, a VAE's mode collapse); low, and
+it separates more than the others.
+
 ## 1. Concepts
 
 | term | meaning |
