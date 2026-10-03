@@ -13,9 +13,8 @@ use legume_numeric::matrix::traits::IoOps;
 ///
 /// A diverged run otherwise reaches disk looking exactly like a good one — the
 /// parquet has the right shape, the right row names and the right columns, and
-/// only the values are `NaN`. Downstream (`plot`, `cluster`, `annotate`,
-/// `pseudotime`) then fails far from the cause, or worse, quietly produces
-/// empty output. Failing here names the real problem at the point the artifact
+/// only the values are `NaN`. Downstream (`plot`, `cluster`, `annotate`)
+/// then fails far from the cause, or worse, quietly produces empty output. Failing here names the real problem at the point the artifact
 /// would have been created.
 fn reject_non_finite(mat: &Mat, what: &str, path: &str) -> anyhow::Result<()> {
     let bad = mat.iter().filter(|x| !x.is_finite()).count();
