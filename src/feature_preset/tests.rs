@@ -213,6 +213,25 @@ fn carried_rows_of_an_untyped_source_are_genes() {
     assert!(c.types.iter().all(|t| t.as_ref() == "gene"));
 }
 
+/// The flag may name the run's table or its manifest instead of its prefix,
+/// as `senna run`'s picker fills it: the types table is still found.
+#[test]
+fn the_types_are_read_when_the_flag_names_a_table_or_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = write_fne_like(dir.path(), true);
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_TP53")];
+    let kind = ge::FeatureNameKind::Gene { delim: '_' };
+    for given in [
+        format!("{prefix}.feature_embedding.parquet"),
+        format!("{prefix}.senna.json"),
+    ] {
+        let (_, carried) = load_preset_genes(&given, PresetMode::Freeze, &axis, &kind).unwrap();
+        let c = carried.unwrap();
+        let types: Vec<&str> = c.types.iter().map(AsRef::as_ref).collect();
+        assert_eq!(types, ["gene", "term", "word"], "{given}");
+    }
+}
+
 fn write_run_table(prefix: &str, suffix: &str, row_axis: &str, names: &[&str]) -> String {
     let path = format!("{prefix}.{suffix}");
     let names: Vec<Box<str>> = names.iter().map(|s| Box::from(*s)).collect();

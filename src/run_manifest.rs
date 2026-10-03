@@ -134,7 +134,8 @@ pub const RHO_TABLE_SUFFIXES: [&str; 3] = [
 /// tells a v2 prefix from a v1 one when both ρ names exist.
 const COEMBED_SUFFIX: &str = ".feature_coembedding.parquet";
 
-/// Locate a run's per-gene embedding `ρ` from its `--out` prefix.
+/// Locate a run's per-gene embedding `ρ` from its `--out` prefix (or its ρ
+/// table or manifest; see below).
 ///
 /// **The single place that knows where ρ can live.** Consumers used to probe for
 /// it independently — `FrozenFeatureSpec` by filename, `deconvolve` by manifest
@@ -154,25 +155,22 @@ const COEMBED_SUFFIX: &str = ".feature_coembedding.parquet";
 ///    confirms it is signed rather than a log-simplex.
 ///
 /// `prefix` may also name the table itself (any of the three) or the run's
-/// `run.senna.json`; both reduce to the prefix, so a path pasted from a
-/// listing works as well as the stem.
+/// `run.senna.json`, so a path pasted from a listing works as well as the
+/// stem. A manifest that exists is read for its recorded ρ (see
+/// [`resolve_feature_embedding_for`]); otherwise its name gives the prefix.
 ///
 /// Returns `(rho_path, bias_path)`; the bias is `None` when absent (callers
 /// default it to zero).
 pub fn resolve_feature_embedding(prefix: &str) -> anyhow::Result<(String, Option<String>)> {
     // A table path given directly: the same candidate as probing would find
     // under its stem, so route it through the stem and the same scale check.
-    let named_table = RHO_TABLE_SUFFIXES
-        .iter()
-        .find_map(|suf| prefix.strip_suffix(suf).map(|stem| (stem, *suf)));
-    if let Some((stem, suf)) = named_table {
+    if let Some((stem, suf)) = strip_table_suffix(prefix) {
         anyhow::ensure!(
             Path::new(prefix).exists(),
             "no per-gene embedding ρ at `{prefix}`: the file does not exist"
         );
         let rho = prefix.to_string();
-        let bias = format!("{stem}.feature_bias.parquet");
-        let bias = Path::new(&bias).exists().then_some(bias);
+        let bias = bias_beside(stem);
         if suf == RHO_TABLE_SUFFIXES[2] {
             let m = Mat::from_parquet(&rho)?;
             anyhow::ensure!(
@@ -183,11 +181,14 @@ pub fn resolve_feature_embedding(prefix: &str) -> anyhow::Result<(String, Option
         return Ok((rho, bias));
     }
     if prefix.ends_with(".senna.json") {
+        if Path::new(prefix).is_file() {
+            let (m, dir) = RunManifest::load(Path::new(prefix))?;
+            return resolve_feature_embedding_for(&m, &dir);
+        }
         return resolve_feature_embedding(&derive_out_prefix(prefix));
     }
 
-    let bias = format!("{prefix}.feature_bias.parquet");
-    let bias = Path::new(&bias).exists().then_some(bias);
+    let bias = bias_beside(prefix);
 
     let exists = |suffix: &str| {
         let cand = format!("{prefix}{suffix}");
@@ -230,6 +231,31 @@ pub fn resolve_feature_embedding(prefix: &str) -> anyhow::Result<(String, Option
     )
 }
 
+/// The types table of the run whose ρ is at `rho` (as resolved by
+/// [`resolve_feature_embedding`]), when it wrote one. Like the bias it sits
+/// under the table's stem, which a flag naming the table or the manifest is
+/// not.
+pub fn feature_types_beside(
+    rho: &str,
+) -> anyhow::Result<Option<Vec<data_beans::aux::feature_types::FeatureType>>> {
+    let stem = strip_table_suffix(rho).map_or(rho, |(stem, _)| stem);
+    data_beans::aux::feature_types::read_feature_types(stem)
+}
+
+/// `path` split into its stem and the [`RHO_TABLE_SUFFIXES`] suffix it ends
+/// with, if any.
+fn strip_table_suffix(path: &str) -> Option<(&str, &'static str)> {
+    RHO_TABLE_SUFFIXES
+        .iter()
+        .find_map(|suf| path.strip_suffix(suf).map(|stem| (stem, *suf)))
+}
+
+/// `{stem}.feature_bias.parquet`, when it exists.
+fn bias_beside(stem: &str) -> Option<String> {
+    let bias = format!("{stem}.feature_bias.parquet");
+    Path::new(&bias).exists().then_some(bias)
+}
+
 /// Resolve `ρ` (and its bias) for a run that has a manifest in hand.
 ///
 /// The manifest's `outputs.feature_embedding` is authoritative when present —
@@ -239,19 +265,15 @@ pub fn resolve_feature_embedding(prefix: &str) -> anyhow::Result<(String, Option
 /// run prefix.
 ///
 /// This is the entry point for manifest-holding consumers;
-/// [`resolve_feature_embedding`] is the prefix-only adapter for callers such
-/// as `--freeze-feature-embedding` that are handed a bare prefix.
+/// [`resolve_feature_embedding`] is the one for callers handed a path (a
+/// prefix, ρ table or manifest), such as `--freeze-feature-embedding`.
 pub fn resolve_feature_embedding_for(
     m: &RunManifest,
     manifest_dir: &Path,
 ) -> anyhow::Result<(String, Option<String>)> {
     if let Some(rel) = m.outputs.feature_embedding.as_deref() {
         let rho = resolve(manifest_dir, rel).to_string_lossy().into_owned();
-        let bias = RHO_TABLE_SUFFIXES
-            .iter()
-            .find_map(|suf| rho.strip_suffix(suf))
-            .map(|stem| format!("{stem}.feature_bias.parquet"))
-            .filter(|b| Path::new(b).exists());
+        let bias = strip_table_suffix(&rho).and_then(|(stem, _)| bias_beside(stem));
         return Ok((rho, bias));
     }
     let prefix = resolve(manifest_dir, &m.prefix)
@@ -2190,13 +2212,23 @@ mod tests {
         let genes: Vec<Box<str>> = vec!["A".into(), "B".into()];
         m.to_parquet_with_names(&rho, (Some(&genes), Some("gene")), None)
             .unwrap();
-        let manifest = format!("{prefix}.senna.json");
-        std::fs::write(&manifest, "{}").unwrap();
+        // A manifest that records no ρ, and one not yet written: both probe
+        // the prefix.
+        let manifest = default_path(&prefix);
         for given in [prefix.as_str(), rho.as_str(), manifest.as_str()] {
             let (got, bias) = resolve_feature_embedding(given).unwrap();
             assert_eq!(got, rho, "given {given}");
             assert!(bias.is_none());
         }
+        write_kind_only(&prefix, RunKind::Topic).unwrap();
+        assert_eq!(resolve_feature_embedding(&manifest).unwrap().0, rho);
+
+        // A renamed manifest goes by the ρ it records, not by its own name.
+        let renamed = format!("{}/best.senna.json", dir.path().display());
+        let mut recorded = RunManifest::new(RunKind::Topic, &prefix);
+        recorded.outputs.feature_embedding = Some(rho.clone());
+        recorded.save(Path::new(&renamed)).unwrap();
+        assert_eq!(resolve_feature_embedding(&renamed).unwrap().0, rho);
         assert!(resolve_feature_embedding(&format!("{prefix}.dictionary.parquet")).is_err());
 
         // A v1 `feature_loading` beside it: that is ρ, and `feature_embedding`

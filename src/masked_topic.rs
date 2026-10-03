@@ -835,7 +835,13 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             }
             // Pre-train inputs are gene-keyed; row names aren't available yet.
             let kind = args.feature_name_kind.resolve_or_gene();
-            Some(crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(prefix, kind)?)
+            Some(
+                crate::topic::freeze::FrozenFeatureSpec::resolve_from_prefix(
+                    prefix,
+                    preset_flag,
+                    kind,
+                )?,
+            )
         }
     };
 
@@ -1054,15 +1060,19 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
              (warm-start would overwrite the pre-trained ρ from a different checkpoint)"
         );
         let host = spec.materialize(&gene_names)?;
+        // Only a pinning mode carries rows, so only it needs their types.
+        let src_types = if pinned_rho {
+            senna::run_manifest::feature_types_beside(&spec.dictionary_path)?.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         carried = senna::carried_rows::CarriedRows::from_unmatched(
             pinned_rho,
             preset_flag,
             &host,
             &gene_names,
             &spec.name_kind,
-            data_beans::aux::feature_types::read_feature_types(&spec.source_prefix)?
-                .as_deref()
-                .unwrap_or(&[]),
+            &src_types,
             &spec.dictionary_path,
         )?;
         anyhow::ensure!(
