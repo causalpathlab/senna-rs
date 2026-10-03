@@ -250,7 +250,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     );
     let prebuilt_partition = args.pb_from.partition(
         inherited.as_ref(),
-        &crate::refine_weighting::partition_settings(&args),
+        &crate::refine_weighting::partition_settings(args),
     )?;
 
     let PreparedData {

@@ -833,11 +833,12 @@ impl App {
     }
 
     /// The flags at least two queued fits have, in the order first met, as
-    /// a form: each with the value they all hold, or none where they
-    /// differ (see [`Self::shared_values`]).
+    /// a form: each with the value they all hold, or none (and listed even
+    /// when advanced) where they differ; a choice offers only the values
+    /// every fit takes.
     fn shared_form(&self) -> Method {
         let rows = self.shared_rows();
-        // Each flag's first field, and the values the fits hold it at.
+        // Each flag's fields across the fits, in the order first met.
         let mut seen: std::collections::HashMap<&str, usize> = Default::default();
         let mut found: Vec<Vec<&Field>> = Vec::new();
         for &r in &rows {

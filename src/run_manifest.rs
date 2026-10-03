@@ -1403,6 +1403,18 @@ impl RunManifest {
         }
     }
 
+    /// The run's cell → pb partition, resolved against `manifest_dir`: of
+    /// every cell it trained on, when it wrote that beside its per-cell
+    /// table (QC held cells back from the outputs).
+    #[must_use]
+    pub fn cell_to_pb_path(&self, manifest_dir: &Path) -> Option<String> {
+        let full = resolve(manifest_dir, self.outputs.cell_to_pb.as_deref()?)
+            .to_string_lossy()
+            .into_owned();
+        let all = cell_to_pb_all_path(&full);
+        Some(if Path::new(&all).is_file() { all } else { full })
+    }
+
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let s = serde_json::to_string_pretty(self)?;
         fs::write(path, s).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
@@ -1762,6 +1774,40 @@ impl InheritedFromManifest {
     }
 }
 
+/// The recorded settings in which `here` differs from `there` (two
+/// serialized argument structs, or parts of them), as `path: there →
+/// here`. A setting `there` does not record (an older senna's) is passed;
+/// numbers are compared as the f32 most settings are, since a JSON round
+/// trip need not give back the same f64.
+#[must_use]
+pub fn settings_differences(there: &serde_json::Value, here: &serde_json::Value) -> Vec<String> {
+    fn walk(there: &serde_json::Value, here: &serde_json::Value, path: &str) -> Vec<String> {
+        use serde_json::Value;
+        match (there, here) {
+            (Value::Object(a), Value::Object(b)) => b
+                .iter()
+                .filter_map(|(k, v)| a.get(k).map(|w| (k, w, v)))
+                .flat_map(|(k, w, v)| {
+                    let p = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    walk(w, v, &p)
+                })
+                .collect(),
+            (Value::Number(a), Value::Number(b))
+                if a.as_f64().map(|x| x as f32) == b.as_f64().map(|x| x as f32) =>
+            {
+                Vec::new()
+            }
+            _ if there == here => Vec::new(),
+            _ => vec![format!("{path}: {there} there, {here} here")],
+        }
+    }
+    walk(there, here, "")
+}
+
 /// Load a `senna.json` manifest and extract the fields a downstream
 /// trainer would inherit. Bails for source kinds that don't write a
 /// feature embedding (SVD / joint-SVD); accepts bge, fne, and the
@@ -1800,17 +1846,7 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
     let data_files = m.data_inputs(&dir);
     let batch_files = m.data_batches(&dir);
     let feature_embedding_prefix: Box<str> = to_box(&m.prefix);
-    // The partition of every cell trained on, when the run wrote one beside
-    // its per-cell table (QC held cells back from the outputs).
-    let cell_to_pb_path: Option<Box<str>> = m.outputs.cell_to_pb.as_deref().map(|p| {
-        let full = to_box(p);
-        let all = cell_to_pb_all_path(&full);
-        if Path::new(&all).is_file() {
-            all.into()
-        } else {
-            full
-        }
-    });
+    let cell_to_pb_path: Option<Box<str>> = m.cell_to_pb_path(&dir).map(Into::into);
     let reload =
         crate::multiome_layout::recorded_layout(m.data.multiome.as_ref(), m.data.input.len())?;
     Ok(InheritedFromManifest {

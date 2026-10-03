@@ -31,18 +31,13 @@ fn shapes(long: &str) -> bool {
             .filter_map(|a| a.get_long().map(str::to_string))
             .collect()
     });
-    // The masked models' feature-axis restriction (a feature network, or
-    // the genes of a given feature table) and multiome load change the
-    // cells' sketch too.
+    // Named as `--pb-from` checks them, from the same lists.
+    let name = long.replace('-', "_");
     // Outputs only: they write something, but cut cells no differently.
-    if crate::refine_weighting::OUTPUT_ONLY.contains(&long.replace('-', "_").as_str()) {
+    if crate::refine_weighting::OUTPUT_ONLY.contains(&name.as_str()) {
         return false;
     }
-    set.contains(long)
-        || long == "multiome"
-        || long.starts_with("feature-network")
-        || long.starts_with("no-feature-network")
-        || long.ends_with("-feature-embedding")
+    set.contains(long) || crate::refine_weighting::cuts_cells(&name)
 }
 
 /// What decides the partition `form` builds: its partition-shaping flags
@@ -93,8 +88,9 @@ fn sketch_dim(form: &Method) -> usize {
             .parse()
             .ok()
     };
-    let k = value("n-latent-topics")
-        .or_else(|| value("n-latent"))
+    let k = crate::refine_weighting::LATENT_COUNTS
+        .iter()
+        .find_map(|n| value(&n.replace('_', "-")))
         .unwrap_or(0);
     value("proj-dim").unwrap_or(0).max(k)
 }

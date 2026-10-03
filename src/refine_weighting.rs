@@ -142,12 +142,10 @@ pub(crate) struct PbFromArgs {
                      (its prefix, or its .senna.json) on the same cells: the cell\n\
                      reassignment, the --pb-tree and the BBKNN + DC-SBM refinement are\n\
                      skipped; the counts are aggregated and the batch effects estimated\n\
-                     on that partition. It must have been built as this run would\n\
-                     build its own: the same collapse, cell QC, HVG and feature-name\n\
-                     settings and sketch width (output-only flags aside), else the run\n\
-                     stops naming the difference; and every cell of this run must be in\n\
-                     it. A partition cut by --cnv-clones is refused. The pb tree behind\n\
-                     it stays with that run: this one writes no {out}.pb_tree.json.\n\
+                     on that partition. That run must have built it as this one would:\n\
+                     the same collapse, QC, HVG and feature-name settings and sketch\n\
+                     width (output flags aside), not cut by --cnv-clones, over every\n\
+                     cell of this run. Its pb tree is not copied: no {out}.pb_tree.json.\n\
                      `senna run` passes it to fits queued with the same collapse settings,\n\
                      so the partition is built once. Not with --from (which inherits one)\n\
                      or --cnv-clones."
@@ -186,7 +184,8 @@ impl PbFromArgs {
                          its own settings are what is compared"
                     );
                 }
-                let differ = differences(&source_settings(args), built_with, "");
+                let differ =
+                    senna::run_manifest::settings_differences(&source_settings(args), built_with);
                 anyhow::ensure!(
                     differ.is_empty(),
                     "--pb-from {run}: that run built its partition with other settings \
@@ -199,20 +198,9 @@ impl PbFromArgs {
                  built its partition as this run would cannot be checked"
             ),
         }
-        let path = m.outputs.cell_to_pb.as_deref().ok_or_else(|| {
+        let path = m.cell_to_pb_path(&dir).ok_or_else(|| {
             anyhow::anyhow!("--pb-from {run}: that run recorded no cell → pb partition")
         })?;
-        // The partition of every cell it trained on, when QC held some back
-        // from its per-cell outputs.
-        let path = senna::run_manifest::resolve(&dir, path)
-            .to_string_lossy()
-            .into_owned();
-        let all = senna::run_manifest::cell_to_pb_all_path(&path);
-        let path = if std::path::Path::new(&all).is_file() {
-            all
-        } else {
-            path
-        };
         log::info!("--pb-from: collapsing on the partition in {path}");
         Ok(Some(senna::run_manifest::load_cell_to_pb_raw(&path)?))
     }
@@ -226,6 +214,21 @@ pub(crate) const OUTPUT_ONLY: &[&str] = &[
     "qc_report",
     "qc_histogram",
 ];
+
+/// Settings, by recorded (snake_case) name, outside the collapse, QC and HVG
+/// groups that change the cells' sketch: multiome load, and the masked
+/// models' feature-axis restriction (a feature network, or the genes of a
+/// given feature table).
+pub(crate) fn cuts_cells(name: &str) -> bool {
+    name == "multiome"
+        || name.starts_with("feature_network")
+        || name.starts_with("no_feature_network")
+        || name.ends_with("_feature_embedding")
+}
+
+/// The names a fit's number of latent topics goes by. The sketch cells are
+/// partitioned on is `--proj-dim` wide, or this number when larger.
+pub(crate) const LATENT_COUNTS: [&str; 2] = ["n_latent_topics", "n_latent"];
 
 /// What a fit builds its partition from, out of its argument struct as its
 /// manifest's `train_args` records it: the collapse, cell QC, HVG and
@@ -242,14 +245,8 @@ fn source_settings(args: &serde_json::Value) -> serde_json::Value {
     let Some(args) = args.as_object() else {
         return out;
     };
-    let shaping = |k: &str| {
-        matches!(
-            k,
-            "collapse" | "qc" | "hvg" | "feature_name_kind" | "multiome"
-        ) || k.starts_with("feature_network")
-            || k.starts_with("no_feature_network")
-            || k.ends_with("_feature_embedding")
-    };
+    let shaping =
+        |k: &str| matches!(k, "collapse" | "qc" | "hvg" | "feature_name_kind") || cuts_cells(k);
     for (k, v) in args.iter().filter(|(k, _)| shaping(k)) {
         out[k] = v.clone();
     }
@@ -268,7 +265,7 @@ fn source_settings(args: &serde_json::Value) -> serde_json::Value {
             }
         }
     }
-    let k = ["n_latent_topics", "n_latent"]
+    let k = LATENT_COUNTS
         .iter()
         .find_map(|k| args.get(*k).and_then(serde_json::Value::as_u64))
         .unwrap_or(0);
@@ -276,35 +273,6 @@ fn source_settings(args: &serde_json::Value) -> serde_json::Value {
         out["sketch_dim"] = p.max(k).into();
     }
     out
-}
-
-/// The settings in which `here` differs from `there`, as `path: there →
-/// here`. A setting `there` does not record (an older senna's) is passed;
-/// numbers are compared as the f32 most settings are, since a JSON round
-/// trip need not give back the same f64.
-fn differences(there: &serde_json::Value, here: &serde_json::Value, path: &str) -> Vec<String> {
-    use serde_json::Value;
-    match (there, here) {
-        (Value::Object(a), Value::Object(b)) => b
-            .iter()
-            .filter_map(|(k, v)| a.get(k).map(|w| (k, w, v)))
-            .flat_map(|(k, w, v)| {
-                let p = if path.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{path}.{k}")
-                };
-                differences(w, v, &p)
-            })
-            .collect(),
-        (Value::Number(a), Value::Number(b))
-            if a.as_f64().map(|x| x as f32) == b.as_f64().map(|x| x as f32) =>
-        {
-            Vec::new()
-        }
-        _ if there == here => Vec::new(),
-        _ => vec![format!("{path}: {there} there, {here} here")],
-    }
 }
 
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]

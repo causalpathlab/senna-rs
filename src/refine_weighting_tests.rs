@@ -63,14 +63,21 @@ fn differences_are_in_what_builds_the_partition() {
         "n_latent": 10,
         "epochs": 5,
     });
-    assert!(differences(&source_settings(&there), &source_settings(&here), "").is_empty());
+    assert!(senna::run_manifest::settings_differences(
+        &source_settings(&there),
+        &source_settings(&here)
+    )
+    .is_empty());
 
     let here = serde_json::json!({
         "collapse": {"proj_dim": 50, "sort_dim": 6},
         "qc": {"min_features": 200},
         "n_latent": 10,
     });
-    let d = differences(&source_settings(&there), &source_settings(&here), "");
+    let d = senna::run_manifest::settings_differences(
+        &source_settings(&there),
+        &source_settings(&here),
+    );
     assert_eq!(d.len(), 2, "{d:?}");
     assert!(d
         .iter()
@@ -97,17 +104,28 @@ fn floats_outputs_and_the_feature_axis_in_the_comparison() {
         "multiome": false,
         "init_feature_embedding": null,
     });
-    assert!(differences(&source_settings(&there), &source_settings(&here), "").is_empty());
+    assert!(senna::run_manifest::settings_differences(
+        &source_settings(&there),
+        &source_settings(&here)
+    )
+    .is_empty());
 
     let here = serde_json::json!({
         "collapse": {"proj_dim": 50, "sort_dim": 10},
         "qc": {"qc_mads": x},
         "multiome": true,
     });
-    let d = differences(&source_settings(&there), &source_settings(&here), "");
+    let d = senna::run_manifest::settings_differences(
+        &source_settings(&there),
+        &source_settings(&here),
+    );
     assert_eq!(d, ["multiome: false there, true here"]);
 
     // A record with no collapse settings is passed, not refused.
     let bare = serde_json::json!({"epochs": 5});
-    assert!(differences(&source_settings(&bare), &source_settings(&here), "").is_empty());
+    assert!(senna::run_manifest::settings_differences(
+        &source_settings(&bare),
+        &source_settings(&here)
+    )
+    .is_empty());
 }

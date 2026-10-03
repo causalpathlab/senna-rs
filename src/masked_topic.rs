@@ -857,7 +857,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     let prebuilt_partition = args.pb_from.partition(
         inherited.as_ref(),
-        &crate::refine_weighting::partition_settings(&args),
+        &crate::refine_weighting::partition_settings(args),
     )?;
 
     let effective_hvg =
