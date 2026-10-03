@@ -1069,7 +1069,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             &host,
             &gene_names,
             &spec.name_kind,
-            &spec.src_types,
+            &spec.carried_types(&host),
             &spec.dictionary_path,
         )?;
         anyhow::ensure!(

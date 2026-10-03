@@ -18,11 +18,14 @@
 //! feature axis (a panel) still hands on the full table it was given.
 
 use data_beans::aux::feature_types::{FeatureType, GENE_TYPE};
-use data_beans::aux::frozen_features::{load_frozen_feature_host, FrozenLoadArgs, SourceNameMap};
+use data_beans::aux::frozen_features::{
+    load_frozen_feature_host_matching, FrozenLoadArgs, SourceNameMap,
+};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::info;
 use rustc_hash::FxHashSet;
+use senna::carried_rows::{matchable_rows, types_of_rows};
 
 pub(crate) use senna::carried_rows::CarriedRows;
 
@@ -65,53 +68,44 @@ pub(crate) fn load_preset_rows(
     let (dictionary_path, _bias) = senna::run_manifest::resolve_feature_embedding(prefix)
         .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
 
-    // Which source rows are genes: the types table, when the run wrote one.
-    let src_types: Option<Vec<FeatureType>> =
-        senna::run_manifest::feature_types_beside(&dictionary_path)?;
-    let gene_names: Option<FxHashSet<&str>> = src_types.as_ref().map(|rows| {
+    // The source's row types, when it wrote them: only its gene and region
+    // rows may match (a term, word or cell type may share a gene's name).
+    let written_types = senna::run_manifest::feature_types_beside(&dictionary_path)?;
+    let gene_names: Option<FxHashSet<&str>> = written_types.as_ref().map(|rows| {
         rows.iter()
             .filter(|(_, t)| t.as_ref() == GENE_TYPE)
             .map(|(n, _)| n.as_ref())
             .collect()
     });
+    // A region row keeps its name: the row grammar lifts genes only.
     let rename_gene = |n: &str| -> Box<str> {
         match rename_source {
             Some(f) if gene_names.as_ref().is_none_or(|genes| genes.contains(n)) => f(n),
             _ => n.into(),
         }
     };
-    let host = load_frozen_feature_host(FrozenLoadArgs {
-        dictionary_path: &dictionary_path,
-        bias_path: None,
-        target_feature_names: feature_names,
-        name_kind: kind.clone(),
-        source_name_map: rename_source.map(|_| &rename_gene as SourceNameMap<'_>),
-    })?;
-    let gene_src: Option<FxHashSet<usize>> = gene_names.as_ref().map(|genes| {
-        let renamed: FxHashSet<Box<str>> = genes.iter().map(|n| rename_gene(n)).collect();
-        host.src_names
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| renamed.contains(*n))
-            .map(|(i, _)| i)
-            .collect()
-    });
+    let mut src_types: Option<Vec<FeatureType>> = None;
+    let host = load_frozen_feature_host_matching(
+        FrozenLoadArgs {
+            dictionary_path: &dictionary_path,
+            bias_path: None,
+            target_feature_names: feature_names,
+            name_kind: kind.clone(),
+            source_name_map: rename_source.map(|_| &rename_gene as SourceNameMap<'_>),
+        },
+        |names| {
+            src_types = types_of_rows(written_types.clone(), names, &dictionary_path);
+            Ok(matchable_rows(src_types.as_deref(), names.len()))
+        },
+    )?;
 
     let h = host.e_feat.ncols();
-    let mut ids: Vec<u32> = Vec::new();
-    let mut rows: Vec<f32> = Vec::new();
-    for (j, (&target, &src)) in host
-        .keep_target_indices
-        .iter()
-        .zip(&host.keep_src_indices)
-        .enumerate()
-    {
-        if gene_src.as_ref().is_some_and(|s| !s.contains(&src)) {
-            continue;
-        }
-        ids.push(target as u32);
-        rows.extend(host.e_feat.row(j).iter().copied());
-    }
+    let ids: Vec<u32> = host.keep_target_indices.iter().map(|&t| t as u32).collect();
+    let rows: Vec<f32> = host
+        .e_feat
+        .row_iter()
+        .flat_map(|r| r.iter().copied().collect::<Vec<_>>())
+        .collect();
     anyhow::ensure!(
         !ids.is_empty(),
         "{flag} {prefix}: no gene of this feature axis has a row in {dictionary_path}"

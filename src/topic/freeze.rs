@@ -16,14 +16,15 @@
 //!    `data_vec.row_names()` returns after masking).
 
 use data_beans::aux::feature_names::FeatureNameKind;
-use data_beans::aux::feature_types::{FeatureType, GENE_TYPE};
+use data_beans::aux::feature_types::{feature_rows, FeatureType};
 use data_beans::aux::frozen_features::{
-    load_frozen_feature_host, FrozenFeatureHost, FrozenLoadArgs,
+    load_frozen_feature_host_matching, FrozenFeatureHost, FrozenLoadArgs,
 };
 use legume_numeric::matrix::parquet::peek_parquet_field_names;
 use legume_numeric::matrix::traits::IoOps;
 use nalgebra::DMatrix;
 use rustc_hash::FxHashSet;
+use senna::carried_rows::{matchable_rows, types_of_rows};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -31,10 +32,10 @@ pub struct FrozenFeatureSpec {
     pub dictionary_path: String,
     pub bias_path: Option<String>,
     pub name_kind: FeatureNameKind,
-    /// The source's row types (`feature_types.parquet`), empty when it wrote
-    /// none. Only its gene rows are matched to the data's features: a term,
-    /// word or cell-type row of an `fne` table may share a gene's name.
-    pub src_types: Vec<FeatureType>,
+    /// The types table written beside the source, when there is one. Only
+    /// its gene and region rows match the data's features: a term, word or
+    /// cell-type row of an `fne` table may share a gene's name.
+    written_types: Option<Vec<FeatureType>>,
     /// Cached source canonical-name set, populated lazily on first
     /// `mask_fn` invocation. `Rc<RefCell<...>>` so the closure can share
     /// the cache with the owning spec without taking `&mut self`.
@@ -60,8 +61,8 @@ impl FrozenFeatureSpec {
     ) -> anyhow::Result<Self> {
         let (dictionary_path, bias_path) = senna::run_manifest::resolve_feature_embedding(prefix)
             .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
-        let src_types =
-            senna::run_manifest::feature_types_beside(&dictionary_path)?.unwrap_or_default();
+        let written_types = senna::run_manifest::feature_types_beside(&dictionary_path)
+            .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
         match &bias_path {
             Some(b) => log::info!("Frozen feature side: {dictionary_path} + {b}"),
             None => log::info!("Frozen feature side: {dictionary_path} (bias = 0)"),
@@ -70,7 +71,7 @@ impl FrozenFeatureSpec {
             dictionary_path,
             bias_path,
             name_kind,
-            src_types,
+            written_types,
             source_canon: Rc::new(RefCell::new(None)),
         })
     }
@@ -82,16 +83,23 @@ impl FrozenFeatureSpec {
         let kind = self.name_kind.clone();
         let canon_cell = self.source_canon.clone();
         let dict_path = self.dictionary_path.clone();
-        let genes = self.gene_rows();
+        let written = self.written_types.clone();
         Box::new(move |row_names: &[Box<str>]| -> anyhow::Result<Vec<bool>> {
             if canon_cell.borrow().is_none() {
                 let dict = <DMatrix<f32> as IoOps>::from_parquet(&dict_path)?;
-                let mut set: FxHashSet<Box<str>> = FxHashSet::default();
-                for name in &dict.rows {
-                    if genes.as_ref().is_none_or(|g| g.contains(name)) {
-                        set.insert(kind.canonicalize(name));
-                    }
-                }
+                let types = types_of_rows(written.clone(), &dict.rows, &dict_path);
+                let marked = matchable_rows(types.as_deref(), dict.rows.len());
+                let set: FxHashSet<Box<str>> = dict
+                    .rows
+                    .iter()
+                    .zip(&marked)
+                    .filter(|(_, &m)| m)
+                    .map(|(n, _)| kind.canonicalize(n))
+                    .collect();
+                anyhow::ensure!(
+                    !set.is_empty(),
+                    "{dict_path}: none of its rows is a gene or region, by its types table"
+                );
                 log::info!(
                     "Frozen feature side: {} canonical names loaded from {}",
                     set.len(),
@@ -133,43 +141,31 @@ impl FrozenFeatureSpec {
         &self,
         post_load_gene_names: &[Box<str>],
     ) -> anyhow::Result<FrozenFeatureHost> {
-        let mut host = load_frozen_feature_host(FrozenLoadArgs {
-            dictionary_path: &self.dictionary_path,
-            bias_path: self.bias_path.as_deref(),
-            target_feature_names: post_load_gene_names,
-            name_kind: self.name_kind.clone(),
-            source_name_map: None,
-        })?;
-        if let Some(genes) = self.gene_rows() {
-            keep_gene_rows(&mut host, &genes);
-        }
-        Ok(host)
+        load_frozen_feature_host_matching(
+            FrozenLoadArgs {
+                dictionary_path: &self.dictionary_path,
+                bias_path: self.bias_path.as_deref(),
+                target_feature_names: post_load_gene_names,
+                name_kind: self.name_kind.clone(),
+                source_name_map: None,
+            },
+            |names| Ok(matchable_rows(self.types_of(names).as_deref(), names.len())),
+        )
     }
 
-    /// The source rows that are genes, when the source says.
-    fn gene_rows(&self) -> Option<FxHashSet<Box<str>>> {
-        (!self.src_types.is_empty()).then(|| {
-            self.src_types
-                .iter()
-                .filter(|(_, t)| t.as_ref() == GENE_TYPE)
-                .map(|(n, _)| n.clone())
-                .collect()
-        })
+    /// The source's types, one per row of `names` (its rows in order), when
+    /// its types table lists them; warned about once, in [`Self::mask_fn`].
+    fn types_of(&self, names: &[Box<str>]) -> Option<Vec<FeatureType>> {
+        self.written_types
+            .clone()
+            .filter(|t| feature_rows(t, names).is_some())
     }
-}
 
-/// Drop the matches of `host` whose source row is not among `genes`.
-fn keep_gene_rows(host: &mut FrozenFeatureHost, genes: &FxHashSet<Box<str>>) {
-    let keep: Vec<usize> = (0..host.keep_src_indices.len())
-        .filter(|&j| genes.contains(&host.src_names[host.keep_src_indices[j]]))
-        .collect();
-    if keep.len() == host.keep_src_indices.len() {
-        return;
+    /// The types of `host`'s source rows for the rows carried through, empty
+    /// without them (every row a gene).
+    pub fn carried_types(&self, host: &FrozenFeatureHost) -> Vec<FeatureType> {
+        self.types_of(&host.src_names).unwrap_or_default()
     }
-    host.e_feat = host.e_feat.select_rows(keep.iter());
-    host.b_feat = keep.iter().map(|&j| host.b_feat[j]).collect();
-    host.keep_target_indices = keep.iter().map(|&j| host.keep_target_indices[j]).collect();
-    host.keep_src_indices = keep.iter().map(|&j| host.keep_src_indices[j]).collect();
 }
 
 #[cfg(test)]
@@ -177,24 +173,25 @@ mod tests {
     use super::*;
     use data_beans::aux::feature_types::write_feature_types;
 
-    /// An `fne`-like source: two genes and a word row named like a feature
-    /// of the data. Only the gene rows match, in the mask and the host.
+    /// An `fne`-like source: a cell type named like a gene, before it, and a
+    /// word named like a feature of the data. Only gene rows match, in the
+    /// mask and the host, and the carried rows keep their own types.
     #[test]
     fn only_the_source_s_gene_rows_match() {
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("run").to_string_lossy().into_owned();
-        let names: Vec<Box<str>> = ["TP53", "apoptosis", "GATA1"]
+        let names: Vec<Box<str>> = ["CD4", "TP53", "apoptosis", "CD4"]
             .iter()
             .map(|s| Box::from(*s))
             .collect();
-        DMatrix::<f32>::from_row_slice(3, 2, &[1.0, -1.0, 2.0, -2.0, 3.0, -3.0])
+        DMatrix::<f32>::from_row_slice(4, 2, &[9.0, 9.0, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0])
             .to_parquet_with_names(
                 &format!("{prefix}.feature_embedding.parquet"),
                 (Some(&names), Some("feature")),
                 None,
             )
             .unwrap();
-        let types: Vec<Box<str>> = ["gene", "word", "gene"]
+        let types: Vec<Box<str>> = ["cell_type", "gene", "word", "gene"]
             .iter()
             .map(|s| Box::from(*s))
             .collect();
@@ -206,7 +203,7 @@ mod tests {
             FeatureNameKind::Gene { delim: '_' },
         )
         .unwrap();
-        let axis: Vec<Box<str>> = ["ENSG1_GATA1", "apoptosis", "ENSG2_TP53"]
+        let axis: Vec<Box<str>> = ["ENSG1_CD4", "apoptosis", "ENSG2_TP53"]
             .iter()
             .map(|s| Box::from(*s))
             .collect();
@@ -216,12 +213,16 @@ mod tests {
         let host = spec.materialize(&kept).unwrap();
         assert_eq!(host.keep_target_indices, [0, 1]);
         assert_eq!(
+            host.keep_src_indices,
+            [3, 1],
+            "CD4 is the gene row, not the cell type"
+        );
+        assert_eq!(
             host.e_feat.row(0).iter().copied().collect::<Vec<_>>(),
             [3.0, -3.0]
         );
-        // Given the word's name anyway, the host still leaves it out.
-        let host = spec.materialize(&axis).unwrap();
-        assert_eq!(host.keep_target_indices, [0, 2]);
-        assert_eq!(host.b_feat.len(), 2);
+        let carried = spec.carried_types(&host);
+        assert_eq!(carried[0].1.as_ref(), "cell_type");
+        assert_eq!(carried.len(), 4);
     }
 }

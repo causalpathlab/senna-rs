@@ -312,39 +312,16 @@ fn probe_feature_embedding(
     )
 }
 
-/// The types table of the run whose ρ is at `rho` (as resolved by
-/// [`resolve_feature_embedding`]), when it wrote one for that table. Like the
-/// bias it sits under the table's stem, which a flag naming the table or the
-/// manifest is not. One that does not list `rho`'s rows in order is another
-/// table's: warned about and left out.
+/// The types table written beside the run whose ρ is at `rho` (as resolved
+/// by [`resolve_feature_embedding`]), when it wrote one. Like the bias it
+/// sits under the table's stem, which a flag naming the table or the
+/// manifest is not. Whether it describes `rho`'s rows is checked against
+/// them once read ([`crate::carried_rows::types_of_rows`]).
 pub fn feature_types_beside(
     rho: &str,
 ) -> anyhow::Result<Option<Vec<data_beans::aux::feature_types::FeatureType>>> {
     let stem = strip_table_suffix(rho).map_or(rho, |(stem, _)| stem);
-    let Some(types) = data_beans::aux::feature_types::read_feature_types(stem)? else {
-        return Ok(None);
-    };
-    // One row per table row, in order — else it was written for another
-    // table under this stem (an older run's), and says nothing of this one.
-    let fields = legume_numeric::matrix::parquet::peek_parquet_field_names(rho)?;
-    let row_axis = fields
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("{rho}: no columns"))?;
-    let rows = legume_numeric::matrix::parquet::read_parquet_string_columns_by_name(
-        rho,
-        &[row_axis.as_ref()],
-    )?
-    .pop()
-    .unwrap_or_default();
-    if !types.iter().map(|(n, _)| n).eq(rows.iter()) {
-        log::warn!(
-            "{} does not describe the rows of {rho} (left by another run?); \
-             every row of {rho} is taken as a gene",
-            data_beans::aux::feature_types::feature_types_path(stem)
-        );
-        return Ok(None);
-    }
-    Ok(Some(types))
+    data_beans::aux::feature_types::read_feature_types(stem)
 }
 
 /// `path` split into its stem and the [`RHO_TABLE_SUFFIXES`] suffix it ends
@@ -2399,26 +2376,6 @@ mod tests {
             write_signed(&format!("{prefix}{suf}"));
         }
         prefix
-    }
-
-    /// A types table is read for the ρ it lists the rows of, and left out
-    /// for another table under the same stem.
-    #[test]
-    fn the_types_table_must_list_rho_s_rows() {
-        use data_beans::aux::feature_types::write_feature_types;
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = run_with(dir.path(), &[".feature_embedding.parquet"]);
-        let rho = format!("{prefix}.feature_embedding.parquet");
-        assert!(feature_types_beside(&rho).unwrap().is_none());
-        let names: Vec<Box<str>> = vec!["A".into(), "B".into()];
-        write_feature_types(&prefix, &names, &["gene".into(), "word".into()]).unwrap();
-        assert_eq!(feature_types_beside(&rho).unwrap().unwrap().len(), 2);
-        // A stale `feature_loading` with other rows: not described.
-        let stale = format!("{prefix}.feature_loading.parquet");
-        let m = Mat::from_fn(1, 2, |_, j| j as f32 - 0.5);
-        m.to_parquet_with_names(&stale, (Some(&["C".into()]), Some("gene")), None)
-            .unwrap();
-        assert!(feature_types_beside(&stale).unwrap().is_none());
     }
 
     /// Which of `feature_embedding` and `feature_loading` is ρ: the run's

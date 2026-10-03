@@ -306,6 +306,58 @@ fn appending_keeps_the_run_s_own_types() {
     assert_eq!(types, ["gene", "cell_type", "gene", "term"]);
 }
 
+/// A types table left at the output prefix by an older run, for other rows,
+/// is replaced rather than refusing the finished run.
+#[test]
+fn appending_replaces_a_types_table_another_run_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("run").to_string_lossy().into_owned();
+    write_run_table(&out, "feature_embedding.parquet", "gene", &["A", "B"]);
+    write_feature_types(&out, &[Box::from("X")], &[Box::from("word")]).unwrap();
+    carried_fixture()
+        .append_to(&out, "feature_embedding.parquet")
+        .unwrap();
+    let types = data_beans::aux::feature_types::read_feature_types(&out)
+        .unwrap()
+        .unwrap();
+    let types: Vec<&str> = types.iter().map(|(_, t)| t.as_ref()).collect();
+    assert_eq!(types, ["gene", "gene", "gene", "term"]);
+}
+
+/// A cell type named like a gene, earlier in the table, neither pins the
+/// gene nor comes through as one.
+#[test]
+fn a_cell_type_named_like_a_gene_does_not_stand_in_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = dir.path().join("run").to_string_lossy().into_owned();
+    let names: Vec<Box<str>> = ["CD4", "CD4"].iter().map(|s| Box::from(*s)).collect();
+    DMatrix::<f32>::from_row_slice(2, 2, &[9.0, 9.0, 1.0, -1.0])
+        .to_parquet_with_names(
+            &format!("{prefix}.feature_embedding.parquet"),
+            (Some(&names), Some("feature")),
+            None,
+        )
+        .unwrap();
+    write_feature_types(
+        &prefix,
+        &names,
+        &[Box::from("cell_type"), Box::from("gene")],
+    )
+    .unwrap();
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG1_CD4")];
+    let (f, carried) = load_preset_genes(
+        &prefix,
+        PresetMode::Freeze,
+        &axis,
+        &ge::FeatureNameKind::Gene { delim: '_' },
+    )
+    .unwrap();
+    assert_eq!(f.ids, vec![0]);
+    assert_eq!(f.rows, vec![1.0, -1.0]);
+    // The cell type shares the axis's name, so it is not carried twice.
+    assert!(carried.is_none());
+}
+
 /// A carried name the run wrote itself is superseded by the run's row; a
 /// width that disagrees is refused and the table is left as written.
 #[test]

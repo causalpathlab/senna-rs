@@ -4,7 +4,8 @@
 //! by [`crate::run_manifest::write_run_manifest`] for every engine.
 
 use data_beans::aux::feature_types::{
-    feature_types_path, read_feature_types, write_feature_types, FeatureType, GENE_TYPE,
+    feature_rows, feature_types_path, is_data_feature_type, read_feature_types,
+    write_feature_types, FeatureType, GENE_TYPE,
 };
 use data_beans::aux::frozen_features::FrozenFeatureHost;
 use graph_embedding_util as ge;
@@ -13,7 +14,39 @@ use legume_numeric::matrix::parquet::peek_parquet_field_names;
 use legume_numeric::matrix::traits::IoOps;
 use log::info;
 use nalgebra::DMatrix;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
+
+/// The types of a table's rows (`names`, in order) from the types table
+/// written beside it: `None` when it wrote none, or one for another table
+/// (an older run's under the same prefix), which `what` names in a warning.
+/// Without types every row is taken as a gene.
+#[must_use]
+pub fn types_of_rows(
+    types: Option<Vec<FeatureType>>,
+    names: &[Box<str>],
+    what: &str,
+) -> Option<Vec<FeatureType>> {
+    let types = types?;
+    if feature_rows(&types, names).is_none() {
+        log::warn!(
+            "the types table beside {what} lists other rows (left by another run?); \
+             every row of {what} is taken as a gene"
+        );
+        return None;
+    }
+    Some(types)
+}
+
+/// Which of `n` rows may match a data feature: by their types (see
+/// [`types_of_rows`]), a gene or a genomic window — not a term, word or cell
+/// type that may share a gene's name; every row without types.
+#[must_use]
+pub fn matchable_rows(types: Option<&[FeatureType]>, n: usize) -> Vec<bool> {
+    match types {
+        Some(t) => t.iter().map(|(_, ty)| is_data_feature_type(ty)).collect(),
+        None => vec![true; n],
+    }
+}
 
 /// The rows of a given table that pin nothing on this run's feature axis,
 /// kept to write back beside the trained table. Only meaningful when the
@@ -38,7 +71,8 @@ impl CarriedRows {
     /// `None` with a log line when `pins` is false: then the trained rows
     /// leave the table's space and the leftover rows would not belong beside
     /// them. `flag` names the caller's mode for that line; `src_types` is the
-    /// source run's types table (empty when it wrote none: all genes).
+    /// source's types, one per source row in order ([`types_of_rows`]; empty
+    /// when it has none: all genes).
     pub fn from_unmatched(
         pins: bool,
         flag: &str,
@@ -60,10 +94,6 @@ impl CarriedRows {
             .iter()
             .flat_map(|n| [n.clone(), kind.canonicalize(n)])
             .collect();
-        let src_types: FxHashMap<&str, &str> = src_types
-            .iter()
-            .map(|(n, t)| (n.as_ref(), t.as_ref()))
-            .collect();
         let idx: Vec<usize> = host
             .src_names
             .iter()
@@ -77,9 +107,14 @@ impl CarriedRows {
             return Ok(None);
         }
         let names: Vec<Box<str>> = idx.iter().map(|&i| host.src_names[i].clone()).collect();
-        let types: Vec<Box<str>> = names
+        // By position: a cell type and a gene may share a name.
+        let types: Vec<Box<str>> = idx
             .iter()
-            .map(|n| Box::from(src_types.get(n.as_ref()).copied().unwrap_or(GENE_TYPE)))
+            .map(|&i| {
+                src_types
+                    .get(i)
+                    .map_or(GENE_TYPE.into(), |(_, t)| t.clone())
+            })
             .collect();
         let rows = host.src_e_feat.select_rows(idx.iter());
         Ok(Some(Self {
@@ -125,17 +160,12 @@ impl CarriedRows {
             );
             return Ok(());
         }
-        let own_types: Vec<Box<str>> = match read_feature_types(out_prefix)? {
-            Some(rows) => {
-                anyhow::ensure!(
-                    rows.len() == n && rows.iter().zip(&table.rows).all(|((a, _), b)| a == b),
-                    "{}: rows disagree with {rho_path}",
-                    feature_types_path(out_prefix)
-                );
-                rows.into_iter().map(|(_, t)| t).collect()
-            }
-            None => vec![GENE_TYPE.into(); n],
-        };
+        // A types table this run did not write (an older run's) is replaced.
+        let own_types: Vec<Box<str>> =
+            match types_of_rows(read_feature_types(out_prefix)?, &table.rows, rho_path) {
+                Some(rows) => rows.into_iter().map(|(_, t)| t).collect(),
+                None => vec![GENE_TYPE.into(); n],
+            };
 
         let m = keep.len();
         let mat = concatenate_vertical(&[table.mat, self.rows.select_rows(keep.iter())])?;
