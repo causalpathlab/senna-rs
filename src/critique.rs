@@ -29,13 +29,17 @@
 //!
 //! Levels are numbered as in `cell_to_pb.parquet`: `0` is the coarsest.
 
+use legume_numeric::matrix::knn::all_pairs::knn_rows_l2;
+use legume_numeric::matrix::knn::metric::l2_sq;
 use legume_numeric::matrix::parquet::{write_named_table, Column};
 use log::warn;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use senna::embed_common::*;
-use senna::run_manifest::{load_cell_to_pb_raw, resolve, CellSpace, RunManifest};
-use std::path::Path;
+use senna::run_manifest::{
+    load_cell_to_pb_raw, resolve, CellSpace, InheritedPartition, RunManifest,
+};
+use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
 pub struct CritiqueArgs {
@@ -83,7 +87,8 @@ pub struct CritiqueArgs {
         default_value_t = 0.25,
         help = "Far is beyond rank max(3·knn, this fraction of the pseudobulks)",
         long_help = "Near is rank ≤ --knn. Far must be well clear of it, so that one\n\
-                     model at rank 15 and another at 16 is not a disagreement."
+                     model at rank 15 and another at 16 is not a disagreement.\n\
+                     A level too small to hold a rank beyond far is skipped."
     )]
     far_frac: f64,
 
@@ -100,6 +105,16 @@ pub struct CritiqueArgs {
         help = "Levels with more pseudobulks than this are skipped"
     )]
     max_pb: usize,
+}
+
+pub(crate) fn check_params(knn: usize, far_frac: f64, min_cells: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(knn >= 1, "--knn must be at least 1");
+    anyhow::ensure!(
+        far_frac > 0.0 && far_frac < 1.0,
+        "--far-frac must lie strictly between 0 and 1 (got {far_frac})"
+    );
+    anyhow::ensure!(min_cells >= 1, "--min-cells must be at least 1");
+    Ok(())
 }
 
 /// Position of every source name in `target`, or `usize::MAX` when absent.
@@ -121,36 +136,56 @@ pub(crate) fn rank_of(sorted: &[f32], d: f32) -> u32 {
     sorted.partition_point(|&x| x < d) as u32 + 1
 }
 
-/// The rank beyond which a model holds a pair far: `max(3·knn, ⌈P·frac⌉)`,
-/// well clear of near (`≤ knn`).
-pub(crate) fn far_rank(n_pb: usize, knn: usize, frac: f64) -> u32 {
-    (3 * knn).max((n_pb as f64 * frac).ceil() as usize) as u32
+/// Near is rank ≤ `near`; far is rank > `far`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Bounds {
+    pub near: u32,
+    pub far: u32,
 }
 
-/// Median of the known ranks (`u32::MAX` is unknown); `None` when none is known.
-pub(crate) fn median_rank(ranks: impl Iterator<Item = u32>) -> Option<f64> {
-    let mut known: Vec<u32> = ranks.filter(|&r| r != u32::MAX).collect();
-    if known.is_empty() {
-        return None;
+impl Bounds {
+    /// `far = max(3·knn, ⌈P·frac⌉)`, well clear of near. `None` when no rank
+    /// can lie beyond it: ranks run from 1 to `P − 1`.
+    pub(crate) fn for_level(n_pb: usize, knn: usize, frac: f64) -> Option<Self> {
+        let far = (3 * knn).max((n_pb as f64 * frac).ceil() as usize);
+        (n_pb.saturating_sub(1) > far).then_some(Bounds {
+            near: knn as u32,
+            far: far as u32,
+        })
     }
-    known.sort_unstable();
-    let m = known.len();
-    Some(if m % 2 == 1 {
-        f64::from(known[m / 2])
-    } else {
-        0.5 * (f64::from(known[m / 2 - 1]) + f64::from(known[m / 2]))
-    })
 }
 
-/// The median rank of pair `c` over every model except `model`.
-pub(crate) fn others_consensus(ranks: &[Vec<u32>], model: usize, c: usize) -> Option<f64> {
-    median_rank(
-        ranks
-            .iter()
-            .enumerate()
-            .filter(|&(o, _)| o != model)
-            .map(|(_, rk)| rk[c]),
-    )
+/// The known ranks of pair `c` over all models (`u32::MAX` is unknown), sorted.
+pub(crate) fn sorted_known(ranks: &[Vec<u32>], c: usize) -> Vec<u32> {
+    let mut known: Vec<u32> = ranks
+        .iter()
+        .map(|rk| rk[c])
+        .filter(|&r| r != u32::MAX)
+        .collect();
+    known.sort_unstable();
+    known
+}
+
+pub(crate) fn median(sorted: &[u32]) -> Option<f64> {
+    let m = sorted.len();
+    match m {
+        0 => None,
+        _ if m % 2 == 1 => Some(f64::from(sorted[m / 2])),
+        _ => Some(0.5 * (f64::from(sorted[m / 2 - 1]) + f64::from(sorted[m / 2]))),
+    }
+}
+
+/// The median of `sorted` with one occurrence of `own` left out: a model's
+/// rank never votes on itself.
+pub(crate) fn median_without(sorted: &[u32], own: u32) -> Option<f64> {
+    match sorted.iter().position(|&r| r == own) {
+        Some(at) => {
+            let mut others = sorted.to_vec();
+            others.remove(at);
+            median(&others)
+        }
+        None => median(sorted),
+    }
 }
 
 /// What the models together say about a pair.
@@ -162,11 +197,10 @@ pub(crate) enum PairLabel {
 }
 
 impl PairLabel {
-    /// From the median rank over all models: near is `≤ knn`, far is `> far`.
-    pub(crate) fn of(median: Option<f64>, knn: u32, far: u32) -> Self {
+    pub(crate) fn of(median: Option<f64>, b: Bounds) -> Self {
         match median {
-            Some(m) if m <= f64::from(knn) => PairLabel::Similar,
-            Some(m) if m > f64::from(far) => PairLabel::Different,
+            Some(m) if m <= f64::from(b.near) => PairLabel::Similar,
+            Some(m) if m > f64::from(b.far) => PairLabel::Different,
             _ => PairLabel::Ambiguous,
         }
     }
@@ -188,48 +222,36 @@ pub(crate) enum Charge {
     Split,
 }
 
-/// One model's charges at one level.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct Tally {
-    /// Pairs in the model's top-`k`.
-    pub near: usize,
-    /// Near pairs the other models hold far.
-    pub merges: usize,
-    /// Pairs the model holds far while the other models keep them near.
-    pub splits: usize,
+/// Judge one model, pair by pair, against the median of the others. `own` is
+/// the model's ranks, `sorted` every pair's known ranks over all models.
+pub(crate) fn charges(own: &[u32], sorted: &[Vec<u32>], b: Bounds) -> Vec<Charge> {
+    own.iter()
+        .zip(sorted)
+        .map(|(&r, all)| {
+            if r == u32::MAX {
+                return Charge::None;
+            }
+            match median_without(all, r) {
+                Some(o) if r <= b.near && o > f64::from(b.far) => Charge::Merge,
+                Some(o) if r > b.far && o <= f64::from(b.near) => Charge::Split,
+                _ => Charge::None,
+            }
+        })
+        .collect()
 }
 
-/// Judge `model` against the median of the others, pair by pair.
-/// `ranks[model][pair]`, `u32::MAX` where unknown.
-pub(crate) fn tally(ranks: &[Vec<u32>], model: usize, knn: u32, far: u32) -> (Tally, Vec<Charge>) {
-    let n = ranks[model].len();
-    let mut t = Tally::default();
-    let mut charges = vec![Charge::None; n];
-    for (c, charge) in charges.iter_mut().enumerate() {
-        let r = ranks[model][c];
-        if r == u32::MAX {
-            continue;
-        }
-        let Some(others) = others_consensus(ranks, model, c) else {
-            continue;
-        };
-        if r <= knn {
-            t.near += 1;
-            if others > f64::from(far) {
-                t.merges += 1;
-                *charge = Charge::Merge;
-            }
-        } else if r > far && others <= f64::from(knn) {
-            t.splits += 1;
-            *charge = Charge::Split;
-        }
-    }
-    (t, charges)
+/// Pairs in a model's top-`k` (unknown ranks never count).
+pub(crate) fn near_count(own: &[u32], b: Bounds) -> usize {
+    own.iter().filter(|&&r| r <= b.near).count()
 }
 
 /// Per kept pseudobulk: `merge`, `split`, `merge+split` or `consistent`, from
 /// the charged pairs it belongs to.
-pub(crate) fn pb_labels(n_pb: usize, pairs: &[(u32, u32)], charges: &[Charge]) -> Vec<Box<str>> {
+pub(crate) fn pb_labels(
+    n_pb: usize,
+    pairs: &[(u32, u32)],
+    charges: &[Charge],
+) -> Vec<&'static str> {
     let mut flag = vec![0u8; n_pb];
     for (&(a, b), &ch) in pairs.iter().zip(charges) {
         let bit = match ch {
@@ -247,18 +269,26 @@ pub(crate) fn pb_labels(n_pb: usize, pairs: &[(u32, u32)], charges: &[Charge]) -
             3 => "merge+split",
             _ => "consistent",
         })
-        .map(Box::from)
         .collect()
 }
 
-/// One fit, aligned to the partition's cells.
-struct Model {
-    name: String,
-    space: CellSpace,
-    /// Partition cell → row of `latent`, or `usize::MAX`.
-    row_of_cell: Vec<usize>,
-    latent: Mat,
-    coverage: f64,
+/// `base`, `base_2`, … until every name is unique, including against names
+/// that already carry a suffix.
+pub(crate) fn unique_names(bases: Vec<String>) -> Vec<String> {
+    let mut used: FxHashSet<String> = FxHashSet::default();
+    bases
+        .into_iter()
+        .map(|base| {
+            let mut name = base.clone();
+            let mut n = 1;
+            while used.contains(&name) {
+                n += 1;
+                name = format!("{base}_{n}");
+            }
+            used.insert(name.clone());
+            name
+        })
+        .collect()
 }
 
 /// The pseudobulks kept at one level.
@@ -309,285 +339,258 @@ impl Level {
     }
 }
 
-/// A model's pseudobulk view at one level: rows in the metric of its space,
-/// and which rows have any cells.
-fn pb_view(model: &Model, level: &Level) -> (Mat, Vec<bool>) {
-    let p = level.n_pb();
-    let d = model.latent.ncols();
-    let mut sum = Mat::zeros(p, d);
-    let mut count = vec![0usize; p];
-    for (cell, &pb) in level.pb_of_cell.iter().enumerate() {
-        let row = model.row_of_cell[cell];
-        if pb == usize::MAX || row == usize::MAX {
-            continue;
+/// One model's pseudobulk view at one level: only the pseudobulks it has cells
+/// in, already in its metric, so Euclidean distance is the right distance.
+pub(crate) struct View {
+    /// Kept pseudobulk index of each row of `x`.
+    pbs: Vec<usize>,
+    /// Kept pseudobulk index → row of `x`, or `usize::MAX`.
+    slot: Vec<usize>,
+    x: Mat,
+}
+
+impl View {
+    /// Keep the rows marked `valid` of a `P × d` matrix.
+    pub(crate) fn compact(full: Mat, valid: &[bool]) -> Self {
+        let pbs: Vec<usize> = (0..valid.len()).filter(|&i| valid[i]).collect();
+        let mut slot = vec![usize::MAX; valid.len()];
+        for (row, &pb) in pbs.iter().enumerate() {
+            slot[pb] = row;
         }
-        count[pb] += 1;
-        for k in 0..d {
-            let x = model.latent[(row, k)];
-            sum[(pb, k)] += match model.space {
-                CellSpace::LogSimplex => x.exp(),
-                CellSpace::Embedding | CellSpace::Signed => x,
-            };
-        }
-    }
-    let valid: Vec<bool> = count.iter().map(|&c| c > 0).collect();
-    for (i, &c) in count.iter().enumerate() {
-        if c > 0 {
-            let mut r = sum.row_mut(i);
-            r /= c as f32;
+        View {
+            x: full.select_rows(&pbs),
+            pbs,
+            slot,
         }
     }
-    match model.space {
-        CellSpace::LogSimplex => sum.apply(|x| *x = x.max(0.0).sqrt()),
-        CellSpace::Embedding => {
-            for (i, ok) in valid.iter().enumerate() {
-                if *ok {
-                    let mut r = sum.row_mut(i);
-                    let n = r.norm();
-                    if n > 0.0 {
-                        r /= n;
-                    }
+
+    /// The model's latent (θ already exponentiated for a simplex) averaged over
+    /// each pseudobulk of `level`, in the metric of `space`.
+    fn build(latent: &Mat, row_of_cell: &[usize], space: CellSpace, level: &Level) -> Self {
+        let p = level.n_pb();
+        let mut sum = Mat::zeros(p, latent.ncols());
+        let mut count = vec![0usize; p];
+        for (&pb, &row) in level.pb_of_cell.iter().zip(row_of_cell) {
+            if pb != usize::MAX && row != usize::MAX {
+                count[pb] += 1;
+                let mut s = sum.row_mut(pb);
+                s += latent.row(row);
+            }
+        }
+        for (i, &c) in count.iter().enumerate() {
+            if c > 0 {
+                let mut r = sum.row_mut(i);
+                r /= c as f32;
+            }
+        }
+        let valid: Vec<bool> = count.iter().map(|&c| c > 0).collect();
+        let mut view = View::compact(sum, &valid);
+        match space {
+            CellSpace::LogSimplex => view.x.apply(|v| *v = v.max(0.0).sqrt()),
+            CellSpace::Embedding => l2_normalize_rows_inplace(&mut view.x),
+            CellSpace::Signed => {
+                for mut col in view.x.column_iter_mut() {
+                    let n = col.len().max(1) as f32;
+                    let mean = col.sum() / n;
+                    let sd = (col.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n)
+                        .sqrt()
+                        .max(1e-12);
+                    col.apply(|v| *v = (*v - mean) / sd);
                 }
             }
         }
-        CellSpace::Signed => {
-            for k in 0..d {
-                let vals: Vec<f32> = (0..p).filter(|&i| valid[i]).map(|i| sum[(i, k)]).collect();
-                if vals.len() < 2 {
-                    continue;
-                }
-                let mean = vals.iter().sum::<f32>() / vals.len() as f32;
-                let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / vals.len() as f32;
-                let sd = var.sqrt().max(1e-12);
-                for i in 0..p {
-                    sum[(i, k)] = (sum[(i, k)] - mean) / sd;
-                }
+        view
+    }
+
+    /// Every row's top-`k` pairs, as `(min, max)` kept indices.
+    pub(crate) fn top_k_pairs(&self, k: usize) -> Vec<(u32, u32)> {
+        let (nbrs, _) = knn_rows_l2(&self.x, k);
+        nbrs.iter()
+            .enumerate()
+            .flat_map(|(i, js)| {
+                let a = self.pbs[i];
+                js.iter().map(move |&j| {
+                    let b = self.pbs[j];
+                    (a.min(b) as u32, a.max(b) as u32)
+                })
+            })
+            .collect()
+    }
+
+    /// Every candidate's rank: the smaller of the two directional ranks, or
+    /// `u32::MAX` when the model has no cells in either pseudobulk.
+    pub(crate) fn pair_ranks(&self, pairs: &[(u32, u32)]) -> Vec<u32> {
+        let n = self.x.nrows();
+        let d = self.x.ncols();
+        // One contiguous column per pseudobulk.
+        let xt = self.x.transpose();
+        let col = |i: usize| &xt.as_slice()[i * d..(i + 1) * d];
+        let mut by_row: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
+        for (c, &(a, b)) in pairs.iter().enumerate() {
+            let (sa, sb) = (self.slot[a as usize], self.slot[b as usize]);
+            if sa != usize::MAX && sb != usize::MAX {
+                by_row[sa].push((sb, c));
+                by_row[sb].push((sa, c));
             }
         }
+        let directional: Vec<Vec<(usize, u32)>> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                if by_row[i].is_empty() {
+                    return Vec::new();
+                }
+                let dist: Vec<f32> = (0..n)
+                    .map(|j| {
+                        if j == i {
+                            f32::INFINITY
+                        } else {
+                            l2_sq(col(i), col(j))
+                        }
+                    })
+                    .collect();
+                let mut sorted = dist.clone();
+                sorted.sort_by(f32::total_cmp);
+                sorted.pop(); // `i` itself, at +∞
+                by_row[i]
+                    .iter()
+                    .map(|&(j, c)| (c, rank_of(&sorted, dist[j])))
+                    .collect()
+            })
+            .collect();
+        let mut rank = vec![u32::MAX; pairs.len()];
+        for (c, r) in directional.into_iter().flatten() {
+            rank[c] = rank[c].min(r);
+        }
+        rank
     }
-    (sum, valid)
 }
 
-/// Squared Euclidean distances from row `i` to every row; `+∞` for `i` itself
-/// and for rows without cells.
-fn row_distances(view: &Mat, valid: &[bool], i: usize) -> Vec<f32> {
-    (0..view.nrows())
-        .map(|j| {
-            if j == i || !valid[j] {
-                f32::INFINITY
-            } else {
-                (view.row(i) - view.row(j)).norm_squared()
-            }
-        })
-        .collect()
+/// One fit, reduced to its views at the judged levels.
+struct Model {
+    kind: &'static str,
+    prefix: String,
+    coverage: f64,
+    /// Per level; `None` at a skipped level.
+    views: Vec<Option<View>>,
 }
 
-/// A view's top-`k` pairs, as `(min, max)` kept indices.
-fn top_k_pairs(view: &Mat, valid: &[bool], k: usize) -> Vec<(u32, u32)> {
-    (0..view.nrows())
-        .into_par_iter()
-        .filter(|&i| valid[i])
-        .flat_map_iter(|i| {
-            let d = row_distances(view, valid, i);
-            let mut idx: Vec<usize> = (0..d.len()).filter(|&j| d[j].is_finite()).collect();
-            idx.sort_by(|&a, &b| d[a].total_cmp(&d[b]));
-            idx.truncate(k);
-            idx.into_iter()
-                .map(move |j| (i.min(j) as u32, i.max(j) as u32))
-        })
-        .collect()
-}
-
-/// Every candidate's rank in one view: the smaller of the two directional
-/// ranks, or `u32::MAX` when the model has no cells in either pseudobulk.
-fn pair_ranks(view: &Mat, valid: &[bool], pairs: &[(u32, u32)]) -> Vec<u32> {
-    let p = view.nrows();
-    let mut by_row: Vec<Vec<(usize, usize)>> = vec![Vec::new(); p];
-    for (c, &(a, b)) in pairs.iter().enumerate() {
-        by_row[a as usize].push((b as usize, c));
-        by_row[b as usize].push((a as usize, c));
-    }
-    let directional: Vec<Vec<(usize, u32)>> = (0..p)
-        .into_par_iter()
-        .map(|i| {
-            if !valid[i] || by_row[i].is_empty() {
-                return Vec::new();
-            }
-            let d = row_distances(view, valid, i);
-            let mut sorted: Vec<f32> = d.iter().copied().filter(|x| x.is_finite()).collect();
-            sorted.sort_by(f32::total_cmp);
-            by_row[i]
-                .iter()
-                .filter(|&&(j, _)| valid[j])
-                .map(|&(j, c)| (c, rank_of(&sorted, d[j])))
-                .collect()
-        })
-        .collect();
-    let mut rank = vec![u32::MAX; pairs.len()];
-    for (c, r) in directional.into_iter().flatten() {
-        rank[c] = rank[c].min(r);
-    }
-    rank
+/// A judged level: its bounds, or why it was skipped.
+enum Judged {
+    Bounds(Bounds),
+    Skipped(String),
 }
 
 pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
-    anyhow::ensure!(args.min_cells >= 1, "--min-cells must be at least 1");
+    check_params(args.knn, args.far_frac, args.min_cells)?;
 
-    // Models, in the order given.
     let mut manifests = Vec::with_capacity(args.runs.len());
     for run in &args.runs {
         manifests.push(senna::run_manifest::load_for(run)?);
     }
-    let names = model_names(&manifests);
-
-    // The partition.
-    let (pm, pdir) = match args.partition.as_deref() {
-        Some(p) => senna::run_manifest::load_for(p)?,
-        None => manifests
+    let names = unique_names(
+        manifests
             .iter()
-            .find(|(m, dir)| m.cell_to_pb_path(dir).is_some())
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "none of the models wrote a cell → pseudobulk partition; \
-                     pass --partition with a topic, masked or vae run"
+            .map(|(m, _)| {
+                Path::new(&m.prefix).file_name().map_or_else(
+                    || m.kind.as_str().to_string(),
+                    |s| s.to_string_lossy().into_owned(),
                 )
-            })?,
-    };
-    let part_path = pm.cell_to_pb_path(&pdir).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{}: no cell_to_pb in the manifest; the partition run must be a topic, masked or vae run",
-            pm.prefix
-        )
-    })?;
-    info!("Partition: {part_path}");
-    let (assignments, part_cells) = load_cell_to_pb_raw(&part_path)?;
+            })
+            .collect(),
+    );
+
+    let (part_path, (assignments, part_cells)) = load_partition(args, &manifests)?;
     let levels: Vec<Level> = assignments
         .iter()
         .map(|a| Level::new(a, args.min_cells))
         .collect();
-    for (l, lv) in levels.iter().enumerate() {
-        info!(
-            "Level {l}: {} pseudobulks with ≥ {} cells",
-            lv.n_pb(),
-            args.min_cells
-        );
-    }
+    let judged: Vec<Judged> = levels
+        .iter()
+        .enumerate()
+        .map(|(l, lv)| {
+            let p = lv.n_pb();
+            let j = if p > args.max_pb {
+                Judged::Skipped(format!("{p} pseudobulks exceed --max-pb {}", args.max_pb))
+            } else {
+                match Bounds::for_level(p, args.knn, args.far_frac) {
+                    Some(b) => Judged::Bounds(b),
+                    None => Judged::Skipped(format!(
+                        "{p} pseudobulks leave no rank beyond far; lower --knn to judge this level"
+                    )),
+                }
+            };
+            match &j {
+                Judged::Bounds(b) => info!(
+                    "Level {l}: {p} pseudobulks; near ≤ {}, far > {}",
+                    b.near, b.far
+                ),
+                Judged::Skipped(why) => warn!("Level {l} skipped: {why}"),
+            }
+            j
+        })
+        .collect();
 
     let mut models = Vec::with_capacity(manifests.len());
     for ((m, dir), name) in manifests.iter().zip(&names) {
-        models.push(load_model(m, dir, name, &part_cells)?);
+        models.push(load_model(m, dir, name, &part_cells, &levels, &judged)?);
     }
 
-    let knn = args.knn as u32;
-    let mut pair_tab = PairTable::new(names.len());
+    let mut pair_tab = PairTable::default();
     let mut summary_tab = SummaryTable::default();
     let mut cell_cols: Vec<(Box<str>, Vec<Box<str>>)> = Vec::new();
     let mut level_json = Vec::new();
-    for (l, lv) in levels.iter().enumerate() {
-        let p = lv.n_pb();
-        if p < 3 {
-            continue;
-        }
-        if p > args.max_pb {
-            warn!(
-                "Level {l}: {p} pseudobulks exceed --max-pb {}; skipped",
-                args.max_pb
-            );
-            continue;
-        }
-        let far = far_rank(p, args.knn, args.far_frac);
-        let views: Vec<(Mat, Vec<bool>)> = models.iter().map(|m| pb_view(m, lv)).collect();
-        let mut cand: FxHashSet<(u32, u32)> = FxHashSet::default();
-        for (view, valid) in &views {
-            cand.extend(top_k_pairs(view, valid, args.knn));
-        }
-        let mut pairs: Vec<(u32, u32)> = cand.into_iter().collect();
-        pairs.sort_unstable();
-        let ranks: Vec<Vec<u32>> = views
-            .iter()
-            .map(|(view, valid)| pair_ranks(view, valid, &pairs))
-            .collect();
-
-        let mut labels = Vec::with_capacity(pairs.len());
-        for (c, &(a, b)) in pairs.iter().enumerate() {
-            let (a, b) = (a as usize, b as usize);
-            let median = median_rank(ranks.iter().map(|rk| rk[c]));
-            let label = PairLabel::of(median, knn, far);
-            labels.push(label);
-            let known: Vec<u32> = ranks
-                .iter()
-                .map(|rk| rk[c])
-                .filter(|&x| x != u32::MAX)
-                .collect();
-            let t = &mut pair_tab;
-            t.key
-                .push(format!("{l}:{}-{}", lv.pb_id[a], lv.pb_id[b]).into());
-            t.level.push(l as i32);
-            t.pb_a.push(lv.pb_id[a] as i32);
-            t.pb_b.push(lv.pb_id[b] as i32);
-            t.n_cells_a.push(lv.n_cells[a] as i32);
-            t.n_cells_b.push(lv.n_cells[b] as i32);
-            for (col, rk) in t.rank.iter_mut().zip(&ranks) {
-                col.push(if rk[c] == u32::MAX {
-                    f32::NAN
-                } else {
-                    rk[c] as f32
-                });
+    for (l, (lv, j)) in levels.iter().zip(&judged).enumerate() {
+        let b = match j {
+            Judged::Bounds(b) => *b,
+            Judged::Skipped(why) => {
+                level_json
+                    .push(serde_json::json!({ "level": l, "n_pb": lv.n_pb(), "skipped": why }));
+                continue;
             }
-            t.median_rank.push(median.map_or(f32::NAN, |m| m as f32));
-            t.rank_spread
-                .push(match (known.iter().max(), known.iter().min()) {
-                    (Some(hi), Some(lo)) => (hi - lo) as f32,
-                    _ => f32::NAN,
-                });
-            t.label.push(label.as_str().into());
-        }
+        };
+        let views: Vec<&View> = models
+            .iter()
+            .map(|m| m.views[l].as_ref().expect("a view at every judged level"))
+            .collect();
+        let pairs = candidates(&views, args.knn);
+        let ranks: Vec<Vec<u32>> = views.iter().map(|v| v.pair_ranks(&pairs)).collect();
+        let sorted: Vec<Vec<u32>> = (0..pairs.len()).map(|c| sorted_known(&ranks, c)).collect();
+        let label_count = pair_tab.push_level(l, lv, b, &pairs, &ranks, &sorted);
 
         for (mi, name) in names.iter().enumerate() {
-            let (t, charges) = tally(&ranks, mi, knn, far);
-            let pb_label = pb_labels(p, &pairs, &charges);
+            let ch = charges(&ranks[mi], &sorted, b);
+            let pb_label = pb_labels(lv.n_pb(), &pairs, &ch);
             cell_cols.push((
                 format!("{name}.L{l}").into(),
                 lv.pb_of_cell
                     .iter()
-                    .map(|&pb| {
-                        if pb == usize::MAX {
-                            Box::from("")
-                        } else {
-                            pb_label[pb].clone()
-                        }
-                    })
+                    .map(|&pb| Box::from(pb_label.get(pb).copied().unwrap_or("")))
                     .collect(),
             ));
-            summary_tab.push(l, name, p, far, &t);
-            info!(
-                "Level {l}, {name}: {} near pairs; merges {}, splits {}",
-                t.near, t.merges, t.splits
-            );
+            let row = summary_tab.push(l, name, lv.n_pb(), b, near_count(&ranks[mi], b), &ch);
+            info!("Level {l}, {name}: merges {}, splits {}", row.0, row.1);
         }
 
-        let count = |x: PairLabel| labels.iter().filter(|&&y| y == x).count();
         info!(
-            "Level {l}: {} candidate pairs; similar {}, different {}, ambiguous {} (far > {far})",
+            "Level {l}: {} candidate pairs; similar {}, different {}, ambiguous {}",
             pairs.len(),
-            count(PairLabel::Similar),
-            count(PairLabel::Different),
-            count(PairLabel::Ambiguous),
+            label_count[0],
+            label_count[1],
+            label_count[2],
         );
         level_json.push(serde_json::json!({
             "level": l,
-            "n_pb": p,
+            "n_pb": lv.n_pb(),
             "n_pairs": pairs.len(),
-            "similar": count(PairLabel::Similar),
-            "different": count(PairLabel::Different),
-            "ambiguous": count(PairLabel::Ambiguous),
-            "far_rank": far,
+            "similar": label_count[0],
+            "different": label_count[1],
+            "ambiguous": label_count[2],
+            "near_rank": b.near,
+            "far_rank": b.far,
         }));
     }
 
-    // Write.
     pair_tab.write(&format!("{}.critique.pairs.parquet", args.out), &names)?;
     summary_tab.write(&format!("{}.critique.summary.parquet", args.out))?;
     let cols: Vec<(Box<str>, Column)> = cell_cols
@@ -602,10 +605,10 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
     )?;
     let record = serde_json::json!({
         "partition": part_path,
-        "models": models.iter().zip(&manifests).map(|(m, (man, _))| serde_json::json!({
-            "name": m.name,
-            "kind": man.kind.as_str(),
-            "prefix": man.prefix,
+        "models": models.iter().zip(&names).map(|(m, name)| serde_json::json!({
+            "name": name,
+            "kind": m.kind,
+            "prefix": m.prefix,
             "coverage": m.coverage,
         })).collect::<Vec<_>>(),
         "params": {
@@ -626,32 +629,55 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Short, unique names: the run prefix's file name, with `_2`, `_3`, … on repeats.
-fn model_names(manifests: &[(RunManifest, std::path::PathBuf)]) -> Vec<String> {
-    let mut seen: FxHashMap<String, usize> = FxHashMap::default();
-    manifests
-        .iter()
-        .map(|(m, _)| {
-            let base = Path::new(&m.prefix).file_name().map_or_else(
-                || m.kind.as_str().to_string(),
-                |s| s.to_string_lossy().into_owned(),
-            );
-            let n = seen.entry(base.clone()).or_insert(0);
-            *n += 1;
-            if *n == 1 {
-                base
-            } else {
-                format!("{base}_{n}")
-            }
-        })
-        .collect()
+/// The union of every view's top-`k` pairs, sorted.
+fn candidates(views: &[&View], k: usize) -> Vec<(u32, u32)> {
+    let mut pairs: Vec<(u32, u32)> = views.iter().flat_map(|v| v.top_k_pairs(k)).collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
 }
 
+/// The partition run's per-cell partition: `(path, levels coarsest-first, cells)`.
+///
+/// The per-cell `cell_to_pb`, not `cell_to_pb_all`: that one also holds the
+/// cells QC kept out of the per-cell outputs, which no model has a latent row for.
+fn load_partition(
+    args: &CritiqueArgs,
+    manifests: &[(RunManifest, PathBuf)],
+) -> anyhow::Result<(String, InheritedPartition)> {
+    let (pm, pdir) = match args.partition.as_deref() {
+        Some(p) => senna::run_manifest::load_for(p)?,
+        None => manifests
+            .iter()
+            .find(|(m, _)| m.outputs.cell_to_pb.is_some())
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "none of the models wrote a cell → pseudobulk partition; \
+                     pass --partition with a topic, masked or vae run"
+                )
+            })?,
+    };
+    let rel = pm.outputs.cell_to_pb.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{}: no cell_to_pb in the manifest; the partition run must be a topic, masked or vae run",
+            pm.prefix
+        )
+    })?;
+    let path = resolve(&pdir, rel).to_string_lossy().into_owned();
+    info!("Partition: {path}");
+    Ok((path.clone(), load_cell_to_pb_raw(&path)?))
+}
+
+/// Read one model's cell latent, align it to the partition, and reduce it to
+/// its views at the judged levels; the latent itself is not kept.
 fn load_model(
     m: &RunManifest,
     dir: &Path,
     name: &str,
     part_cells: &[Box<str>],
+    levels: &[Level],
+    judged: &[Judged],
 ) -> anyhow::Result<Model> {
     let rel = m.outputs.geometry_latent().ok_or_else(|| {
         anyhow::anyhow!(
@@ -660,15 +686,20 @@ fn load_model(
         )
     })?;
     let path = resolve(dir, rel).to_string_lossy().into_owned();
-    let MatWithNames { rows, mat, .. } = Mat::from_parquet_with_row_names(&path, Some(0))?;
+    let MatWithNames {
+        rows,
+        mat: mut latent,
+        ..
+    } = Mat::from_parquet_with_row_names(&path, Some(0))?;
     let row_of_cell = tolerant_align(part_cells, &rows);
     let matched = row_of_cell.iter().filter(|&&r| r != usize::MAX).count();
     let coverage = matched as f64 / part_cells.len().max(1) as f64;
+    let space = m.kind.cell_space();
     info!(
         "Model {name} ({}): {} cells × {} dims from {path}; {:.1}% of the partition's cells",
         m.kind.as_str(),
         rows.len(),
-        mat.ncols(),
+        latent.ncols(),
         100.0 * coverage
     );
     anyhow::ensure!(
@@ -677,18 +708,27 @@ fn load_model(
          is it a fit of the same data?",
         100.0 * coverage
     );
+    if space == CellSpace::LogSimplex {
+        latent.apply(|v| *v = v.exp());
+    }
+    let views = levels
+        .iter()
+        .zip(judged)
+        .map(|(lv, j)| {
+            matches!(j, Judged::Bounds(_)).then(|| View::build(&latent, &row_of_cell, space, lv))
+        })
+        .collect();
     Ok(Model {
-        name: name.to_string(),
-        space: m.kind.cell_space(),
-        row_of_cell,
-        latent: mat,
+        kind: m.kind.as_str(),
+        prefix: m.prefix.clone(),
         coverage,
+        views,
     })
 }
 
 /// One row per candidate pair, as `{out}.critique.pairs.parquet`.
+#[derive(Default)]
 struct PairTable {
-    key: Vec<Box<str>>,
     level: Vec<i32>,
     pb_a: Vec<i32>,
     pb_b: Vec<i32>,
@@ -697,27 +737,57 @@ struct PairTable {
     /// Per model; `NaN` where the model has no cells in either pseudobulk.
     rank: Vec<Vec<f32>>,
     median_rank: Vec<f32>,
-    rank_spread: Vec<f32>,
+    /// Largest minus smallest known rank. Not `rank_spread`: per-model columns
+    /// are `rank_{model}`, and a run named `spread` would collide.
+    spread: Vec<f32>,
     label: Vec<Box<str>>,
 }
 
 impl PairTable {
-    fn new(n_models: usize) -> Self {
-        PairTable {
-            key: Vec::new(),
-            level: Vec::new(),
-            pb_a: Vec::new(),
-            pb_b: Vec::new(),
-            n_cells_a: Vec::new(),
-            n_cells_b: Vec::new(),
-            rank: vec![Vec::new(); n_models],
-            median_rank: Vec::new(),
-            rank_spread: Vec::new(),
-            label: Vec::new(),
+    /// Add one level's pairs; returns how many are similar, different and ambiguous.
+    fn push_level(
+        &mut self,
+        l: usize,
+        lv: &Level,
+        b: Bounds,
+        pairs: &[(u32, u32)],
+        ranks: &[Vec<u32>],
+        sorted: &[Vec<u32>],
+    ) -> [usize; 3] {
+        self.rank.resize_with(ranks.len(), Vec::new);
+        let mut count = [0usize; 3];
+        for (c, &(a, b_)) in pairs.iter().enumerate() {
+            let (a, b_) = (a as usize, b_ as usize);
+            let med = median(&sorted[c]);
+            let label = PairLabel::of(med, b);
+            count[label as usize] += 1;
+            self.level.push(l as i32);
+            self.pb_a.push(lv.pb_id[a] as i32);
+            self.pb_b.push(lv.pb_id[b_] as i32);
+            self.n_cells_a.push(lv.n_cells[a] as i32);
+            self.n_cells_b.push(lv.n_cells[b_] as i32);
+            for (col, rk) in self.rank.iter_mut().zip(ranks) {
+                col.push(if rk[c] == u32::MAX {
+                    f32::NAN
+                } else {
+                    rk[c] as f32
+                });
+            }
+            self.median_rank.push(med.map_or(f32::NAN, |m| m as f32));
+            self.spread
+                .push(match (sorted[c].first(), sorted[c].last()) {
+                    (Some(lo), Some(hi)) => (hi - lo) as f32,
+                    _ => f32::NAN,
+                });
+            self.label.push(label.as_str().into());
         }
+        count
     }
 
     fn write(&self, path: &str, names: &[String]) -> anyhow::Result<()> {
+        let key: Vec<Box<str>> = (0..self.level.len())
+            .map(|i| format!("{}:{}-{}", self.level[i], self.pb_a[i], self.pb_b[i]).into())
+            .collect();
         let rank_names: Vec<Box<str>> = names.iter().map(|n| format!("rank_{n}").into()).collect();
         let mut cols: Vec<(Box<str>, Column)> = vec![
             ("level".into(), Column::I32(&self.level)),
@@ -730,9 +800,9 @@ impl PairTable {
             cols.push((name.clone(), Column::F32(col)));
         }
         cols.push(("median_rank".into(), Column::F32(&self.median_rank)));
-        cols.push(("rank_spread".into(), Column::F32(&self.rank_spread)));
+        cols.push(("spread".into(), Column::F32(&self.spread)));
         cols.push(("label".into(), Column::Str(&self.label)));
-        write_named_table(path, "pair", &self.key, &cols)
+        write_named_table(path, "pair", &key, &cols)
     }
 }
 
@@ -750,20 +820,31 @@ struct SummaryTable {
 }
 
 impl SummaryTable {
-    fn push(&mut self, level: usize, model: &str, n_pb: usize, far: u32, t: &Tally) {
+    /// Add one model's row; returns its `(merges, splits)`.
+    fn push(
+        &mut self,
+        level: usize,
+        model: &str,
+        n_pb: usize,
+        b: Bounds,
+        near: usize,
+        charges: &[Charge],
+    ) -> (usize, usize) {
+        let merges = charges.iter().filter(|&&c| c == Charge::Merge).count();
+        let splits = charges.iter().filter(|&&c| c == Charge::Split).count();
         self.model.push(model.into());
         self.level.push(level as i32);
         self.n_pb.push(n_pb as i32);
-        self.far_rank.push(far as i32);
-        self.near.push(t.near as i32);
-        self.merges.push(t.merges as i32);
-        self.splits.push(t.splits as i32);
-        let total = t.merges + t.splits;
-        self.merge_share.push(if total == 0 {
+        self.far_rank.push(b.far as i32);
+        self.near.push(near as i32);
+        self.merges.push(merges as i32);
+        self.splits.push(splits as i32);
+        self.merge_share.push(if merges + splits == 0 {
             f32::NAN
         } else {
-            t.merges as f32 / total as f32
+            merges as f32 / (merges + splits) as f32
         });
+        (merges, splits)
     }
 
     fn write(&self, path: &str) -> anyhow::Result<()> {
