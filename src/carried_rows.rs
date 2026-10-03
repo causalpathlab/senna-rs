@@ -4,16 +4,66 @@
 //! by [`crate::run_manifest::write_run_manifest`] for every engine.
 
 use data_beans::aux::feature_types::{
-    feature_types_path, read_feature_types, write_feature_types, FeatureType, GENE_TYPE,
+    feature_rows, feature_types_path, is_data_feature_type, read_feature_types,
+    write_feature_types, FeatureType, GENE_TYPE,
 };
 use data_beans::aux::frozen_features::FrozenFeatureHost;
 use graph_embedding_util as ge;
 use legume_numeric::matrix::dmatrix_util::concatenate_vertical;
-use legume_numeric::matrix::parquet::peek_parquet_field_names;
+use legume_numeric::matrix::parquet::{peek_parquet_field_names, read_parquet_string_column};
 use legume_numeric::matrix::traits::IoOps;
 use log::info;
 use nalgebra::DMatrix;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
+
+/// Which rows of a table (`names`, in order) may match a data feature, and
+/// `types` (the types table written beside it) when it describes those rows:
+/// by their types, a gene or a genomic window — not a term, word or cell
+/// type that may share a gene's name. Without types, or with a types table
+/// written for another table (an older run's under the same prefix, which
+/// `what` names in a warning), every row may match and is taken as a gene.
+#[must_use]
+pub fn matchable_rows<'a>(
+    types: Option<&'a [FeatureType]>,
+    names: &[Box<str>],
+    what: &str,
+) -> (Vec<bool>, Option<&'a [FeatureType]>) {
+    if let Some(t) = types {
+        if let Some(marks) = feature_rows(t, names) {
+            return (marks, Some(t));
+        }
+        log::warn!(
+            "the types table beside {what} lists other rows (left by another run?); \
+             every row of {what} is taken as a gene"
+        );
+    }
+    (vec![true; names.len()], None)
+}
+
+/// Remove `{out_prefix}.feature_types.parquet` when it is older than the
+/// run's ρ at `rho_path` and does not list its rows: another run's, left
+/// under this prefix, which would otherwise be read as describing this one.
+pub fn clear_stale_types(out_prefix: &str, rho_path: &str) -> anyhow::Result<()> {
+    let path = feature_types_path(out_prefix);
+    if !older(&path, rho_path) {
+        return Ok(());
+    }
+    let Some(types) = read_feature_types(out_prefix)? else {
+        return Ok(());
+    };
+    let rows = read_parquet_string_column(rho_path, 0)?;
+    if feature_rows(&types, &rows).is_none() {
+        std::fs::remove_file(&path)?;
+        info!("Removed {path}: it describes an earlier run's table, not {rho_path}");
+    }
+    Ok(())
+}
+
+/// Whether file `a` was last written before file `b`.
+fn older(a: &str, b: &str) -> bool {
+    let modified = |p: &str| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    matches!((modified(a), modified(b)), (Some(x), Some(y)) if x < y)
+}
 
 /// The rows of a given table that pin nothing on this run's feature axis,
 /// kept to write back beside the trained table. Only meaningful when the
@@ -38,7 +88,8 @@ impl CarriedRows {
     /// `None` with a log line when `pins` is false: then the trained rows
     /// leave the table's space and the leftover rows would not belong beside
     /// them. `flag` names the caller's mode for that line; `src_types` is the
-    /// source run's types table (empty when it wrote none: all genes).
+    /// source's types, one per source row in order ([`types_of_rows`]; empty
+    /// when it has none: all genes).
     pub fn from_unmatched(
         pins: bool,
         flag: &str,
@@ -55,21 +106,33 @@ impl CarriedRows {
             );
             return Ok(None);
         }
+        anyhow::ensure!(
+            src_types.is_empty() || src_types.len() == host.src_names.len(),
+            "{dictionary_path}: {} types for {} rows",
+            src_types.len(),
+            host.src_names.len()
+        );
         let used: FxHashSet<usize> = host.keep_src_indices.iter().copied().collect();
+        let taken_exact: FxHashSet<&Box<str>> = target_names.iter().collect();
         let taken: FxHashSet<Box<str>> = target_names
             .iter()
             .flat_map(|n| [n.clone(), kind.canonicalize(n)])
-            .collect();
-        let src_types: FxHashMap<&str, &str> = src_types
-            .iter()
-            .map(|(n, t)| (n.as_ref(), t.as_ref()))
             .collect();
         let idx: Vec<usize> = host
             .src_names
             .iter()
             .enumerate()
+            // A row named as a feature of the axis would come out twice. A
+            // gene or region row counts by its canonical name too; a term,
+            // word or cell type is its own row, so only by its exact name.
             .filter(|(i, n)| {
-                !used.contains(i) && !taken.contains(*n) && !taken.contains(&kind.canonicalize(n))
+                let data = src_types
+                    .get(*i)
+                    .is_none_or(|(_, t)| is_data_feature_type(t));
+                let matched_or_taken = used.contains(i)
+                    || taken_exact.contains(*n)
+                    || data && taken.contains(&kind.canonicalize(n));
+                !matched_or_taken
             })
             .map(|(i, _)| i)
             .collect();
@@ -77,9 +140,14 @@ impl CarriedRows {
             return Ok(None);
         }
         let names: Vec<Box<str>> = idx.iter().map(|&i| host.src_names[i].clone()).collect();
-        let types: Vec<Box<str>> = names
+        // By position: a cell type and a gene may share a name.
+        let types: Vec<Box<str>> = idx
             .iter()
-            .map(|n| Box::from(src_types.get(n.as_ref()).copied().unwrap_or(GENE_TYPE)))
+            .map(|&i| {
+                src_types
+                    .get(i)
+                    .map_or_else(|| GENE_TYPE.into(), |(_, t)| t.clone())
+            })
             .collect();
         let rows = host.src_e_feat.select_rows(idx.iter());
         Ok(Some(Self {
@@ -125,14 +193,20 @@ impl CarriedRows {
             );
             return Ok(());
         }
+        // A types table an earlier run left here is replaced; one written
+        // since the table that disagrees with it is a writer's fault.
+        let types_path = feature_types_path(out_prefix);
         let own_types: Vec<Box<str>> = match read_feature_types(out_prefix)? {
-            Some(rows) => {
-                anyhow::ensure!(
-                    rows.len() == n && rows.iter().zip(&table.rows).all(|((a, _), b)| a == b),
-                    "{}: rows disagree with {rho_path}",
-                    feature_types_path(out_prefix)
-                );
+            Some(rows) if feature_rows(&rows, &table.rows).is_some() => {
                 rows.into_iter().map(|(_, t)| t).collect()
+            }
+            Some(_) => {
+                anyhow::ensure!(
+                    older(&types_path, rho_path),
+                    "{types_path}: rows disagree with {rho_path}"
+                );
+                log::warn!("{types_path} describes an earlier run's table; replacing it");
+                vec![GENE_TYPE.into(); n]
             }
             None => vec![GENE_TYPE.into(); n],
         };

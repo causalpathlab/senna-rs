@@ -306,6 +306,104 @@ fn appending_keeps_the_run_s_own_types() {
     assert_eq!(types, ["gene", "cell_type", "gene", "term"]);
 }
 
+/// Set `path`'s modification time `secs` seconds back.
+fn age(path: &str, secs: u64) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+        .unwrap();
+}
+
+/// A types table left at the output prefix by an older run, for other rows,
+/// is replaced rather than refusing the finished run; one written since the
+/// run's table that disagrees with it is refused.
+#[test]
+fn appending_replaces_a_types_table_another_run_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("run").to_string_lossy().into_owned();
+    write_run_table(&out, "feature_embedding.parquet", "gene", &["A", "B"]);
+    write_feature_types(&out, &[Box::from("X")], &[Box::from("word")]).unwrap();
+    assert!(carried_fixture()
+        .append_to(&out, "feature_embedding.parquet")
+        .is_err());
+    age(
+        &data_beans::aux::feature_types::feature_types_path(&out),
+        60,
+    );
+    carried_fixture()
+        .append_to(&out, "feature_embedding.parquet")
+        .unwrap();
+    let types = data_beans::aux::feature_types::read_feature_types(&out)
+        .unwrap()
+        .unwrap();
+    let types: Vec<&str> = types.iter().map(|(_, t)| t.as_ref()).collect();
+    assert_eq!(types, ["gene", "gene", "gene", "term"]);
+}
+
+/// A cell type named like a gene, earlier in the table, neither pins the
+/// gene nor comes through as one.
+#[test]
+fn a_cell_type_named_like_a_gene_does_not_stand_in_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = dir.path().join("run").to_string_lossy().into_owned();
+    let names: Vec<Box<str>> = ["CD4", "CD4"].iter().map(|s| Box::from(*s)).collect();
+    DMatrix::<f32>::from_row_slice(2, 2, &[9.0, 9.0, 1.0, -1.0])
+        .to_parquet_with_names(
+            &format!("{prefix}.feature_embedding.parquet"),
+            (Some(&names), Some("feature")),
+            None,
+        )
+        .unwrap();
+    write_feature_types(
+        &prefix,
+        &names,
+        &[Box::from("cell_type"), Box::from("gene")],
+    )
+    .unwrap();
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG1_CD4")];
+    let (f, carried) = load_preset_genes(
+        &prefix,
+        PresetMode::Freeze,
+        &axis,
+        &ge::FeatureNameKind::Gene { delim: '_' },
+    )
+    .unwrap();
+    assert_eq!(f.ids, vec![0]);
+    assert_eq!(f.rows, vec![1.0, -1.0]);
+    // The cell type is its own row: carried through, as a cell type.
+    let c = carried.unwrap();
+    assert_eq!(c.names, vec![Box::from("CD4")]);
+    assert_eq!(c.types, vec![Box::from("cell_type")]);
+}
+
+/// With nothing carried, a types table an earlier run left at the output
+/// prefix, for other rows, is removed; the run's own is kept.
+#[test]
+fn a_stale_types_table_is_cleared_when_nothing_is_carried() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("run").to_string_lossy().into_owned();
+    let rho = write_run_table(&out, "feature_embedding.parquet", "gene", &["A", "B"]);
+    let types = data_beans::aux::feature_types::feature_types_path(&out);
+    write_feature_types(
+        &out,
+        &[Box::from("A"), Box::from("B")],
+        &[Box::from("gene"), Box::from("word")],
+    )
+    .unwrap();
+    age(&types, 60);
+    senna::carried_rows::clear_stale_types(&out, &rho).unwrap();
+    assert!(
+        std::path::Path::new(&types).is_file(),
+        "it lists the rows: kept"
+    );
+    write_feature_types(&out, &[Box::from("X")], &[Box::from("word")]).unwrap();
+    age(&types, 60);
+    senna::carried_rows::clear_stale_types(&out, &rho).unwrap();
+    assert!(!std::path::Path::new(&types).is_file());
+}
+
 /// A carried name the run wrote itself is superseded by the run's row; a
 /// width that disagrees is refused and the table is left as written.
 #[test]

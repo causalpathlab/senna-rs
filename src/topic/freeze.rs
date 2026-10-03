@@ -16,20 +16,28 @@
 //!    `data_vec.row_names()` returns after masking).
 
 use data_beans::aux::feature_names::FeatureNameKind;
+use data_beans::aux::feature_types::FeatureType;
 use data_beans::aux::frozen_features::{
-    load_frozen_feature_host, FrozenFeatureHost, FrozenLoadArgs,
+    load_frozen_feature_host_matching, FrozenFeatureHost, FrozenLoadArgs,
 };
 use legume_numeric::matrix::parquet::peek_parquet_field_names;
 use legume_numeric::matrix::traits::IoOps;
 use nalgebra::DMatrix;
 use rustc_hash::FxHashSet;
-use std::cell::RefCell;
+use senna::carried_rows::matchable_rows;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub struct FrozenFeatureSpec {
     pub dictionary_path: String,
     pub bias_path: Option<String>,
     pub name_kind: FeatureNameKind,
+    /// The types table written beside the source, when there is one. Only
+    /// its gene and region rows match the data's features: a term, word or
+    /// cell-type row of an `fne` table may share a gene's name.
+    written_types: Option<Rc<[FeatureType]>>,
+    /// Whether `written_types` lists the source's rows, once checked.
+    types_fit: Rc<Cell<Option<bool>>>,
     /// Cached source canonical-name set, populated lazily on first
     /// `mask_fn` invocation. `Rc<RefCell<...>>` so the closure can share
     /// the cache with the owning spec without taking `&mut self`.
@@ -55,6 +63,9 @@ impl FrozenFeatureSpec {
     ) -> anyhow::Result<Self> {
         let (dictionary_path, bias_path) = senna::run_manifest::resolve_feature_embedding(prefix)
             .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
+        let written_types = senna::run_manifest::feature_types_beside(&dictionary_path)
+            .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?
+            .map(Rc::from);
         match &bias_path {
             Some(b) => log::info!("Frozen feature side: {dictionary_path} + {b}"),
             None => log::info!("Frozen feature side: {dictionary_path} (bias = 0)"),
@@ -63,6 +74,8 @@ impl FrozenFeatureSpec {
             dictionary_path,
             bias_path,
             name_kind,
+            written_types,
+            types_fit: Rc::new(Cell::new(None)),
             source_canon: Rc::new(RefCell::new(None)),
         })
     }
@@ -74,13 +87,24 @@ impl FrozenFeatureSpec {
         let kind = self.name_kind.clone();
         let canon_cell = self.source_canon.clone();
         let dict_path = self.dictionary_path.clone();
+        let written = self.written_types.clone();
+        let fit = self.types_fit.clone();
         Box::new(move |row_names: &[Box<str>]| -> anyhow::Result<Vec<bool>> {
             if canon_cell.borrow().is_none() {
                 let dict = <DMatrix<f32> as IoOps>::from_parquet(&dict_path)?;
-                let mut set: FxHashSet<Box<str>> = FxHashSet::default();
-                for name in &dict.rows {
-                    set.insert(kind.canonicalize(name));
-                }
+                let marked = marks(written.as_deref(), &fit, &dict.rows, &dict_path);
+                let set: FxHashSet<Box<str>> = dict
+                    .rows
+                    .iter()
+                    .zip(&marked)
+                    .filter(|(_, &m)| m)
+                    .map(|(n, _)| kind.canonicalize(n))
+                    .collect();
+                anyhow::ensure!(
+                    !set.is_empty(),
+                    "{dict_path}: no row may match a feature (its types table marks no \
+                     gene or region row)"
+                );
                 log::info!(
                     "Frozen feature side: {} canonical names loaded from {}",
                     set.len(),
@@ -122,12 +146,57 @@ impl FrozenFeatureSpec {
         &self,
         post_load_gene_names: &[Box<str>],
     ) -> anyhow::Result<FrozenFeatureHost> {
-        load_frozen_feature_host(FrozenLoadArgs {
-            dictionary_path: &self.dictionary_path,
-            bias_path: self.bias_path.as_deref(),
-            target_feature_names: post_load_gene_names,
-            name_kind: self.name_kind.clone(),
-            source_name_map: None,
-        })
+        load_frozen_feature_host_matching(
+            FrozenLoadArgs {
+                dictionary_path: &self.dictionary_path,
+                bias_path: self.bias_path.as_deref(),
+                target_feature_names: post_load_gene_names,
+                name_kind: self.name_kind.clone(),
+                source_name_map: None,
+            },
+            |names| {
+                Ok(marks(
+                    self.written_types.as_deref(),
+                    &self.types_fit,
+                    names,
+                    &self.dictionary_path,
+                ))
+            },
+        )
+    }
+
+    /// The types of `host`'s source rows for the rows carried through, empty
+    /// without them (every row a gene).
+    pub fn carried_types(&self, host: &FrozenFeatureHost) -> &[FeatureType] {
+        marks(
+            self.written_types.as_deref(),
+            &self.types_fit,
+            &host.src_names,
+            &self.dictionary_path,
+        );
+        match (self.types_fit.get(), self.written_types.as_deref()) {
+            (Some(true), Some(t)) => t,
+            _ => &[],
+        }
     }
 }
+
+/// [`matchable_rows`] of the source's rows `names`, its types checked against
+/// them once (`fit`): a misfit is warned about the first time only.
+fn marks(
+    written: Option<&[FeatureType]>,
+    fit: &Cell<Option<bool>>,
+    names: &[Box<str>],
+    what: &str,
+) -> Vec<bool> {
+    if fit.get() == Some(false) {
+        return vec![true; names.len()];
+    }
+    let (marks, types) = matchable_rows(written, names, what);
+    fit.set(Some(types.is_some()));
+    marks
+}
+
+#[cfg(test)]
+#[path = "tests/freeze.rs"]
+mod tests;
