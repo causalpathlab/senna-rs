@@ -27,7 +27,7 @@ pub struct FeatureEmbeddingArgs {
                      in place of the prefix; a table that is not the ρ the manifest\n\
                      records (an older run's co-embed) is refused.\n\
                      A `senna fne` run qualifies: its table also holds terms, words and\n\
-                     cell types, and only its gene rows are read.\n\
+                     cell types, and only its gene and genomic-window rows are matched.\n\
                      \n\
                      Genes match by canonical name (`ENSG…_TP53` is `TP53`).\n\
                      A matched gene keeps its row for the whole fit; the rest of the\n\

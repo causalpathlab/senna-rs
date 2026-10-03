@@ -16,18 +16,18 @@ use log::info;
 use nalgebra::DMatrix;
 use rustc_hash::FxHashSet;
 
-/// The types of a table's rows (`names`, in order) from the types table
-/// written beside it: `None` when it wrote none, or one for another table
-/// (an older run's under the same prefix), which `what` names in a warning.
-/// Without types every row is taken as a gene.
+/// `types`, the types table written beside a table, when it describes that
+/// table's rows (`names`, in order); `None` when there is none, or it was
+/// written for another table (an older run's under the same prefix), which
+/// `what` names in a warning. Without types every row is taken as a gene.
 #[must_use]
-pub fn types_of_rows(
-    types: Option<Vec<FeatureType>>,
+pub fn types_of_rows<'a>(
+    types: Option<&'a [FeatureType]>,
     names: &[Box<str>],
     what: &str,
-) -> Option<Vec<FeatureType>> {
+) -> Option<&'a [FeatureType]> {
     let types = types?;
-    if feature_rows(&types, names).is_none() {
+    if feature_rows(types, names).is_none() {
         log::warn!(
             "the types table beside {what} lists other rows (left by another run?); \
              every row of {what} is taken as a gene"
@@ -35,6 +35,31 @@ pub fn types_of_rows(
         return None;
     }
     Some(types)
+}
+
+/// Remove `{out_prefix}.feature_types.parquet` when it is older than the
+/// run's ρ at `rho_path` and does not list its rows: another run's, left
+/// under this prefix, which would otherwise be read as describing this one.
+pub fn clear_stale_types(out_prefix: &str, rho_path: &str) -> anyhow::Result<()> {
+    let path = feature_types_path(out_prefix);
+    if !std::path::Path::new(&path).is_file() || !older(&path, rho_path) {
+        return Ok(());
+    }
+    let Some(types) = read_feature_types(out_prefix)? else {
+        return Ok(());
+    };
+    let table = DMatrix::<f32>::from_parquet(rho_path)?;
+    if feature_rows(&types, &table.rows).is_none() {
+        std::fs::remove_file(&path)?;
+        info!("Removed {path}: it describes an earlier run's table, not {rho_path}");
+    }
+    Ok(())
+}
+
+/// Whether file `a` was last written before file `b`.
+fn older(a: &str, b: &str) -> bool {
+    let modified = |p: &str| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    matches!((modified(a), modified(b)), (Some(x), Some(y)) if x < y)
 }
 
 /// Which of `n` rows may match a data feature: by their types (see
@@ -89,7 +114,14 @@ impl CarriedRows {
             );
             return Ok(None);
         }
+        anyhow::ensure!(
+            src_types.is_empty() || src_types.len() == host.src_names.len(),
+            "{dictionary_path}: {} types for {} rows",
+            src_types.len(),
+            host.src_names.len()
+        );
         let used: FxHashSet<usize> = host.keep_src_indices.iter().copied().collect();
+        let taken_exact: FxHashSet<&Box<str>> = target_names.iter().collect();
         let taken: FxHashSet<Box<str>> = target_names
             .iter()
             .flat_map(|n| [n.clone(), kind.canonicalize(n)])
@@ -98,8 +130,16 @@ impl CarriedRows {
             .src_names
             .iter()
             .enumerate()
+            // A row named as a feature of the axis would come out twice. A
+            // gene or region row counts by its canonical name too; a term,
+            // word or cell type is its own row, so only by its exact name.
             .filter(|(i, n)| {
-                !used.contains(i) && !taken.contains(*n) && !taken.contains(&kind.canonicalize(n))
+                let data = src_types
+                    .get(*i)
+                    .is_none_or(|(_, t)| is_data_feature_type(t));
+                !used.contains(i)
+                    && !taken_exact.contains(*n)
+                    && !(data && taken.contains(&kind.canonicalize(n)))
             })
             .map(|(i, _)| i)
             .collect();
@@ -113,7 +153,7 @@ impl CarriedRows {
             .map(|&i| {
                 src_types
                     .get(i)
-                    .map_or(GENE_TYPE.into(), |(_, t)| t.clone())
+                    .map_or_else(|| GENE_TYPE.into(), |(_, t)| t.clone())
             })
             .collect();
         let rows = host.src_e_feat.select_rows(idx.iter());
@@ -160,12 +200,23 @@ impl CarriedRows {
             );
             return Ok(());
         }
-        // A types table this run did not write (an older run's) is replaced.
-        let own_types: Vec<Box<str>> =
-            match types_of_rows(read_feature_types(out_prefix)?, &table.rows, rho_path) {
-                Some(rows) => rows.into_iter().map(|(_, t)| t).collect(),
-                None => vec![GENE_TYPE.into(); n],
-            };
+        // A types table an earlier run left here is replaced; one written
+        // since the table that disagrees with it is a writer's fault.
+        let types_path = feature_types_path(out_prefix);
+        let own_types: Vec<Box<str>> = match read_feature_types(out_prefix)? {
+            Some(rows) if feature_rows(&rows, &table.rows).is_some() => {
+                rows.into_iter().map(|(_, t)| t).collect()
+            }
+            Some(_) => {
+                anyhow::ensure!(
+                    older(&types_path, rho_path),
+                    "{types_path}: rows disagree with {rho_path}"
+                );
+                log::warn!("{types_path} describes an earlier run's table; replacing it");
+                vec![GENE_TYPE.into(); n]
+            }
+            None => vec![GENE_TYPE.into(); n],
+        };
 
         let m = keep.len();
         let mat = concatenate_vertical(&[table.mat, self.rows.select_rows(keep.iter())])?;

@@ -316,7 +316,7 @@ fn probe_feature_embedding(
 /// by [`resolve_feature_embedding`]), when it wrote one. Like the bias it
 /// sits under the table's stem, which a flag naming the table or the
 /// manifest is not. Whether it describes `rho`'s rows is checked against
-/// them once read ([`crate::carried_rows::types_of_rows`]).
+/// them once read ([`crate::carried_rows::types_of_rows`]), by every reader.
 pub fn feature_types_beside(
     rho: &str,
 ) -> anyhow::Result<Option<Vec<data_beans::aux::feature_types::FeatureType>>> {
@@ -1969,11 +1969,14 @@ pub struct RunDescription<'a> {
 /// the manifest's own directory — even when the run directory is moved
 /// after writing.
 pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
-    if let Some(c) = desc.carried {
-        let suffix = desc
-            .feature_embedding_suffix
-            .ok_or_else(|| anyhow::anyhow!("{}: no ρ file to carry rows into", desc.prefix))?;
-        c.append_to(desc.prefix, suffix)?;
+    match (desc.carried, desc.feature_embedding_suffix) {
+        (Some(c), Some(suffix)) => c.append_to(desc.prefix, suffix)?,
+        (Some(_), None) => anyhow::bail!("{}: no ρ file to carry rows into", desc.prefix),
+        (None, Some(suffix)) => crate::carried_rows::clear_stale_types(
+            desc.prefix,
+            &format!("{}.{suffix}", desc.prefix),
+        )?,
+        (None, None) => {}
     }
     let basename = Path::new(desc.prefix).file_name().map_or_else(
         || desc.prefix.to_string(),

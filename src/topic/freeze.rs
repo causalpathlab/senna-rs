@@ -87,8 +87,8 @@ impl FrozenFeatureSpec {
         Box::new(move |row_names: &[Box<str>]| -> anyhow::Result<Vec<bool>> {
             if canon_cell.borrow().is_none() {
                 let dict = <DMatrix<f32> as IoOps>::from_parquet(&dict_path)?;
-                let types = types_of_rows(written.clone(), &dict.rows, &dict_path);
-                let marked = matchable_rows(types.as_deref(), dict.rows.len());
+                let types = types_of_rows(written.as_deref(), &dict.rows, &dict_path);
+                let marked = matchable_rows(types, dict.rows.len());
                 let set: FxHashSet<Box<str>> = dict
                     .rows
                     .iter()
@@ -98,7 +98,8 @@ impl FrozenFeatureSpec {
                     .collect();
                 anyhow::ensure!(
                     !set.is_empty(),
-                    "{dict_path}: none of its rows is a gene or region, by its types table"
+                    "{dict_path}: no row may match a feature (its types table marks no \
+                     gene or region row)"
                 );
                 log::info!(
                     "Frozen feature side: {} canonical names loaded from {}",
@@ -149,22 +150,22 @@ impl FrozenFeatureSpec {
                 name_kind: self.name_kind.clone(),
                 source_name_map: None,
             },
-            |names| Ok(matchable_rows(self.types_of(names).as_deref(), names.len())),
+            |names| Ok(matchable_rows(self.types_of(names), names.len())),
         )
     }
 
     /// The source's types, one per row of `names` (its rows in order), when
     /// its types table lists them; warned about once, in [`Self::mask_fn`].
-    fn types_of(&self, names: &[Box<str>]) -> Option<Vec<FeatureType>> {
+    fn types_of(&self, names: &[Box<str>]) -> Option<&[FeatureType]> {
         self.written_types
-            .clone()
+            .as_deref()
             .filter(|t| feature_rows(t, names).is_some())
     }
 
     /// The types of `host`'s source rows for the rows carried through, empty
     /// without them (every row a gene).
-    pub fn carried_types(&self, host: &FrozenFeatureHost) -> Vec<FeatureType> {
-        self.types_of(&host.src_names).unwrap_or_default()
+    pub fn carried_types(&self, host: &FrozenFeatureHost) -> &[FeatureType] {
+        self.types_of(&host.src_names).unwrap_or(&[])
     }
 }
 
