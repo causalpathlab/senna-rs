@@ -316,7 +316,7 @@ fn probe_feature_embedding(
 /// by [`resolve_feature_embedding`]), when it wrote one. Like the bias it
 /// sits under the table's stem, which a flag naming the table or the
 /// manifest is not. Whether it describes `rho`'s rows is checked against
-/// them once read ([`crate::carried_rows::types_of_rows`]), by every reader.
+/// them once read ([`crate::carried_rows::matchable_rows`]), by every reader.
 pub fn feature_types_beside(
     rho: &str,
 ) -> anyhow::Result<Option<Vec<data_beans::aux::feature_types::FeatureType>>> {

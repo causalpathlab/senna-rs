@@ -10,31 +10,34 @@ use data_beans::aux::feature_types::{
 use data_beans::aux::frozen_features::FrozenFeatureHost;
 use graph_embedding_util as ge;
 use legume_numeric::matrix::dmatrix_util::concatenate_vertical;
-use legume_numeric::matrix::parquet::peek_parquet_field_names;
+use legume_numeric::matrix::parquet::{peek_parquet_field_names, read_parquet_string_column};
 use legume_numeric::matrix::traits::IoOps;
 use log::info;
 use nalgebra::DMatrix;
 use rustc_hash::FxHashSet;
 
-/// `types`, the types table written beside a table, when it describes that
-/// table's rows (`names`, in order); `None` when there is none, or it was
-/// written for another table (an older run's under the same prefix), which
-/// `what` names in a warning. Without types every row is taken as a gene.
+/// Which rows of a table (`names`, in order) may match a data feature, and
+/// `types` (the types table written beside it) when it describes those rows:
+/// by their types, a gene or a genomic window — not a term, word or cell
+/// type that may share a gene's name. Without types, or with a types table
+/// written for another table (an older run's under the same prefix, which
+/// `what` names in a warning), every row may match and is taken as a gene.
 #[must_use]
-pub fn types_of_rows<'a>(
+pub fn matchable_rows<'a>(
     types: Option<&'a [FeatureType]>,
     names: &[Box<str>],
     what: &str,
-) -> Option<&'a [FeatureType]> {
-    let types = types?;
-    if feature_rows(types, names).is_none() {
+) -> (Vec<bool>, Option<&'a [FeatureType]>) {
+    if let Some(t) = types {
+        if let Some(marks) = feature_rows(t, names) {
+            return (marks, Some(t));
+        }
         log::warn!(
             "the types table beside {what} lists other rows (left by another run?); \
              every row of {what} is taken as a gene"
         );
-        return None;
     }
-    Some(types)
+    (vec![true; names.len()], None)
 }
 
 /// Remove `{out_prefix}.feature_types.parquet` when it is older than the
@@ -42,14 +45,14 @@ pub fn types_of_rows<'a>(
 /// under this prefix, which would otherwise be read as describing this one.
 pub fn clear_stale_types(out_prefix: &str, rho_path: &str) -> anyhow::Result<()> {
     let path = feature_types_path(out_prefix);
-    if !std::path::Path::new(&path).is_file() || !older(&path, rho_path) {
+    if !older(&path, rho_path) {
         return Ok(());
     }
     let Some(types) = read_feature_types(out_prefix)? else {
         return Ok(());
     };
-    let table = DMatrix::<f32>::from_parquet(rho_path)?;
-    if feature_rows(&types, &table.rows).is_none() {
+    let rows = read_parquet_string_column(rho_path, 0)?;
+    if feature_rows(&types, &rows).is_none() {
         std::fs::remove_file(&path)?;
         info!("Removed {path}: it describes an earlier run's table, not {rho_path}");
     }
@@ -60,17 +63,6 @@ pub fn clear_stale_types(out_prefix: &str, rho_path: &str) -> anyhow::Result<()>
 fn older(a: &str, b: &str) -> bool {
     let modified = |p: &str| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     matches!((modified(a), modified(b)), (Some(x), Some(y)) if x < y)
-}
-
-/// Which of `n` rows may match a data feature: by their types (see
-/// [`types_of_rows`]), a gene or a genomic window — not a term, word or cell
-/// type that may share a gene's name; every row without types.
-#[must_use]
-pub fn matchable_rows(types: Option<&[FeatureType]>, n: usize) -> Vec<bool> {
-    match types {
-        Some(t) => t.iter().map(|(_, ty)| is_data_feature_type(ty)).collect(),
-        None => vec![true; n],
-    }
 }
 
 /// The rows of a given table that pin nothing on this run's feature axis,

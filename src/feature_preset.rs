@@ -1,17 +1,16 @@
 //! `--{freeze,init,lora}-feature-embedding <prefix>` for every model with a
-//! gene table (`senna bge`, `senna simba`, `senna fne`): the gene (and
-//! genomic-window) rows of an earlier run's feature table, matched onto the
-//! caller's feature axis, to pin,
-//! to start from, or to anchor a low-rank residual to. The result is a
-//! [`ge::PresetRows`] with ids into the given axis; the PBG commands lift it
-//! to their node ids with `map_ids`.
+//! gene table (`senna bge`, `senna simba`, `senna fne`): the gene and
+//! genomic-window rows of an earlier run's feature table, matched onto the
+//! caller's feature axis, to pin, to start from, or to anchor a low-rank
+//! residual to. The result is a [`ge::PresetRows`] with ids into the given
+//! axis; the PBG commands lift it to their node ids with `map_ids`.
 //!
 //! The source is any run whose prefix resolves through
 //! [`senna::run_manifest::resolve_feature_embedding`] — typically `senna fne`,
-//! whose table also holds terms, words and cell types. Those rows never match,
-//! by the run's `feature_types.parquet` when it describes the table; a source
-//! without one is taken to be all genes. Features of this axis with no source
-//! row stay free.
+//! whose table also holds terms, words and cell types. Its
+//! `feature_types.parquet`, when it lists the table's rows, keeps those rows
+//! from matching; without one every row is a gene. Features of this axis
+//! with no source row stay free.
 //!
 //! Under a pinning mode the rows the match left unused — genes the data lacks
 //! and every non-gene row — come back out as [`CarriedRows`]: appended
@@ -27,7 +26,7 @@ use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::info;
 use rustc_hash::FxHashSet;
-use senna::carried_rows::{matchable_rows, types_of_rows};
+use senna::carried_rows::matchable_rows;
 use std::cell::{Cell, RefCell};
 
 pub(crate) use senna::carried_rows::CarriedRows;
@@ -74,10 +73,10 @@ pub(crate) fn load_preset_rows(
     // The source's row types, when it wrote them for this table: only its
     // gene and region rows may match (a term, word or cell type may share a
     // gene's name), and only its genes are lifted into the row grammar.
-    let written = senna::run_manifest::feature_types_beside(&dictionary_path)
-        .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
-    let checked = Cell::new(false);
-    let genes: RefCell<Option<FxHashSet<Box<str>>>> = RefCell::new(None);
+    let ctx = |e: anyhow::Error| anyhow::anyhow!("{flag} {prefix}: {e}");
+    let written = senna::run_manifest::feature_types_beside(&dictionary_path).map_err(ctx)?;
+    let checked: Cell<Option<&[FeatureType]>> = Cell::new(None);
+    let genes: RefCell<Option<FxHashSet<&str>>> = RefCell::new(None);
     let rename_gene = |n: &str| -> Box<str> {
         match rename_source {
             Some(f) if genes.borrow().as_ref().is_none_or(|g| g.contains(n)) => f(n),
@@ -93,27 +92,24 @@ pub(crate) fn load_preset_rows(
             source_name_map: rename_source.map(|_| &rename_gene as SourceNameMap<'_>),
         },
         |names| {
-            let types = types_of_rows(written.as_deref(), names, &dictionary_path);
-            checked.set(types.is_some());
+            let (marks, types) = matchable_rows(written.as_deref(), names, &dictionary_path);
+            checked.set(types);
             *genes.borrow_mut() = types.map(|t| {
                 t.iter()
                     .filter(|(_, ty)| ty.as_ref() == GENE_TYPE)
-                    .map(|(n, _)| n.clone())
+                    .map(|(n, _)| n.as_ref())
                     .collect()
             });
-            Ok(matchable_rows(types, names.len()))
+            Ok(marks)
         },
     )
-    .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
-    let src_types: &[FeatureType] = match &written {
-        Some(t) if checked.get() => t,
-        _ => &[],
-    };
+    .map_err(ctx)?;
+    let src_types: &[FeatureType] = checked.get().unwrap_or(&[]);
 
     let h = host.e_feat.ncols();
     let ids: Vec<u32> = host.keep_target_indices.iter().map(|&t| t as u32).collect();
     // Row-major: the transpose's column-major storage.
-    let rows: Vec<f32> = host.e_feat.transpose().as_slice().to_vec();
+    let rows: Vec<f32> = host.e_feat.transpose().data.into();
     info!(
         "Feature side from {dictionary_path} (H={h}): {} of {} features {}",
         ids.len(),
