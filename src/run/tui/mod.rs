@@ -441,16 +441,26 @@ impl App {
         }
     }
 
+    /// Switch to screen `s`. Arriving at the parameters with two fits or
+    /// more queued opens the page of what they share.
+    fn go_to(&mut self, s: Screen) {
+        if s == Screen::Params && self.screen != s && self.shared_rows().len() > 1 {
+            self.show_shared();
+            self.message = Some("flags the queued fits share; ] for each fit's own".into());
+        }
+        self.screen = s;
+    }
+
     /// Keys every screen shares. Returns whether `k` was one.
     fn global_key(&mut self, k: KeyEvent) -> bool {
         let screens = self.screens();
         let at = screens.iter().position(|s| *s == self.screen).unwrap_or(0);
         match k.code {
-            KeyCode::Tab => self.screen = screens[(at + 1) % screens.len()],
-            KeyCode::BackTab => self.screen = screens[(at + screens.len() - 1) % screens.len()],
+            KeyCode::Tab => self.go_to(screens[(at + 1) % screens.len()]),
+            KeyCode::BackTab => self.go_to(screens[(at + screens.len() - 1) % screens.len()]),
             KeyCode::Char(c @ '1'..='4') => {
                 if let Some(s) = screens.get(c as usize - '1' as usize) {
-                    self.screen = *s;
+                    self.go_to(*s);
                 }
             }
             _ if self.is_go(k) => self.open_confirm(),
@@ -787,11 +797,23 @@ impl App {
                 self.edit(Target::Out(self.method_row), out);
             }
             KeyCode::Enter | KeyCode::Right => {
+                // Queuing the second fit is when the shared page first
+                // exists, so show it then; otherwise the method's own page.
+                let before = self.shared_rows().len();
                 self.rows[self.method_row].on = true;
-                self.show_params(self.method_row);
+                if before == 1 && self.shared_rows().len() == 2 {
+                    self.go_to(Screen::Params);
+                } else {
+                    self.show_params(self.method_row);
+                }
             }
             _ => {}
         }
+    }
+
+    fn show_shared(&mut self) {
+        self.shared_page = true;
+        self.field_row = 0;
     }
 
     fn show_params(&mut self, m: usize) {
@@ -1031,10 +1053,7 @@ impl App {
                 };
                 match pages[(at + d) % pages.len()] {
                     Some(m) => self.show_params(m),
-                    None => {
-                        self.shared_page = true;
-                        self.field_row = 0;
-                    }
+                    None => self.show_shared(),
                 }
             }
             KeyCode::Char('a') => {

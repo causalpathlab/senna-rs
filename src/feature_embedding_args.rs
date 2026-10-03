@@ -18,12 +18,14 @@ pub struct FeatureEmbeddingArgs {
         help = "Pin the gene embedding ρ to an earlier run's table; everything else trains",
         long_help = "Pin the per-gene embedding ρ to an earlier run's feature table,\n\
                      given by that run's output prefix.\n\
-                     It resolves `{prefix}.feature_embedding.parquet`,\n\
-                     else `{prefix}.dictionary.parquet`, accepting only a signed table\n\
+                     It takes the ρ the run's `{prefix}.senna.json` records; without\n\
+                     one it resolves `{prefix}.feature_embedding.parquet`, else\n\
+                     `{prefix}.dictionary.parquet`, accepting only a signed table\n\
                      (a log-simplex dictionary is refused); an older run's\n\
                      `{prefix}.feature_loading.parquet` is read first when present.\n\
                      One of those table paths, or the run's `.senna.json`, is accepted\n\
-                     in place of the prefix.\n\
+                     in place of the prefix; a table that is not the ρ the manifest\n\
+                     records (an older run's co-embed) is refused.\n\
                      A `senna fne` run qualifies: its table also holds terms, words and\n\
                      cell types, and only its gene rows are read.\n\
                      \n\

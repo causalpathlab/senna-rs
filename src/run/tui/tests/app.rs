@@ -729,14 +729,89 @@ fn the_shared_page_sets_a_flag_in_every_queued_fit_that_has_it() {
     assert!(!a.shared_page);
 }
 
+/// With two fits or more queued the parameters open on what they share:
+/// on arriving by Tab or number, and on queuing the second fit. Enter on a
+/// fit already queued, or on a third, opens that fit's own page.
+#[test]
+fn the_parameters_open_on_the_shared_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    let (topic, simba, vae) = (row_of(&a, "topic"), row_of(&a, "simba"), row_of(&a, "vae"));
+    a.screen = Screen::Methods;
+    a.method_row = topic;
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(a.screen, Screen::Params);
+    assert!(!a.shared_page, "one fit: its own page");
+
+    a.screen = Screen::Methods;
+    a.method_row = simba;
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(a.screen, Screen::Params);
+    assert!(a.shared_page, "the second fit: the shared page");
+    key(&mut a, KeyCode::Char(']'));
+    assert!(!a.shared_page, "] goes on to each fit's own");
+
+    a.screen = Screen::Methods;
+    key(&mut a, KeyCode::Enter);
+    assert!(!a.shared_page, "a fit already queued: its own page");
+    assert_eq!(a.param_method, simba);
+    a.screen = Screen::Methods;
+    a.method_row = vae;
+    key(&mut a, KeyCode::Enter);
+    assert!(!a.shared_page, "a third fit: its own page");
+    assert_eq!(a.param_method, vae);
+
+    for by in [KeyCode::Tab, KeyCode::Char('3')] {
+        a.screen = Screen::Methods;
+        key(&mut a, by);
+        assert_eq!(a.screen, Screen::Params);
+        assert!(a.shared_page, "arriving by {by:?}");
+        key(&mut a, KeyCode::Char(']'));
+    }
+    // Already on the parameters, a number key stays on the page shown.
+    key(&mut a, KeyCode::Char('3'));
+    assert!(!a.shared_page);
+}
+
 #[test]
 fn enter_on_a_feature_table_flag_picks_the_newest_table() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
     std::fs::write(dir.path().join("old.feature_embedding.parquet"), b"").unwrap();
     std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
-    // A topic run's β, written later, is not what the flag takes.
+    // Written later, none of these is what the flag takes: a topic run's β,
+    // and an svd run's manifest and signed loadings, which are not ρ.
     std::fs::write(dir.path().join("topic.dictionary.parquet"), b"").unwrap();
+    let svd = dir.path().join("svd").to_string_lossy().into_owned();
+    senna::run_manifest::RunManifest::new(senna::run_manifest::RunKind::Svd, &svd)
+        .save(&dir.path().join("svd.senna.json"))
+        .unwrap();
+    let genes: Vec<Box<str>> = vec!["A".into(), "B".into()];
+    use legume_numeric::matrix::traits::IoOps;
+    nalgebra::DMatrix::<f32>::from_row_slice(2, 2, &[0.5, -0.5, -0.5, 0.5])
+        .to_parquet_with_names(
+            &format!("{svd}.dictionary.parquet"),
+            (Some(&genes), Some("gene")),
+            None,
+        )
+        .unwrap();
+    let t0 = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    for (i, n) in [
+        "old.feature_embedding.parquet",
+        "topic.dictionary.parquet",
+        "svd.senna.json",
+        "svd.dictionary.parquet",
+    ]
+    .iter()
+    .enumerate()
+    {
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join(n))
+            .unwrap()
+            .set_modified(t0 + std::time::Duration::from_secs(10 * i as u64))
+            .unwrap();
+    }
     let bge = row_of(&a, "bge");
     a.rows[bge].on = true;
     a.show_params(bge);
