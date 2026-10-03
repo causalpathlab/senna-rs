@@ -652,8 +652,6 @@ pub struct RunManifest {
     #[serde(default)]
     pub annotate: RunAnnotate,
     #[serde(default)]
-    pub pseudotime: RunPseudotime,
-    #[serde(default)]
     pub defaults: RunDefaults,
     /// The fit configuration this run was trained with — see
     /// [`TrainArgsRecord`]. Absent for runs written before it existed, and for
@@ -1177,44 +1175,6 @@ pub struct RunAnnotate {
     pub unknown: Unknown,
 }
 
-/// Paths to artifacts produced by `senna pseudotime`. Populated when the
-/// command is invoked with `--from <manifest>`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RunPseudotime {
-    /// `{pt_out}.pseudotime.parquet` — cells × 1 scalar pseudotime.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pseudotime: Option<String>,
-    /// `{pt_out}.principal_graph.nodes.parquet` — K × D centroid
-    /// coordinates in the latent space the graph was fit on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nodes_latent: Option<String>,
-    /// `{pt_out}.principal_graph.nodes_2d.parquet` — K × 2 centroid
-    /// coordinates in the 2D layout space (only written when
-    /// `layout.cell_coords` is present).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nodes_2d: Option<String>,
-    /// `{pt_out}.principal_graph.edges.parquet` — E × 3 (from, to, weight).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edges: Option<String>,
-    /// Root principal-graph node id used when computing pseudotime.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root_node: Option<usize>,
-    /// `{pt_out}.tree_layout.cell_coords.parquet` — N × 2 cell positions
-    /// in a Reingold-Tilford tree layout (x = sibling slot, y = geodesic
-    /// pseudotime). Used by `lupin plot --colour-by pseudotime` to render
-    /// a Monocle-2-style tree plot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree_cell_coords: Option<String>,
-    /// `{pt_out}.tree_layout.nodes_2d.parquet` — K × 2 principal-graph
-    /// node positions in the same tree layout as `tree_cell_coords`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree_nodes_2d: Option<String>,
-    /// Fields this version does not know, written by another tool or a
-    /// newer senna; kept so a load/save round trip never drops them.
-    #[serde(flatten, default)]
-    pub unknown: Unknown,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunDefaults {
     /// Default `--colour-by` for `lupin plot`: `"topic" | "cluster" | "pb-id"`.
@@ -1240,7 +1200,6 @@ impl RunManifest {
             layout: RunLayout::default(),
             cluster: RunCluster::default(),
             annotate: RunAnnotate::default(),
-            pseudotime: RunPseudotime::default(),
             defaults: RunDefaults::default(),
             train_args: None,
             unknown: Unknown::default(),
@@ -2152,14 +2111,16 @@ mod tests {
     }
 
     /// Another tool (or a newer senna) may add keys this version does not
-    /// know; saving must not drop them, at the top level or inside a section.
+    /// know, or an older one may carry keys it no longer reads; saving must not
+    /// drop them, at the top level or inside a section.
     #[test]
     fn unknown_keys_survive_a_round_trip() {
         let json = r#"{
             "version": 2, "kind": "bge", "prefix": "r",
             "layout": {"cell_coords": "r.umap.cell_coords.parquet", "novel": {"a": 1}},
             "annotate": {"argmax": "a.argmax.tsv", "extra_table": "a.x.parquet"},
-            "something_new": [1, 2]
+            "something_new": [1, 2],
+            "pseudotime": {"pseudotime": "pt.pseudotime.parquet", "root_node": 3}
         }"#;
         let m: RunManifest = serde_json::from_str(json).unwrap();
         let back: serde_json::Value =
@@ -2168,6 +2129,9 @@ mod tests {
         assert_eq!(back["layout"]["cell_coords"], "r.umap.cell_coords.parquet");
         assert_eq!(back["annotate"]["extra_table"], "a.x.parquet");
         assert_eq!(back["something_new"][1], 2);
+        // A block from the retired `lupin pseudotime` is kept as an unknown key.
+        assert_eq!(back["pseudotime"]["pseudotime"], "pt.pseudotime.parquet");
+        assert_eq!(back["pseudotime"]["root_node"], 3);
     }
 
     /// Composition views read the latent first and only fall back to the

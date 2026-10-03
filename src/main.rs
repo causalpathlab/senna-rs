@@ -70,7 +70,6 @@ mod run;
 mod simba;
 mod svd;
 mod topic;
-mod tree_layout;
 #[cfg(feature = "view")]
 mod tui;
 mod update;
@@ -171,7 +170,7 @@ fn print_logo() {
                   4. 2D layout         senna layout {phate|tsne|umap} --from run.senna.json\n\
                   \n\
                   Annotation, trajectory, association, and figures live in `lupin`\n\
-                  (`lupin --help`). Layout can use pseudotime from a prior `lupin pseudotime` run.\n\
+                  (`lupin --help`).\n\
                   \n\
                   Bulk deconvolution is a side branch off a `bge` or `simba` run.\n\
                   It needs an annotation (from `lupin annotate`) and bulk counts, plus the single-cell\n\
@@ -857,15 +856,6 @@ enum LayoutCmd {
                       Cells are placed from their pseudobulk coordinates."
     )]
     Umap(LayoutUmapArgs),
-    #[command(
-        about = "Reingold-Tilford tree layout from a pseudotime run.",
-        long_about = "Reads the principal graph and root node from `manifest.pseudotime`,\n\
-                      written by `lupin pseudotime`. It then produces a top-down tree layout.\n\
-                      y is geodesic pseudotime; x is sibling order.\n\
-                      \n\
-                      Writes manifest.pseudotime.tree_{cell_coords,nodes_2d}."
-    )]
-    Tree(LayoutTreeArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -957,9 +947,6 @@ fn main() -> anyhow::Result<()> {
             }
             LayoutCmd::Phate(args) => {
                 fit_layout_phate(args)?;
-            }
-            LayoutCmd::Tree(args) => {
-                fit_layout_tree(args)?;
             }
         },
         Commands::Clustering(args) => {
