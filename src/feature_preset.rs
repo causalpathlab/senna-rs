@@ -17,7 +17,7 @@
 //! `feature_types.parquet` naming every row's type, so a run on a narrow
 //! feature axis (a panel) still hands on the full table it was given.
 
-use data_beans::aux::feature_types::{read_feature_types, FeatureType, GENE_TYPE};
+use data_beans::aux::feature_types::{FeatureType, GENE_TYPE};
 use data_beans::aux::frozen_features::{load_frozen_feature_host, FrozenLoadArgs, SourceNameMap};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
@@ -66,7 +66,8 @@ pub(crate) fn load_preset_rows(
         .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
 
     // Which source rows are genes: the types table, when the run wrote one.
-    let src_types: Option<Vec<FeatureType>> = read_feature_types(prefix)?;
+    let src_types: Option<Vec<FeatureType>> =
+        senna::run_manifest::feature_types_beside(&dictionary_path)?;
     let gene_names: Option<FxHashSet<&str>> = src_types.as_ref().map(|rows| {
         rows.iter()
             .filter(|(_, t)| t.as_ref() == GENE_TYPE)
