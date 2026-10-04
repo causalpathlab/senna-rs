@@ -11,6 +11,7 @@ use senna::embed_common::*;
 use candle_core::{Device, Tensor};
 use legume_numeric::candle::decoder::DynDecoderModuleT;
 use legume_numeric::candle::traits::*;
+use legume_numeric::candle::vae::pairs::PairMetric;
 use std::sync::atomic::AtomicBool;
 
 use super::anchor_prior::anchor_penalty_at_level;
@@ -82,11 +83,25 @@ where
     let hook_ref: &legume_numeric::candle::vae::LevelLossHook = &hook_owned;
     let candle_cfg = make_candle_config(config, Some(hook_ref));
 
-    let scores = legume_numeric::candle::vae::topic::train_mixed(
+    // A round's peer labels: θ is compared by Hellinger, as the critique did.
+    let metric = PairMetric::Hellinger;
+    let peer = config.args.peer.as_ref();
+    let peer_levels = peer
+        .map(|p| {
+            let smoothing = config.args.topic_smoothing;
+            p.levels(&*encoder, &level_refs, metric, smoothing, config.dev)
+        })
+        .transpose()?;
+    let penalty = peer
+        .zip(peer_levels.as_deref())
+        .map(|(p, levels)| p.penalty(levels, metric));
+
+    let scores = legume_numeric::candle::vae::topic::train_mixed_with_pairs(
         &level_refs,
         encoder,
         decoders,
         &candle_cfg,
+        penalty.as_ref(),
     )?;
     Ok(TrainScores {
         llik: scores.llik,
@@ -113,6 +128,10 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
     // Multi-decoder path historically did not apply the anchor-prior
     // penalty (the `topic` command passes `anchor_prior_per_level: None`,
     // `anchor_penalty: 0.0` here). Keep that behaviour explicitly.
+    anyhow::ensure!(
+        config.args.peer.is_none(),
+        "peer labels train a single-decoder topic fit only, not a multi-decoder one"
+    );
     let candle_cfg = make_candle_config(config, None);
 
     let scores = legume_numeric::candle::vae::topic::train_mixed_multi_decoder(

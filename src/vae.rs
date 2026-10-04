@@ -86,6 +86,12 @@ pub struct VaeArgs {
     #[serde(skip)]
     pub(crate) pb_reference: Option<senna::pb_reference::ReferenceInput>,
 
+    /// A round's peer labels and how to train on them; set by `senna update`
+    /// and recorded in the manifest's history, not here.
+    #[arg(skip)]
+    #[serde(skip)]
+    pub(crate) peer: Option<crate::peer_pairs::PeerTraining>,
+
     #[arg(
         long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)",
@@ -459,11 +465,21 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         stop: &stop,
         loss_hook: None,
     };
-    let scores = legume_numeric::candle::vae::topic::train_mixed(
+    // A round's peer labels: z is compared by Euclidean distance.
+    let metric = legume_numeric::candle::vae::pairs::PairMetric::Euclidean;
+    let peer = args.peer.as_ref();
+    let peer_levels = peer
+        .map(|p| p.levels(&encoder, &level_refs, metric, 0.0, &dev))
+        .transpose()?;
+    let penalty = peer
+        .zip(peer_levels.as_deref())
+        .map(|(p, levels)| p.penalty(levels, metric));
+    let scores = legume_numeric::candle::vae::topic::train_mixed_with_pairs(
         &level_refs,
         &mut encoder,
         &decoders,
         &train_cfg,
+        penalty.as_ref(),
     )?;
     TrainScores {
         llik: scores.llik,
@@ -656,6 +672,7 @@ impl crate::update::Updatable for VaeArgs {
         // See `TopicArgs::rebase` — the inherited partition cannot cover new cells.
         self.from = None;
         self.pb_from = r.pb_from;
+        self.peer = r.peer;
         if let Some(e) = r.epochs {
             self.epochs = e;
         }

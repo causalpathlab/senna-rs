@@ -24,8 +24,8 @@
 //!
 //! **A round** of peer critique (see `senna critique`) is an update with no new
 //! data: the parent continues on its own cells, on a named partition
-//! (`--pb-from`, by default the parent's own) and, from stage 2 on, trained
-//! against critique labels (`--peer-labels`). It replays the recorded inputs and
+//! (`--pb-from`, by default the parent's own), and a topic or vae round trains
+//! against critique labels (`--peer-labels`, see [`crate::peer_pairs`]). It replays the recorded inputs and
 //! never substitutes the carried pseudobulks, which would stand in for the only
 //! cells there are; a lineage that already holds them is refused.
 //!
@@ -37,6 +37,9 @@
 use senna::embed_common::*;
 use senna::run_manifest::{rel_to_manifest, RunHistory, RunKind, RunManifest};
 use std::path::PathBuf;
+
+/// `--peer-weight`'s default: see the plan's stage 2b for the sweep behind it.
+const PEER_WEIGHT: f32 = 1.0;
 
 /// The four things `update` changes about a recorded fit.
 ///
@@ -67,6 +70,8 @@ pub(crate) struct Rebase {
     /// A round's partition to collapse on (`--pb-from`), empty with new data.
     /// Only the families that collapse (topic, vae, masked-*) take it.
     pub pb_from: crate::refine_weighting::PbFromArgs,
+    /// A round's peer labels; only topic and vae train on them.
+    pub peer: Option<crate::peer_pairs::PeerTraining>,
 }
 
 /// A fit whose recorded arguments can be re-pointed at a larger cohort.
@@ -107,10 +112,33 @@ pub struct UpdateArgs {
         conflicts_with = "data_files",
         help = "Round only: critique labels to train against ({out}.critique.labels.{model}.parquet)",
         long_help = "Pairs of pseudobulks this model is to push apart, written by\n\
-                     `senna critique --questions`. Recorded in the manifest; the\n\
-                     training term that reads them is not built yet."
+                     `senna critique --questions` over the partition this round\n\
+                     collapses on. Each minibatch also encodes a few labelled pairs and\n\
+                     adds a hinge that is zero once a pair is as far apart as the\n\
+                     level's --peer-far-frac quantile of pair distances, measured in\n\
+                     the parent's own latent. topic and vae fits only."
     )]
     peer_labels: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = PEER_WEIGHT,
+        requires = "peer_labels",
+        help = "Weight of the peer-label penalty against the per-sample ELBO"
+    )]
+    peer_weight: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.25,
+        requires = "peer_labels",
+        help = "Quantile of a level's pair distances a labelled pair is pushed out to",
+        long_help = "How far a labelled pair is pushed: out to this quantile of the\n\
+                     level's pair distances in the parent's latent, and no further.\n\
+                     The default matches `senna critique --far-frac`'s, so a merged\n\
+                     pair ends where the critique would call it far."
+    )]
+    peer_far_frac: f32,
 
     #[arg(
         long,
@@ -576,12 +604,14 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
                 .as_deref()
                 .map_or(String::new(), |l| format!(", with labels {l}")),
         );
-        if args.peer_labels.is_some() {
-            log::warn!(
-                "--peer-labels is recorded but not trained on yet: no training term reads \
-                 the labels so far"
-            );
-        }
+        anyhow::ensure!(
+            args.peer_labels.is_none() || matches!(kind, RunKind::Topic | RunKind::Vae),
+            "--peer-labels trains topic and vae fits only, not a {kind} run"
+        );
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&args.peer_far_frac) && args.peer_weight >= 0.0,
+            "--peer-far-frac must be in [0, 1] and --peer-weight non-negative"
+        );
     } else {
         info!(
             "update [{kind}]: continuing {} from {} recorded + {} new = {} data file(s)",
@@ -645,6 +675,14 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         pb_from: crate::refine_weighting::PbFromArgs {
             pb_from: pb_from.clone(),
         },
+        peer: args
+            .peer_labels
+            .clone()
+            .map(|labels| crate::peer_pairs::PeerTraining {
+                labels,
+                weight: args.peer_weight,
+                far_frac: args.peer_far_frac,
+            }),
     };
 
     dispatch(args, &manifest, rebase)?;
@@ -661,6 +699,11 @@ fn dispatch(args: &UpdateArgs, manifest: &RunManifest, rebase: Rebase) -> anyhow
         RunKind::Topic => {
             let mut a: crate::topic::cmd::TopicArgs = manifest.train_args_as(&args.model)?;
             a.rebase(rebase);
+            anyhow::ensure!(
+                a.peer.is_none() || a.decoder.len() == 1,
+                "--peer-labels trains a single-decoder topic fit, not one with {} decoders",
+                a.decoder.len()
+            );
             crate::topic::cmd::fit_topic_model(&a)
         }
         RunKind::Vae => {
@@ -754,6 +797,8 @@ fn record_history(args: &UpdateArgs, pb_from: Option<&str>) -> anyhow::Result<()
     m.history = Some(RunHistory {
         parent: rel(&args.model),
         peer_labels: args.peer_labels.as_deref().map(rel),
+        peer_weight: args.peer_labels.is_some().then_some(args.peer_weight),
+        peer_far_frac: args.peer_labels.is_some().then_some(args.peer_far_frac),
         pb_from: pb_from.map(rel),
         unknown: Default::default(),
     });

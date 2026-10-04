@@ -138,6 +138,12 @@ pub struct TopicArgs {
     #[serde(skip)]
     pub(crate) pb_reference: Option<senna::pb_reference::ReferenceInput>,
 
+    /// A round's peer labels and how to train on them; set by `senna update`
+    /// and recorded in the manifest's history, not here.
+    #[arg(skip)]
+    #[serde(skip)]
+    pub(crate) peer: Option<crate::peer_pairs::PeerTraining>,
+
     #[arg(
         long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)",
@@ -1232,6 +1238,7 @@ impl crate::update::Updatable for TopicArgs {
         // leaves it empty, since none could cover them.
         self.from = None;
         self.pb_from = r.pb_from;
+        self.peer = r.peer;
         if let Some(e) = r.epochs {
             self.epochs = e;
         }

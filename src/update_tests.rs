@@ -124,6 +124,21 @@ fn a_round_takes_a_partition_and_labels_but_no_new_cell_flags() {
     );
 }
 
+/// The penalty's settings mean nothing without labels to train on.
+#[test]
+fn peer_settings_need_labels() {
+    let round = |extra: &[&str]| {
+        let base = ["senna-update", "--model", "m", "-o", "out"];
+        Cli::try_parse_from(base.iter().copied().chain(extra.iter().copied())).map(|c| c.args)
+    };
+    for flag in [["--peer-weight", "10"], ["--peer-far-frac", "0.3"]] {
+        assert!(round(&flag).is_err(), "{} without labels", flag[0]);
+    }
+    let a = round(&["--peer-labels", "l.parquet", "--peer-weight", "10"]).expect("parses");
+    assert_eq!(a.peer_weight, 10.0);
+    assert_eq!(a.peer_far_frac, 0.25);
+}
+
 /// With no new data, the recorded batches are replayed as they are; with new
 /// data, the new files still need their own.
 #[test]

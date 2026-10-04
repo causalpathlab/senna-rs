@@ -670,9 +670,8 @@ pub struct RunManifest {
 }
 
 /// One round's place in a model's history: the version it continued from, the
-/// critique labels it trained against, and the partition it collapsed on. By
-/// path for now, relative to the manifest; the label file's hash and the
-/// round's seed (plan §1) arrive with stage 2, which reads that file.
+/// critique labels it trained against and how, and the partition it collapsed
+/// on. Paths are relative to the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunHistory {
     /// The parent version's prefix.
@@ -680,6 +679,11 @@ pub struct RunHistory {
     /// `{out}.critique.labels.{model}.parquet` from `senna critique`, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_labels: Option<String>,
+    /// The penalty's weight and far quantile the labels were trained with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_weight: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_far_frac: Option<f32>,
     /// The run whose partition this round collapsed on, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_from: Option<String>,
@@ -2125,6 +2129,8 @@ mod tests {
         m.history = Some(RunHistory {
             parent: "/tmp/run1".into(),
             peer_labels: Some("c.critique.labels.vae.parquet".into()),
+            peer_weight: Some(1.0),
+            peer_far_frac: Some(0.25),
             pb_from: Some("topic.senna.json".into()),
             unknown: Unknown::default(),
         });
