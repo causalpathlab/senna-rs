@@ -98,7 +98,8 @@ fn parameters_are_checked() {
 #[test]
 fn known_ranks_skip_unknown_and_sort() {
     let ranks = vec![vec![9], vec![u32::MAX], vec![3], vec![5]];
-    assert_eq!(sorted_known(&ranks, 0), vec![3, 5, 9]);
+    assert_eq!(known_ranks(&ranks, &[0, 1, 2, 3], 0), vec![3, 5, 9]);
+    assert_eq!(known_ranks(&ranks, &[1, 3], 0), vec![5]);
 }
 
 #[test]
