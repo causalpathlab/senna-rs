@@ -42,6 +42,7 @@ mod bge;
 mod cluster_bhc;
 mod clustering;
 mod counterfactual;
+mod critique;
 mod deconvolve;
 mod docs;
 mod embed_diag;
@@ -79,6 +80,7 @@ mod view;
 
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
+use critique::{run_critique, CritiqueArgs};
 use deconvolve::DeconvolveArgs;
 use docs::{run_docs, DocsArgs};
 use embed_diag::*;
@@ -653,6 +655,24 @@ enum Commands {
     Probe(ProbeArgs),
 
     #[command(
+        about = "Report where fits disagree on which pseudobulks are alike.",
+        long_about = "Read-only peer critique, stage 0a of docs/peer-critique-plan.md.\n\
+                      \n\
+                      Each fit's cell latent is averaged over one run's pseudobulks.\n\
+                      Pairs that any fit puts among its nearest neighbours become candidates.\n\
+                      Each fit is judged against the median rank of the other fits:\n\
+                      it merges a pair it keeps near while the others hold it far.\n\
+                      A fit's merge rate is its merges over its near pairs.\n\
+                      Only the latents are read, not the counts.\n\
+                      --cell-labels checks the merges against known cell labels.\n\
+                      \n\
+                      Usage:\n\
+                      senna critique topic.senna.json vae.senna.json svd.senna.json -o out\n  \
+                      Writes {out}.critique.{pairs,summary}.parquet and {out}.critique.json."
+    )]
+    Critique(CritiqueArgs),
+
+    #[command(
         about = "Absorb new samples into a trained model by continuing its training.",
         long_about = "Continue a trained run over a larger cohort.\n\
                       \n\
@@ -917,6 +937,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Predict(args) => {
             predict_model(args)?;
+        }
+        Commands::Critique(args) => {
+            run_critique(args)?;
         }
         Commands::Probe(args) => {
             run_probe(args)?;

@@ -9,6 +9,12 @@ it were a description of the code is how people end up debugging things that wer
 |---|---|
 | [`deconvolve.md`](deconvolve.md) | The `senna deconvolve` model and its inputs. |
 
+## Plans — not built
+
+| doc | what it is |
+|---|---|
+| [`peer-critique-plan.md`](peer-critique-plan.md) | Fits that question each other, as active learning with the other models as the oracle: a model keeping close what the others hold apart is told to push the pair apart. Stage 0a (`senna critique`) is built. |
+
 ## Moved to lupin
 
 Cell-type annotation and lineage live in [`lupin`](https://github.com/causalpathlab/lupin-rs),
