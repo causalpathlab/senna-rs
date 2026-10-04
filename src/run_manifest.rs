@@ -658,9 +658,9 @@ pub struct RunManifest {
     /// commands that produce no re-runnable fit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub train_args: Option<TrainArgsRecord>,
-    /// What a round of `senna update` continued from and trained against
-    /// (a model's chain of versions, one per round). Absent on a fit that is
-    /// no round.
+    /// What a `senna revise` continued from and was revised on
+    /// (a model's chain of versions, one per revision). Absent on any other
+    /// fit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<RunHistory>,
     /// Fields this version does not know, written by another tool or a
@@ -669,26 +669,37 @@ pub struct RunManifest {
     pub unknown: Unknown,
 }
 
-/// One round's place in a model's history: the version it continued from, the
+/// One revision's place in a model's history: the version it continued from, the
 /// critique labels it trained against and how, and the partition it collapsed
 /// on. Paths are relative to the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunHistory {
     /// The parent version's prefix.
     pub parent: String,
-    /// `{out}.critique.labels.{model}.parquet` from `senna critique`, if any.
+    /// `{out}.critique.labels.{model}.parquet` from `senna critique`, when
+    /// `senna revise` moved this version on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_labels: Option<String>,
-    /// The penalty's weight and far quantile the labels were trained with.
+    /// How `senna revise` moved it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peer_weight: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peer_far_frac: Option<f32>,
-    /// The run whose partition this round collapsed on, if any.
+    pub revise: Option<Revise>,
+    /// The run whose partition this revision collapsed on, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_from: Option<String>,
     #[serde(flatten, default)]
     pub unknown: Unknown,
+}
+
+/// The settings of a `senna revise`: the far quantile its labelled pairs were
+/// pushed out to, its epoch budget, learning rate and pairs per step, and the
+/// likelihood drop it was allowed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Revise {
+    pub far_frac: f32,
+    pub epochs: usize,
+    pub learning_rate: f32,
+    pub pair_batch: usize,
+    pub max_llik_drop: f32,
 }
 
 /// The training subcommand's own argument struct, recorded so `senna update`
@@ -2129,8 +2140,13 @@ mod tests {
         m.history = Some(RunHistory {
             parent: "/tmp/run1".into(),
             peer_labels: Some("c.critique.labels.vae.parquet".into()),
-            peer_weight: Some(1.0),
-            peer_far_frac: Some(0.25),
+            revise: Some(Revise {
+                far_frac: 0.25,
+                epochs: 200,
+                learning_rate: 1e-3,
+                pair_batch: 64,
+                max_llik_drop: 0.01,
+            }),
             pb_from: Some("topic.senna.json".into()),
             unknown: Unknown::default(),
         });

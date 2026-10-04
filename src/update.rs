@@ -22,12 +22,12 @@
 //! checked against (`--no-pb-reference`), and the fallback when the
 //! substitution is impossible — see [`select_reference`].
 //!
-//! **A round** of peer critique (see `senna critique`) is an update with no new
-//! data: the parent continues on its own cells, on a named partition
-//! (`--pb-from`, by default the parent's own), and a topic or vae round trains
-//! against critique labels (`--peer-labels`, see [`crate::peer_pairs`]). It replays the recorded inputs and
-//! never substitutes the carried pseudobulks, which would stand in for the only
-//! cells there are; a lineage that already holds them is refused.
+//! **A round** is how `senna revise` sets a fit up, and the one case with no new
+//! data: the parent on its own cells, on a named partition (`senna revise
+//! --pb-from`, by default the parent's own). It replays the recorded inputs
+//! and never substitutes the carried pseudobulks, which would stand in for the
+//! only cells there are; a lineage that already holds them is refused. The
+//! `update` command itself always absorbs new data.
 //!
 //! **The partition is deliberately not inherited** when there is new data.
 //! `--from` would pull the parent's cell→pb membership along with its inputs, but
@@ -37,9 +37,6 @@
 use senna::embed_common::*;
 use senna::run_manifest::{rel_to_manifest, RunHistory, RunKind, RunManifest};
 use std::path::PathBuf;
-
-/// `--peer-weight`'s default: see the plan's stage 2b for the sweep behind it.
-const PEER_WEIGHT: f32 = 1.0;
 
 /// The four things `update` changes about a recorded fit.
 ///
@@ -70,8 +67,8 @@ pub(crate) struct Rebase {
     /// A round's partition to collapse on (`--pb-from`), empty with new data.
     /// Only the families that collapse (topic, vae, masked-*) take it.
     pub pb_from: crate::refine_weighting::PbFromArgs,
-    /// A round's peer labels; only topic and vae train on them.
-    pub peer: Option<crate::peer_pairs::PeerTraining>,
+    /// `senna revise`'s labels; only topic and vae take them.
+    pub peer: Option<crate::peer_pairs::PeerRevision>,
 }
 
 /// A fit whose recorded arguments can be re-pointed at a larger cohort.
@@ -83,62 +80,10 @@ pub(crate) trait Updatable {
 pub struct UpdateArgs {
     #[arg(
         value_delimiter = ',',
-        help = "New data files to absorb (.zarr or .h5); none makes this a round",
-        long_help = "The new data to absorb into the parent.\n\
-                     With none, the update is a round: the parent continues on its own\n\
-                     cells (recorded inputs and batches replayed), collapsed on its own\n\
-                     partition or --pb-from's, and the new version's manifest records\n\
-                     its history. Rounds are how fits take `senna critique`'s labels."
+        required = true,
+        help = "New data files to absorb (.zarr or .h5)"
     )]
     data_files: Vec<Box<str>>,
-
-    #[arg(
-        long,
-        value_name = "RUN",
-        conflicts_with = "data_files",
-        help = "Round only: collapse on this run's cell → pseudobulk partition",
-        long_help = "A round continues the parent on its own cells, collapsed on the\n\
-                     parent's own partition unless --pb-from names another. With it the\n\
-                     fit collapses on that run's partition (a topic, masked or vae run\n\
-                     over the same cells), so every model in a critique round shares\n\
-                     one set of pseudobulks. Not with new data: a partition over the\n\
-                     parent's cells cannot cover cells it never saw."
-    )]
-    pb_from: Option<Box<str>>,
-
-    #[arg(
-        long,
-        value_name = "FILE",
-        conflicts_with = "data_files",
-        help = "Round only: critique labels to train against ({out}.critique.labels.{model}.parquet)",
-        long_help = "Pairs of pseudobulks this model is to push apart, written by\n\
-                     `senna critique --questions` over the partition this round\n\
-                     collapses on. Each minibatch also encodes a few labelled pairs and\n\
-                     adds a hinge that is zero once a pair is as far apart as the\n\
-                     level's --peer-far-frac quantile of pair distances, measured in\n\
-                     the parent's own latent. topic and vae fits only."
-    )]
-    peer_labels: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = PEER_WEIGHT,
-        requires = "peer_labels",
-        help = "Weight of the peer-label penalty against the per-sample ELBO"
-    )]
-    peer_weight: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.25,
-        requires = "peer_labels",
-        help = "Quantile of a level's pair distances a labelled pair is pushed out to",
-        long_help = "How far a labelled pair is pushed: out to this quantile of the\n\
-                     level's pair distances in the parent's latent, and no further.\n\
-                     The default matches `senna critique --far-frac`'s, so a merged\n\
-                     pair ends where the critique would call it far."
-    )]
-    peer_far_frac: f32,
 
     #[arg(
         long,
@@ -167,14 +112,13 @@ pub struct UpdateArgs {
         help = "Batch files for the NEW data, one per new data file",
         long_help = "Required when the parent had batch files, because the loader\n\
                      needs one batch file per data file across the whole cohort.\n\
-                     The parent's recorded list is prepended automatically.\n\
-                     Not in a round: it replays the parent's recorded batches."
+                     The parent's recorded list is prepended automatically."
     )]
     batch_files: Option<Vec<Box<str>>>,
 
     #[arg(
         long,
-        help = "Epochs for this round (default: the parent's recorded count)",
+        help = "Epochs for this update (default: the parent's recorded count)",
         long_help = "Continuing from trained weights usually needs fewer epochs than\n\
                      the original fit. Omit to reuse whatever the parent used."
     )]
@@ -248,12 +192,28 @@ pub struct UpdateArgs {
     add_embedding_dim: usize,
 }
 
+/// What makes [`continue_fit`] a revision: the parent on its own cells, on
+/// `pb_from`'s partition (else its own), moved on `peer`'s labels.
+pub(crate) struct Round {
+    pub pb_from: Option<Box<str>>,
+    pub peer: crate::peer_pairs::PeerRevision,
+}
+
 impl UpdateArgs {
-    /// No new data: the parent continues on its own cells. What a round may
-    /// and may not set is clap's: `--pb-from` and `--peer-labels` conflict
-    /// with new data, `--batch-files` and `--use-pb-reference` require it.
-    pub(crate) fn is_round(&self) -> bool {
-        self.data_files.is_empty()
+    /// `model` into `out` with no new data, the set-up of a [`Round`]; the
+    /// command line always names new data.
+    pub(crate) fn own_cells(model: Box<str>, out: Box<str>) -> Self {
+        Self {
+            data_files: Vec::new(),
+            model,
+            out,
+            batch_files: None,
+            epochs: None,
+            use_pb_reference: false,
+            no_pb_reference: false,
+            add_topics: 0,
+            add_embedding_dim: 0,
+        }
     }
 }
 
@@ -368,8 +328,9 @@ fn select_reference(
     args: &UpdateArgs,
     manifest: &RunManifest,
     recorded: &[Box<str>],
+    round: bool,
 ) -> anyhow::Result<Option<senna::pb_reference::ReferenceInput>> {
-    let chosen: Result<Option<senna::pb_reference::ReferenceInput>, String> = if args.is_round() {
+    let chosen: Result<Option<senna::pb_reference::ReferenceInput>, String> = if round {
         Err(
             "a round continues on the parent's own cells, and there is nothing to stand \
              them in for"
@@ -417,7 +378,7 @@ fn select_reference(
         Ok(r) => return Ok(r),
         Err(why) => why,
     };
-    if args.is_round() {
+    if round {
         check_round_inputs(recorded)?;
         return Ok(None);
     }
@@ -473,9 +434,16 @@ fn carried_reference_among(recorded: &[Box<str>]) -> Option<&str> {
 }
 
 pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
+    continue_fit(args, None)
+}
+
+/// An update, or with a [`Round`] a revision: the same fit set up the same
+/// way, the one moved on critique labels instead of trained on.
+pub(crate) fn continue_fit(args: &UpdateArgs, round: Option<&Round>) -> anyhow::Result<()> {
+    let command = if round.is_some() { "revise" } else { "update" };
     anyhow::ensure!(
         args.out.as_ref() != args.model.as_ref(),
-        "update refuses to write in place: -o ({}) must differ from --model ({}). A trained \
+        "{command} refuses to write in place: -o ({}) must differ from --model ({}). A trained \
          model is a versioned artifact — write M_v2 and keep M_v1.",
         args.out,
         args.model,
@@ -490,17 +458,19 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     let manifest_path = PathBuf::from(senna::run_manifest::default_path(&args.model));
     let (manifest, dir) = RunManifest::load(&manifest_path).map_err(|e| {
         anyhow::anyhow!(
-            "{e}\n`senna update` replays the parent's recorded fit, which lives in its run \
-             manifest. A prefix without one cannot be continued — re-train it, or drive the \
-             family command directly with `--init-from {}`.",
-            args.model,
+            "{e}\n`senna {command}` replays the parent's recorded fit, which lives in its run \
+             manifest. A prefix without one cannot be continued; re-train it.",
         )
     })?;
     let kind = manifest.kind;
+    anyhow::ensure!(
+        round.is_none() || matches!(kind, RunKind::Topic | RunKind::Vae),
+        "senna revise moves topic and vae fits only, not a {kind} run"
+    );
 
     let recorded = manifest.data_inputs(&dir);
     ensure_not_recorded(&recorded, &args.data_files)?;
-    let reference = select_reference(args, &manifest, &recorded)?;
+    let reference = select_reference(args, &manifest, &recorded, round.is_some())?;
 
     // Only the collapsing families take a partition, and a parent cut by
     // --cnv-clones built strata no other run's partition covers.
@@ -508,7 +478,8 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         .train_args
         .as_ref()
         .is_some_and(|t| crate::refine_weighting::cut_by_cnv_clones(&t.args));
-    if args.pb_from.is_some() {
+    let given = round.and_then(|r| r.pb_from.clone());
+    if given.is_some() {
         anyhow::ensure!(
             matches!(kind, RunKind::Topic | RunKind::Vae) || kind.is_masked_family(),
             "--pb-from applies to a run that collapses cells into pseudobulks (topic, masked-*, \
@@ -521,13 +492,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             args.model
         );
     }
-    let pb_from = round_partition(
-        args.pb_from.clone(),
-        &args.model,
-        kind,
-        args.is_round(),
-        cnv_cut,
-    );
+    let pb_from = round_partition(given, &args.model, kind, round.is_some(), cnv_cut);
 
     let (data_files, batch_files) = match reference.as_ref() {
         Some(r) => {
@@ -592,25 +557,15 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
                  (--no-pb-reference) is likely the better trade at this scale."
             );
         }
-    } else if args.is_round() {
+    } else if let Some(r) = round {
         info!(
-            "update [{kind}]: a round on {}'s own {} data file(s){}{}",
+            "revise [{kind}]: {} on its own {} data file(s){}, labels {}",
             args.model,
             data_files.len(),
             pb_from.as_deref().map_or(String::new(), |p| format!(
                 ", collapsing on {p}'s partition"
             )),
-            args.peer_labels
-                .as_deref()
-                .map_or(String::new(), |l| format!(", with labels {l}")),
-        );
-        anyhow::ensure!(
-            args.peer_labels.is_none() || matches!(kind, RunKind::Topic | RunKind::Vae),
-            "--peer-labels trains topic and vae fits only, not a {kind} run"
-        );
-        anyhow::ensure!(
-            (0.0..=1.0).contains(&args.peer_far_frac) && args.peer_weight >= 0.0,
-            "--peer-far-frac must be in [0, 1] and --peer-weight non-negative"
+            r.peer.labels,
         );
     } else {
         info!(
@@ -675,19 +630,12 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         pb_from: crate::refine_weighting::PbFromArgs {
             pb_from: pb_from.clone(),
         },
-        peer: args
-            .peer_labels
-            .clone()
-            .map(|labels| crate::peer_pairs::PeerTraining {
-                labels,
-                weight: args.peer_weight,
-                far_frac: args.peer_far_frac,
-            }),
+        peer: round.map(|r| r.peer.clone()),
     };
 
     dispatch(args, &manifest, rebase)?;
-    if args.is_round() {
-        record_history(args, pb_from.as_deref())?;
+    if let Some(r) = round {
+        record_history(args, pb_from.as_deref(), &r.peer)?;
     }
     Ok(())
 }
@@ -701,7 +649,7 @@ fn dispatch(args: &UpdateArgs, manifest: &RunManifest, rebase: Rebase) -> anyhow
             a.rebase(rebase);
             anyhow::ensure!(
                 a.peer.is_none() || a.decoder.len() == 1,
-                "--peer-labels trains a single-decoder topic fit, not one with {} decoders",
+                "senna revise moves a single-decoder topic fit, not one with {} decoders",
                 a.decoder.len()
             );
             crate::topic::cmd::fit_topic_model(&a)
@@ -787,8 +735,12 @@ fn dispatch(args: &UpdateArgs, manifest: &RunManifest, rebase: Rebase) -> anyhow
 }
 
 /// Stamp the new version's manifest with what this round continued from and
-/// trained against. The family wrote the manifest; this adds to it.
-fn record_history(args: &UpdateArgs, pb_from: Option<&str>) -> anyhow::Result<()> {
+/// was revised on. The family wrote the manifest; this adds to it.
+fn record_history(
+    args: &UpdateArgs,
+    pb_from: Option<&str>,
+    peer: &crate::peer_pairs::PeerRevision,
+) -> anyhow::Result<()> {
     let path = PathBuf::from(senna::run_manifest::default_path(&args.out));
     let (mut m, out_dir) = RunManifest::load(&path)?;
     // Relative to the manifest, as every other recorded path is, so a moved
@@ -796,9 +748,14 @@ fn record_history(args: &UpdateArgs, pb_from: Option<&str>) -> anyhow::Result<()
     let rel = |p: &str| rel_to_manifest(&out_dir, p);
     m.history = Some(RunHistory {
         parent: rel(&args.model),
-        peer_labels: args.peer_labels.as_deref().map(rel),
-        peer_weight: args.peer_labels.is_some().then_some(args.peer_weight),
-        peer_far_frac: args.peer_labels.is_some().then_some(args.peer_far_frac),
+        peer_labels: Some(rel(&peer.labels)),
+        revise: Some(senna::run_manifest::Revise {
+            far_frac: peer.far_frac,
+            epochs: peer.epochs,
+            learning_rate: peer.learning_rate,
+            pair_batch: peer.batch,
+            max_llik_drop: peer.max_llik_drop,
+        }),
         pb_from: pb_from.map(rel),
         unknown: Default::default(),
     });

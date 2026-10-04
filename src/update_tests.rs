@@ -81,62 +81,29 @@ fn recorded_paths_resolve_against_the_run_directory() {
 
 // ---- Rounds: continue on the same cells, with critique labels -------------------
 
-/// A round continues the parent on its own cells: no new data file is needed.
+/// `update` always absorbs new data, and takes no partition: rounds on a
+/// fit's own cells belong to `senna revise`.
 #[test]
-fn a_round_needs_no_new_data() {
-    let round = ["senna-update", "--model", "m", "-o", "out"];
-    let a = Cli::try_parse_from(round).expect("a round parses").args;
-    assert!(a.data_files.is_empty());
-    assert!(a.is_round());
-    let a = parse(&[]).expect("an update with new data parses");
-    assert!(!a.is_round());
-}
-
-/// What a round may set: the partition to collapse on and the labels to train
-/// on. What it may not: batch files for new data it does not have, and the
-/// carried-reference request, which stands pseudobulks in for new cells. clap
-/// owns these relations, so a wrong combination does not parse.
-#[test]
-fn a_round_takes_a_partition_and_labels_but_no_new_cell_flags() {
-    let round = |extra: &[&str]| {
-        let base = ["senna-update", "--model", "m", "-o", "out"];
-        Cli::try_parse_from(base.iter().copied().chain(extra.iter().copied())).map(|c| c.args)
-    };
-    let a = round(&["--pb-from", "p.senna.json", "--peer-labels", "l.parquet"])
-        .expect("round flags parse");
-    assert_eq!(a.pb_from.as_deref(), Some("p.senna.json"));
-    assert_eq!(a.peer_labels.as_deref(), Some("l.parquet"));
-    assert!(
-        round(&["--batch-files", "b.tsv"]).is_err(),
-        "batch files describe new data"
-    );
-    assert!(
-        round(&["--use-pb-reference"]).is_err(),
-        "a round never substitutes its only cells"
-    );
-    assert!(
-        parse(&["--pb-from", "p.senna.json"]).is_err(),
-        "a partition cannot cover new cells"
-    );
-    assert!(
-        parse(&["--peer-labels", "l.parquet"]).is_err(),
-        "labels are for a round"
-    );
-}
-
-/// The penalty's settings mean nothing without labels to train on.
-#[test]
-fn peer_settings_need_labels() {
-    let round = |extra: &[&str]| {
-        let base = ["senna-update", "--model", "m", "-o", "out"];
-        Cli::try_parse_from(base.iter().copied().chain(extra.iter().copied())).map(|c| c.args)
-    };
-    for flag in [["--peer-weight", "10"], ["--peer-far-frac", "0.3"]] {
-        assert!(round(&flag).is_err(), "{} without labels", flag[0]);
+fn an_update_needs_new_data_and_takes_no_round_flags() {
+    let bare = ["senna-update", "--model", "m", "-o", "out"];
+    assert!(Cli::try_parse_from(bare).is_err(), "no new data");
+    parse(&[]).expect("new data parses");
+    for flag in [
+        ["--pb-from", "p.senna.json"],
+        ["--peer-labels", "l.parquet"],
+    ] {
+        assert!(parse(&flag).is_err(), "{} belongs to senna revise", flag[0]);
     }
-    let a = round(&["--peer-labels", "l.parquet", "--peer-weight", "10"]).expect("parses");
-    assert_eq!(a.peer_weight, 10.0);
-    assert_eq!(a.peer_far_frac, 0.25);
+}
+
+/// `senna revise` sets a fit up on its own cells: no new data, nothing else
+/// changed.
+#[test]
+fn a_revision_sets_up_the_parent_on_its_own_cells() {
+    let a = UpdateArgs::own_cells("m".into(), "out".into());
+    assert!(a.data_files.is_empty());
+    assert!(a.epochs.is_none() && a.batch_files.is_none());
+    assert_eq!((a.add_topics, a.add_embedding_dim), (0, 0));
 }
 
 /// With no new data, the recorded batches are replayed as they are; with new

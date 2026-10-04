@@ -86,11 +86,11 @@ pub struct VaeArgs {
     #[serde(skip)]
     pub(crate) pb_reference: Option<senna::pb_reference::ReferenceInput>,
 
-    /// A round's peer labels and how to train on them; set by `senna update`
-    /// and recorded in the manifest's history, not here.
+    /// Critique labels to revise on, set by `senna revise` and recorded in
+    /// the manifest's history, not here; the fit then never trains on the ELBO.
     #[arg(skip)]
     #[serde(skip)]
-    pub(crate) peer: Option<crate::peer_pairs::PeerTraining>,
+    pub(crate) peer: Option<crate::peer_pairs::PeerRevision>,
 
     #[arg(
         long,
@@ -465,27 +465,35 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         stop: &stop,
         loss_hook: None,
     };
-    // A round's peer labels: z is compared by Euclidean distance.
-    let metric = legume_numeric::candle::vae::pairs::PairMetric::Euclidean;
-    let peer = args.peer.as_ref();
-    let peer_levels = peer
-        .map(|p| p.levels(&encoder, &level_refs, metric, 0.0, &dev))
-        .transpose()?;
-    let penalty = peer
-        .zip(peer_levels.as_deref())
-        .map(|(p, levels)| p.penalty(levels, metric));
-    let scores = legume_numeric::candle::vae::topic::train_mixed_with_pairs(
-        &level_refs,
-        &mut encoder,
-        &decoders,
-        &train_cfg,
-        penalty.as_ref(),
-    )?;
-    TrainScores {
-        llik: scores.llik,
-        kl: scores.kl,
+    match args.peer.as_ref() {
+        // `senna revise`: the labels alone move the encoder; z is compared by
+        // Euclidean distance, as the critique did.
+        Some(p) => p.revise(
+            &format!("{}.revise.parquet", args.out),
+            &level_refs,
+            &parameters,
+            &encoder,
+            &decoders,
+            legume_numeric::candle::vae::pairs::PairMetric::Euclidean,
+            0.0,
+            train_cfg.minibatch_size,
+            &dev,
+            &stop,
+        )?,
+        None => {
+            let scores = legume_numeric::candle::vae::topic::train_mixed(
+                &level_refs,
+                &mut encoder,
+                &decoders,
+                &train_cfg,
+            )?;
+            TrainScores {
+                llik: scores.llik,
+                kl: scores.kl,
+            }
+            .to_parquet(&format!("{}.log_likelihood.parquet", args.out))?;
+        }
     }
-    .to_parquet(&format!("{}.log_likelihood.parquet", args.out))?;
 
     // Persist weights + per-gene mean, then move to CPU for threaded eval.
     info!("Writing model parameters");

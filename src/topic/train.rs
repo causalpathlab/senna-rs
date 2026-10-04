@@ -72,6 +72,27 @@ where
         .map(|(a, b, c)| (a, b.as_ref(), c))
         .collect();
 
+    // `senna revise`: the labels alone move the encoder, θ compared by
+    // Hellinger as the critique did; no ELBO, so no anchor prior either.
+    if let Some(p) = config.args.peer.as_ref() {
+        p.revise(
+            &format!("{}.revise.parquet", config.args.out),
+            &level_refs,
+            config.parameters,
+            encoder,
+            decoders,
+            PairMetric::Hellinger,
+            config.args.topic_smoothing,
+            config.args.minibatch_size,
+            config.dev,
+            config.stop,
+        )?;
+        return Ok(TrainScores {
+            llik: Vec::new(),
+            kl: Vec::new(),
+        });
+    }
+
     // Anchor-prior loss hook: senna injects the CE penalty per level
     // through the legume_numeric::candle `loss_hook` slot.
     let priors = config.anchor_prior_per_level;
@@ -83,25 +104,11 @@ where
     let hook_ref: &legume_numeric::candle::vae::LevelLossHook = &hook_owned;
     let candle_cfg = make_candle_config(config, Some(hook_ref));
 
-    // A round's peer labels: θ is compared by Hellinger, as the critique did.
-    let metric = PairMetric::Hellinger;
-    let peer = config.args.peer.as_ref();
-    let peer_levels = peer
-        .map(|p| {
-            let smoothing = config.args.topic_smoothing;
-            p.levels(&*encoder, &level_refs, metric, smoothing, config.dev)
-        })
-        .transpose()?;
-    let penalty = peer
-        .zip(peer_levels.as_deref())
-        .map(|(p, levels)| p.penalty(levels, metric));
-
-    let scores = legume_numeric::candle::vae::topic::train_mixed_with_pairs(
+    let scores = legume_numeric::candle::vae::topic::train_mixed(
         &level_refs,
         encoder,
         decoders,
         &candle_cfg,
-        penalty.as_ref(),
     )?;
     Ok(TrainScores {
         llik: scores.llik,
@@ -128,10 +135,6 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
     // Multi-decoder path historically did not apply the anchor-prior
     // penalty (the `topic` command passes `anchor_prior_per_level: None`,
     // `anchor_penalty: 0.0` here). Keep that behaviour explicitly.
-    anyhow::ensure!(
-        config.args.peer.is_none(),
-        "peer labels train a single-decoder topic fit only, not a multi-decoder one"
-    );
     let candle_cfg = make_candle_config(config, None);
 
     let scores = legume_numeric::candle::vae::topic::train_mixed_multi_decoder(

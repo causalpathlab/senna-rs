@@ -67,6 +67,7 @@ mod probe;
 mod refine_weighting;
 mod resolve_embedding_space;
 mod resolve_topics;
+mod revise;
 #[cfg(feature = "view")]
 mod run;
 mod simba;
@@ -97,6 +98,7 @@ use predict::{predict_model, PredictArgs};
 use probe::{run_probe, ProbeArgs};
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
 use resolve_topics::{resolve_topics, ResolveTopicsArgs};
+use revise::{run_revise, ReviseArgs};
 use senna::embed_common::*;
 use simba::{fit_simba, SimbaArgs};
 use svd::*;
@@ -674,8 +676,8 @@ enum Commands {
     Critique(CritiqueArgs),
 
     #[command(
-        about = "Continue a trained model: absorb new samples, or run a critique round.",
-        long_about = "Continue a trained run over a larger cohort, or on its own cells.\n\
+        about = "Continue a trained model: absorb new samples.",
+        long_about = "Continue a trained run over a larger cohort.\n\
                       \n\
                       The parent's manifest records both the data it was trained on\n\
                       and the arguments it was trained with, so the update re-runs\n\
@@ -688,13 +690,10 @@ enum Commands {
                       cell is re-read, unless the parent's carried pseudobulks stand in\n\
                       for them (the default; see --no-pb-reference).\n\
                       \n\
-                      With no new data the update is a round: the parent continues on\n\
-                      its own cells and partition, and records --peer-labels from\n\
-                      `senna critique --questions` in its history.\n\
+                      To move a fit on `senna critique` labels, see `senna revise`.\n\
                       \n\
                       Usage:\n\
-                      senna update new.zarr --model M_v1 -o M_v2\n  \
-                      senna update --model M_v1 -o M_v2 --peer-labels c.critique.labels.m.parquet\n\
+                      senna update new.zarr --model M_v1 -o M_v2\n\
                       \n\
                       Families: topic, masked-topic, masked-sbp, masked-vae, vae.\n\
                       For svd and simba this re-fits on the union — there are no weights\n\
@@ -703,6 +702,24 @@ enum Commands {
                       axis are initialized through them."
     )]
     Update(UpdateArgs),
+
+    #[command(
+        about = "Move a fit on critique labels alone.",
+        long_about = "Revise a topic or vae fit on `senna critique --questions` labels.\n\
+                      \n\
+                      The fit is set up as `senna update` sets it up, on its own cells\n\
+                      and the partition the labels were judged on, but it is not trained:\n\
+                      only its encoder moves, and only the labels enter the loss,\n\
+                      until each merged pair is as far apart as the level's\n\
+                      --far-frac quantile. The decoder is frozen. A revision that\n\
+                      lowers any level's likelihood by more than --max-llik-drop\n\
+                      saves no model; {out}.revise.parquet records it either way.\n\
+                      \n\
+                      Usage:\n\
+                      senna revise --model M_v1 --labels c.critique.labels.m.parquet -o M_v2\n  \
+                      Writes M_v2 as a new version, with {out}.revise.parquet."
+    )]
+    Revise(ReviseArgs),
 
     #[command(
         about = "Impute full-feature counts on new cells by kNN over a reference latent.",
@@ -953,6 +970,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Update(args) => {
             run_update(args)?;
+        }
+        Commands::Revise(args) => {
+            run_revise(args)?;
         }
         Commands::Impute(args) => {
             impute_model(args)?;
