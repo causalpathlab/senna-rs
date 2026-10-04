@@ -114,69 +114,56 @@ fn median_without_leaves_one_rank_out() {
     assert_eq!(median_without(&[7], 7), None);
 }
 
-#[test]
-fn pair_label_reads_the_all_model_median() {
-    let b = Bounds { near: 15, far: 45 };
-    assert_eq!(PairLabel::of(Some(4.0), b), PairLabel::Similar);
-    assert_eq!(PairLabel::of(Some(30.0), b), PairLabel::Ambiguous);
-    assert_eq!(PairLabel::of(Some(46.0), b), PairLabel::Different);
-    assert_eq!(PairLabel::of(None, b), PairLabel::Ambiguous);
-}
-
-// ---- Charges ----------------------------------------------------------------------
+// ---- Merges -----------------------------------------------------------------------
 
 const B: Bounds = Bounds { near: 15, far: 45 };
 
-fn charges_of(ranks: &[Vec<u32>], model: usize) -> Vec<Charge> {
+fn merges_of(ranks: &[Vec<u32>], model: usize) -> Vec<bool> {
     let sorted: Vec<Vec<u32>> = (0..ranks[0].len())
         .map(|c| sorted_known(ranks, c))
         .collect();
-    charges(&ranks[model], &sorted, B)
+    merges(&ranks[model], &sorted, B)
 }
 
-/// Two identical models never disagree, so neither is charged.
+/// Two identical models never disagree, so neither merges anything.
 #[test]
-fn agreeing_models_are_not_charged() {
+fn agreeing_models_do_not_merge() {
     let ranks = vec![vec![1, 2, 60], vec![1, 2, 60]];
-    assert!(charges_of(&ranks, 0).iter().all(|&c| c == Charge::None));
+    assert_eq!(merges_of(&ranks, 0), vec![false; 3]);
     assert_eq!(near_count(&ranks[0], B), 2);
 }
 
-/// With two models, a pair one keeps near and the other holds far is a merge
-/// for the first and a split for the second.
+/// A model merges a pair it keeps near while the others hold it far. Holding
+/// far what the others keep near is not a critique: that model is usually right.
 #[test]
-fn two_models_charge_each_other() {
+fn only_keeping_near_what_the_others_hold_far_is_a_merge() {
     let ranks = vec![vec![3, 50], vec![60, 2]];
-    assert_eq!(charges_of(&ranks, 0), vec![Charge::Merge, Charge::Split]);
-    assert_eq!(charges_of(&ranks, 1), vec![Charge::Split, Charge::Merge]);
+    assert_eq!(merges_of(&ranks, 0), vec![true, false]);
+    assert_eq!(merges_of(&ranks, 1), vec![false, true]);
 }
 
-/// With three models the majority decides: the lone model keeping the pair near
-/// is charged a merge; the two that agree on far are not charged.
+/// With three models the majority decides: only the lone model merges.
 #[test]
-fn the_majority_is_not_charged() {
+fn the_majority_does_not_merge() {
     let ranks = vec![vec![3], vec![60], vec![70]];
-    assert_eq!(charges_of(&ranks, 0), vec![Charge::Merge]);
-    assert_eq!(charges_of(&ranks, 1), vec![Charge::None]);
-    assert_eq!(charges_of(&ranks, 2), vec![Charge::None]);
+    assert_eq!(merges_of(&ranks, 0), vec![true]);
+    assert_eq!(merges_of(&ranks, 1), vec![false]);
+    assert_eq!(merges_of(&ranks, 2), vec![false]);
 }
 
 #[test]
-fn a_model_without_cells_is_not_charged() {
+fn a_model_without_cells_does_not_merge() {
     let ranks = vec![vec![u32::MAX], vec![2]];
-    assert_eq!(charges_of(&ranks, 0), vec![Charge::None]);
-    assert_eq!(charges_of(&ranks, 1), vec![Charge::None]);
+    assert_eq!(merges_of(&ranks, 0), vec![false]);
+    assert_eq!(merges_of(&ranks, 1), vec![false]);
 }
 
+/// The report card: how often a pair the model keeps near is one the others
+/// hold far.
 #[test]
-fn pseudobulk_labels_combine_their_charges() {
-    let pairs = [(0, 1), (1, 2), (3, 4)];
-    let charges = [Charge::Merge, Charge::Split, Charge::None];
-    let seen = [true; 5];
-    assert_eq!(
-        pb_labels(&pairs, &charges, &seen),
-        ["merge", "merge+split", "split", "consistent", "consistent"]
-    );
+fn merge_rate_is_merges_over_near_pairs() {
+    assert!((merge_rate(5, 20) - 0.25).abs() < 1e-6);
+    assert!(merge_rate(0, 0).is_nan());
 }
 
 #[test]
@@ -188,16 +175,6 @@ fn names_stay_unique_after_suffixing() {
     assert_eq!(sorted.len(), 4, "{names:?}");
     assert_eq!(names[0], "a");
     assert_eq!(names[3], "b");
-}
-
-/// A pseudobulk the model has no cells in was never judged: not "consistent".
-#[test]
-fn unseen_pseudobulks_are_labelled_unseen() {
-    let seen = [true, true, false];
-    assert_eq!(
-        pb_labels(&[(0, 1)], &[Charge::None], &seen),
-        ["consistent", "consistent", "unseen"]
-    );
 }
 
 /// A non-finite averaged latent says nothing about distance: its pseudobulk

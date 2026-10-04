@@ -14,18 +14,19 @@
 //!    on z-scored signed scores.
 //! 3. **Candidates.** The union of every model's top-`k` pseudobulk pairs. Each pair
 //!    gets a rank in every model: the smaller of its two directional ranks.
-//! 4. **Consensus.** Near is rank ≤ `k`; far is beyond `max(3k, P/4)` by default,
-//!    well clear of near. A pair's label is read off the median rank over all
-//!    models: `similar`, `different` or `ambiguous`.
-//! 5. **Charges.** Each model is judged against the median rank of the *other*
+//! 4. **Close and far.** Near is rank ≤ `k`; far is beyond `max(3k, P/4)` by
+//!    default, well clear of near.
+//! 5. **Merges.** Each model is judged against the median rank of the *other*
 //!    models, so its own rank never votes. It *merges* a pair it keeps near while
-//!    the others hold it far, and *splits* a pair it holds far while the others
-//!    keep it near. A model with many merges and few splits packs states the
-//!    others separate: the signature of mode collapse.
+//!    the others hold it far; the critique is "push these two apart". The reverse,
+//!    holding far what the others keep near, is not a critique: checked against
+//!    expert cell types, the lone model that separates is usually right.
+//! 6. **Report card.** A model's merge rate is its merges over its near pairs:
+//!    high, and it lumps together states the others separate (a topic model's
+//!    resolution limit, a VAE's mode collapse).
 //!
-//! The latents alone cannot say which side of a disagreement is right; the
-//! others' consensus stands in for it. Models that share a mistake are not
-//! charged for it.
+//! With `--cell-labels`, each pair's label-composition overlap checks the merges:
+//! a merged pair should share few labels compared with the model's near pairs.
 //!
 //! Levels are numbered as in `cell_to_pb.parquet`: `0` is the coarsest.
 
@@ -69,8 +70,7 @@ pub struct CritiqueArgs {
         help = "Output prefix",
         long_help = "Writes:\n  \
                      {out}.critique.pairs.parquet     one row per candidate pair\n  \
-                     {out}.critique.summary.parquet   merges and splits per model and level\n  \
-                     {out}.critique.cells.parquet     per cell, its pseudobulk's label per model and level\n  \
+                     {out}.critique.summary.parquet   merges and merge rate per model and level\n  \
                      {out}.critique.json              inputs and parameters"
     )]
     out: Box<str>,
@@ -207,54 +207,14 @@ pub(crate) fn median_without(sorted: &[u32], own: u32) -> Option<f64> {
     }
 }
 
-/// What the models together say about a pair.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PairLabel {
-    Similar,
-    Different,
-    Ambiguous,
-}
-
-impl PairLabel {
-    pub(crate) fn of(median: Option<f64>, b: Bounds) -> Self {
-        match median {
-            Some(m) if m <= f64::from(b.near) => PairLabel::Similar,
-            Some(m) if m > f64::from(b.far) => PairLabel::Different,
-            _ => PairLabel::Ambiguous,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            PairLabel::Similar => "similar",
-            PairLabel::Different => "different",
-            PairLabel::Ambiguous => "ambiguous",
-        }
-    }
-}
-
-/// What a pair is charged to one model as.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Charge {
-    None,
-    Merge,
-    Split,
-}
-
-/// Judge one model, pair by pair, against the median of the others. `own` is
-/// the model's ranks, `sorted` every pair's known ranks over all models.
-pub(crate) fn charges(own: &[u32], sorted: &[Vec<u32>], b: Bounds) -> Vec<Charge> {
+/// Which pairs `model` merges: it keeps the pair near while the median of the
+/// other models holds it far. `own` is the model's ranks, `sorted` every
+/// pair's known ranks over all models.
+pub(crate) fn merges(own: &[u32], sorted: &[Vec<u32>], b: Bounds) -> Vec<bool> {
     own.iter()
         .zip(sorted)
         .map(|(&r, all)| {
-            if r == u32::MAX {
-                return Charge::None;
-            }
-            match median_without(all, r) {
-                Some(o) if r <= b.near && o > f64::from(b.far) => Charge::Merge,
-                Some(o) if r > b.far && o <= f64::from(b.near) => Charge::Split,
-                _ => Charge::None,
-            }
+            r <= b.near && median_without(all, r).is_some_and(|o| o > f64::from(b.far))
         })
         .collect()
 }
@@ -264,33 +224,13 @@ pub(crate) fn near_count(own: &[u32], b: Bounds) -> usize {
     own.iter().filter(|&&r| r <= b.near).count()
 }
 
-/// Per kept pseudobulk: `merge`, `split`, `merge+split` or `consistent`, from
-/// the charged pairs it belongs to; `unseen` where the model has no view of it.
-pub(crate) fn pb_labels(
-    pairs: &[(u32, u32)],
-    charges: &[Charge],
-    seen: &[bool],
-) -> Vec<&'static str> {
-    let mut flag = vec![0u8; seen.len()];
-    for (&(a, b), &ch) in pairs.iter().zip(charges) {
-        let bit = match ch {
-            Charge::None => continue,
-            Charge::Merge => 1,
-            Charge::Split => 2,
-        };
-        flag[a as usize] |= bit;
-        flag[b as usize] |= bit;
+/// Merges over near pairs; `NaN` without near pairs.
+pub(crate) fn merge_rate(merges: usize, near: usize) -> f32 {
+    if near == 0 {
+        f32::NAN
+    } else {
+        merges as f32 / near as f32
     }
-    flag.iter()
-        .zip(seen)
-        .map(|(f, &seen)| match (seen, f) {
-            (false, _) => "unseen",
-            (true, 1) => "merge",
-            (true, 2) => "split",
-            (true, 3) => "merge+split",
-            _ => "consistent",
-        })
-        .collect()
 }
 
 /// `base`, `base_2`, … until every name is unique, including against names
@@ -538,11 +478,6 @@ impl View {
         view
     }
 
-    /// Which kept pseudobulks the view holds.
-    fn seen(&self) -> Vec<bool> {
-        self.slot.iter().map(|&r| r != usize::MAX).collect()
-    }
-
     /// Every row's top-`k` pairs, as `(min, max)` kept indices.
     pub(crate) fn top_k_pairs(&self, k: usize) -> Vec<(u32, u32)> {
         let (nbrs, _) = knn_rows_l2(&self.x, k);
@@ -683,7 +618,6 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
 
     let mut pair_tab = PairTable::default();
     let mut summary_tab = SummaryTable::default();
-    let mut cell_cols: Vec<(Box<str>, Vec<Box<str>>)> = Vec::new();
     let mut level_json = Vec::new();
     for (l, (lv, j)) in levels.iter().zip(&judged).enumerate() {
         let b = match j {
@@ -701,7 +635,14 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
         let pairs = candidates(&views, args.knn);
         let ranks: Vec<Vec<u32>> = views.iter().map(|v| v.pair_ranks(&pairs)).collect();
         let sorted: Vec<Vec<u32>> = (0..pairs.len()).map(|c| sorted_known(&ranks, c)).collect();
-        let label_count = pair_tab.push_level(l, lv, b, &pairs, &ranks, &sorted);
+        let merged: Vec<Vec<bool>> = ranks.iter().map(|rk| merges(rk, &sorted, b)).collect();
+        let judged = JudgedLevel {
+            pairs: &pairs,
+            ranks: &ranks,
+            sorted: &sorted,
+            merged: &merged,
+        };
+        pair_tab.push_level(l, lv, &judged, &names);
         // With cell labels: each pair's composition overlap, NaN where unknown.
         let overlaps: Option<Vec<f32>> = labels.as_ref().map(|cl| {
             let comp = label_composition(&lv.pb_of_cell, &cl.of_cell, lv.n_pb(), cl.n_labels);
@@ -718,21 +659,16 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
         }
 
         for (mi, name) in names.iter().enumerate() {
-            let ch = charges(&ranks[mi], &sorted, b);
-            let pb_label = pb_labels(&pairs, &ch, &views[mi].seen());
-            cell_cols.push((
-                format!("{name}.L{l}").into(),
-                lv.pb_of_cell
-                    .iter()
-                    .map(|&pb| Box::from(pb_label.get(pb).copied().unwrap_or("")))
-                    .collect(),
-            ));
-            let row = summary_tab.push(l, name, lv.n_pb(), b, near_count(&ranks[mi], b), &ch);
-            info!("Level {l}, {name}: merges {}, splits {}", row.0, row.1);
+            let near = near_count(&ranks[mi], b);
+            let n_merged = merged[mi].iter().filter(|&&m| m).count();
+            summary_tab.push(l, name, lv.n_pb(), b, near, n_merged);
+            info!(
+                "Level {l}, {name}: {n_merged} merges of {near} near pairs (rate {:.3})",
+                merge_rate(n_merged, near)
+            );
             if let Some(ov) = &overlaps {
-                let merged: Vec<bool> = ch.iter().map(|&c| c == Charge::Merge).collect();
-                let near: Vec<bool> = ranks[mi].iter().map(|&r| r <= b.near).collect();
-                let (m, n) = (mean_over(ov, &merged), mean_over(ov, &near));
+                let is_near: Vec<bool> = ranks[mi].iter().map(|&r| r <= b.near).collect();
+                let (m, n) = (mean_over(ov, &merged[mi]), mean_over(ov, &is_near));
                 summary_tab.merge_overlap.push(m);
                 summary_tab.near_overlap.push(n);
                 info!(
@@ -741,20 +677,11 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
             }
         }
 
-        info!(
-            "Level {l}: {} candidate pairs; similar {}, different {}, ambiguous {}",
-            pairs.len(),
-            label_count[0],
-            label_count[1],
-            label_count[2],
-        );
+        info!("Level {l}: {} candidate pairs", pairs.len());
         level_json.push(serde_json::json!({
             "level": l,
             "n_pb": lv.n_pb(),
             "n_pairs": pairs.len(),
-            "similar": label_count[0],
-            "different": label_count[1],
-            "ambiguous": label_count[2],
             "near_rank": b.near,
             "far_rank": b.far,
         }));
@@ -762,16 +689,6 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
 
     pair_tab.write(&format!("{}.critique.pairs.parquet", args.out), &names)?;
     summary_tab.write(&format!("{}.critique.summary.parquet", args.out))?;
-    let cols: Vec<(Box<str>, Column)> = cell_cols
-        .iter()
-        .map(|(n, v)| (n.clone(), Column::Str(v)))
-        .collect();
-    write_named_table(
-        &format!("{}.critique.cells.parquet", args.out),
-        "cell",
-        &part_cells,
-        &cols,
-    )?;
     let record = serde_json::json!({
         "partition": part_path,
         "models": models.iter().zip(&names).map(|(m, name)| serde_json::json!({
@@ -794,7 +711,7 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
         serde_json::to_string_pretty(&record)?,
     )?;
     info!(
-        "Wrote {}.critique.{{pairs,summary,cells}}.parquet and .critique.json",
+        "Wrote {}.critique.{{pairs,summary}}.parquet and .critique.json",
         args.out
     );
     Ok(())
@@ -897,6 +814,17 @@ fn load_model(
     })
 }
 
+/// One level's candidate pairs and what the models said about them.
+struct JudgedLevel<'a> {
+    pairs: &'a [(u32, u32)],
+    /// `ranks[model][pair]`, `u32::MAX` where unknown.
+    ranks: &'a [Vec<u32>],
+    /// Per pair, the known ranks over all models, sorted.
+    sorted: &'a [Vec<u32>],
+    /// `merged[model][pair]`.
+    merged: &'a [Vec<bool>],
+}
+
 /// One row per candidate pair, as `{out}.critique.pairs.parquet`.
 #[derive(Default)]
 struct PairTable {
@@ -911,34 +839,29 @@ struct PairTable {
     /// Largest minus smallest known rank. Not `rank_spread`: per-model columns
     /// are `rank_{model}`, and a run named `spread` would collide.
     spread: Vec<f32>,
-    label: Vec<Box<str>>,
+    /// The models that merged the pair, comma-separated; empty when none did.
+    merged_by: Vec<Box<str>>,
     /// With `--cell-labels`: the overlap of the two label compositions.
     label_overlap: Vec<f32>,
 }
 
 impl PairTable {
-    /// Add one level's pairs; returns how many are similar, different and ambiguous.
-    fn push_level(
-        &mut self,
-        l: usize,
-        lv: &Level,
-        b: Bounds,
-        pairs: &[(u32, u32)],
-        ranks: &[Vec<u32>],
-        sorted: &[Vec<u32>],
-    ) -> [usize; 3] {
+    /// Add one level's pairs.
+    fn push_level(&mut self, l: usize, lv: &Level, j: &JudgedLevel, names: &[String]) {
+        let JudgedLevel {
+            pairs,
+            ranks,
+            sorted,
+            merged,
+        } = *j;
         self.rank.resize_with(ranks.len(), Vec::new);
-        let mut count = [0usize; 3];
-        for (c, &(a, b_)) in pairs.iter().enumerate() {
-            let (a, b_) = (a as usize, b_ as usize);
-            let med = median(&sorted[c]);
-            let label = PairLabel::of(med, b);
-            count[label as usize] += 1;
+        for (c, &(a, b)) in pairs.iter().enumerate() {
+            let (a, b) = (a as usize, b as usize);
             self.level.push(l as i32);
             self.pb_a.push(lv.pb_id[a] as i32);
-            self.pb_b.push(lv.pb_id[b_] as i32);
+            self.pb_b.push(lv.pb_id[b] as i32);
             self.n_cells_a.push(lv.n_cells[a] as i32);
-            self.n_cells_b.push(lv.n_cells[b_] as i32);
+            self.n_cells_b.push(lv.n_cells[b] as i32);
             for (col, rk) in self.rank.iter_mut().zip(ranks) {
                 col.push(if rk[c] == u32::MAX {
                     f32::NAN
@@ -946,15 +869,21 @@ impl PairTable {
                     rk[c] as f32
                 });
             }
-            self.median_rank.push(med.map_or(f32::NAN, |m| m as f32));
+            self.median_rank
+                .push(median(&sorted[c]).map_or(f32::NAN, |m| m as f32));
             self.spread
                 .push(match (sorted[c].first(), sorted[c].last()) {
                     (Some(lo), Some(hi)) => (hi - lo) as f32,
                     _ => f32::NAN,
                 });
-            self.label.push(label.as_str().into());
+            let by: Vec<&str> = names
+                .iter()
+                .zip(merged)
+                .filter(|(_, m)| m[c])
+                .map(|(n, _)| n.as_str())
+                .collect();
+            self.merged_by.push(by.join(",").into());
         }
-        count
     }
 
     fn write(&self, path: &str, names: &[String]) -> anyhow::Result<()> {
@@ -974,7 +903,7 @@ impl PairTable {
         }
         cols.push(("median_rank".into(), Column::F32(&self.median_rank)));
         cols.push(("spread".into(), Column::F32(&self.spread)));
-        cols.push(("label".into(), Column::Str(&self.label)));
+        cols.push(("merged_by".into(), Column::Str(&self.merged_by)));
         if !self.label_overlap.is_empty() {
             cols.push(("label_overlap".into(), Column::F32(&self.label_overlap)));
         }
@@ -991,8 +920,8 @@ struct SummaryTable {
     far_rank: Vec<i32>,
     near: Vec<i32>,
     merges: Vec<i32>,
-    splits: Vec<i32>,
-    merge_share: Vec<f32>,
+    /// Merges over near pairs: the report card.
+    merge_rate: Vec<f32>,
     /// With `--cell-labels`: mean label overlap of the merged pairs, and of
     /// all the model's near pairs (the base a merge is judged against).
     merge_overlap: Vec<f32>,
@@ -1000,7 +929,6 @@ struct SummaryTable {
 }
 
 impl SummaryTable {
-    /// Add one model's row; returns its `(merges, splits)`.
     fn push(
         &mut self,
         level: usize,
@@ -1008,23 +936,15 @@ impl SummaryTable {
         n_pb: usize,
         b: Bounds,
         near: usize,
-        charges: &[Charge],
-    ) -> (usize, usize) {
-        let merges = charges.iter().filter(|&&c| c == Charge::Merge).count();
-        let splits = charges.iter().filter(|&&c| c == Charge::Split).count();
+        merges: usize,
+    ) {
         self.model.push(model.into());
         self.level.push(level as i32);
         self.n_pb.push(n_pb as i32);
         self.far_rank.push(b.far as i32);
         self.near.push(near as i32);
         self.merges.push(merges as i32);
-        self.splits.push(splits as i32);
-        self.merge_share.push(if merges + splits == 0 {
-            f32::NAN
-        } else {
-            merges as f32 / (merges + splits) as f32
-        });
-        (merges, splits)
+        self.merge_rate.push(merge_rate(merges, near));
     }
 
     fn write(&self, path: &str) -> anyhow::Result<()> {
@@ -1034,8 +954,7 @@ impl SummaryTable {
             ("far_rank".into(), Column::I32(&self.far_rank)),
             ("near_pairs".into(), Column::I32(&self.near)),
             ("merges".into(), Column::I32(&self.merges)),
-            ("splits".into(), Column::I32(&self.splits)),
-            ("merge_share".into(), Column::F32(&self.merge_share)),
+            ("merge_rate".into(), Column::F32(&self.merge_rate)),
         ];
         if !self.merge_overlap.is_empty() {
             cols.push(("merge_overlap".into(), Column::F32(&self.merge_overlap)));
