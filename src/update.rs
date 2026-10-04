@@ -22,7 +22,7 @@
 //! checked against (`--no-pb-reference`), and the fallback when the
 //! substitution is impossible — see [`select_reference`].
 //!
-//! **A round** (`docs/peer-critique-plan.md`, §8.1) is an update with no new
+//! **A round** of peer critique (see `senna critique`) is an update with no new
 //! data: the parent continues on its own cells, on a named partition
 //! (`--pb-from`, by default the parent's own) and, from stage 2 on, trained
 //! against critique labels (`--peer-labels`). It replays the recorded inputs and
@@ -572,8 +572,8 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         );
         if args.peer_labels.is_some() {
             log::warn!(
-                "--peer-labels is recorded but not yet trained on: the training term that \
-                 pushes labelled pairs apart is stage 2 of docs/peer-critique-plan.md"
+                "--peer-labels is recorded but not trained on yet: no training term reads \
+                 the labels so far"
             );
         }
     } else {

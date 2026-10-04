@@ -1,4 +1,4 @@
-//! `senna critique` — stage 0a of `docs/peer-critique-plan.md`: report only.
+//! `senna critique` — fits that question each other: a report, nothing trained.
 //!
 //! Several fits of the same cells place pseudobulks differently. This command
 //! finds the pseudobulk pairs on which they disagree, entirely in the models'

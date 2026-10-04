@@ -13,6 +13,7 @@ temp*/
 
 # Local working notes, not published
 docs/text-anchored-gene-space-plan.md
+docs/peer-critique-plan.md
 
 # Not tracked; resolved fresh on each build
 Cargo.lock

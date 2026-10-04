@@ -659,7 +659,7 @@ pub struct RunManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub train_args: Option<TrainArgsRecord>,
     /// What a round of `senna update` continued from and trained against
-    /// (`docs/peer-critique-plan.md`, §1 "history"). Absent on a fit that is
+    /// (a model's chain of versions, one per round). Absent on a fit that is
     /// no round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<RunHistory>,

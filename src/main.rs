@@ -656,7 +656,7 @@ enum Commands {
 
     #[command(
         about = "Report where fits disagree on which pseudobulks are alike.",
-        long_about = "Read-only peer critique, stage 0a of docs/peer-critique-plan.md.\n\
+        long_about = "Read-only peer critique: fits that question each other.\n\
                       \n\
                       Each fit's cell latent is averaged over one run's pseudobulks.\n\
                       Pairs that any fit puts among its nearest neighbours become candidates.\n\
