@@ -211,7 +211,7 @@ with genes, and the topic model has θ and β. A label on one side moves their o
 | topic | A, B | A, B | extra loss term: a margin on θ (A) and on β rows (B) | `ExtraLossHook` in legume-numeric (below) |
 | vae | A, B | A, B | extra loss term on z (A) and on decoder rows (B) | same hook |
 | masked-* | A, B | A, B | extra loss term on θ (A) and on ρ (B) | the same hook on `train_masked` |
-| svd | A, B | — | does not receive at first; later, pair weights in a weighted SVD | none at first |
+| svd | A, B | A | **as features**: the genes that separate its merged pairs in the pseudobulk counts are promoted into its HVG set, and `rsvd` is re-solved; the solver is untouched | a merge-score term in the HVG ranking (`--must-train-features` exists already) |
 | bge, simba, gem | A, B | A, B | **as edges**: explicit negatives | explicit negatives in `graph-embedding-util` (to be checked) |
 | fne | B | B | **as edges**: one relation per model's gene view, plus external knowledge | edge files from the gene views; it already consumes typed relations |
 
@@ -259,7 +259,7 @@ Messages are files under `{run}.peer/`. Models never read each other's messages;
 **Labels, critique → model:** `{model}.r{round}.labels.parquet` (stage 0c writes `{out}.critique.labels.{model}.parquet`)
 
 | channel | level | pb_a | pb_b | weight | answer_rank | own_rank | answered_by |
-|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|---|
 
 Field notes:
 
@@ -430,6 +430,15 @@ labels act as a simulated perfect oracle; they never enter the loop.
 ## 11. Follow-ups and open questions
 
 **Follow-ups**
+
+- **SVD learns through its features, not its geometry.** A merged pair is one whose difference
+  lies outside the span of SVD's chosen genes, so the feedback acts on the gene set: the
+  separating genes of each merged pair (`|x_a − x_b|` over `pb_gene.parquet`, weighted by the
+  label) are summed over the model's merges and folded into the HVG ranking, at a fixed feature
+  budget. SVD stays closed-form and unweighted, and the committee cannot bend its geometry, only
+  point at genes it ignores. The same hint can serve any model with an HVG step, beside its loss
+  term. Set aside: appending weighted difference columns before the solve, and a cannot-link
+  constrained PCA (Zhang et al., SDM 2007), both of which change what SVD is.
 
 - **§3.1 A hybrid mixing view.** Tried: a view from each model's cell-level kNN graph (PAGA-style
   connectivity between pseudobulks; Wolf et al., Genome Biology 2019), built by streaming each
