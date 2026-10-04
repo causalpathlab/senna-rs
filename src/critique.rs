@@ -64,7 +64,8 @@ pub struct CritiqueArgs {
         long,
         help = "Run whose cell → pseudobulk partition is used (default: the first model that has one)",
         long_help = "A run that wrote {out}.cell_to_pb.parquet (topic, masked-*, vae).\n\
-                     The models need not have trained on this partition."
+                     The models need not have trained on this partition.\n\
+                     Default: the first model that has one."
     )]
     partition: Option<Box<str>>,
 
@@ -74,10 +75,10 @@ pub struct CritiqueArgs {
         required = true,
         help = "Output prefix",
         long_help = "Writes:\n  \
-                     {out}.critique.pairs.parquet     one row per candidate pair\n  \
-                     {out}.critique.summary.parquet   merges and merge rate per model and level\n  \
-                     {out}.critique.labels.{model}.parquet  with --questions: pairs the model is to push apart\n  \
-                     {out}.critique.json              inputs and parameters"
+                     {out}.critique.pairs.parquet           one row per candidate pair\n  \
+                     {out}.critique.summary.parquet         merges and merge rate per model and level\n  \
+                     {out}.critique.labels.{model}.parquet  with --questions: pairs to push apart\n  \
+                     {out}.critique.json                    inputs and parameters"
     )]
     out: Box<str>,
 
@@ -92,7 +93,8 @@ pub struct CritiqueArgs {
         long,
         default_value_t = 0.25,
         help = "Far is beyond rank max(2·knn, this fraction of the pseudobulks)",
-        long_help = "Near is rank ≤ --knn. Far must be well clear of it, so that one\n\
+        long_help = "Far is beyond rank max(2·knn, this fraction of the pseudobulks).\n\
+                     Near is rank ≤ --knn; far must be well clear of it, so that one\n\
                      model at rank 15 and another at 16 is not a disagreement.\n\
                      A level too small to hold a rank beyond far is skipped."
     )]
@@ -147,11 +149,13 @@ pub struct CritiqueArgs {
         long,
         requires = "label_column",
         help = "Per-cell labels to check the critique against (TSV, may be gzipped)",
-        long_help = "A table with a header; the first column names the cell, as in the\n\
-                     partition. Each pseudobulk is described by its label composition,\n\
-                     and each pair by the overlap of the two compositions:\n\
-                     1 for the same mix of labels, 0 for no label in common.\n\
-                     A merge charge is borne out when its pair's overlap is low."
+        long_help = "A tab-separated table with a header (gzipped is fine); the first\n\
+                     column names the cell, as in the partition. Each pseudobulk is\n\
+                     described by its label composition, and each pair by the overlap\n\
+                     of the two compositions: 1 for the same mix of labels, 0 for no\n\
+                     label in common. A merge is borne out when its pair's overlap is\n\
+                     low against the model's other near pairs. Labels only check the\n\
+                     merges; they never change them."
     )]
     cell_labels: Option<Box<str>>,
 

@@ -673,8 +673,8 @@ enum Commands {
     Critique(CritiqueArgs),
 
     #[command(
-        about = "Absorb new samples into a trained model by continuing its training.",
-        long_about = "Continue a trained run over a larger cohort.\n\
+        about = "Continue a trained model: absorb new samples, or run a critique round.",
+        long_about = "Continue a trained run over a larger cohort, or on its own cells.\n\
                       \n\
                       The parent's manifest records both the data it was trained on\n\
                       and the arguments it was trained with, so the update re-runs\n\
@@ -683,11 +683,17 @@ enum Commands {
                       \n\
                       Every family trains on pseudobulks, so the old cohort is\n\
                       replayed exactly and old-vs-new batch effects are matched at\n\
-                      cell resolution. The cost is that each round re-reads every\n\
-                      previously absorbed cell.\n\
+                      cell resolution. The cost is that every previously absorbed\n\
+                      cell is re-read, unless the parent's carried pseudobulks stand in\n\
+                      for them (the default; see --no-pb-reference).\n\
+                      \n\
+                      With no new data the update is a round: the parent continues on\n\
+                      its own cells and partition, and records --peer-labels from\n\
+                      `senna critique --questions` in its history.\n\
                       \n\
                       Usage:\n\
-                      senna update new.zarr --model M_v1 -o M_v2\n\
+                      senna update new.zarr --model M_v1 -o M_v2\n  \
+                      senna update --model M_v1 -o M_v2 --peer-labels c.critique.labels.m.parquet\n\
                       \n\
                       Families: topic, masked-topic, masked-sbp, masked-vae, vae.\n\
                       For svd and simba this re-fits on the union — there are no weights\n\

@@ -78,7 +78,12 @@ pub(crate) trait Updatable {
 pub struct UpdateArgs {
     #[arg(
         value_delimiter = ',',
-        help = "New data files to absorb (.zarr or .h5); none makes this a round on the parent's cells"
+        help = "New data files to absorb (.zarr or .h5); none makes this a round",
+        long_help = "The new data to absorb into the parent.\n\
+                     With none, the update is a round: the parent continues on its own\n\
+                     cells (recorded inputs and batches replayed), collapsed on its own\n\
+                     partition or --pb-from's, and the new version's manifest records\n\
+                     its history. Rounds are how fits take `senna critique`'s labels."
     )]
     data_files: Vec<Box<str>>,
 
@@ -134,7 +139,8 @@ pub struct UpdateArgs {
         help = "Batch files for the NEW data, one per new data file",
         long_help = "Required when the parent had batch files, because the loader\n\
                      needs one batch file per data file across the whole cohort.\n\
-                     The parent's recorded list is prepended automatically."
+                     The parent's recorded list is prepended automatically.\n\
+                     Not in a round: it replays the parent's recorded batches."
     )]
     batch_files: Option<Vec<Box<str>>>,
 
