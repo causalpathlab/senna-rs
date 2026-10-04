@@ -62,22 +62,25 @@ fn level_keeps_pseudobulks_with_enough_cells() {
 
 // ---- Bounds -----------------------------------------------------------------------
 
-/// "Far" must be well clear of "near": beyond max(3k, P/4), never just k + 1.
+/// "Far" must be well clear of "near": beyond max(2K, P/4), never just K + 1.
+/// Swept against expert cell types on two donors: rules set by K alone do not
+/// carry over between datasets; the P/4 part does.
 #[test]
 fn far_leaves_a_gap_after_near() {
     let far = |p, k| Bounds::for_level(p, k, 0.25).map(|b| b.far);
-    assert_eq!(far(106, 15), Some(45));
+    assert_eq!(far(106, 15), Some(30));
+    assert_eq!(far(420, 15), Some(105));
     assert_eq!(far(1000, 15), Some(250));
-    assert_eq!(far(40, 5), Some(15));
+    assert_eq!(far(40, 5), Some(10));
     assert_eq!(Bounds::for_level(106, 15, 0.25).map(|b| b.near), Some(15));
 }
 
 /// Ranks run to P − 1, so a level too small to hold a rank beyond far has no bounds.
 #[test]
 fn a_level_too_small_for_far_has_no_bounds() {
-    assert!(Bounds::for_level(47, 15, 0.25).is_some());
-    assert!(Bounds::for_level(46, 15, 0.25).is_none());
-    assert!(Bounds::for_level(40, 15, 0.25).is_none());
+    assert!(Bounds::for_level(32, 15, 0.25).is_some());
+    assert!(Bounds::for_level(31, 15, 0.25).is_none());
+    assert!(Bounds::for_level(20, 15, 0.25).is_none());
 }
 
 #[test]

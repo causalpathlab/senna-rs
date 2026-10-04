@@ -130,10 +130,11 @@ latent is not finite, are left out of the view.
 ### 3.3 Answers
 
 - **The answer is the others' median rank.** The learner never answers itself.
-- **Far is beyond `max(2K, P/4)`.** Swept against expert cell types (§10): any rule looser than
-  about P/4 lets merges of the same cell type in; rules much stricter (P/2, the bottom *K*, all
-  other models agreeing) are just as precise but find far fewer merges. *(The stage-0a build uses
-  `max(3K, P/4)`; the change to `2K` waits on the second donor.)*
+- **Far is beyond `max(2K, P/4)`.** Swept against expert cell types on two donors (§10): a far
+  set by *K* alone admits merges of one cell type on one donor and not the other, so far must
+  scale with *P*; rules looser than about P/4 let same-type merges in; rules much stricter (P/2,
+  the bottom *K*, all other models agreeing) are just as precise but find far fewer merges. The
+  `2K` floor only guards tiny levels.
 - **Only a far answer is taken.** A near pair answered far is a **merge**. A far pair answered
   near is **contentious**: no label, because a lone separating model is usually right (§10).
 - **Level context.** At a coarse level the nearest pseudobulks are often different cell types;
@@ -412,7 +413,13 @@ labels act as a simulated perfect oracle; they never enter the loop.
   - **Merge rate per near pair:** SVD 0.06–0.13; topic, vae and bge 0.015–0.05.
   - **Far rule.** The others' median beyond P/4 passes (merge overlap ≤ 0.03 of the base at both
     label granularities); beyond P/8, 3K or 4K it does not. `max(2K, P/4)` finds 1628 merges,
-    `max(3K, P/4)` 1282, at the same precision. To be confirmed on donor BM2.
+    `max(3K, P/4)` 1282, at the same precision.
+  - **Seven models** (adding masked-topic, masked-vae and simba): every model's merges still
+    overlap ≤ 0.009. Merge rates rank SVD highest (0.06–0.16), then masked-vae; bge, simba and
+    masked-topic lowest (0.007–0.023). With more voices, even far beyond P/8 passes.
+- *HCA donor BM2, topic + vae + svd + bge.* `max(2K, P/4)` passes again (1698 merges; ratio to
+  base 0.017 fine, 0.029 broad), `max(3K, P/4)` finds 1412. Rules set by K alone fail here
+  (beyond 5K: ratio 0.29), though beyond 5K passed on BM1.
   - The labels come from clustering in a PCA-like space, so they share some bias with separating
     models.
 

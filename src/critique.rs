@@ -14,7 +14,7 @@
 //!    on z-scored signed scores.
 //! 3. **Candidates.** The union of every model's top-`k` pseudobulk pairs. Each pair
 //!    gets a rank in every model: the smaller of its two directional ranks.
-//! 4. **Close and far.** Near is rank ≤ `k`; far is beyond `max(3k, P/4)` by
+//! 4. **Close and far.** Near is rank ≤ `k`; far is beyond `max(2k, P/4)` by
 //!    default, well clear of near.
 //! 5. **Merges.** Each model is judged against the median rank of the *other*
 //!    models, so its own rank never votes. It *merges* a pair it keeps near while
@@ -85,7 +85,7 @@ pub struct CritiqueArgs {
     #[arg(
         long,
         default_value_t = 0.25,
-        help = "Far is beyond rank max(3·knn, this fraction of the pseudobulks)",
+        help = "Far is beyond rank max(2·knn, this fraction of the pseudobulks)",
         long_help = "Near is rank ≤ --knn. Far must be well clear of it, so that one\n\
                      model at rank 15 and another at 16 is not a disagreement.\n\
                      A level too small to hold a rank beyond far is skipped."
@@ -163,10 +163,13 @@ pub(crate) struct Bounds {
 }
 
 impl Bounds {
-    /// `far = max(3·knn, ⌈P·frac⌉)`, well clear of near. `None` when no rank
+    /// `far = max(2·knn, ⌈P·frac⌉)`, well clear of near. The `P·frac` part does
+    /// the work: swept against expert cell types on two HCA donors, a far set by
+    /// `knn` alone admits merges of one cell type on one donor and not the other;
+    /// `2·knn` only guards tiny levels. `None` when no rank
     /// can lie beyond it: ranks run from 1 to `P − 1`.
     pub(crate) fn for_level(n_pb: usize, knn: usize, frac: f64) -> Option<Self> {
-        let far = (3 * knn).max((n_pb as f64 * frac).ceil() as usize);
+        let far = (2 * knn).max((n_pb as f64 * frac).ceil() as usize);
         (n_pb.saturating_sub(1) > far).then_some(Bounds {
             near: knn as u32,
             far: far as u32,
