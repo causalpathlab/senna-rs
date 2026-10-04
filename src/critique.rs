@@ -309,14 +309,7 @@ pub(crate) fn kmeanspp(
         let score: Vec<f64> = weights
             .iter()
             .zip(&near2)
-            .map(|(w, d2)| {
-                let w = w.max(0.0);
-                if picked.is_empty() {
-                    w
-                } else {
-                    w * d2
-                }
-            })
+            .map(|(w, &d2)| w.max(0.0) * if picked.is_empty() { 1.0 } else { d2 })
             .collect();
         // `Err` when nothing has weight, or the total is not finite.
         let Ok(draw) = WeightedIndex::new(&score) else {

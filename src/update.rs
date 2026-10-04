@@ -16,7 +16,7 @@
 //! works from stored pseudobulk summaries.
 //!
 //! What that costs is time: re-reading every previously absorbed cell makes a
-//! chain of S samples O(S²) in cell reads. So by default a round substitutes the
+//! chain of S samples O(S²) in cell reads. So by default an update substitutes the
 //! parent's carried pseudobulks for its cells ([`senna::pb_reference`]) and
 //! costs the new data only; the exact re-collapse remains the baseline it is
 //! checked against (`--no-pb-reference`), and the fallback when the
@@ -24,9 +24,10 @@
 //!
 //! **A round** (`docs/peer-critique-plan.md`, §8.1) is an update with no new
 //! data: the parent continues on its own cells, on a named partition
-//! (`--pb-from`) and, from stage 2 on, trained against critique labels
-//! (`--peer-labels`). It replays the recorded inputs and never substitutes the
-//! carried pseudobulks, which would stand in for the only cells there are.
+//! (`--pb-from`, by default the parent's own) and, from stage 2 on, trained
+//! against critique labels (`--peer-labels`). It replays the recorded inputs and
+//! never substitutes the carried pseudobulks, which would stand in for the only
+//! cells there are; a lineage that already holds them is refused.
 //!
 //! **The partition is deliberately not inherited** when there is new data.
 //! `--from` would pull the parent's cell→pb membership along with its inputs, but
@@ -86,7 +87,8 @@ pub struct UpdateArgs {
         value_name = "RUN",
         conflicts_with = "data_files",
         help = "Round only: collapse on this run's cell → pseudobulk partition",
-        long_help = "A round continues the parent on its own cells. With --pb-from the\n\
+        long_help = "A round continues the parent on its own cells, collapsed on the\n\
+                     parent's own partition unless --pb-from names another. With it the\n\
                      fit collapses on that run's partition (a topic, masked or vae run\n\
                      over the same cells), so every model in a critique round shares\n\
                      one set of pseudobulks. Not with new data: a partition over the\n\
@@ -145,7 +147,7 @@ pub struct UpdateArgs {
     epochs: Option<usize>,
 
     /// Explicit form of the default. Kept so existing scripts parse, and so a
-    /// request the round cannot honour is an error rather than a fallback.
+    /// request the update cannot honour is an error rather than a fallback.
     #[arg(
         long,
         hide = true,
@@ -161,7 +163,7 @@ pub struct UpdateArgs {
         long,
         conflicts_with = "use_pb_reference",
         help = "Re-collapse the whole cohort from cells, ignoring any carried pseudobulks",
-        long_help = "By default a round substitutes the parent's carried pseudobulks\n\
+        long_help = "By default an update substitutes the parent's carried pseudobulks\n\
                      for its cells, so it costs the NEW data only: absorbing S\n\
                      samples one at a time is linear in cell reads instead of\n\
                      quadratic. The trade is resolution. Old-vs-new batch matching\n\
@@ -175,11 +177,11 @@ pub struct UpdateArgs {
                      This flag forces the exact computation instead: every cell the\n\
                      model has already seen is re-read and re-collapsed alongside\n\
                      the new ones, and batch matching stays at cell resolution. It\n\
-                     is also what a round does on its own when the substitution is\n\
+                     is also what an update does on its own when the substitution is\n\
                      impossible: no batch labels for the new data, a parent that\n\
                      carries nothing, a simba or multiome parent.\n\
                      \n\
-                     Not available once a chain has substituted: that round's\n\
+                     Not available once a chain has substituted: that update's\n\
                      inputs hold the carried reference in place of the cells, and\n\
                      re-reading it as cells would weigh each pseudobulk as one."
     )]
@@ -221,12 +223,37 @@ impl UpdateArgs {
     }
 }
 
-/// Whether the recorded fit was cut by `--cnv-clones`: it built its own strata,
-/// which no other run's partition covers.
-pub(crate) fn recorded_cnv_clones(args: &serde_json::Value) -> bool {
-    ["/collapse/cnv_clones", "/cnv_clones"]
-        .iter()
-        .any(|p| args.pointer(p).is_some_and(|v| !v.is_null()))
+/// The partition a round collapses on: `--pb-from` when given, else the
+/// parent's own, so the round keeps the pseudobulks it is critiqued on. None
+/// for a parent cut by `--cnv-clones` (its strata are its own to rebuild), for
+/// a kind that does not collapse, and for an update with new data.
+pub(crate) fn round_partition(
+    given: Option<Box<str>>,
+    parent: &str,
+    kind: RunKind,
+    round: bool,
+    cnv_cut: bool,
+) -> Option<Box<str>> {
+    let collapses = matches!(kind, RunKind::Topic | RunKind::Vae) || kind.is_masked_family();
+    if !round || !collapses {
+        return given;
+    }
+    given.or_else(|| (!cnv_cut).then(|| Box::from(parent)))
+}
+
+/// A round replays the recorded inputs as cells, so a lineage that absorbed
+/// data through carried pseudobulks, which hold them in place of the cells,
+/// cannot continue as a round.
+pub(crate) fn check_round_inputs(recorded: &[Box<str>]) -> anyhow::Result<()> {
+    if let Some(path) = carried_reference_among(recorded) {
+        anyhow::bail!(
+            "a round replays the parent's inputs as cells, but they hold carried pseudobulks \
+             ({path}) in place of the cells absorbed earlier; re-reading those as cells would \
+             weigh each pseudobulk as one cell. Round on a model fitted from cells, or one \
+             updated with --no-pb-reference."
+        );
+    }
+    Ok(())
 }
 
 /// Refuse a new input the parent already trained on.
@@ -311,7 +338,7 @@ fn select_reference(
     let chosen: Result<Option<senna::pb_reference::ReferenceInput>, String> = if args.is_round() {
         Err(
             "a round continues on the parent's own cells, and there is nothing to stand \
-                 them in for"
+             them in for"
                 .into(),
         )
     } else if args.no_pb_reference {
@@ -319,20 +346,20 @@ fn select_reference(
     } else if manifest.kind == RunKind::Simba {
         Err(
             "a simba run trains on cells, never on pseudobulks, so there is nothing to \
-                 substitute"
+             substitute"
                 .into(),
         )
     } else if multiome_recorded(manifest) {
         Err(format!(
             "{} is a multiome run, whose union column alignment cannot keep carried \
-                 pseudobulks contiguous",
+             pseudobulks contiguous",
             args.model
         ))
     } else if args.batch_files.is_none() {
         Err(format!(
             "the new data has no --batch-files; the carried pseudobulks are their own batch \
-                 and the loader takes one batch file per data file. Passing batch labels lets a \
-                 round reuse {}'s carried pseudobulks and cost the new data only",
+             and the loader takes one batch file per data file. Passing batch labels lets an \
+             update reuse {}'s carried pseudobulks and cost the new data only",
             args.model
         ))
     } else {
@@ -343,7 +370,7 @@ fn select_reference(
             Ok(Some(r)) => Ok(Some(r)),
             Ok(None) => Err(format!(
                 "{} carries no pseudobulks (trained with --no-emit-pb-reference, or before \
-                     carrying was the default)",
+                 carrying was the default)",
                 args.model
             )),
             Err(e) => Err(format!(
@@ -356,6 +383,10 @@ fn select_reference(
         Ok(r) => return Ok(r),
         Err(why) => why,
     };
+    if args.is_round() {
+        check_round_inputs(recorded)?;
+        return Ok(None);
+    }
     if let Some(path) = carried_reference_among(recorded) {
         anyhow::bail!(
             "{} cannot be re-collapsed from cells ({why}): its inputs hold a carried reference \
@@ -433,13 +464,16 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     })?;
     let kind = manifest.kind;
 
-    let round = args.is_round();
     let recorded = manifest.data_inputs(&dir);
     ensure_not_recorded(&recorded, &args.data_files)?;
     let reference = select_reference(args, &manifest, &recorded)?;
 
     // Only the collapsing families take a partition, and a parent cut by
     // --cnv-clones built strata no other run's partition covers.
+    let cnv_cut = manifest
+        .train_args
+        .as_ref()
+        .is_some_and(|t| crate::refine_weighting::cut_by_cnv_clones(&t.args));
     if args.pb_from.is_some() {
         anyhow::ensure!(
             matches!(kind, RunKind::Topic | RunKind::Vae) || kind.is_masked_family(),
@@ -447,15 +481,19 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
              vae), not to a '{kind}' run"
         );
         anyhow::ensure!(
-            !manifest
-                .train_args
-                .as_ref()
-                .is_some_and(|t| recorded_cnv_clones(&t.args)),
+            !cnv_cut,
             "{} was cut by --cnv-clones and built its own strata, which no other run's \
              partition covers; a round of it collapses on its own",
             args.model
         );
     }
+    let pb_from = round_partition(
+        args.pb_from.clone(),
+        &args.model,
+        kind,
+        args.is_round(),
+        cnv_cut,
+    );
 
     let (data_files, batch_files) = match reference.as_ref() {
         Some(r) => {
@@ -520,12 +558,12 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
                  (--no-pb-reference) is likely the better trade at this scale."
             );
         }
-    } else if round {
+    } else if args.is_round() {
         info!(
             "update [{kind}]: a round on {}'s own {} data file(s){}{}",
             args.model,
             data_files.len(),
-            args.pb_from.as_deref().map_or(String::new(), |p| format!(
+            pb_from.as_deref().map_or(String::new(), |p| format!(
                 ", collapsing on {p}'s partition"
             )),
             args.peer_labels
@@ -599,24 +637,20 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         growth,
         reference,
         pb_from: crate::refine_weighting::PbFromArgs {
-            pb_from: args.pb_from.clone(),
+            pb_from: pb_from.clone(),
         },
     };
 
-    dispatch(kind, args, &manifest, rebase)?;
-    if round {
-        record_history(args)?;
+    dispatch(args, &manifest, rebase)?;
+    if args.is_round() {
+        record_history(args, pb_from.as_deref())?;
     }
     Ok(())
 }
 
 /// Replay the parent's recorded fit, rebased, through its family's entry point.
-fn dispatch(
-    kind: RunKind,
-    args: &UpdateArgs,
-    manifest: &RunManifest,
-    rebase: Rebase,
-) -> anyhow::Result<()> {
+fn dispatch(args: &UpdateArgs, manifest: &RunManifest, rebase: Rebase) -> anyhow::Result<()> {
+    let kind = manifest.kind;
     match kind {
         RunKind::Topic => {
             let mut a: crate::topic::cmd::TopicArgs = manifest.train_args_as(&args.model)?;
@@ -705,7 +739,7 @@ fn dispatch(
 
 /// Stamp the new version's manifest with what this round continued from and
 /// trained against. The family wrote the manifest; this adds to it.
-fn record_history(args: &UpdateArgs) -> anyhow::Result<()> {
+fn record_history(args: &UpdateArgs, pb_from: Option<&str>) -> anyhow::Result<()> {
     let path = PathBuf::from(senna::run_manifest::default_path(&args.out));
     let (mut m, out_dir) = RunManifest::load(&path)?;
     // Relative to the manifest, as every other recorded path is, so a moved
@@ -714,7 +748,7 @@ fn record_history(args: &UpdateArgs) -> anyhow::Result<()> {
     m.history = Some(RunHistory {
         parent: rel(&args.model),
         peer_labels: args.peer_labels.as_deref().map(rel),
-        pb_from: args.pb_from.as_deref().map(rel),
+        pb_from: pb_from.map(rel),
         unknown: Default::default(),
     });
     m.save(&path)

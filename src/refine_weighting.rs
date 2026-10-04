@@ -174,8 +174,7 @@ impl PbFromArgs {
             Some(rec) => {
                 let args = &rec.args;
                 anyhow::ensure!(
-                    args.pointer("/collapse/cnv_clones")
-                        .is_none_or(serde_json::Value::is_null),
+                    !cut_by_cnv_clones(args),
                     "--pb-from {run}: that run cut its partition by CNV clone (--cnv-clones)"
                 );
                 if args.get("from").is_some_and(|v| !v.is_null()) {
@@ -235,6 +234,14 @@ pub(crate) const LATENT_COUNTS: [&str; 2] = ["n_latent_topics", "n_latent"];
 /// feature-name settings, multiome load and the masked models' feature-axis
 /// restriction, and the width of the sketch cells are partitioned on
 /// (`--proj-dim`, or the number of latent topics when larger).
+/// Whether a recorded fit was cut by `--cnv-clones`: it built strata of its
+/// own, so no run can share its partition and it can share no other's.
+pub(crate) fn cut_by_cnv_clones(recorded_args: &serde_json::Value) -> bool {
+    recorded_args
+        .pointer("/collapse/cnv_clones")
+        .is_some_and(|v| !v.is_null())
+}
+
 pub(crate) fn partition_settings(args: &impl serde::Serialize) -> serde_json::Value {
     source_settings(&serde_json::to_value(args).unwrap_or_default())
 }

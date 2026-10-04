@@ -2,7 +2,8 @@
 //! parent's carried pseudobulks, and what it does when it cannot.
 
 use super::{
-    carried_reference_among, multiome_in_args, recorded_cnv_clones, union_batches, UpdateArgs,
+    carried_reference_among, check_round_inputs, multiome_in_args, round_partition, union_batches,
+    UpdateArgs,
 };
 use clap::Parser;
 
@@ -140,14 +141,46 @@ fn a_round_replays_the_recorded_batches() {
 /// it on another run's partition. The flag is read off the recorded arguments.
 #[test]
 fn a_cnv_cut_parent_is_read_off_its_recorded_arguments() {
-    assert!(recorded_cnv_clones(
+    use crate::refine_weighting::cut_by_cnv_clones;
+    assert!(cut_by_cnv_clones(
         &serde_json::json!({ "collapse": { "cnv_clones": "c.tsv" } })
     ));
-    assert!(!recorded_cnv_clones(
+    assert!(!cut_by_cnv_clones(
         &serde_json::json!({ "collapse": { "cnv_clones": null } })
     ));
-    assert!(recorded_cnv_clones(
-        &serde_json::json!({ "cnv_clones": "c.tsv" })
-    ));
-    assert!(!recorded_cnv_clones(&serde_json::json!({ "epochs": 10 })));
+    assert!(!cut_by_cnv_clones(&serde_json::json!({ "epochs": 10 })));
+}
+
+/// A round keeps the pseudobulks it is critiqued on: without --pb-from it
+/// collapses on the parent's own partition. A parent cut by --cnv-clones built
+/// strata no partition can stand for, so it rebuilds; non-collapsing kinds
+/// have no partition at all; with new data nothing is inherited.
+#[test]
+fn a_round_without_pb_from_keeps_the_parents_partition() {
+    use senna::run_manifest::RunKind;
+    let p = |given: Option<&str>, kind, round, cnv| {
+        round_partition(given.map(Box::from), "runs/m", kind, round, cnv)
+    };
+    assert_eq!(
+        p(None, RunKind::Vae, true, false).as_deref(),
+        Some("runs/m")
+    );
+    assert_eq!(
+        p(Some("t"), RunKind::Vae, true, false).as_deref(),
+        Some("t")
+    );
+    assert_eq!(p(None, RunKind::Vae, true, true), None);
+    assert_eq!(p(None, RunKind::Svd, true, false), None);
+    assert_eq!(p(None, RunKind::Topic, false, false), None);
+}
+
+/// A lineage absorbed through carried pseudobulks holds them among its inputs;
+/// a round would replay them as cells, so it is refused with a reason that fits.
+#[test]
+fn a_round_refuses_a_lineage_holding_carried_pseudobulks() {
+    let cells: Vec<Box<str>> = vec!["a.zarr".into()];
+    assert!(check_round_inputs(&cells).is_ok());
+    let carried: Vec<Box<str>> = vec!["a.zarr".into(), "r1.pb_reference.zarr.zip".into()];
+    let e = check_round_inputs(&carried).unwrap_err().to_string();
+    assert!(e.contains("round") && !e.contains("--batch-files"), "{e}");
 }
