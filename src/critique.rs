@@ -169,11 +169,17 @@ pub struct CritiqueArgs {
 
 pub(crate) fn check_params(knn: usize, far_frac: f64, min_cells: usize) -> anyhow::Result<()> {
     anyhow::ensure!(knn >= 1, "--knn must be at least 1");
+    check_far_frac(far_frac)?;
+    anyhow::ensure!(min_cells >= 1, "--min-cells must be at least 1");
+    Ok(())
+}
+
+/// `--far-frac`, as `senna critique` judges far and `senna revise` pushes to.
+pub(crate) fn check_far_frac(far_frac: f64) -> anyhow::Result<()> {
     anyhow::ensure!(
         far_frac > 0.0 && far_frac < 1.0,
         "--far-frac must lie strictly between 0 and 1 (got {far_frac})"
     );
-    anyhow::ensure!(min_cells >= 1, "--min-cells must be at least 1");
     Ok(())
 }
 

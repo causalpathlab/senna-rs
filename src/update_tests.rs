@@ -135,25 +135,13 @@ fn a_cnv_cut_parent_is_read_off_its_recorded_arguments() {
 
 /// A round keeps the pseudobulks it is critiqued on: without --pb-from it
 /// collapses on the parent's own partition. A parent cut by --cnv-clones built
-/// strata no partition can stand for, so it rebuilds; non-collapsing kinds
-/// have no partition at all; with new data nothing is inherited.
+/// strata no partition can stand for, so it rebuilds.
 #[test]
 fn a_round_without_pb_from_keeps_the_parents_partition() {
-    use senna::run_manifest::RunKind;
-    let p = |given: Option<&str>, kind, round, cnv| {
-        round_partition(given.map(Box::from), "runs/m", kind, round, cnv)
-    };
-    assert_eq!(
-        p(None, RunKind::Vae, true, false).as_deref(),
-        Some("runs/m")
-    );
-    assert_eq!(
-        p(Some("t"), RunKind::Vae, true, false).as_deref(),
-        Some("t")
-    );
-    assert_eq!(p(None, RunKind::Vae, true, true), None);
-    assert_eq!(p(None, RunKind::Svd, true, false), None);
-    assert_eq!(p(None, RunKind::Topic, false, false), None);
+    let p = |given: Option<&str>, cnv| round_partition(given.map(Box::from), "runs/m", cnv);
+    assert_eq!(p(None, false).as_deref(), Some("runs/m"));
+    assert_eq!(p(Some("t"), false).as_deref(), Some("t"));
+    assert_eq!(p(None, true), None);
 }
 
 /// A lineage absorbed through carried pseudobulks holds them among its inputs;

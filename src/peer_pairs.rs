@@ -23,27 +23,14 @@ use legume_numeric::candle::vae::pairs::{
 use legume_numeric::candle::vae::smooth_topics;
 use legume_numeric::candle::vae::topic::{level_llik, LevelData};
 use legume_numeric::matrix::parquet::read_table_columns;
+use senna::run_manifest::{CellSpace, Revise, RunKind};
 use std::sync::atomic::AtomicBool;
 
-/// How `senna revise` moves a fit. Set by the revise command, never part of a
-/// fit's recorded arguments: the manifest's history records it instead.
+/// How `senna revise` moves a fit: the settings its manifest's history
+/// records. Set by the revise command, never part of a fit's recorded
+/// arguments.
 #[derive(Clone, Debug)]
-pub(crate) struct PeerRevision {
-    /// `{out}.critique.labels.{model}.parquet`.
-    pub labels: Box<str>,
-    /// The quantile of the level's pair distances that counts as far.
-    pub far_frac: f32,
-    /// Passes over the labelled pairs at most; fewer once every pair is at
-    /// its margin.
-    pub epochs: usize,
-    pub learning_rate: f32,
-    /// Labelled pairs per step.
-    pub batch: usize,
-    /// The largest drop in any level's log-likelihood per sample the revision may
-    /// cost before it is refused, as a fraction of the parent's: the
-    /// likelihood's scale differs by family and data, a fraction does not.
-    pub max_llik_drop: f32,
-}
+pub(crate) struct PeerRevision(pub Revise);
 
 /// What a revision did, level by level, written next to the revised fit.
 pub(crate) struct Revision {
@@ -61,6 +48,16 @@ pub(crate) struct Revision {
 /// The encoder's variables in every family `senna revise` moves.
 const ENCODER_PREFIX: &str = "nn.enc";
 
+/// The distance a `kind`'s pairs are pushed apart in: the one `senna critique`
+/// ranked them in, from the same cell space.
+fn pair_metric(kind: RunKind) -> anyhow::Result<PairMetric> {
+    match kind.cell_space() {
+        CellSpace::LogSimplex => Ok(PairMetric::Hellinger),
+        CellSpace::Signed => Ok(PairMetric::Euclidean),
+        CellSpace::Embedding => anyhow::bail!("senna revise cannot move a {kind} run"),
+    }
+}
+
 impl PeerRevision {
     /// Each level's pairs, with the margin measured in `encoder`'s latent.
     pub(crate) fn levels<Enc: EncoderModuleT>(
@@ -71,7 +68,7 @@ impl PeerRevision {
         topic_smoothing: f64,
         dev: &Device,
     ) -> anyhow::Result<Vec<LevelPairs>> {
-        let per_level = read_level_pairs(&self.labels, level_data.len())?;
+        let per_level = read_level_pairs(&self.0.labels, level_data.len())?;
         per_level
             .into_iter()
             .zip(level_data)
@@ -84,7 +81,7 @@ impl PeerRevision {
                 let x0 = null.map(|b| b.to_tensor(dev)).transpose()?;
                 let (z, _) = encoder.forward_t(&x, x0.as_ref(), false)?;
                 let z = smooth_topics(z, topic_smoothing)?;
-                let margin = quantile_distance(&z, metric, self.far_frac)?;
+                let margin = quantile_distance(&z, metric, self.0.far_frac)?;
                 info!(
                     "revise, level {level}: {} pairs to push to at least {margin:.4} apart",
                     pairs.len()
@@ -94,20 +91,20 @@ impl PeerRevision {
             .collect()
     }
 
-    /// Move `encoder` on the labels alone and write what happened to
-    /// `record` (`{out}.revise.parquet`). The result is refused, so the caller
-    /// saves no model and the parent stays the latest version, when it was
-    /// interrupted, when no pair needed moving, or when any level's likelihood
-    /// fell by more than `max_llik_drop`.
+    /// Move `encoder`, a `kind` fit's, on the labels alone and write what
+    /// happened to `{out}.revise.parquet`. The result is refused, so the
+    /// caller saves no model and the parent stays the latest version, when it
+    /// was interrupted, when no pair needed moving, or when any level's
+    /// likelihood fell by more than `max_llik_drop`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn revise<Enc, Dec>(
         &self,
-        record: &str,
+        kind: RunKind,
+        out: &str,
         level_data: &[LevelData],
         parameters: &candle_nn::VarMap,
         encoder: &Enc,
         decoders: &[Dec],
-        metric: PairMetric,
         topic_smoothing: f64,
         minibatch_size: usize,
         dev: &Device,
@@ -117,6 +114,8 @@ impl PeerRevision {
         Enc: EncoderModuleT,
         Dec: DecoderModuleT,
     {
+        let s = &self.0;
+        let metric = pair_metric(kind)?;
         let levels = self.levels(encoder, level_data, metric, topic_smoothing, dev)?;
         let llik = |encoder: &Enc| {
             level_llik(
@@ -139,15 +138,19 @@ impl PeerRevision {
                 dev,
                 metric,
                 topic_smoothing,
-                learning_rate: self.learning_rate,
-                max_epochs: self.epochs,
-                batch: self.batch,
+                learning_rate: s.learning_rate,
+                max_epochs: s.epochs,
+                batch: s.pair_batch,
                 grad_clip: 0.0,
                 stop,
                 verbose: true,
             },
         )?;
-        let llik_after = llik(encoder)?;
+        // Nothing moved, nothing to measure again.
+        let llik_after = match trace.steps {
+            0 => llik_before.clone(),
+            _ => llik(encoder)?,
+        };
         let resolved = |row: Option<&Vec<f32>>| row.cloned().unwrap_or_default();
         let revision = Revision {
             llik_before,
@@ -159,7 +162,7 @@ impl PeerRevision {
             steps: trace.steps,
         };
         revision.log();
-        revision.to_parquet(record)?;
+        revision.to_parquet(&format!("{out}.revise.parquet"))?;
         anyhow::ensure!(
             !stop.load(std::sync::atomic::Ordering::Relaxed),
             "revise interrupted after {} step(s); no model saved",
@@ -169,7 +172,7 @@ impl PeerRevision {
             revision.steps > 0,
             "revise: every labelled pair is already at its margin; no model saved"
         );
-        revision.check(self.max_llik_drop)
+        revision.check(s.max_llik_drop)
     }
 }
 

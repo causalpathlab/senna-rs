@@ -224,14 +224,8 @@ impl UpdateArgs {
 pub(crate) fn round_partition(
     given: Option<Box<str>>,
     parent: &str,
-    kind: RunKind,
-    round: bool,
     cnv_cut: bool,
 ) -> Option<Box<str>> {
-    let collapses = matches!(kind, RunKind::Topic | RunKind::Vae) || kind.is_masked_family();
-    if !round || !collapses {
-        return given;
-    }
     given.or_else(|| (!cnv_cut).then(|| Box::from(parent)))
 }
 
@@ -479,20 +473,13 @@ pub(crate) fn continue_fit(args: &UpdateArgs, round: Option<&Round>) -> anyhow::
         .as_ref()
         .is_some_and(|t| crate::refine_weighting::cut_by_cnv_clones(&t.args));
     let given = round.and_then(|r| r.pb_from.clone());
-    if given.is_some() {
-        anyhow::ensure!(
-            matches!(kind, RunKind::Topic | RunKind::Vae) || kind.is_masked_family(),
-            "--pb-from applies to a run that collapses cells into pseudobulks (topic, masked-*, \
-             vae), not to a '{kind}' run"
-        );
-        anyhow::ensure!(
-            !cnv_cut,
-            "{} was cut by --cnv-clones and built its own strata, which no other run's \
-             partition covers; a round of it collapses on its own",
-            args.model
-        );
-    }
-    let pb_from = round_partition(given, &args.model, kind, round.is_some(), cnv_cut);
+    anyhow::ensure!(
+        given.is_none() || !cnv_cut,
+        "{} was cut by --cnv-clones and built its own strata, which no other run's \
+         partition covers; a revision of it collapses on its own",
+        args.model
+    );
+    let pb_from = round.and_then(|_| round_partition(given, &args.model, cnv_cut));
 
     let (data_files, batch_files) = match reference.as_ref() {
         Some(r) => {
@@ -565,7 +552,7 @@ pub(crate) fn continue_fit(args: &UpdateArgs, round: Option<&Round>) -> anyhow::
             pb_from.as_deref().map_or(String::new(), |p| format!(
                 ", collapsing on {p}'s partition"
             )),
-            r.peer.labels,
+            r.peer.0.labels,
         );
     } else {
         info!(
@@ -647,11 +634,6 @@ fn dispatch(args: &UpdateArgs, manifest: &RunManifest, rebase: Rebase) -> anyhow
         RunKind::Topic => {
             let mut a: crate::topic::cmd::TopicArgs = manifest.train_args_as(&args.model)?;
             a.rebase(rebase);
-            anyhow::ensure!(
-                a.peer.is_none() || a.decoder.len() == 1,
-                "senna revise moves a single-decoder topic fit, not one with {} decoders",
-                a.decoder.len()
-            );
             crate::topic::cmd::fit_topic_model(&a)
         }
         RunKind::Vae => {
@@ -748,13 +730,9 @@ fn record_history(
     let rel = |p: &str| rel_to_manifest(&out_dir, p);
     m.history = Some(RunHistory {
         parent: rel(&args.model),
-        peer_labels: Some(rel(&peer.labels)),
         revise: Some(senna::run_manifest::Revise {
-            far_frac: peer.far_frac,
-            epochs: peer.epochs,
-            learning_rate: peer.learning_rate,
-            pair_batch: peer.batch,
-            max_llik_drop: peer.max_llik_drop,
+            labels: rel(&peer.0.labels),
+            ..peer.0.clone()
         }),
         pb_from: pb_from.map(rel),
         unknown: Default::default(),

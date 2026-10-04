@@ -11,7 +11,6 @@ use senna::embed_common::*;
 use candle_core::{Device, Tensor};
 use legume_numeric::candle::decoder::DynDecoderModuleT;
 use legume_numeric::candle::traits::*;
-use legume_numeric::candle::vae::pairs::PairMetric;
 use std::sync::atomic::AtomicBool;
 
 use super::anchor_prior::anchor_penalty_at_level;
@@ -76,12 +75,12 @@ where
     // Hellinger as the critique did; no ELBO, so no anchor prior either.
     if let Some(p) = config.args.peer.as_ref() {
         p.revise(
-            &format!("{}.revise.parquet", config.args.out),
+            senna::run_manifest::RunKind::Topic,
+            &config.args.out,
             &level_refs,
             config.parameters,
             encoder,
             decoders,
-            PairMetric::Hellinger,
             config.args.topic_smoothing,
             config.args.minibatch_size,
             config.dev,
@@ -132,6 +131,11 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
         .map(|(a, b, c)| (a, b.as_ref(), c))
         .collect();
 
+    anyhow::ensure!(
+        config.args.peer.is_none(),
+        "senna revise moves a single-decoder topic fit, not one with {} decoders",
+        config.args.decoder.len()
+    );
     // Multi-decoder path historically did not apply the anchor-prior
     // penalty (the `topic` command passes `anchor_prior_per_level: None`,
     // `anchor_penalty: 0.0` here). Keep that behaviour explicitly.

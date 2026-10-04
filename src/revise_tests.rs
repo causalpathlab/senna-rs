@@ -30,14 +30,14 @@ fn a_revision_needs_labels_and_defaults_the_rest() {
     assert_eq!(a.far_frac, 0.25);
     assert!(a.pb_from.is_none());
     let r = a.revision().expect("defaults are valid");
-    assert_eq!(&*r.labels, "l.parquet");
+    assert_eq!(r.0.labels, "l.parquet");
     assert!(Cli::try_parse_from(["senna-revise", "--model", "m", "-o", "out"]).is_err());
 }
 
 #[test]
 fn out_of_range_settings_are_refused() {
     for bad in [
-        ["--far-frac", "1.5"],
+        ["--far-frac", "1"],
         ["--far-frac", "0"],
         ["--epochs", "0"],
         ["--pair-batch", "0"],

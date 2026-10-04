@@ -469,12 +469,12 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         // `senna revise`: the labels alone move the encoder; z is compared by
         // Euclidean distance, as the critique did.
         Some(p) => p.revise(
-            &format!("{}.revise.parquet", args.out),
+            senna::run_manifest::RunKind::Vae,
+            &args.out,
             &level_refs,
             &parameters,
             &encoder,
             &decoders,
-            legume_numeric::candle::vae::pairs::PairMetric::Euclidean,
             0.0,
             train_cfg.minibatch_size,
             &dev,

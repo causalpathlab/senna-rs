@@ -18,6 +18,7 @@
 use crate::peer_pairs::PeerRevision;
 use crate::update::{continue_fit, Round, UpdateArgs};
 use clap::Args;
+use senna::run_manifest::Revise;
 
 #[derive(Args, Debug)]
 pub struct ReviseArgs {
@@ -91,13 +92,7 @@ pub struct ReviseArgs {
 
 impl ReviseArgs {
     fn revision(&self) -> anyhow::Result<PeerRevision> {
-        // At 0 the margin is the closest pair's distance, which every
-        // labelled pair already meets.
-        anyhow::ensure!(
-            self.far_frac > 0.0 && self.far_frac <= 1.0,
-            "--far-frac must be in (0, 1], not {}",
-            self.far_frac
-        );
+        crate::critique::check_far_frac(f64::from(self.far_frac))?;
         anyhow::ensure!(
             self.epochs > 0 && self.pair_batch > 0,
             "--epochs and --pair-batch must be positive"
@@ -106,14 +101,14 @@ impl ReviseArgs {
             self.learning_rate > 0.0 && self.max_llik_drop >= 0.0,
             "--learning-rate must be positive and --max-llik-drop non-negative"
         );
-        Ok(PeerRevision {
-            labels: self.labels.clone(),
+        Ok(PeerRevision(Revise {
+            labels: self.labels.to_string(),
             far_frac: self.far_frac,
             epochs: self.epochs,
             learning_rate: self.learning_rate,
-            batch: self.pair_batch,
+            pair_batch: self.pair_batch,
             max_llik_drop: self.max_llik_drop,
-        })
+        }))
     }
 }
 

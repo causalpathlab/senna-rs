@@ -676,11 +676,7 @@ pub struct RunManifest {
 pub struct RunHistory {
     /// The parent version's prefix.
     pub parent: String,
-    /// `{out}.critique.labels.{model}.parquet` from `senna critique`, when
-    /// `senna revise` moved this version on it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peer_labels: Option<String>,
-    /// How `senna revise` moved it.
+    /// The labels `senna revise` moved this version on, and how.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revise: Option<Revise>,
     /// The run whose partition this revision collapsed on, if any.
@@ -690,15 +686,20 @@ pub struct RunHistory {
     pub unknown: Unknown,
 }
 
-/// The settings of a `senna revise`: the far quantile its labelled pairs were
-/// pushed out to, its epoch budget, learning rate and pairs per step, and the
-/// likelihood drop it was allowed.
+/// The settings of a `senna revise`: its labels, the far quantile the
+/// labelled pairs were pushed out to, its epoch budget, learning rate and
+/// pairs per step, and the likelihood drop it was allowed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Revise {
+    /// `{out}.critique.labels.{model}.parquet` from `senna critique`.
+    pub labels: String,
     pub far_frac: f32,
     pub epochs: usize,
     pub learning_rate: f32,
     pub pair_batch: usize,
+    /// The largest drop in any level's log-likelihood per sample allowed, as
+    /// a fraction of the parent's: the likelihood's scale differs by family
+    /// and data, a fraction does not.
     pub max_llik_drop: f32,
 }
 
@@ -2139,8 +2140,8 @@ mod tests {
         assert!(serde_json::to_value(&m).unwrap().get("history").is_none());
         m.history = Some(RunHistory {
             parent: "/tmp/run1".into(),
-            peer_labels: Some("c.critique.labels.vae.parquet".into()),
             revise: Some(Revise {
+                labels: "c.critique.labels.vae.parquet".into(),
                 far_frac: 0.25,
                 epochs: 200,
                 learning_rate: 1e-3,
@@ -2155,7 +2156,7 @@ mod tests {
         let h = back.history.expect("history survives");
         assert_eq!(h.parent, "/tmp/run1");
         assert_eq!(
-            h.peer_labels.as_deref(),
+            h.revise.map(|r| r.labels).as_deref(),
             Some("c.critique.labels.vae.parquet")
         );
         assert_eq!(h.pb_from.as_deref(), Some("topic.senna.json"));

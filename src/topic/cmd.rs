@@ -544,12 +544,8 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     )?;
 
     // Per-level [K, D_l] anchor tensors on the training device. Built once
-    // here, held alive for the entire fit via the outer scope. A revision
-    // trains on no ELBO, so it needs no anchor penalty.
-    let anchor_tensors = match args.peer {
-        None => anchor_prior.per_level_device_tensors(&level_coarsenings, &dev)?,
-        Some(_) => Vec::new(),
-    };
+    // here, held alive for the entire fit via the outer scope.
+    let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings, &dev)?;
 
     let ctx = PipelineCtx {
         level_decoder_dims: &level_decoder_dims,
@@ -572,7 +568,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         args,
         stop: &stop,
         anchor_prior: Some(&anchor_prior),
-        anchor_prior_per_level: args.peer.is_none().then_some(&anchor_tensors[..]),
+        anchor_prior_per_level: Some(&anchor_tensors),
         feature_stats: FeatureStats {
             mean: &feature_mean,
             mean_full: &feature_mean_full,
