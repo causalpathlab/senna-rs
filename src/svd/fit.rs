@@ -30,6 +30,7 @@ pub struct SvdArgs {
                      {out}.adjusted.zarr              batch-adjusted backend (if --save-adjusted)\n  \
                      {out}.selected_features.txt      selected HVG names (if HVG enabled)\n  \
                      {out}.cell_proj.parquet          cached random projection\n  \
+                     {out}.feature_weights.parquet    per-gene weights (if any)\n  \
                      {out}.senna.json                 run manifest for `senna layout/plot --from`"
     )]
     out: Box<str>,
@@ -61,6 +62,24 @@ pub struct SvdArgs {
     #[arg(skip)]
     #[serde(skip)]
     init_from: Option<Box<str>>,
+
+    /// `senna revise`'s labels: the fit then votes on its genes before
+    /// solving. Set by revise, never a flag; the weights it leaves are
+    /// recorded instead.
+    #[arg(skip)]
+    #[serde(skip)]
+    pub(crate) vote: Option<crate::svd::revise::Vote>,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Per-gene weights applied before the SVD (gene, weight)",
+        long_help = "Scales each gene's standardised log expression before the solve,\n\
+                     so the components weigh it accordingly; a gene not listed keeps\n\
+                     weight 1. `senna revise` writes these as\n\
+                     {out}.feature_weights.parquet and records them here."
+    )]
+    feature_weights: Option<Box<str>>,
 
     #[arg(
         long,
@@ -135,6 +154,40 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
     })?;
+
+    // Per-gene weights: the recorded ones, times a revision's votes, which
+    // need no collapse and so are cast before it. A revision's weights are
+    // this run's own and are recorded by absolute path, so a replay from
+    // anywhere solves in the same space.
+    let gene_names = data_vec.row_names()?;
+    let mut feature_weights = args
+        .feature_weights
+        .as_deref()
+        .map(|f| crate::svd::revise::read_feature_weights(f, &gene_names))
+        .transpose()?;
+    let mut weights_file = args.feature_weights.as_deref().map(absolute).transpose()?;
+    if let Some(vote) = args.vote.as_ref() {
+        let partition = vote.partition.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "senna revise of an svd run needs --pb-from: the run whose partition the \
+                 labels were judged on"
+            )
+        })?;
+        let votes = crate::svd::revise::feature_votes(
+            &data_vec,
+            partition,
+            &vote.peer,
+            args.column_sum_norm,
+        )?;
+        let mut w = feature_weights
+            .take()
+            .unwrap_or_else(|| vec![1.0; votes.len()]);
+        w.iter_mut().zip(&votes).for_each(|(a, b)| *a *= b);
+        let path = format!("{}.feature_weights.parquet", args.out);
+        crate::svd::revise::write_feature_weights(&path, &gene_names, &w, &votes)?;
+        weights_file = Some(absolute(&path)?);
+        feature_weights = Some(w);
+    }
 
     // 3. Batch-adjusted collapsing (pseudobulk)
     //
@@ -244,10 +297,10 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         args.n_latent_topics,
         args.column_sum_norm,
         args.block_size,
+        feature_weights.as_deref(),
     )?;
 
     let cell_names = data_vec.column_names()?;
-    let gene_names = data_vec.row_names()?;
 
     // SVD reuses the topic models' `T{c}` convention so `lupin plot
     // --colour-by topic` reads the latent.parquet identically regardless
@@ -307,8 +360,10 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
+    let mut train_args = senna::run_manifest::record_train_args(args)?;
+    train_args.args["feature_weights"] = serde_json::to_value(&weights_file)?;
     senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
-        train_args: Some(senna::run_manifest::record_train_args(args)?),
+        train_args: Some(train_args),
         kind: senna::run_manifest::RunKind::Svd,
         prefix: &args.out,
         data_input: &input,
@@ -345,6 +400,20 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Multiply row `g` of `m` by `w[g]`; no weights, no change.
+fn scale_rows(m: &mut Mat, w: Option<&[f32]>) {
+    if let Some(w) = w {
+        for (mut row, &wg) in m.row_iter_mut().zip(w) {
+            row *= wg;
+        }
+    }
+}
+
+/// `path` made absolute, so a recorded path does not depend on the cwd.
+fn absolute(path: &str) -> anyhow::Result<Box<str>> {
+    Ok(std::path::absolute(path)?.to_string_lossy().into())
+}
+
 struct NystromParam<'a> {
     basis_dk: &'a Mat,
     delta_dp: Option<&'a Mat>,
@@ -365,8 +434,11 @@ struct NystromOut {
 /// * `rank` - matrix factorization rank
 /// * `column_sum_norm` - column sum normalization scale
 /// * `block_size` - online learning block size
+/// * `feature_weights` - per-gene weights `w`, if any
 ///
-///
+/// With weights the solve is on `W·X`, and the dictionary is `W·U`: a cell
+/// `x` then projects as `x^T W U S^-1`, here and in every reader of the
+/// dictionary (`predict`, `impute`), with no weight file to carry along.
 fn do_nystrom_proj(
     log_xx_dn: Mat,
     delta_dp: Option<&Mat>,
@@ -374,12 +446,15 @@ fn do_nystrom_proj(
     rank: usize,
     column_sum_norm: f32,
     block_size: Option<usize>,
+    feature_weights: Option<&[f32]>,
 ) -> anyhow::Result<NystromOut> {
-    let mut log_xx_dn = log_xx_dn.clone();
+    let mut log_xx_dn = log_xx_dn;
 
     log_xx_dn.scale_columns_inplace();
+    scale_rows(&mut log_xx_dn, feature_weights);
 
-    let (u_dk, s_k, _) = log_xx_dn.rsvd(rank)?;
+    let (mut u_dk, s_k, _) = log_xx_dn.rsvd(rank)?;
+    scale_rows(&mut u_dk, feature_weights);
     let basis_dk = nystrom_basis(&u_dk, &s_k);
 
     info!(
@@ -526,6 +601,12 @@ impl crate::update::Updatable for SvdArgs {
         self.out = r.out;
         self.pb_reference = r.reference;
         self.init_from = Some(r.init_from);
+        // A revision votes on genes over the partition its labels were
+        // judged on; svd collapses on its own for everything else.
+        self.vote = r.peer.map(|peer| crate::svd::revise::Vote {
+            peer,
+            partition: r.pb_from.pb_from,
+        });
         // `svd` has no weights and no epoch loop. `update` rejects `--epochs`
         // for an svd parent before reaching this.
     }

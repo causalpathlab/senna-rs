@@ -197,12 +197,21 @@ impl PbFromArgs {
                  built its partition as this run would cannot be checked"
             ),
         }
-        let path = m.cell_to_pb_path(&dir).ok_or_else(|| {
-            anyhow::anyhow!("--pb-from {run}: that run recorded no cell → pb partition")
-        })?;
-        log::info!("--pb-from: collapsing on the partition in {path}");
-        Ok(Some(senna::run_manifest::load_cell_to_pb_raw(&path)?))
+        recorded_partition(run, &m, &dir).map(Some)
     }
+}
+
+/// The cell → pseudobulk partition `run` (manifest `m` in `dir`) recorded.
+pub(crate) fn recorded_partition(
+    run: &str,
+    m: &senna::run_manifest::RunManifest,
+    dir: &std::path::Path,
+) -> anyhow::Result<senna::run_manifest::InheritedPartition> {
+    let path = m.cell_to_pb_path(dir).ok_or_else(|| {
+        anyhow::anyhow!("--pb-from {run}: that run recorded no cell → pb partition")
+    })?;
+    log::info!("--pb-from: the partition in {path}");
+    senna::run_manifest::load_cell_to_pb_raw(&path)
 }
 
 /// Settings that write something out but do not change how cells are

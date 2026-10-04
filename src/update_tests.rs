@@ -134,14 +134,14 @@ fn a_cnv_cut_parent_is_read_off_its_recorded_arguments() {
 }
 
 /// A round keeps the pseudobulks it is critiqued on: without --pb-from it
-/// collapses on the parent's own partition. A parent cut by --cnv-clones built
-/// strata no partition can stand for, so it rebuilds.
+/// collapses on the parent's own partition. A parent with none it can lend
+/// (cut by --cnv-clones, or an svd run) has nothing to fall back on.
 #[test]
 fn a_round_without_pb_from_keeps_the_parents_partition() {
-    let p = |given: Option<&str>, cnv| round_partition(given.map(Box::from), "runs/m", cnv);
-    assert_eq!(p(None, false).as_deref(), Some("runs/m"));
-    assert_eq!(p(Some("t"), false).as_deref(), Some("t"));
-    assert_eq!(p(None, true), None);
+    let p = |given: Option<&str>, own| round_partition(given.map(Box::from), "runs/m", own);
+    assert_eq!(p(None, true).as_deref(), Some("runs/m"));
+    assert_eq!(p(Some("t"), true).as_deref(), Some("t"));
+    assert_eq!(p(None, false), None);
 }
 
 /// A lineage absorbed through carried pseudobulks holds them among its inputs;

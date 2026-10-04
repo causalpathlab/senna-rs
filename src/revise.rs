@@ -14,6 +14,10 @@
 //! model, so the parent stays the latest version. Neither does one that was
 //! interrupted or had no pair to move. `{out}.revise.parquet` records every
 //! attempt, refused or not.
+//!
+//! An svd fit has no encoder: the labels vote on its genes instead, and the
+//! SVD is solved again on the reweighted genes (see [`crate::svd::revise`]).
+//! It has no likelihood to gate on, and the encoder settings do not apply.
 
 use crate::peer_pairs::PeerRevision;
 use crate::update::{continue_fit, Round, UpdateArgs};
@@ -25,7 +29,7 @@ pub struct ReviseArgs {
     #[arg(
         long,
         required = true,
-        help = "Model prefix to revise (a topic or vae run)"
+        help = "Model prefix to revise (a topic, vae or svd run)"
     )]
     pub(crate) model: Box<str>,
 
@@ -72,20 +76,20 @@ pub struct ReviseArgs {
     #[arg(
         long,
         default_value_t = 200,
-        help = "Passes over the labelled pairs at most (fewer once every pair is far)"
+        help = "Passes over the labelled pairs at most (fewer once every pair is far; not svd)"
     )]
     pub(crate) epochs: usize,
 
-    #[arg(long, default_value_t = 1e-3, help = "Encoder learning rate")]
+    #[arg(long, default_value_t = 1e-3, help = "Encoder learning rate (not svd)")]
     pub(crate) learning_rate: f32,
 
-    #[arg(long, default_value_t = 64, help = "Labelled pairs per step")]
+    #[arg(long, default_value_t = 64, help = "Labelled pairs per step (not svd)")]
     pub(crate) pair_batch: usize,
 
     #[arg(
         long,
         default_value_t = 0.01,
-        help = "Refuse a revision that lowers any level's log-likelihood by more than this fraction"
+        help = "Refuse a revision that lowers any level's log-likelihood by more than this fraction (not svd)"
     )]
     pub(crate) max_llik_drop: f32,
 }

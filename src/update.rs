@@ -224,9 +224,9 @@ impl UpdateArgs {
 pub(crate) fn round_partition(
     given: Option<Box<str>>,
     parent: &str,
-    cnv_cut: bool,
+    parent_has_own: bool,
 ) -> Option<Box<str>> {
-    given.or_else(|| (!cnv_cut).then(|| Box::from(parent)))
+    given.or_else(|| parent_has_own.then(|| Box::from(parent)))
 }
 
 /// A round replays the recorded inputs as cells, so a lineage that absorbed
@@ -458,8 +458,8 @@ pub(crate) fn continue_fit(args: &UpdateArgs, round: Option<&Round>) -> anyhow::
     })?;
     let kind = manifest.kind;
     anyhow::ensure!(
-        round.is_none() || matches!(kind, RunKind::Topic | RunKind::Vae),
-        "senna revise moves topic and vae fits only, not a {kind} run"
+        round.is_none() || matches!(kind, RunKind::Topic | RunKind::Vae | RunKind::Svd),
+        "senna revise moves topic, vae and svd fits only, not a {kind} run"
     );
 
     let recorded = manifest.data_inputs(&dir);
@@ -479,7 +479,9 @@ pub(crate) fn continue_fit(args: &UpdateArgs, round: Option<&Round>) -> anyhow::
          partition covers; a revision of it collapses on its own",
         args.model
     );
-    let pb_from = round.and_then(|_| round_partition(given, &args.model, cnv_cut));
+    // A parent without a partition of its own (svd) has none to fall back on.
+    let own = !cnv_cut && manifest.cell_to_pb_path(&dir).is_some();
+    let pb_from = round.and_then(|_| round_partition(given, &args.model, own));
 
     let (data_files, batch_files) = match reference.as_ref() {
         Some(r) => {

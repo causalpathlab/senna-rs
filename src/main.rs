@@ -705,7 +705,7 @@ enum Commands {
 
     #[command(
         about = "Move a fit on critique labels alone.",
-        long_about = "Revise a topic or vae fit on `senna critique --questions` labels.\n\
+        long_about = "Revise a topic, vae or svd fit on `senna critique --questions` labels.\n\
                       \n\
                       The fit is set up as `senna update` sets it up, on its own cells\n\
                       and the partition the labels were judged on, but it is not trained:\n\
@@ -714,6 +714,11 @@ enum Commands {
                       --far-frac quantile. The decoder is frozen. A revision that\n\
                       lowers any level's likelihood by more than --max-llik-drop\n\
                       saves no model; {out}.revise.parquet records it either way.\n\
+                      \n\
+                      An svd fit has no encoder: the labels vote genes up or down by\n\
+                      how far apart the merged pairs sit on them, and the SVD is\n\
+                      solved again on the reweighted genes ({out}.feature_weights.parquet).\n\
+                      It needs --pb-from, and has no likelihood gate.\n\
                       \n\
                       Usage:\n\
                       senna revise --model M_v1 --labels c.critique.labels.m.parquet -o M_v2\n  \

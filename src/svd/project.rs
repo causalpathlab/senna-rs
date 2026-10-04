@@ -2,7 +2,8 @@
 //!
 //! An svd run writes no encoder checkpoint, so `predict` and `impute` cannot
 //! reach it the way they reach the topic families. What it does write is the
-//! dictionary `u` — orthonormal columns from the Nyström rsvd — and that is
+//! dictionary `u` (orthonormal columns from the Nyström rsvd, or `W·u` for a
+//! run with `--feature-weights`, which carries the weights along) and that is
 //! enough: a new cell is put through the same per-column transform training
 //! used ([`super::nystrom_preprocess_columns`]) and multiplied through `u`.
 //!
