@@ -661,13 +661,14 @@ enum Commands {
                       Each fit's cell latent is averaged over one run's pseudobulks.\n\
                       Pairs that any fit puts among its nearest neighbours become candidates.\n\
                       Each fit is judged against the median rank of the other fits:\n\
-                      it merges a pair it keeps near while the others hold it far,\n\
-                      and splits a pair it holds far while the others keep it near.\n\
+                      it merges a pair it keeps near while the others hold it far.\n\
+                      A fit's merge rate is its merges over its near pairs.\n\
                       Only the latents are read, not the counts.\n\
+                      --cell-labels checks the merges against known cell labels.\n\
                       \n\
                       Usage:\n\
                       senna critique topic.senna.json vae.senna.json svd.senna.json -o out\n  \
-                      Writes {out}.critique.{pairs,summary,cells}.parquet and {out}.critique.json."
+                      Writes {out}.critique.{pairs,summary}.parquet and {out}.critique.json."
     )]
     Critique(CritiqueArgs),
 

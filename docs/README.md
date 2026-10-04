@@ -13,7 +13,7 @@ it were a description of the code is how people end up debugging things that wer
 
 | doc | what it is |
 |---|---|
-| [`peer-critique-plan.md`](peer-critique-plan.md) | Fits that correct each other through peer-mined pairs on two channels (pseudobulk pairs and gene pairs). A count-based referee labels the pairs, and rounds run through `senna update`. |
+| [`peer-critique-plan.md`](peer-critique-plan.md) | Fits that question each other, as active learning with the other models as the oracle: a model keeping close what the others hold apart is told to push the pair apart. Stage 0a (`senna critique`) is built. |
 
 ## Moved to lupin
 

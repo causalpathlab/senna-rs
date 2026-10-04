@@ -1,9 +1,9 @@
-# Peer critique — fits that correct each other (plan)
+# Peer critique — models that question each other (plan)
 
 ## 0. Status and summary
 
-**Status: plan. Only stage 0a is built:** `senna critique`, a read-only report (§10). Code
-references describe what exists today and where the new pieces would attach.
+**Status: plan. Stage 0a is built:** `senna critique`, a read-only report (§10). Code references
+describe what exists today and where the new pieces would attach.
 
 senna fits several latent models on the same cells: `topic`, `vae`, `svd`, the `masked-*`
 family, `bge`, `simba`, `gem`, and on the gene side `fne`. Each has a characteristic failure:
@@ -12,69 +12,70 @@ family, `bge`, `simba`, `gem`, and on the gene side `fne`. Each has a characteri
 - a Gaussian VAE can collapse neighbourhoods (mode collapse);
 - SVD separates on directions that are not biology.
 
-No model is perfect, and their failures differ, so one model can point out another's mistakes.
-Instead of one joint model holding every component, the fits stay separate and exchange
-**critique** in rounds. A model is told "these two things you keep together, the others hold
-apart", or "these two you hold apart, the others keep together".
+No model is perfect, and their failures differ. Instead of one joint model holding every
+component, the fits stay separate and improve one another in rounds, as **active learning in
+which the oracle is the other models**:
 
-**Critique lives entirely in the models' latent spaces.** No gene counts are read: every model
-has already been fitted to the counts, so its latent is a data-informed view, and a disagreement
-between views means at least one model kept structure another lost. A model is judged against
-the **consensus of the other models**. This is contrastive learning with peer-mined hard pairs.
+- every model is a **learner**: it asks about pairs of cell groups;
+- the other models are its **oracle**: their consensus answers;
+- answers are trusted in one direction only (§3.3), and questions are chosen to be informative,
+  diverse and random (§8.2);
+- the learner trains on the answers it can trust, and the next round asks again.
 
-Critique runs on two channels, one on each side of the cell × gene matrix:
+**Everything happens in the models' latent spaces.** No gene counts are read: every model has
+already been fitted to the counts, so a disagreement between latents means at least one model
+kept structure another lost.
+
+Questions run on two channels, one on each side of the cell × gene matrix:
 
 - **Channel A, pseudobulk pairs** (§3): do the models agree on which pseudobulks are alike?
 - **Channel B, feature pairs** (§4): do they agree on which genes belong together?
 
-The channels feed each other (§5).
-
 ### In plain terms
 
-**A model is critiqued when it puts two groups of cells close together that the other models
-clearly keep apart, and the critique is always "push these two apart".**
+**A model asks the others about pairs of cell groups. When it keeps a pair close and the others
+clearly hold it apart, it is told "push these two apart". Nothing else is taken as an answer.**
 
 1. **Every model is a witness.** Each has its own picture of the cells; none is trusted alone.
 2. **They describe the same groups.** All models are asked about the same pseudobulks, and each
-   says which groups are its nearest neighbours.
+   ranks the other groups from nearest to farthest.
 3. **Close and far are ranks, not distances.** Each model measures in its own units, so the
-   question is "is B among A's 15 nearest?" (close) or "is B far down the list?" (far). The gap
+   question is "is B among A's 15 nearest?" (close) or "is B in A's far quarter?" (far). The gap
    between the two means rank 15 against rank 16 is never a disagreement.
-4. **A model is judged by the others, never by itself:** the median rank of the other models.
-5. **One kind of critique.**
+4. **A model is answered by the others, never by itself:** the median rank of the other models.
+5. **Only "far" answers are taken.**
 
-   | this model says | the others say | critique |
+   | the asking model says | the others answer | outcome |
    |---|---|---|
    | close | clearly far | **merge**: "push these apart" |
-   | far | close | **split**: reported, no critique |
+   | far | close | **contentious**: no answer; queued as a question (§8.2) |
 
-6. **Why only "push apart".** Against expert cell types (§10), a merged pair is two different
-   cell types 84–100 % of the time. A split usually means the lone model saw a difference the
-   others share a blind spot on; telling it to pull the pair together would teach it the
-   majority's mistake. **Separation is evidence; closeness is not.**
+6. **Why.** Against expert cell types (§10), a merged pair is two different cell types almost
+   every time. When a lone model holds a pair far that the others keep close, it is usually the
+   one that is right; telling it to pull the pair together would teach it the majority's mistake.
+   **Separation is evidence; closeness is not.**
 
 Example: topic ranks pseudobulks 36 and 58 at 52, svd at 60, bge at 48, and the VAE at 15. The
 VAE alone keeps them together and is told to push them apart. They are B cells and non-B cells.
 
-A model's **merge share**, merges / (merges + splits), is its report card: high, and it lumps
-groups the others separate (a topic model's resolution limit, a VAE's mode collapse); low, and
-it separates more than the others.
+A model's **merge rate**, merges over its near pairs, is its report card: high, and it lumps
+together groups the others separate (a topic model's resolution limit, a VAE's mode collapse).
 
 ## 1. Concepts
 
 | term | meaning |
 |---|---|
-| **model** | one fit (`topic`, `vae`, …). It publishes its view and consumes critique. |
+| **model** | one fit (`topic`, `vae`, …). It is a learner, and an oracle for the others. |
 | **channel** | one kind of pair: pseudobulk pairs (A) or feature pairs (B). |
-| **view** | a model's neighbourhoods on one channel: every pair's rank (1 = nearest). |
-| **near / far** | rank ≤ *k* / rank beyond `max(3k, P/4)`, well clear of near. |
-| **candidate** | a pair in some model's top-*k*. |
-| **consensus** | for one model, the median rank of a pair over the *other* models. A model never votes on itself. |
-| **critic** | the component that builds the consensus and charges each model (`senna critique`). |
-| **charge** | a **merge** (the model keeps near what the others hold far) or a **split** (the reverse). |
-| **label** | what a charge becomes for training: −1 for a merge (push apart), +1 for a split (pull together), with a weight. |
-| **round** | publish views → critic → each model trains on its labels → next round. |
-| **history** | a model's chain of versions, one per round. Each version's manifest names its parent version, the label file it trained on (by hash) and the partition it trained on. |
+| **view** | a model's ranks on one channel: for each item, every other item from nearest (1) on. |
+| **near / far** | rank ≤ *K* / beyond `max(2K, P/4)` (§3.3), well clear of near. |
+| **question** | a pair a learner asks about. |
+| **answer** | the median rank of the pair over the other models (a random subset of them, §8.2). |
+| **merge** | the learner keeps the pair near and the answer is far: the pair becomes a label. |
+| **contentious pair** | the learner holds the pair far and the answer is near: no label; it may be asked again. |
+| **label** | −1 on a merged pair (push apart), with a weight. There are no +1 labels. |
+| **round** | publish views → ask and answer → each model trains on its labels → next round. |
+| **history** | a model's chain of versions, one per round. Each version's manifest names its parent version, the label file it trained on (by hash), the partition it trained on, and the round's seed. |
 
 ## 2. Shared indices
 
@@ -95,7 +96,7 @@ A pair can be compared across models only when every model indexes it the same w
 
 - The key is the gene name, reconciled through the shared canonicaliser. No shared partition is
   needed.
-- Fits select features differently (HVG choice), so pairs are mined on the **intersection** of
+- Fits select features differently (HVG choice), so pairs are taken on the **intersection** of
   the fits' feature axes.
 - Topic models that train on coarsened features (`FeatureCoarsening`) embed supergenes. Their
   view is mapped back to genes through the coarsening membership. Two genes in the same supergene
@@ -113,49 +114,51 @@ A pair can be compared across models only when every model indexes it the same w
 
 The view is the model's **cell latent averaged over each pseudobulk** of the partition. It needs
 no model loading and works the same for every kind. The metric follows the run's `CellSpace`
-(`RunKind::cell_space`). Pseudobulks under `--min-cells` cells are left out.
+(`RunKind::cell_space`). Pseudobulks under `--min-cells` cells, and pseudobulks whose averaged
+latent is not finite, are left out of the view.
 
-### 3.2 Mining
+### 3.2 Questions
 
-Compare **ranks**, not distances; the geometries differ. The candidates are the union of every
-model's top-*k* pairs. A pair's rank in a model is the smaller of its two directional ranks.
+- **Ranks, not distances;** the geometries differ. A pair's rank in a model is the smaller of its
+  two directional ranks.
+- **What a learner asks about:** its near pairs ("am I lumping these?"), the union of every
+  model's top-*K* pairs. Stage 0a asks about all of them; from stage 2 on, a round asks a
+  sample (§8.2).
+- Later, a learner can also ask about its **grey zone**, pairs between near and far, where it is
+  least sure.
 
-### 3.3 Consensus
+### 3.3 Answers
 
-- For each model and pair, the **consensus** is the median rank over the other models.
-- **Merge:** the model ranks the pair near while the consensus is far. **Split:** the model ranks
-  it far while the consensus is near. Agreeing models are never charged.
-- **Pair label:** the median over *all* models makes the pair `similar` (near), `different`
-  (far) or `ambiguous`.
-- **Merge share** = merges / (merges + splits), per model and level. Near 1, a model packs
-  together states the others separate: the signature of mode collapse, or of a topic model's
-  resolution limit. Near 0, it separates what the others keep together.
+- **The answer is the others' median rank.** The learner never answers itself.
+- **Far is beyond `max(2K, P/4)`.** Swept against expert cell types (§10): any rule looser than
+  about P/4 lets merges of the same cell type in; rules much stricter (P/2, the bottom *K*, all
+  other models agreeing) are just as precise but find far fewer merges. *(The stage-0a build uses
+  `max(3K, P/4)`; the change to `2K` waits on the second donor.)*
+- **Only a far answer is taken.** A near pair answered far is a **merge**. A far pair answered
+  near is **contentious**: no label, because a lone separating model is usually right (§10).
 - **Level context.** At a coarse level the nearest pseudobulks are often different cell types;
-  near/far are ranks within a level, so this is fine, but rates are compared within a level only.
-- **Global collapse comes first.** Before mining, check each model's effective dimension,
+  near and far are ranks within a level, and rates are compared within a level only.
+- **Global collapse comes first.** Before any round, check each model's effective dimension,
   per-dimension KL and pseudobulk spread. Global collapse needs KL annealing or free bits, not
   pairs.
 
-**Considered and set aside: a count-based referee.** Stage 0a was first built with a referee that
-tested each pair on the summed counts (a two-group Poisson log-likelihood ratio, calibrated by
-random halves of each pseudobulk). On BMMNC it showed three problems:
+**Considered and set aside.**
 
-- abundant housekeeping genes (EEF1A1, TPT1, ACTB, MALAT1, MT-, RPL/RPS) piled up large
-  statistics from small shifts, so pairs differing only in cell quality were called different;
-- at pseudobulk depth a "same" verdict could almost never be earned: fine pseudobulks are small,
-  so a low statistic was lack of power, not sameness;
-- the counts had already been fitted by every model, so the test mostly re-asked a question the
-  latents answer.
+- *A count-based referee* (a two-group Poisson log-likelihood ratio between pseudobulks,
+  calibrated by random halves of each pseudobulk). Abundant housekeeping genes (EEF1A1, TPT1,
+  ACTB, MALAT1, MT-, RPL/RPS) piled up large statistics from small shifts; at pseudobulk depth a
+  "same" could almost never be earned; and the counts had already been fitted by every model.
+- *Taking "near" answers* (pull together). Against expert labels they are mostly wrong (§10).
+- *A concatenated joint latent* as the oracle. It merges whatever most models merge, so it hides
+  exactly the merges worth finding, and near-duplicate models count twice.
+- *Far as the bottom K.* Precise, but finds almost no merges.
 
 ### 3.4 Labels
 
-- **Only merges become labels:** a **negative** (−1) for the merging model, pushing the pair apart.
-- **Splits are reported, never used as positives.** Checked against expert labels (§10), a split
-  usually means the lone model saw a difference the others share a blind spot on. A positive
-  label would teach a correct model to merge.
-- The weight grows with agreement: the more other models agree, and the wider the rank gap
-  between the model and the consensus, the larger.
-- A model is never labelled where the others disagree among themselves (`ambiguous`).
+- **A merge becomes a negative** (−1) for the learner: push the pair apart.
+- **There are no positives.**
+- The weight grows with agreement: the more of the answering models hold the pair far, and the
+  wider the gap between the learner's rank and the answer, the larger.
 
 ## 4. Channel B: feature pairs
 
@@ -169,47 +172,46 @@ random halves of each pseudobulk). On BMMNC it showed three problems:
 | svd | left singular vectors | cosine |
 | bge, simba, gem, fne | `feature_embedding.parquet` | cosine |
 
-### 4.2 Mining
+### 4.2 Questions
 
 As in §3.2, on the intersected feature axis (§2.2), with supergene-internal pairs excluded.
 
-### 4.3 Consensus
+### 4.3 Answers
 
 As in §3.3. A **merge** on this channel is two genes a model keeps together that the others hold
-apart; typically a topic model folding two programs into one topic. A **split** is one program a
-model breaks up.
+apart; typically a topic model folding two programs into one topic.
+
+**External knowledge is one voice.** fne's view comes from its graph (GWAS, eQTL, ABC /
+ENCODE-rE2G, ontologies) rather than from this dataset's counts. It answers as one model, so
+prior knowledge can tip a close call but cannot outvote the fitted models.
 
 ### 4.4 Labels
 
-As in §3.4.
-
-**External knowledge is one voice.** fne's view comes from its graph (GWAS, eQTL, ABC /
-ENCODE-rE2G, ontologies) rather than from this dataset's counts. It joins the consensus as one
-model, so prior knowledge can tip a close call but cannot outvote the fitted models.
+As in §3.4. Whether the channel-B answers are as one-sided as channel A's is for stage 0b to show.
 
 ## 5. Coupling the channels
 
-Each channel can propose candidates for the other. Labels are not passed across: a candidate is
-still judged by its own channel's consensus.
+Each channel can suggest questions for the other. Labels are not passed across: a question is
+still answered on its own channel.
 
-- **A → B, separating genes.** For a disputed pseudobulk pair, the model that separates it says
-  which genes do the separating: its decoder or dictionary evaluated at the two pseudobulks'
-  latents. Those genes' pairs become channel-B candidates.
-- **B → A, program ratios.** For a disputed gene pair, pseudobulks that differ mainly in the
-  ratio of the two genes' loadings become channel-A candidates.
+- **A → B, separating genes.** For a merged pseudobulk pair, the models that separate it say which
+  genes do the separating: their decoder or dictionary evaluated at the two pseudobulks' latents.
+  Those genes' pairs become channel-B questions.
+- **B → A, program ratios.** For a merged gene pair, pseudobulks that differ mainly in the ratio of
+  the two genes' loadings become channel-A questions.
 
 Bipartite models already tie the two sides together internally: bge, simba and gem co-embed cells
-with genes, and the topic model has θ and β. A critique on one side moves their other side too.
+with genes, and the topic model has θ and β. A label on one side moves their other side too.
 
 ## 6. Models
 
-| model | sends | receives | how it receives | change needed |
+| model | asks and answers | receives labels | how it receives | change needed |
 |---|---|---|---|---|
 | topic | A, B | A, B | extra loss term: a margin on θ (A) and on β rows (B) | `ExtraLossHook` in legume-numeric (below) |
 | vae | A, B | A, B | extra loss term on z (A) and on decoder rows (B) | same hook |
 | masked-* | A, B | A, B | extra loss term on θ (A) and on ρ (B) | the same hook on `train_masked` |
 | svd | A, B | — | does not receive at first; later, pair weights in a weighted SVD | none at first |
-| bge, simba, gem | A, B | A, B | **as edges**: positives as a relation, negatives as explicit negatives | relation input for peer edges; explicit negatives in `graph-embedding-util` (to be checked) |
+| bge, simba, gem | A, B | A, B | **as edges**: explicit negatives | explicit negatives in `graph-embedding-util` (to be checked) |
 | fne | B | B | **as edges**: one relation per model's gene view, plus external knowledge | edge files from the gene views; it already consumes typed relations |
 
 **fne as the hub of channel B.** fne fuses the models' gene views with external knowledge into
@@ -233,11 +235,10 @@ pub type ExtraLossHook<'a, Enc> =
 - At an epoch boundary, the same hook can publish the model's views.
 - The anchor prior (`src/topic/train.rs`) could move onto this hook.
 
-The loss terms, with `d` the model's own distance from §3.1 / §4.1:
+The loss term, with `d` the model's own distance from §3.1 / §4.1:
 
 ```
 negative:  w · max(0, m − d(a, b))
-positive:  w · d(a, b)
 ```
 
 For channel A there is a variant that puts the margin on the **decoded profiles** instead of the
@@ -246,25 +247,26 @@ apart could be undone; a margin on the reconstructions targets the failure direc
 
 ## 7. Protocol
 
-Messages are files under `{run}.peer/`. Models never read each other's messages; only the critic
-does. Each file is written to a temporary name and then renamed.
+Messages are files under `{run}.peer/`. Models never read each other's messages; only
+`senna critique` does. Each file is written to a temporary name and then renamed.
 
-**Views, model → critic:** `{model}.r{round}.view.parquet`
+**Views, model → critique:** `{model}.r{round}.view.parquet`
 
 | channel | level | a | b | rank | dist |
 |---|---|---|---|---|---|
 
-**Labels, critic → model:** `{model}.r{round}.labels.parquet`
+**Labels, critique → model:** `{model}.r{round}.labels.parquet`
 
-| channel | level | a | b | label | weight | consensus_rank |
+| channel | level | a | b | weight | answer_rank | answered_by |
 |---|---|---|---|---|---|---|
 
 Field notes:
 
 - `a` and `b` are `pb_id`s on channel A and gene names on channel B.
 - `level` is the partition level on channel A, and null on channel B.
-- A model receives only the labels it was charged with.
-- Both files carry the partition hash and the feature-axis hash in the parquet metadata.
+- `answered_by` names the models in the round's sub-committee.
+- Both files carry the partition hash, the feature-axis hash and the round's seed in the parquet
+  metadata.
 
 ## 8. Execution
 
@@ -272,27 +274,26 @@ Field notes:
 
 `senna update` (`src/update.rs`) is a dispatcher. It replays a fit's recorded arguments through
 `Rebase`, warm-starts from the parent and writes a new versioned artifact, for every family
-through `Updatable`. A round has the same shape, with "continue with critique" in place of
+through `Updatable`. A round has the same shape, with "continue with labels" in place of
 "continue with new cells":
 
 ```
-round r:
-  senna critique M_a.r{r} M_b.r{r} … --partition P_r          → labels/{a,b,…}.r{r}.parquet
+round r (seed s_r):
+  senna critique M_a.r{r} M_b.r{r} … --partition P_r --seed s_r   → labels/{a,b,…}.r{r}.parquet
   senna update --model M_a.r{r} --out M_a.r{r+1} --peer-labels labels/a.r{r}.parquet \
-               --pb-from P_r --epochs E                       (one per device, in parallel)
+               --pb-from P_r --epochs E                          (one per device, in parallel)
   …
 ```
 
-- `senna critique` is the critic: it reads the models' manifests, builds their views and the
-  consensus, and writes the labels.
-- `senna run` drives the loop.
+`senna run` drives the loop.
 
 What this provides:
 
 - **History.** Each round writes a new version whose manifest records its parent version, its
-  label file (by hash) and its partition (§1). Before and after open side by side in `senna view`.
-- **Rollback.** If a round makes a model worse (held-out likelihood drops, or its charges grow),
-  the previous version stays the result.
+  label file (by hash), its partition and its seed (§1). Before and after open side by side in
+  `senna view`.
+- **Rollback.** If a round makes a model worse (held-out likelihood drops, or its merge rate
+  grows), the previous version stays the result.
 
 Where `update` does not fit today:
 
@@ -301,22 +302,41 @@ Where `update` does not fit today:
    parent's partition. With no new cells that reason does not apply, so a round **sets**
    `--pb-from P_r`.
 3. **Carried pseudobulks** (`pb_reference`) are tied to the parent's partition. A
-   fixed-partition round can keep that fast path. A redrawn-partition round (§8.2) must
+   fixed-partition round can keep that fast path. A redrawn-partition round (§8.3) must
    re-collapse on `P_r`.
 4. **Each round is a fresh process**, so Adam state resets and data is reloaded. This is
    acceptable at tens of epochs per round. Otherwise the optimizer state can be saved next to
-   the weights, or the fits can run as long-lived processes that synchronise at a barrier (§8.3).
+   the weights, or the fits can run as long-lived processes that synchronise at a barrier (§8.4).
 
-### 8.2 Redrawing partitions (channel A)
+### 8.2 Choosing questions: informative, diverse, random
+
+A round does not ask every question. It draws a batch, like a minibatch in stochastic gradient
+descent, so no fixed list steers a model and, over rounds, every question gets asked.
+
+- **Informative and diverse: k-means++ seeding.** Draw the batch one pair at a time, each with
+  probability proportional to its disagreement (the gap between the learner's rank and the
+  answer) squared, times its distance from the pairs already drawn. Disagreement makes a question
+  informative; the distance spreads the batch over the space. This is BADGE's use of k-means++
+  for batch active learning (Ash et al., ICLR 2020).
+- **Stochastic.** Each round draws a fresh batch with a fresh seed. An outlier pair can be drawn
+  but cannot dominate every round. The `--min-cells` floor keeps tiny pseudobulks, the likeliest
+  outliers, out of the pool.
+- **Random sub-committees.** Each round, the answer comes from a random subset of the other models
+  (query by bagging; Abe & Mamitsuka, ICML 1998). An odd model only sometimes answers, and a
+  merge that holds across sub-committees is the more trustworthy.
+- **Contentious pairs stay in the pool.** No label is given, but they can be asked again; a pair
+  that stays contentious across rounds and partitions marks a difference only some models see.
+
+### 8.3 Redrawing partitions (channel A)
 
 The partition is **fixed within a round**, so that messages share an index. It is **redrawn
-between rounds**, so that critique is not an artifact of one particular grouping.
+between rounds**, so that a label is not an artifact of one particular grouping.
 
 - Models do not care about the partition. Their encoders are amortised, so a new partition only
   means new training rows. Their views are rebuilt each round.
-- Channel-A charges are kept at **cell-group** resolution, as must-link and cannot-link
-  constraints over a stable fine grouping such as the round-0 finest level. Each round moves the
-  constraints onto the new partition by overlap:
+- Channel-A labels are kept at **cell-group** resolution, as cannot-link constraints over a stable
+  fine grouping such as the round-0 finest level. Each round moves the constraints onto the new
+  partition by overlap:
 
   ```
   w_ab = Σ_(i,j) frac(a ∩ S_i) · frac(b ∩ S_j) · w_ij
@@ -327,104 +347,107 @@ between rounds**, so that critique is not an artifact of one particular grouping
 - What to vary: `--pb-refine-seed`, the projection seed, `--sort-dim`, `--knn-cells`. Keep the
   number of levels fixed, because changing it changes scale rather than resampling.
 - Channel B is keyed by gene, so its labels need no transport.
-- An optional later step lets the partition take critique as well. Cannot-links keep cells out
-  of a shared pseudobulk, and a pseudobulk whose cells the models place far apart gets split.
 
-### 8.3 Parallel devices
+### 8.4 Parallel devices
 
 - One fit per GPU, each its own process, with the device chosen as today
   (`src/embed_common.rs` `to_device`).
-- The critic runs on the CPU, and so does collapsing `P_{r+1}` while round `r` trains.
-- Rounds are **synchronous by default** (a barrier), so they are deterministic. An asynchronous
-  mode (pick up the newest labels whenever ready, as in codistillation) can come later if waiting
-  for the slowest fit hurts.
+- `senna critique` runs on the CPU, and so does collapsing `P_{r+1}` while round `r` trains.
+- Rounds are **synchronous by default** (a barrier), so they are deterministic given their seeds.
+  An asynchronous mode (pick up the newest labels whenever ready, as in codistillation) can come
+  later if waiting for the slowest fit hurts.
 - Fits that share a GPU must pin `--minibatch-size` and skip the `gpu_mem_fraction` probe,
   which assumes it is alone on the device.
 
 ## 9. Safeguards
 
-Judging by consensus has a known failure: models that share a mistake are never charged for it,
-and repeated rounds pull the models towards agreement. The safeguards target that.
+The oracle is the other models, so it can share their mistakes: a pair every model merges is
+never questioned, and repeated rounds pull the models towards agreement. The safeguards target
+that.
 
-- **Diverse voices.** The consensus is only as good as the spread of model families in it.
+- **Only far answers.** A model is never told to pull a pair together (§3.3), so a correct lone
+  separation is never trained away.
+- **Diverse voices.** The answer is only as good as the spread of model families behind it.
   Near-duplicates (topic and masked-topic) should count as one family, so that similar models
   cannot outvote different ones.
 - **Each model's own likelihood.** Every round checks each model's held-out likelihood on the
   counts and rolls back a round that hurts it (§8.1). This is where the data still has the last
-  word: a model may move towards the others only as far as its own fit to the counts allows.
-- **Disagreement is kept, not erased.** A small λ that ramps up, a label budget per round per
-  channel, and labels only where the others agree among themselves (§3.4).
-- The label budget is where **k-means++-style sampling** belongs: pick labels with probability
-  growing with the disagreement, and down-weight pairs near ones already picked, so one region
-  does not steer a model. D² weighting favours outliers, so it needs a floor on cells per
-  pseudobulk.
-- Partition and feature-axis hashes on every message (§7).
-- A log per round of the charges per model per channel. They should fall across rounds; if they
-  oscillate, stop.
+  word.
+- **Small steps.** A small weight λ that ramps up, and a batch of questions per round (§8.2),
+  not the whole pool.
+- Partition and feature-axis hashes, and the round's seed, on every message (§7).
+- A log per round of each model's merge rate per channel. It should fall across rounds; if it
+  oscillates, stop.
 
-## 10. Staged plan
+## 10. Staged plan and results
 
 Each stage can be checked on its own before the next one is built.
 
 | stage | channel | builds | check |
 |---|---|---|---|
-| 0a | A | **built:** `senna critique`, report only. Views averaged over one run's partition, top-*k* candidates, ranks per model, leave-one-out consensus, merges / splits / merge share per model, per-cell labels | Do the charges match known model behaviour (a topic model's merges, a VAE's collapse)? Do merged pairs fall on known fine cell types? |
+| 0a | A | **built:** `senna critique`, report only. Views averaged over one run's partition, top-*K* questions, ranks per model, leave-one-out answers, merges and merge rate per model, `merged_by` per pair; `--cell-labels` checks the merges against known labels | Are merged pairs different cell types? |
 | 0b | B | the same for gene pairs, from the models' gene embeddings | Do topic merges join genes of known separate programs? |
-| 1 | — | no-new-cells mode for `senna update` with explicit `--pb-from` | Continuing without critique is neutral. |
-| 2 | A, B | `ExtraLossHook`; `--peer-labels` through `Rebase` for topic / vae / masked | One round reduces the model's charges without hurting its held-out likelihood. |
-| 3 | A, B | peer edges into bge / simba / gem; gene views into fne as relations | The same check, for the graph models. |
-| 4 | A, B | the round loop in `senna run`, on parallel devices | Charges fall across rounds, and likelihoods hold. |
+| 1 | — | no-new-cells mode for `senna update` with explicit `--pb-from` | Continuing without labels is neutral. |
+| 2 | A, B | question sampling (§8.2); `ExtraLossHook`; `--peer-labels` through `Rebase` for topic / vae / masked | One round lowers the model's merge rate without hurting its held-out likelihood. |
+| 3 | A, B | peer negatives into bge / simba / gem; gene views into fne as relations | The same check, for the graph models. |
+| 4 | A, B | the round loop in `senna run`, on parallel devices | Merge rates fall across rounds, and likelihoods hold. |
 | 5 | A | redrawn partitions with constraint transport | Persistent constraints agree with stage 0a. |
-| 6 | A ↔ B | channel coupling (§5) | Coupled candidates are charged at a higher rate than mined ones. |
-| 7 | A | (optional) the partition takes critique | — |
+| 6 | A ↔ B | channel coupling (§5) | Coupled questions yield merges at a higher rate than sampled ones. |
+
+**Evaluation** follows active learning: model quality (merge rate, and with known labels the
+label overlap of what a model keeps near) against the number of labels it has trained on. Expert
+labels act as a simulated perfect oracle; they never enter the loop.
 
 **Stage 0a results.**
 
-- *BMMNC, topic + vae + svd + bge.* The topic model has the highest merge share at every level
-  (0.83–0.86 at the two finer levels), the VAE follows (0.74–0.81), SVD is charged most in both
-  directions (≈ 0.55–0.6), and bge leans to splits (≈ 0.4).
-- *HCA bone marrow, donor BM1, the same four models, checked against the study's expert cell
-  types (`evaluate_critique.py` beside the outputs in `paper-senna/results/critique-hca-bm1/`).*
-  - **Merges are right.** The two pseudobulks of a merged pair have different majority types in
-    84–100 % of merges (24 broad types; 100 % with the 55 fine types). Among the same model's
-    other near pairs the rate is 18–30 % at the finer levels.
-  - **Splits are mostly wrong as charges.** For topic, vae and bge, 0–7 % of split pairs share a
-    broad type: the lone model that separated the pair was right, and the consensus held a
-    shared merge. SVD's splits share a type in 28–45 % of cases (base 14–32 %): some of its
-    separations are over-splitting.
-  - Hence §3.4: merges become labels, splits do not. The labels come from clustering in a
-    PCA-like space, so they share some bias with separating models.
+- *BMMNC, topic + vae + svd + bge.* The topic model and the VAE carry most of their charges as
+  merges at the finer levels; SVD disagrees most in both directions.
+- *HCA bone marrow, donor BM1, the same four models, with `--cell-labels` (55 fine and 24 broad
+  types; outputs in `paper-senna/results/critique-hca-bm1/`).*
+  - **Merges are right.** The label compositions of a merged pair's two pseudobulks overlap
+    0.00–0.01, against 0.18–0.63 for the same model's other near pairs.
+  - **Contentious pairs favour the lone model.** For topic, vae and bge, the pairs they alone hold
+    far share 0–7 % of a broad type: the lone separating model was right. SVD's share 28–45 %
+    (base 14–32 %): some of its separations are over-splits.
+  - **Merge rate per near pair:** SVD 0.06–0.13; topic, vae and bge 0.015–0.05.
+  - **Far rule.** The others' median beyond P/4 passes (merge overlap ≤ 0.03 of the base at both
+    label granularities); beyond P/8, 3K or 4K it does not. `max(2K, P/4)` finds 1628 merges,
+    `max(3K, P/4)` 1282, at the same precision. To be confirmed on donor BM2.
+  - The labels come from clustering in a PCA-like space, so they share some bias with separating
+    models.
 
 ## 11. Open questions
 
 - **§3.1** Views ignore how a pseudobulk's cells are spread: they average cell latents. A view
   built from each model's **cell-level kNN graph** (PAGA-style connectivity between pseudobulks,
-  Wolf et al., Genome Biology 2019) would count two pseudobulks near when their cells mix. Each
-  pseudobulk's spread in each model would also flag pseudobulks one model sees as heterogeneous
-  (§8.2).
-- **§3.3** *k* and the far threshold, and how both should scale with the number of pseudobulks.
-- **§3.3** With three models, one model is half of every other model's consensus. How many
-  families are needed before the consensus is trustworthy, and how to weight near-duplicates.
+  Wolf et al., Genome Biology 2019) would count two pseudobulks near when their cells mix.
+- **§3.3** Per-model reliability: SVD's far answers include over-splits. Whether to weight each
+  model's answer by a reliability estimated without labels.
+- **§3.3** How many model families are needed before the answers are trustworthy, and how to
+  weight near-duplicates.
 - **§3.4** The label weight: agreement count, rank gap, or both.
+- **§8.2** What contentious pairs that persist across rounds and partitions should become: a
+  report of differences only some models see, or questions for an outside oracle.
 - **§4.1** Gene embeddings live on different axes and supports; whether ranks on the
   intersected axis are enough.
 - **§6** A margin on the latent or on the decoded profile. This may differ by family.
 - **§6** Whether `graph-embedding-util` can take explicit negatives, or only samples its own.
-- **§6** How far svd can take part beyond publishing.
 - **§8.1** Whether Adam resets at round boundaries matter in practice.
 
 ## 12. Related work
 
+- Active learning with a committee: query by committee (Seung, Opper & Sompolinsky, COLT 1992;
+  Freund et al., Machine Learning 1997); multi-view contention points, Co-Testing (Muslea, Minton
+  & Knoblock, JAIR 2006); query by bagging (Abe & Mamitsuka, ICML 1998); diverse batches by
+  k-means++ seeding, BADGE (Ash et al., ICLR 2020).
 - Peers teaching each other: Deep Mutual Learning (Zhang et al., CVPR 2018); codistillation
   (Anil et al., ICLR 2018 — stale peer snapshots suffice); Mutual Mean-Teaching (Ge et al.,
-  ICLR 2020 — unsupervised, clustering pseudo-labels).
+  ICLR 2020).
 - Peers choosing each other's samples: Co-teaching (Han et al., NeurIPS 2018); Co-teaching+
-  (Yu et al., ICML 2019 — train on disagreements); JoCoR (Wei et al., CVPR 2020 — the agreement
-  counterpoint); DivideMix (Li et al., ICLR 2020).
+  (Yu et al., ICML 2019 — train on disagreements); JoCoR (Wei et al., CVPR 2020).
 - Contrastive learning: NCE (Gutmann & Hyvärinen, 2010); InfoNCE (van den Oord et al., 2018);
   hard negatives (Robinson et al., ICLR 2021); false negatives (Chuang et al., NeurIPS 2020).
-- Graph-regularised factorisation, the static form of a channel-A critique: LapPLSA (Cai et al.,
-  KDD 2008); GNMF (Cai et al., TPAMI 2011).
+- Cluster connectivity from a cell kNN graph: PAGA (Wolf et al., Genome Biology 2019).
 - Must-link / cannot-link constraints: Wagstaff et al., ICML 2001.
 
 Citations were written from memory. Check each one before quoting it.
