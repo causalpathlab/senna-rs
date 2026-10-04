@@ -301,14 +301,22 @@ pub(crate) fn kmeanspp(
     rng: &mut SmallRng,
 ) -> Vec<usize> {
     let mut picked: Vec<usize> = Vec::new();
-    // Squared distance to the nearest item drawn so far; a drawn item is at 0,
-    // so it is never drawn again. Before the first draw, the weight alone counts.
-    let mut near2 = vec![1.0f64; weights.len()];
+    // Squared distance to the nearest item drawn so far: unbounded before the
+    // first draw, when the weight alone counts, and 0 for a drawn item, so it
+    // is never drawn again.
+    let mut near2 = vec![f64::INFINITY; weights.len()];
     while picked.len() < n {
         let score: Vec<f64> = weights
             .iter()
             .zip(&near2)
-            .map(|(w, d2)| w.max(0.0) * d2)
+            .map(|(w, d2)| {
+                let w = w.max(0.0);
+                if picked.is_empty() {
+                    w
+                } else {
+                    w * d2
+                }
+            })
             .collect();
         // `Err` when nothing has weight, or the total is not finite.
         let Ok(draw) = WeightedIndex::new(&score) else {

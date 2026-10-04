@@ -670,7 +670,9 @@ pub struct RunManifest {
 }
 
 /// One round's place in a model's history: the version it continued from, the
-/// critique labels it trained against, and the partition it collapsed on.
+/// critique labels it trained against, and the partition it collapsed on. By
+/// path for now, relative to the manifest; the label file's hash and the
+/// round's seed (plan §1) arrive with stage 2, which reads that file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunHistory {
     /// The parent version's prefix.

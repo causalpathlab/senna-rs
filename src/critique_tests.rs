@@ -279,11 +279,12 @@ fn seeding_draws_weighted_items_once() {
     assert_eq!(picked, again);
 }
 
-/// Two tight clusters of equal weight: a draw of two almost always takes one
-/// from each, because the second draw is weighted by distance to the first.
+/// Two clusters of equal weight, each wider than 1, so the second draw's
+/// squared-distance weighting must not be capped: a draw of two almost always
+/// takes one from each cluster.
 #[test]
 fn seeding_spreads_draws_across_clusters() {
-    let pos = [0.0f64, 0.1, 0.2, 100.0, 100.1, 100.2];
+    let pos = [0.0f64, 1.0, 2.0, 100.0, 101.0, 102.0];
     let w = [1.0; 6];
     let d = |i: usize, j: usize| (pos[i] - pos[j]).abs();
     let spread = (0..200)

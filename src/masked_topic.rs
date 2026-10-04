@@ -1674,9 +1674,7 @@ impl crate::update::Updatable for MaskedTopicArgs {
         // (Here `--from` also carries --freeze-feature-embedding, which a warm
         // start supersedes: the weights already contain that ρ.)
         self.from = None;
-        // A round names the partition every model collapses on; with new
-        // data there is none that could cover them.
-        self.pb_from = crate::refine_weighting::PbFromArgs { pb_from: r.pb_from };
+        self.pb_from = r.pb_from;
         if let Some(e) = r.epochs {
             self.epochs = e;
         }
