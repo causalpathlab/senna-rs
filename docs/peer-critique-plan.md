@@ -256,14 +256,14 @@ Messages are files under `{run}.peer/`. Models never read each other's messages;
 | channel | level | a | b | rank | dist |
 |---|---|---|---|---|---|
 
-**Labels, critique → model:** `{model}.r{round}.labels.parquet`
+**Labels, critique → model:** `{model}.r{round}.labels.parquet` (stage 0c writes `{out}.critique.labels.{model}.parquet`)
 
-| channel | level | a | b | weight | answer_rank | answered_by |
+| channel | level | pb_a | pb_b | weight | answer_rank | own_rank | answered_by |
 |---|---|---|---|---|---|---|
 
 Field notes:
 
-- `a` and `b` are `pb_id`s on channel A and gene names on channel B.
+- `pb_a` and `pb_b` are `pb_id`s on channel A; on channel B the pair is two gene names.
 - `level` is the partition level on channel A, and null on channel B.
 - `answered_by` names the models in the round's sub-committee.
 - Both files carry the partition hash, the feature-axis hash and the round's seed in the parquet
@@ -387,9 +387,10 @@ Each stage can be checked on its own before the next one is built.
 | stage | channel | builds | check |
 |---|---|---|---|
 | 0a | A | **built:** `senna critique`, report only. Views averaged over one run's partition, top-*K* questions, ranks per model, leave-one-out answers, merges and merge rate per model, `merged_by` per pair; `--cell-labels` checks the merges against known labels | Are merged pairs different cell types? |
+| 0c | A | **built:** random sub-committees (`--committee`) and k-means++ question draws (`--questions`, `--seed`), writing per-model label files (§7) | Sampled labels stay precise and spread wider than the top-disagreement pairs. |
 | 0b | B | the same for gene pairs, from the models' gene embeddings | Do topic merges join genes of known separate programs? |
 | 1 | — | no-new-cells mode for `senna update` with explicit `--pb-from` | Continuing without labels is neutral. |
-| 2 | A, B | question sampling (§8.2); `ExtraLossHook`; `--peer-labels` through `Rebase` for topic / vae / masked | One round lowers the model's merge rate without hurting its held-out likelihood. |
+| 2 | A, B | `ExtraLossHook`; `--peer-labels` through `Rebase` for topic / vae / masked | One round lowers the model's merge rate without hurting its held-out likelihood. |
 | 3 | A, B | peer negatives into bge / simba / gem; gene views into fne as relations | The same check, for the graph models. |
 | 4 | A, B | the round loop in `senna run`, on parallel devices | Merge rates fall across rounds, and likelihoods hold. |
 | 5 | A | redrawn partitions with constraint transport | Persistent constraints agree with stage 0a. |
@@ -417,6 +418,9 @@ labels act as a simulated perfect oracle; they never enter the loop.
   - **Seven models** (adding masked-topic, masked-vae and simba): every model's merges still
     overlap ≤ 0.009. Merge rates rank SVD highest (0.06–0.16), then masked-vae; bge, simba and
     masked-topic lowest (0.007–0.023). With more voices, even far beyond P/8 passes.
+- *Question sampling, HCA BM1, committees of 2, 30 questions per model and level.* The labels'
+  overlap is 0.00–0.035 of each model's near-pair base, they cover 25–51 % more distinct
+  pseudobulks than the same number of top-disagreement pairs, and they are reproducible per seed.
 - *HCA donor BM2, topic + vae + svd + bge.* `max(2K, P/4)` passes again (1698 merges; ratio to
   base 0.017 fine, 0.029 broad), `max(3K, P/4)` finds 1412. Rules set by K alone fail here
   (beyond 5K: ratio 0.29), though beyond 5K passed on BM1.
