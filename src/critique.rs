@@ -34,6 +34,9 @@ use legume_numeric::matrix::knn::all_pairs::knn_rows_l2;
 use legume_numeric::matrix::knn::metric::l2_sq;
 use legume_numeric::matrix::parquet::{write_named_table, Column};
 use log::warn;
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use senna::embed_common::*;
@@ -98,6 +101,37 @@ pub struct CritiqueArgs {
         help = "Pseudobulks with fewer cells are left out"
     )]
     min_cells: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Models answering each model: a random subset of this size (0 = all others)",
+        long_help = "Each model is answered by the median rank of its committee.\n\
+                     0 takes every other model. A smaller committee is drawn at\n\
+                     random per model and level (query by bagging), so an odd\n\
+                     model only sometimes answers."
+    )]
+    committee: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Questions drawn per model and level; their merges become labels (0 = none)",
+        long_help = "Draws a model's questions among its near pairs by k-means++\n\
+                     seeding: weight by disagreement (how far the answer lies beyond\n\
+                     the model's own rank) squared, times squared distance to the\n\
+                     questions already drawn. The drawn questions the answer holds\n\
+                     far are written to {out}.critique.labels.{model}.parquet,\n\
+                     the pairs that model is to push apart."
+    )]
+    questions: usize,
+
+    #[arg(
+        long,
+        default_value_t = 42,
+        help = "Seed for committees and question draws"
+    )]
+    seed: u64,
 
     #[arg(
         long,
@@ -197,29 +231,122 @@ pub(crate) fn median(sorted: &[u32]) -> Option<f64> {
     }
 }
 
-/// The median of `sorted` with one occurrence of `own` left out: a model's
-/// rank never votes on itself.
-pub(crate) fn median_without(sorted: &[u32], own: u32) -> Option<f64> {
-    match sorted.iter().position(|&r| r == own) {
-        Some(at) => {
-            let mut others = sorted.to_vec();
-            others.remove(at);
-            median(&others)
-        }
-        None => median(sorted),
+/// The models that answer `model`: all the others when `size` is 0 or covers
+/// them; otherwise a random subset of `size` of them (query by bagging), sorted.
+pub(crate) fn committee(
+    n_models: usize,
+    model: usize,
+    size: usize,
+    rng: &mut SmallRng,
+) -> Vec<usize> {
+    let mut others: Vec<usize> = (0..n_models).filter(|&o| o != model).collect();
+    if size > 0 && size < others.len() {
+        others.shuffle(rng);
+        others.truncate(size);
+        others.sort_unstable();
     }
+    others
 }
 
-/// Which pairs `model` merges: it keeps the pair near while the median of the
-/// other models holds it far. `own` is the model's ranks, `sorted` every
-/// pair's known ranks over all models.
-pub(crate) fn merges(own: &[u32], sorted: &[Vec<u32>], b: Bounds) -> Vec<bool> {
-    own.iter()
-        .zip(sorted)
-        .map(|(&r, all)| {
-            r <= b.near && median_without(all, r).is_some_and(|o| o > f64::from(b.far))
+/// Per pair, the committee's answer: the median of its members' known ranks
+/// (`u32::MAX` is unknown). The asking model is never on its own committee.
+pub(crate) fn answers(ranks: &[Vec<u32>], committee: &[usize]) -> Vec<Option<f64>> {
+    let n = ranks.first().map_or(0, Vec::len);
+    (0..n)
+        .map(|c| {
+            let mut known: Vec<u32> = committee
+                .iter()
+                .map(|&o| ranks[o][c])
+                .filter(|&r| r != u32::MAX)
+                .collect();
+            known.sort_unstable();
+            median(&known)
         })
         .collect()
+}
+
+/// Which pairs the model merges: it keeps the pair near while the answer holds
+/// it far.
+pub(crate) fn merges(own: &[u32], answers: &[Option<f64>], b: Bounds) -> Vec<bool> {
+    own.iter()
+        .zip(answers)
+        .map(|(&r, a)| r <= b.near && a.is_some_and(|o| o > f64::from(b.far)))
+        .collect()
+}
+
+/// The share of the committee members with a known rank for pair `c` that hold
+/// it far: a merge's label weight.
+pub(crate) fn far_share(ranks: &[Vec<u32>], committee: &[usize], c: usize, b: Bounds) -> f32 {
+    let known: Vec<u32> = committee
+        .iter()
+        .map(|&o| ranks[o][c])
+        .filter(|&r| r != u32::MAX)
+        .collect();
+    if known.is_empty() {
+        return 0.0;
+    }
+    known.iter().filter(|&&r| r > b.far).count() as f32 / known.len() as f32
+}
+
+/// How far apart two pairs are: their endpoints' distances, matched the better
+/// way round.
+pub(crate) fn pair_distance(
+    d: &impl Fn(usize, usize) -> f32,
+    p: (usize, usize),
+    q: (usize, usize),
+) -> f32 {
+    (d(p.0, q.0) + d(p.1, q.1)).min(d(p.0, q.1) + d(p.1, q.0))
+}
+
+/// k-means++ seeding: draw up to `n` items, each with probability proportional
+/// to its weight times its squared distance to the items already drawn (the
+/// weight alone for the first). Items with no weight are never drawn; drawing
+/// stops early when nothing is left to draw.
+pub(crate) fn kmeanspp(
+    weights: &[f64],
+    dist: &impl Fn(usize, usize) -> f64,
+    n: usize,
+    rng: &mut SmallRng,
+) -> Vec<usize> {
+    let m = weights.len();
+    let mut picked: Vec<usize> = Vec::new();
+    let mut near2 = vec![f64::INFINITY; m];
+    let mut taken = vec![false; m];
+    while picked.len() < n {
+        let score: Vec<f64> = (0..m)
+            .map(|i| {
+                if taken[i] {
+                    0.0
+                } else if picked.is_empty() {
+                    weights[i].max(0.0)
+                } else {
+                    weights[i].max(0.0) * near2[i]
+                }
+            })
+            .collect();
+        let total: f64 = score.iter().sum();
+        if total <= 0.0 || !total.is_finite() {
+            break;
+        }
+        let mut u = rng.random::<f64>() * total;
+        let mut i = score.iter().position(|&s| s > 0.0).expect("total > 0");
+        for (j, &sc) in score.iter().enumerate() {
+            if sc > 0.0 {
+                i = j;
+                if u < sc {
+                    break;
+                }
+                u -= sc;
+            }
+        }
+        taken[i] = true;
+        picked.push(i);
+        for (j, slot) in near2.iter_mut().enumerate() {
+            let dj = dist(i, j);
+            *slot = slot.min(dj * dj);
+        }
+    }
+    picked
 }
 
 /// Pairs in a model's top-`k` (unknown ranks never count).
@@ -481,6 +608,16 @@ impl View {
         view
     }
 
+    /// Distance between two kept pseudobulks in this view; `+∞` when either is
+    /// not in it.
+    pub(crate) fn dist(&self, a: usize, b: usize) -> f32 {
+        let (sa, sb) = (self.slot[a], self.slot[b]);
+        if sa == usize::MAX || sb == usize::MAX {
+            return f32::INFINITY;
+        }
+        (self.x.row(sa) - self.x.row(sb)).norm()
+    }
+
     /// Every row's top-`k` pairs, as `(min, max)` kept indices.
     pub(crate) fn top_k_pairs(&self, k: usize) -> Vec<(u32, u32)> {
         let (nbrs, _) = knn_rows_l2(&self.x, k);
@@ -621,6 +758,8 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
 
     let mut pair_tab = PairTable::default();
     let mut summary_tab = SummaryTable::default();
+    let mut label_tabs: Vec<LabelTable> =
+        (0..models.len()).map(|_| LabelTable::default()).collect();
     let mut level_json = Vec::new();
     for (l, (lv, j)) in levels.iter().zip(&judged).enumerate() {
         let b = match j {
@@ -638,7 +777,58 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
         let pairs = candidates(&views, args.knn);
         let ranks: Vec<Vec<u32>> = views.iter().map(|v| v.pair_ranks(&pairs)).collect();
         let sorted: Vec<Vec<u32>> = (0..pairs.len()).map(|c| sorted_known(&ranks, c)).collect();
-        let merged: Vec<Vec<bool>> = ranks.iter().map(|rk| merges(rk, &sorted, b)).collect();
+        let committees: Vec<Vec<usize>> = (0..models.len())
+            .map(|mi| {
+                committee(
+                    models.len(),
+                    mi,
+                    args.committee,
+                    &mut draw_rng(args.seed, l, mi, 0),
+                )
+            })
+            .collect();
+        let answered: Vec<Vec<Option<f64>>> =
+            committees.iter().map(|c| answers(&ranks, c)).collect();
+        let merged: Vec<Vec<bool>> = ranks
+            .iter()
+            .zip(&answered)
+            .map(|(rk, a)| merges(rk, a, b))
+            .collect();
+        if args.questions > 0 {
+            for (mi, label_tab) in label_tabs.iter_mut().enumerate() {
+                let asked = draw_questions(
+                    views[mi],
+                    &pairs,
+                    &ranks[mi],
+                    &answered[mi],
+                    b,
+                    lv.n_pb(),
+                    args.questions,
+                    &mut draw_rng(args.seed, l, mi, 1),
+                );
+                let n_labels = label_tab.push(
+                    l,
+                    lv,
+                    &pairs,
+                    &asked,
+                    &merged[mi],
+                    |c| {
+                        (
+                            far_share(&ranks, &committees[mi], c, b),
+                            answered[mi][c],
+                            ranks[mi][c],
+                        )
+                    },
+                    &committees[mi],
+                    &names,
+                );
+                info!(
+                    "Level {l}, {}: {} questions drawn, {n_labels} labels",
+                    names[mi],
+                    asked.len()
+                );
+            }
+        }
         let judged = JudgedLevel {
             pairs: &pairs,
             ranks: &ranks,
@@ -692,6 +882,11 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
 
     pair_tab.write(&format!("{}.critique.pairs.parquet", args.out), &names)?;
     summary_tab.write(&format!("{}.critique.summary.parquet", args.out))?;
+    if args.questions > 0 {
+        for (tab, name) in label_tabs.iter().zip(&names) {
+            tab.write(&format!("{}.critique.labels.{name}.parquet", args.out))?;
+        }
+    }
     let record = serde_json::json!({
         "partition": part_path,
         "models": models.iter().zip(&names).map(|(m, name)| serde_json::json!({
@@ -703,6 +898,9 @@ pub fn run_critique(args: &CritiqueArgs) -> anyhow::Result<()> {
         "params": {
             "knn": args.knn,
             "far_frac": args.far_frac,
+            "committee": args.committee,
+            "questions": args.questions,
+            "seed": args.seed,
             "min_cells": args.min_cells,
             "cell_labels": args.cell_labels,
             "label_column": args.label_column,
@@ -815,6 +1013,113 @@ fn load_model(
         coverage,
         views,
     })
+}
+
+/// A reproducible generator for one draw: the run's seed, the level, the model
+/// and what is drawn (0 = committee, 1 = questions).
+fn draw_rng(seed: u64, level: usize, model: usize, what: u64) -> SmallRng {
+    let salt = ((level as u64) << 40) ^ ((model as u64) << 8) ^ what;
+    SmallRng::seed_from_u64(seed ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+/// Draw up to `n` of a model's questions among its near pairs: k-means++
+/// seeding, weighted by disagreement squared (how far the answer lies beyond
+/// the model's own rank, over `P`) and spread by distance in the model's view.
+/// Returns indices into `pairs`.
+#[allow(clippy::too_many_arguments)]
+fn draw_questions(
+    view: &View,
+    pairs: &[(u32, u32)],
+    own: &[u32],
+    answered: &[Option<f64>],
+    b: Bounds,
+    n_pb: usize,
+    n: usize,
+    rng: &mut SmallRng,
+) -> Vec<usize> {
+    let pool: Vec<usize> = (0..pairs.len()).filter(|&c| own[c] <= b.near).collect();
+    let weights: Vec<f64> = pool
+        .iter()
+        .map(|&c| {
+            let gap = answered[c].map_or(0.0, |a| (a - f64::from(own[c])).max(0.0));
+            (gap / n_pb.max(1) as f64).powi(2)
+        })
+        .collect();
+    let at = |i: usize| (pairs[pool[i]].0 as usize, pairs[pool[i]].1 as usize);
+    let d = |x: usize, y: usize| view.dist(x, y);
+    let dist = |i: usize, j: usize| f64::from(pair_distance(&d, at(i), at(j)));
+    kmeanspp(&weights, &dist, n, rng)
+        .into_iter()
+        .map(|i| pool[i])
+        .collect()
+}
+
+/// One model's labels, as `{out}.critique.labels.{model}.parquet`: the drawn
+/// questions the answer made merges, the pairs that model is to push apart.
+#[derive(Default)]
+struct LabelTable {
+    level: Vec<i32>,
+    pb_a: Vec<i32>,
+    pb_b: Vec<i32>,
+    weight: Vec<f32>,
+    answer_rank: Vec<f32>,
+    own_rank: Vec<i32>,
+    answered_by: Vec<Box<str>>,
+}
+
+impl LabelTable {
+    /// Add one level's drawn questions that are merges; returns how many.
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        &mut self,
+        l: usize,
+        lv: &Level,
+        pairs: &[(u32, u32)],
+        asked: &[usize],
+        merged: &[bool],
+        about: impl Fn(usize) -> (f32, Option<f64>, u32),
+        committee: &[usize],
+        names: &[String],
+    ) -> usize {
+        let by: Box<str> = committee
+            .iter()
+            .map(|&o| names[o].as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+            .into();
+        let mut n = 0;
+        for &c in asked.iter().filter(|&&c| merged[c]) {
+            let (weight, answer, own) = about(c);
+            let (a, b) = (pairs[c].0 as usize, pairs[c].1 as usize);
+            self.level.push(l as i32);
+            self.pb_a.push(lv.pb_id[a] as i32);
+            self.pb_b.push(lv.pb_id[b] as i32);
+            self.weight.push(weight);
+            self.answer_rank.push(answer.map_or(f32::NAN, |x| x as f32));
+            self.own_rank.push(own as i32);
+            self.answered_by.push(by.clone());
+            n += 1;
+        }
+        n
+    }
+
+    fn write(&self, path: &str) -> anyhow::Result<()> {
+        let key: Vec<Box<str>> = (0..self.level.len())
+            .map(|i| format!("{}:{}-{}", self.level[i], self.pb_a[i], self.pb_b[i]).into())
+            .collect();
+        let channel: Vec<Box<str>> = vec![Box::from("A"); self.level.len()];
+        let cols: Vec<(Box<str>, Column)> = vec![
+            ("channel".into(), Column::Str(&channel)),
+            ("level".into(), Column::I32(&self.level)),
+            ("pb_a".into(), Column::I32(&self.pb_a)),
+            ("pb_b".into(), Column::I32(&self.pb_b)),
+            ("weight".into(), Column::F32(&self.weight)),
+            ("answer_rank".into(), Column::F32(&self.answer_rank)),
+            ("own_rank".into(), Column::I32(&self.own_rank)),
+            ("answered_by".into(), Column::Str(&self.answered_by)),
+        ];
+        write_named_table(path, "pair", &key, &cols)
+    }
 }
 
 /// One level's candidate pairs and what the models said about them.
