@@ -423,11 +423,30 @@ labels act as a simulated perfect oracle; they never enter the loop.
   - The labels come from clustering in a PCA-like space, so they share some bias with separating
     models.
 
-## 11. Open questions
+## 11. Follow-ups and open questions
 
-- **§3.1** Views ignore how a pseudobulk's cells are spread: they average cell latents. A view
-  built from each model's **cell-level kNN graph** (PAGA-style connectivity between pseudobulks,
-  Wolf et al., Genome Biology 2019) would count two pseudobulks near when their cells mix.
+**Follow-ups**
+
+- **§3.1 A hybrid mixing view.** Tried: a view from each model's cell-level kNN graph (PAGA-style
+  connectivity between pseudobulks; Wolf et al., Genome Biology 2019), built by streaming each
+  cell's HNSW neighbours into pseudobulk-pair edge counts, so no graph is kept. On HCA BM1 and
+  BM2 its near pairs were more coherent (label overlap 0.48 vs 0.43, 0.56 vs 0.50) but its
+  merges were not precise (ratio to base 0.33–0.53 vs 0.008–0.03): with a few neighbours per
+  cell most pseudobulk pairs share no edge, tie at the worst rank, and read as far. Absence of
+  edges is not evidence of distance. Next to try: rank a pseudobulk's connected neighbours by
+  connectivity and the rest by centroid distance. The code is on the unmerged branch
+  `critique-mixing`.
+- **The pseudobulk tree as a supervisor.** The collapse already grows a tree over the
+  pseudobulks, and each split carries its own test against noise (the Marchenko–Pastur edge and a
+  two-group likelihood ratio, `{out}.pb_tree.json`). Pseudobulks on opposite sides of a split
+  that passed the edge are negative pairs the data vouches for; pseudobulks within one small
+  subtree, below any passing split, are positive pairs. It is a supervisor outside every model's
+  latent, so it can answer what the committee cannot: pairs every model merges, and contentious
+  pairs only one model separates. The tree comes from one run's random projection, so it needs
+  the same label check before it is trusted.
+
+**Open questions**
+
 - **§3.3** Per-model reliability: SVD's far answers include over-splits. Whether to weight each
   model's answer by a reliability estimated without labels.
 - **§3.3** How many model families are needed before the answers are trustworthy, and how to
