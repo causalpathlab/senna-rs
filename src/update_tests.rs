@@ -1,7 +1,7 @@
 //! What `senna update` decides before it dispatches: whether to substitute the
 //! parent's carried pseudobulks, and what it does when it cannot.
 
-use super::{carried_reference_among, multiome_in_args, UpdateArgs};
+use super::{carried_reference_among, multiome_in_args, round_inputs, UpdateArgs};
 use clap::Parser;
 
 #[derive(clap::Parser)]
@@ -74,4 +74,60 @@ fn recorded_paths_resolve_against_the_run_directory() {
             Box::from("/abs/atac.zarr")
         ]
     );
+}
+
+// ---- Rounds: continue on the same cells, with critique labels -------------------
+
+/// A round continues the parent on its own cells: no new data file is needed.
+#[test]
+fn a_round_needs_no_new_data() {
+    let round = ["senna-update", "--model", "m", "-o", "out"];
+    let a = Cli::try_parse_from(round).expect("a round parses").args;
+    assert!(a.data_files.is_empty());
+    assert!(a.is_round());
+    let a = parse(&[]).expect("an update with new data parses");
+    assert!(!a.is_round());
+}
+
+/// What a round may set: the partition to collapse on and the labels to train
+/// on. What it may not: batch files for new data it does not have, and the
+/// carried-reference request, which stands pseudobulks in for new cells.
+#[test]
+fn a_round_takes_a_partition_and_labels_but_no_new_cell_flags() {
+    let round = |extra: &[&str]| {
+        let base = ["senna-update", "--model", "m", "-o", "out"];
+        Cli::try_parse_from(base.iter().copied().chain(extra.iter().copied())).map(|c| c.args)
+    };
+    let a = round(&["--pb-from", "p.senna.json", "--peer-labels", "l.parquet"])
+        .expect("round flags parse");
+    assert_eq!(a.pb_from.as_deref(), Some("p.senna.json"));
+    assert_eq!(a.peer_labels.as_deref(), Some("l.parquet"));
+    assert!(a.check_round().is_ok());
+    let a = round(&["--batch-files", "b.tsv"]).expect("parses");
+    assert!(
+        a.check_round().is_err(),
+        "batch files describe new data a round has none of"
+    );
+    let a = round(&["--use-pb-reference"]).expect("parses");
+    assert!(
+        a.check_round().is_err(),
+        "a round never substitutes its only cells"
+    );
+    let a = parse(&["--pb-from", "p.senna.json"]).expect("parses");
+    assert!(
+        a.check_round().is_err(),
+        "a partition over the parent's cells cannot cover new cells"
+    );
+}
+
+/// A round replays the recorded inputs and batches, untouched.
+#[test]
+fn a_round_replays_the_recorded_inputs() {
+    let recorded: Vec<Box<str>> = vec!["a.zarr".into(), "b.zarr".into()];
+    let batches: Vec<Box<str>> = vec!["a.tsv".into(), "b.tsv".into()];
+    let (d, b) = round_inputs(recorded.clone(), batches.clone());
+    assert_eq!(d, recorded);
+    assert_eq!(b.as_deref(), Some(batches.as_slice()));
+    let (_, b) = round_inputs(recorded, Vec::new());
+    assert!(b.is_none());
 }

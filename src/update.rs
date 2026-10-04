@@ -22,7 +22,13 @@
 //! checked against (`--no-pb-reference`), and the fallback when the
 //! substitution is impossible — see [`select_reference`].
 //!
-//! **The partition is deliberately not inherited.** `--from` would pull the
+//! **A round** (`docs/peer-critique-plan.md`, §8.1) is an update with no new
+//! data: the parent continues on its own cells, on a named partition
+//! (`--pb-from`) and, from stage 2 on, trained against critique labels
+//! (`--peer-labels`). It replays the recorded inputs and never substitutes the
+//! carried pseudobulks, which would stand in for the only cells there are.
+//!
+//! **The partition is deliberately not inherited** when there is new data. `--from` would pull the
 //! parent's cell→pb membership along with its inputs, but
 //! `align_cell_to_pb_to_cells` bails on any cell absent from the source — which
 //! every new cell is. `from` is forced to `None`.
@@ -57,6 +63,9 @@ pub(crate) struct Rebase {
     /// The parent's carried pseudobulks when they are standing in for its
     /// cells; `None` means this round re-collapses.
     pub reference: Option<senna::pb_reference::ReferenceInput>,
+    /// A round's partition to collapse on (`--pb-from`). Only the families
+    /// that collapse (topic, vae, masked-*) can honour it.
+    pub pb_from: Option<Box<str>>,
 }
 
 /// A fit whose recorded arguments can be re-pointed at a larger cohort.
@@ -67,11 +76,32 @@ pub(crate) trait Updatable {
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
     #[arg(
-        required = true,
         value_delimiter = ',',
-        help = "New data files to absorb (.zarr or .h5)"
+        help = "New data files to absorb (.zarr or .h5); none makes this a round on the parent's cells"
     )]
     data_files: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        value_name = "RUN",
+        help = "Round only: collapse on this run's cell → pseudobulk partition",
+        long_help = "A round continues the parent on its own cells. With --pb-from the\n\
+                     fit collapses on that run's partition (a topic, masked or vae run\n\
+                     over the same cells), so every model in a critique round shares\n\
+                     one set of pseudobulks. Not with new data: a partition over the\n\
+                     parent's cells cannot cover cells it never saw."
+    )]
+    pb_from: Option<Box<str>>,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Round only: critique labels to train against ({out}.critique.labels.{model}.parquet)",
+        long_help = "Pairs of pseudobulks this model is to push apart, written by\n\
+                     `senna critique --questions`. Recorded in the manifest; the\n\
+                     training term that reads them is not built yet."
+    )]
+    peer_labels: Option<Box<str>>,
 
     #[arg(
         long,
@@ -186,6 +216,49 @@ pub struct UpdateArgs {
 /// on the carried-reference path, count its cells twice: once as themselves
 /// and once inside the pseudobulks that already summarize them. Both sides are
 /// compared after canonicalization so two spellings of one path still count.
+impl UpdateArgs {
+    /// No new data: the parent continues on its own cells.
+    pub(crate) fn is_round(&self) -> bool {
+        self.data_files.is_empty()
+    }
+
+    /// What a round may and may not set, and what only a round may set.
+    pub(crate) fn check_round(&self) -> anyhow::Result<()> {
+        if self.is_round() {
+            anyhow::ensure!(
+                self.batch_files.is_none(),
+                "--batch-files describe new data, and a round (no new data files) has none; \
+                 the parent's recorded batches are replayed"
+            );
+            anyhow::ensure!(
+                !self.use_pb_reference,
+                "--use-pb-reference asks to stand the carried pseudobulks in for the parent's \
+                 cells, which are the only cells a round has; a round always re-collapses"
+            );
+        } else {
+            anyhow::ensure!(
+                self.pb_from.is_none(),
+                "--pb-from names a partition over the parent's cells, which cannot cover the new \
+                 cells; it is for a round (no new data files)"
+            );
+            anyhow::ensure!(
+                self.peer_labels.is_none(),
+                "--peer-labels is for a round (no new data files)"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// A round's inputs: the recorded data and batches, untouched.
+pub(crate) fn round_inputs(
+    recorded: Vec<Box<str>>,
+    batches: Vec<Box<str>>,
+) -> (Vec<Box<str>>, Option<Vec<Box<str>>>) {
+    let batches = (!batches.is_empty()).then_some(batches);
+    (recorded, batches)
+}
+
 fn ensure_not_recorded(recorded: &[Box<str>], new: &[Box<str>]) -> anyhow::Result<()> {
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
     let seen: Vec<PathBuf> = recorded.iter().map(|r| canon(r)).collect();
@@ -375,39 +448,48 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     })?;
     let kind = manifest.kind;
 
+    args.check_round()?;
     let recorded = manifest.data_inputs(&dir);
     ensure_not_recorded(&recorded, &args.data_files)?;
-    let reference = select_reference(args, &manifest, &recorded)?;
+    let reference = if args.is_round() {
+        None
+    } else {
+        select_reference(args, &manifest, &recorded)?
+    };
 
-    let (data_files, batch_files) = match reference.as_ref() {
-        Some(r) => {
-            // The reference goes LAST: `weights_for` keys on that, and the
-            // loader concatenates columns in file order.
-            let new_b = args
-                .batch_files
-                .as_deref()
-                .expect("a carried reference is only selected with --batch-files");
-            anyhow::ensure!(
-                new_b.len() == args.data_files.len(),
-                "--batch-files has {} entries but {} new data file(s) were given",
-                new_b.len(),
-                args.data_files.len(),
-            );
-            let mut d = args.data_files.clone();
-            d.push(r.backend.clone());
-            let mut b = new_b.to_vec();
-            b.push(r.batch_file.clone());
-            (d, Some(b))
-        }
-        None => {
-            let mut d = recorded;
-            d.extend(args.data_files.iter().cloned());
-            let b = union_batches(
-                manifest.data_batches(&dir),
-                args.batch_files.as_deref(),
-                args.data_files.len(),
-            )?;
-            (d, b)
+    let (data_files, batch_files) = if args.is_round() {
+        round_inputs(recorded, manifest.data_batches(&dir))
+    } else {
+        match reference.as_ref() {
+            Some(r) => {
+                // The reference goes LAST: `weights_for` keys on that, and the
+                // loader concatenates columns in file order.
+                let new_b = args
+                    .batch_files
+                    .as_deref()
+                    .expect("a carried reference is only selected with --batch-files");
+                anyhow::ensure!(
+                    new_b.len() == args.data_files.len(),
+                    "--batch-files has {} entries but {} new data file(s) were given",
+                    new_b.len(),
+                    args.data_files.len(),
+                );
+                let mut d = args.data_files.clone();
+                d.push(r.backend.clone());
+                let mut b = new_b.to_vec();
+                b.push(r.batch_file.clone());
+                (d, Some(b))
+            }
+            None => {
+                let mut d = recorded;
+                d.extend(args.data_files.iter().cloned());
+                let b = union_batches(
+                    manifest.data_batches(&dir),
+                    args.batch_files.as_deref(),
+                    args.data_files.len(),
+                )?;
+                (d, b)
+            }
         }
     };
 
@@ -440,6 +522,24 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
                 "carried pseudobulks hold {ratio:.1} cells each, so substituting them saves \
                  little while coarsening old-vs-new batch matching. Re-collapsing \
                  (--no-pb-reference) is likely the better trade at this scale."
+            );
+        }
+    } else if args.is_round() {
+        info!(
+            "update [{kind}]: a round on {}'s own {} data file(s){}{}",
+            args.model,
+            data_files.len(),
+            args.pb_from.as_deref().map_or(String::new(), |p| format!(
+                ", collapsing on {p}'s partition"
+            )),
+            args.peer_labels
+                .as_deref()
+                .map_or(String::new(), |l| format!(", with labels {l}")),
+        );
+        if args.peer_labels.is_some() {
+            log::warn!(
+                "--peer-labels is recorded but not yet trained on: the training term that \
+                 pushes labelled pairs apart is stage 2 of docs/peer-critique-plan.md"
             );
         }
     } else {
@@ -502,9 +602,18 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         parent_embedding_dim,
         growth,
         reference,
+        pb_from: args.pb_from.clone(),
     };
+    // Only the collapsing families can honour a partition.
+    anyhow::ensure!(
+        rebase.pb_from.is_none()
+            || matches!(kind, RunKind::Topic | RunKind::Vae)
+            || kind.is_masked_family(),
+        "--pb-from applies to a run that collapses cells into pseudobulks (topic, masked-*, \
+         vae), not to a '{kind}' run"
+    );
 
-    match kind {
+    let fitted = match kind {
         RunKind::Topic => {
             let mut a: crate::topic::cmd::TopicArgs = manifest.train_args_as(&args.model)?;
             a.rebase(rebase);
@@ -587,7 +696,26 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             "update does not support a '{other}' run. Supported: topic, masked-topic, \
              masked-sbp, masked-vae, vae, svd, bge, simba."
         ),
+    };
+    fitted?;
+    if args.is_round() {
+        record_history(args)?;
     }
+    Ok(())
+}
+
+/// Stamp the new version's manifest with what this round continued from and
+/// trained against. The family wrote the manifest; this adds to it.
+fn record_history(args: &UpdateArgs) -> anyhow::Result<()> {
+    let path = PathBuf::from(senna::run_manifest::default_path(&args.out));
+    let (mut m, _) = RunManifest::load(&path)?;
+    m.history = Some(senna::run_manifest::RunHistory {
+        parent: args.model.to_string(),
+        peer_labels: args.peer_labels.as_deref().map(str::to_string),
+        pb_from: args.pb_from.as_deref().map(str::to_string),
+        unknown: Default::default(),
+    });
+    m.save(&path)
 }
 
 #[cfg(test)]

@@ -296,18 +296,21 @@ What this provides:
 - **Rollback.** If a round makes a model worse (held-out likelihood drops, or its merge rate
   grows), the previous version stays the result.
 
-Where `update` does not fit today:
+**A round in `senna update` (built).** With no new data files, `update` is a round: it replays
+the parent's recorded inputs and batches, never substitutes the carried pseudobulks (they would
+stand in for the only cells there are), collapses on `--pb-from P_r` when given (topic, vae and
+the masked family; svd, bge and simba have no partition to inherit), and records `--peer-labels`.
+The new version's manifest carries a `history` block: parent, labels, partition. Batch files and
+`--use-pb-reference` are refused in a round; `--pb-from` and `--peer-labels` are refused with new
+data. The labels are recorded but not yet trained on: that is stage 2.
 
-1. `data_files` is a required argument. Rounds need a **no-new-cells** mode.
-2. Update forces `from = None` and drops `--pb-from`, because new cells are absent from the
-   parent's partition. With no new cells that reason does not apply, so a round **sets**
-   `--pb-from P_r`.
-3. **Carried pseudobulks** (`pb_reference`) are tied to the parent's partition. A
-   fixed-partition round can keep that fast path. A redrawn-partition round (§8.3) must
-   re-collapse on `P_r`.
-4. **Each round is a fresh process**, so Adam state resets and data is reloaded. This is
-   acceptable at tens of epochs per round. Otherwise the optimizer state can be saved next to
-   the weights, or the fits can run as long-lived processes that synchronise at a barrier (§8.4).
+Checked on HCA BM1: 50 more epochs of the VAE on the topic run's partition reproduce that
+partition exactly, keep the log-likelihood flat (−0.0491 → −0.0492) and the merge rate within
+0.017 of the parent's at every level, with merge precision unchanged.
+
+Still open: **each round is a fresh process**, so Adam state resets and data is reloaded. This is
+acceptable at tens of epochs per round. Otherwise the optimizer state can be saved next to the
+weights, or the fits can run as long-lived processes that synchronise at a barrier (§8.4).
 
 ### 8.2 Choosing questions: informative, diverse, random
 
@@ -389,7 +392,7 @@ Each stage can be checked on its own before the next one is built.
 | 0a | A | **built:** `senna critique`, report only. Views averaged over one run's partition, top-*K* questions, ranks per model, leave-one-out answers, merges and merge rate per model, `merged_by` per pair; `--cell-labels` checks the merges against known labels | Are merged pairs different cell types? |
 | 0c | A | **built:** random sub-committees (`--committee`) and k-means++ question draws (`--questions`, `--seed`), writing per-model label files (§7) | Sampled labels stay precise and spread wider than the top-disagreement pairs. |
 | 0b | B | the same for gene pairs, from the models' gene embeddings | Do topic merges join genes of known separate programs? |
-| 1 | — | no-new-cells mode for `senna update` with explicit `--pb-from` | Continuing without labels is neutral. |
+| 1 | — | **built:** a round of `senna update` (no new data) with `--pb-from` and `--peer-labels`, recorded as `history` in the new version's manifest | Continuing without labels is neutral. |
 | 2 | A, B | `ExtraLossHook`; `--peer-labels` through `Rebase` for topic / vae / masked | One round lowers the model's merge rate without hurting its held-out likelihood. |
 | 3 | A, B | peer negatives into bge / simba / gem; gene views into fne as relations | The same check, for the graph models. |
 | 4 | A, B | the round loop in `senna run`, on parallel devices | Merge rates fall across rounds, and likelihoods hold. |

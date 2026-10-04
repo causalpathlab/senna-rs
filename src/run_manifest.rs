@@ -658,8 +658,29 @@ pub struct RunManifest {
     /// commands that produce no re-runnable fit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub train_args: Option<TrainArgsRecord>,
+    /// What a round of `senna update` continued from and trained against
+    /// (`docs/peer-critique-plan.md`, §1 "history"). Absent on a fit that is
+    /// no round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<RunHistory>,
     /// Fields this version does not know, written by another tool or a
     /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
+}
+
+/// One round's place in a model's history: the version it continued from, the
+/// critique labels it trained against, and the partition it collapsed on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunHistory {
+    /// The parent version's prefix.
+    pub parent: String,
+    /// `{out}.critique.labels.{model}.parquet` from `senna critique`, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_labels: Option<String>,
+    /// The run whose partition this round collapsed on, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_from: Option<String>,
     #[serde(flatten, default)]
     pub unknown: Unknown,
 }
@@ -1202,6 +1223,7 @@ impl RunManifest {
             annotate: RunAnnotate::default(),
             defaults: RunDefaults::default(),
             train_args: None,
+            history: None,
             unknown: Unknown::default(),
         }
     }
@@ -2090,6 +2112,29 @@ mod tests {
             m.data_file(&out, "/nowhere/y.zarr"),
             PathBuf::from("/nowhere/y.zarr")
         );
+    }
+
+    /// A round's version names what it continued from and trained against,
+    /// and a version that is no round carries no history at all.
+    #[test]
+    fn history_round_trips_and_is_absent_by_default() {
+        let mut m = RunManifest::new(RunKind::Vae, "/tmp/run2");
+        assert!(serde_json::to_value(&m).unwrap().get("history").is_none());
+        m.history = Some(RunHistory {
+            parent: "/tmp/run1".into(),
+            peer_labels: Some("c.critique.labels.vae.parquet".into()),
+            pb_from: Some("topic.senna.json".into()),
+            unknown: Unknown::default(),
+        });
+        let json = serde_json::to_string(&m).unwrap();
+        let back: RunManifest = serde_json::from_str(&json).unwrap();
+        let h = back.history.expect("history survives");
+        assert_eq!(h.parent, "/tmp/run1");
+        assert_eq!(
+            h.peer_labels.as_deref(),
+            Some("c.critique.labels.vae.parquet")
+        );
+        assert_eq!(h.pb_from.as_deref(), Some("topic.senna.json"));
     }
 
     #[test]
