@@ -655,7 +655,7 @@ impl crate::update::Updatable for VaeArgs {
         self.pb_reference = r.reference;
         // See `TopicArgs::rebase` — the inherited partition cannot cover new cells.
         self.from = None;
-        self.pb_from = Default::default();
+        self.pb_from = r.pb_from;
         if let Some(e) = r.epochs {
             self.epochs = e;
         }

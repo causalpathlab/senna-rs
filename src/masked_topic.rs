@@ -1674,7 +1674,7 @@ impl crate::update::Updatable for MaskedTopicArgs {
         // (Here `--from` also carries --freeze-feature-embedding, which a warm
         // start supersedes: the weights already contain that ρ.)
         self.from = None;
-        self.pb_from = Default::default();
+        self.pb_from = r.pb_from;
         if let Some(e) = r.epochs {
             self.epochs = e;
         }

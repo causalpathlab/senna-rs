@@ -174,8 +174,7 @@ impl PbFromArgs {
             Some(rec) => {
                 let args = &rec.args;
                 anyhow::ensure!(
-                    args.pointer("/collapse/cnv_clones")
-                        .is_none_or(serde_json::Value::is_null),
+                    !cut_by_cnv_clones(args),
                     "--pb-from {run}: that run cut its partition by CNV clone (--cnv-clones)"
                 );
                 if args.get("from").is_some_and(|v| !v.is_null()) {
@@ -229,6 +228,15 @@ pub(crate) fn cuts_cells(name: &str) -> bool {
 /// The names a fit's number of latent topics goes by. The sketch cells are
 /// partitioned on is `--proj-dim` wide, or this number when larger.
 pub(crate) const LATENT_COUNTS: [&str; 2] = ["n_latent_topics", "n_latent"];
+
+/// Whether a recorded fit was cut by `--cnv-clones`: it built strata of its
+/// own, so no run can share its partition and it can share no other's. The
+/// flag lives under `collapse` in every family that collapses.
+pub(crate) fn cut_by_cnv_clones(recorded_args: &serde_json::Value) -> bool {
+    recorded_args
+        .pointer("/collapse/cnv_clones")
+        .is_some_and(|v| !v.is_null())
+}
 
 /// What a fit builds its partition from, out of its argument struct as its
 /// manifest's `train_args` records it: the collapse, cell QC, HVG and

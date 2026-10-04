@@ -98,7 +98,8 @@ fn parameters_are_checked() {
 #[test]
 fn known_ranks_skip_unknown_and_sort() {
     let ranks = vec![vec![9], vec![u32::MAX], vec![3], vec![5]];
-    assert_eq!(sorted_known(&ranks, 0), vec![3, 5, 9]);
+    assert_eq!(known_ranks(&ranks, &[0, 1, 2, 3], 0), vec![3, 5, 9]);
+    assert_eq!(known_ranks(&ranks, &[1, 3], 0), vec![5]);
 }
 
 #[test]
@@ -108,13 +109,27 @@ fn median_averages_the_middle_pair() {
     assert_eq!(median(&[]), None);
 }
 
-/// A model is judged against the others only: its own rank never votes.
+/// A model is answered by its committee only: its own rank never votes.
 #[test]
-fn median_without_leaves_one_rank_out() {
-    assert_eq!(median_without(&[1, 60, 70], 1), Some(65.0));
-    assert_eq!(median_without(&[1, 60, 70], 60), Some(35.5));
-    assert_eq!(median_without(&[5, 5, 80], 5), Some(42.5));
-    assert_eq!(median_without(&[7], 7), None);
+fn the_answer_is_the_committees_median() {
+    let ranks = vec![vec![1, 5], vec![60, u32::MAX], vec![70, 9], vec![10, 11]];
+    assert_eq!(answers(&ranks, &[1, 2]), vec![Some(65.0), Some(9.0)]);
+    assert_eq!(answers(&ranks, &[1, 2, 3]), vec![Some(60.0), Some(10.0)]);
+    assert_eq!(answers(&ranks, &[1]), vec![Some(60.0), None]);
+}
+
+/// All other models by default; a random subset of a given size otherwise,
+/// never the model itself, the same for the same seed.
+#[test]
+fn committees_are_random_subsets_of_the_others() {
+    let rng = |s| rand::rngs::SmallRng::seed_from_u64(s);
+    assert_eq!(committee(4, 1, 0, &mut rng(7)), vec![0, 2, 3]);
+    assert_eq!(committee(4, 1, 9, &mut rng(7)), vec![0, 2, 3]);
+    let c = committee(6, 2, 3, &mut rng(7));
+    assert_eq!(c.len(), 3);
+    assert!(!c.contains(&2));
+    assert!(c.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(c, committee(6, 2, 3, &mut rng(7)));
 }
 
 // ---- Merges -----------------------------------------------------------------------
@@ -122,10 +137,8 @@ fn median_without_leaves_one_rank_out() {
 const B: Bounds = Bounds { near: 15, far: 45 };
 
 fn merges_of(ranks: &[Vec<u32>], model: usize) -> Vec<bool> {
-    let sorted: Vec<Vec<u32>> = (0..ranks[0].len())
-        .map(|c| sorted_known(ranks, c))
-        .collect();
-    merges(&ranks[model], &sorted, B)
+    let others: Vec<usize> = (0..ranks.len()).filter(|&o| o != model).collect();
+    merges(&ranks[model], &answers(ranks, &others), B)
 }
 
 /// Two identical models never disagree, so neither merges anything.
@@ -230,4 +243,58 @@ fn mean_over_skips_unknown_overlaps() {
     let pick = [true, true, true, false];
     assert!((mean_over(&ov, &pick) - 0.25).abs() < 1e-6);
     assert!(mean_over(&ov, &[false; 4]).is_nan());
+}
+
+// ---- Question sampling: informative, diverse, random ----------------------------
+
+/// A merge's weight is the share of the committee holding the pair far.
+#[test]
+fn label_weight_is_the_share_of_far_votes() {
+    let ranks = vec![vec![3], vec![60], vec![20], vec![u32::MAX]];
+    assert!((far_share(&ranks, &[1, 2, 3], 0, B) - 0.5).abs() < 1e-6);
+    assert!((far_share(&ranks, &[1], 0, B) - 1.0).abs() < 1e-6);
+}
+
+/// Two pairs are as far apart as their endpoints, matched the better way round.
+#[test]
+fn pair_distance_matches_endpoints_the_better_way() {
+    let pos = [0.0f32, 1.0, 10.0, 11.0];
+    let d = |i: usize, j: usize| (pos[i] - pos[j]).abs();
+    assert_eq!(pair_distance(&d, (0, 2), (1, 3)), 2.0);
+    assert_eq!(pair_distance(&d, (0, 2), (3, 1)), 2.0);
+    assert_eq!(pair_distance(&d, (0, 1), (0, 1)), 0.0);
+}
+
+/// k-means++ seeding draws only items with weight, each at most once, and the
+/// same items for the same seed.
+#[test]
+fn seeding_draws_weighted_items_once() {
+    let w = [1.0, 0.0, 2.0, 3.0, 0.0];
+    let d = |i: usize, j: usize| (i as f64 - j as f64).abs();
+    let picked = kmeanspp(&w, &d, 10, &mut rand::rngs::SmallRng::seed_from_u64(3));
+    let mut sorted = picked.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, vec![0, 2, 3]);
+    let again = kmeanspp(&w, &d, 10, &mut rand::rngs::SmallRng::seed_from_u64(3));
+    assert_eq!(picked, again);
+}
+
+/// Two clusters of equal weight, each wider than 1, so the second draw's
+/// squared-distance weighting must not be capped: a draw of two almost always
+/// takes one from each cluster.
+#[test]
+fn seeding_spreads_draws_across_clusters() {
+    let pos = [0.0f64, 1.0, 2.0, 100.0, 101.0, 102.0];
+    let w = [1.0; 6];
+    let d = |i: usize, j: usize| (pos[i] - pos[j]).abs();
+    let spread = (0..200)
+        .filter(|&s| {
+            let p = kmeanspp(&w, &d, 2, &mut rand::rngs::SmallRng::seed_from_u64(s));
+            (p[0] < 3) != (p[1] < 3)
+        })
+        .count();
+    assert!(
+        spread >= 195,
+        "only {spread} of 200 draws spread across clusters"
+    );
 }

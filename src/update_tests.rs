@@ -1,7 +1,10 @@
 //! What `senna update` decides before it dispatches: whether to substitute the
 //! parent's carried pseudobulks, and what it does when it cannot.
 
-use super::{carried_reference_among, multiome_in_args, UpdateArgs};
+use super::{
+    carried_reference_among, check_round_inputs, multiome_in_args, round_partition, union_batches,
+    UpdateArgs,
+};
 use clap::Parser;
 
 #[derive(clap::Parser)]
@@ -74,4 +77,110 @@ fn recorded_paths_resolve_against_the_run_directory() {
             Box::from("/abs/atac.zarr")
         ]
     );
+}
+
+// ---- Rounds: continue on the same cells, with critique labels -------------------
+
+/// A round continues the parent on its own cells: no new data file is needed.
+#[test]
+fn a_round_needs_no_new_data() {
+    let round = ["senna-update", "--model", "m", "-o", "out"];
+    let a = Cli::try_parse_from(round).expect("a round parses").args;
+    assert!(a.data_files.is_empty());
+    assert!(a.is_round());
+    let a = parse(&[]).expect("an update with new data parses");
+    assert!(!a.is_round());
+}
+
+/// What a round may set: the partition to collapse on and the labels to train
+/// on. What it may not: batch files for new data it does not have, and the
+/// carried-reference request, which stands pseudobulks in for new cells. clap
+/// owns these relations, so a wrong combination does not parse.
+#[test]
+fn a_round_takes_a_partition_and_labels_but_no_new_cell_flags() {
+    let round = |extra: &[&str]| {
+        let base = ["senna-update", "--model", "m", "-o", "out"];
+        Cli::try_parse_from(base.iter().copied().chain(extra.iter().copied())).map(|c| c.args)
+    };
+    let a = round(&["--pb-from", "p.senna.json", "--peer-labels", "l.parquet"])
+        .expect("round flags parse");
+    assert_eq!(a.pb_from.as_deref(), Some("p.senna.json"));
+    assert_eq!(a.peer_labels.as_deref(), Some("l.parquet"));
+    assert!(
+        round(&["--batch-files", "b.tsv"]).is_err(),
+        "batch files describe new data"
+    );
+    assert!(
+        round(&["--use-pb-reference"]).is_err(),
+        "a round never substitutes its only cells"
+    );
+    assert!(
+        parse(&["--pb-from", "p.senna.json"]).is_err(),
+        "a partition cannot cover new cells"
+    );
+    assert!(
+        parse(&["--peer-labels", "l.parquet"]).is_err(),
+        "labels are for a round"
+    );
+}
+
+/// With no new data, the recorded batches are replayed as they are; with new
+/// data, the new files still need their own.
+#[test]
+fn a_round_replays_the_recorded_batches() {
+    let recorded: Vec<Box<str>> = vec!["a.tsv".into(), "b.tsv".into()];
+    let b = union_batches(recorded.clone(), None, 0).expect("a round replays");
+    assert_eq!(b.as_deref(), Some(recorded.as_slice()));
+    assert!(union_batches(recorded, None, 1).is_err());
+    assert!(union_batches(Vec::new(), None, 0)
+        .expect("no batches")
+        .is_none());
+}
+
+/// A parent cut by --cnv-clones built its own strata; a round cannot collapse
+/// it on another run's partition. The flag is read off the recorded arguments.
+#[test]
+fn a_cnv_cut_parent_is_read_off_its_recorded_arguments() {
+    use crate::refine_weighting::cut_by_cnv_clones;
+    assert!(cut_by_cnv_clones(
+        &serde_json::json!({ "collapse": { "cnv_clones": "c.tsv" } })
+    ));
+    assert!(!cut_by_cnv_clones(
+        &serde_json::json!({ "collapse": { "cnv_clones": null } })
+    ));
+    assert!(!cut_by_cnv_clones(&serde_json::json!({ "epochs": 10 })));
+}
+
+/// A round keeps the pseudobulks it is critiqued on: without --pb-from it
+/// collapses on the parent's own partition. A parent cut by --cnv-clones built
+/// strata no partition can stand for, so it rebuilds; non-collapsing kinds
+/// have no partition at all; with new data nothing is inherited.
+#[test]
+fn a_round_without_pb_from_keeps_the_parents_partition() {
+    use senna::run_manifest::RunKind;
+    let p = |given: Option<&str>, kind, round, cnv| {
+        round_partition(given.map(Box::from), "runs/m", kind, round, cnv)
+    };
+    assert_eq!(
+        p(None, RunKind::Vae, true, false).as_deref(),
+        Some("runs/m")
+    );
+    assert_eq!(
+        p(Some("t"), RunKind::Vae, true, false).as_deref(),
+        Some("t")
+    );
+    assert_eq!(p(None, RunKind::Vae, true, true), None);
+    assert_eq!(p(None, RunKind::Svd, true, false), None);
+    assert_eq!(p(None, RunKind::Topic, false, false), None);
+}
+
+/// A lineage absorbed through carried pseudobulks holds them among its inputs;
+/// a round would replay them as cells, so it is refused with a reason that fits.
+#[test]
+fn a_round_refuses_a_lineage_holding_carried_pseudobulks() {
+    let cells: Vec<Box<str>> = vec!["a.zarr".into()];
+    assert!(check_round_inputs(&cells).is_ok());
+    let carried: Vec<Box<str>> = vec!["a.zarr".into(), "r1.pb_reference.zarr.zip".into()];
+    let e = check_round_inputs(&carried).unwrap_err().to_string();
+    assert!(e.contains("round") && !e.contains("--batch-files"), "{e}");
 }

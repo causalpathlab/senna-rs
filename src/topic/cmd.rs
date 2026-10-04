@@ -1227,9 +1227,11 @@ impl crate::update::Updatable for TopicArgs {
         }
         // NOT inherited: `--from` would pull the parent's cell→pb partition,
         // and `align_cell_to_pb_to_cells` bails on any cell absent from the
-        // source — which every newly absorbed cell is. `--pb-from` likewise.
+        // source — which every newly absorbed cell is. A round's `--pb-from`
+        // names the partition every model collapses on; with new data `update`
+        // leaves it empty, since none could cover them.
         self.from = None;
-        self.pb_from = Default::default();
+        self.pb_from = r.pb_from;
         if let Some(e) = r.epochs {
             self.epochs = e;
         }
