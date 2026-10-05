@@ -205,9 +205,9 @@ pub(crate) struct Bounds {
 
 impl Bounds {
     /// `far = max(2·knn, ⌈P·frac⌉)`, well clear of near. The `P·frac` part does
-    /// the work: swept against expert cell types on two HCA donors, a far set by
-    /// `knn` alone admits merges of one cell type on one donor and not the other;
-    /// `2·knn` only guards tiny levels. `None` when no rank
+    /// the work: a far set by `knn` alone does not carry over between samples
+    /// of different sizes, while a share of the level does; `2·knn` only
+    /// guards tiny levels. `None` when no rank
     /// can lie beyond it: ranks run from 1 to `P − 1`.
     pub(crate) fn for_level(n_pb: usize, knn: usize, frac: f64) -> Option<Self> {
         let far = (2 * knn).max((n_pb as f64 * frac).ceil() as usize);
