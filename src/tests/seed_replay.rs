@@ -1,5 +1,5 @@
 //! A fit replays from its `--seed`: the same seed on the same data writes the
-//! same latent, bit for bit.
+//! same latent, bit for bit, in every family that trains a network.
 
 use crate::planted::planted_zarr;
 use clap::Parser;
@@ -40,6 +40,22 @@ fn replays<A: clap::Args>(fit: fn(&A) -> anyhow::Result<()>, extra: &[&str]) {
     let gap = |x: &Mat, y: &Mat| (x - y).abs().max();
     assert_eq!(gap(&a, &b), 0.0, "the same seed replays");
     assert!(gap(&a, &c) > 0.0, "another seed draws another fit");
+}
+
+#[test]
+fn a_topic_fit_replays_from_its_seed() {
+    replays(
+        crate::fit_topic_model,
+        &["-t", "3", "--minibatch-size", "50"],
+    );
+}
+
+#[test]
+fn a_vae_fit_replays_from_its_seed() {
+    replays(
+        crate::vae::fit_vae_model,
+        &["-t", "3", "--minibatch-size", "50"],
+    );
 }
 
 #[test]
