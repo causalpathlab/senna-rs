@@ -4,11 +4,32 @@ fn line_view(x: &[f32], valid: &[bool]) -> View {
     View::compact(Mat::from_column_slice(x.len(), 1, x), valid)
 }
 
+fn names(v: &[&str]) -> Vec<Box<str>> {
+    v.iter().map(|&s| s.into()).collect()
+}
+
 #[test]
 fn tolerant_alignment_marks_missing_names() {
-    let src: Vec<Box<str>> = vec!["a".into(), "x".into(), "c".into()];
-    let tgt: Vec<Box<str>> = vec!["c".into(), "b".into(), "a".into()];
-    assert_eq!(tolerant_align(&src, &tgt), vec![2, usize::MAX, 0]);
+    let (src, tgt) = (names(&["a", "x", "c"]), names(&["c", "b", "a"]));
+    assert_eq!(tolerant_align(&src, &tgt).unwrap(), vec![2, usize::MAX, 0]);
+}
+
+/// A repeated name matches by position when both lists are the same, and is
+/// refused on either side otherwise, when it would be matched, rather than
+/// every copy landing on one row.
+#[test]
+fn tolerant_alignment_refuses_an_ambiguous_repeat() {
+    let same = names(&["c1", "c2", "c1"]);
+    assert_eq!(tolerant_align(&same, &same).unwrap(), vec![0, 1, 2]);
+    let err = tolerant_align(&names(&["c1", "c2"]), &same).unwrap_err();
+    assert!(
+        err.to_string().contains("c1 appears more than once"),
+        "{err}"
+    );
+    assert!(tolerant_align(&same, &names(&["c1", "c2"])).is_err());
+    // A repeat that matches nothing places no cell, so it is no ambiguity.
+    let extra = names(&["c2", "x", "x"]);
+    assert_eq!(tolerant_align(&names(&["c2"]), &extra).unwrap(), vec![0]);
 }
 
 #[test]
