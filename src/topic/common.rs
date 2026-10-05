@@ -157,9 +157,6 @@ pub(crate) fn expand_delta_for_block(
     Ok(delta_bd.index_select(&indices, 0)?)
 }
 
-/// Seed of the feature coarsening's k-means for fits without a `--seed`.
-pub(crate) const COARSENING_SEED: u64 = 42;
-
 /// The finest collapse and the cell → pseudobulk membership that sizes its
 /// pseudobulks: what the feature coarsening reads its counts from.
 pub(crate) struct FinestPseudobulks<'a> {
@@ -340,12 +337,19 @@ pub(crate) fn compute_level_epochs(total_epochs: usize, num_levels: usize) -> Ve
         .collect()
 }
 
+/// The seed of level `level`'s posterior draw in a run seeded `seed`.
+pub(crate) fn posterior_seed(seed: u64, level: usize) -> u64 {
+    legume_numeric::matrix::rand_util::stream_seed(seed, "posterior", 0, level)
+}
+
 /// Draw `(mixed_nd, batch_nd, target_nd)` from the collapsed posteriors
-/// (one sample per Gamma matrix).
+/// (one sample per Gamma matrix), reproducibly from `seed`
+/// ([`posterior_seed`]).
 pub(crate) fn sample_collapsed_data(
     collapsed: &CollapsedOut,
+    seed: u64,
 ) -> anyhow::Result<(Mat, Option<Mat>, Mat)> {
-    let (mixed_dn, batch_dn, target_dn) = sample_collapsed_data_dp(collapsed)?;
+    let (mixed_dn, batch_dn, target_dn) = sample_collapsed_data_dp(collapsed, seed)?;
     Ok((
         mixed_dn.transpose(),
         batch_dn.map(|b| b.transpose()),
@@ -363,17 +367,21 @@ pub(crate) fn sample_collapsed_data(
 /// still get them from [`sample_collapsed_data`].
 pub(crate) fn sample_collapsed_data_dp(
     collapsed: &CollapsedOut,
+    seed: u64,
 ) -> anyhow::Result<(Mat, Option<Mat>, Mat)> {
-    let mixed_dn = collapsed.mu_observed.posterior_sample()?;
+    use legume_numeric::matrix::rand_util::name_seed;
+    let mixed_dn = collapsed
+        .mu_observed
+        .posterior_sample_seeded(name_seed(seed, "observed"))?;
 
     let batch_dn = collapsed
         .mu_residual
         .as_ref()
-        .map(|x| x.posterior_sample())
+        .map(|x| x.posterior_sample_seeded(name_seed(seed, "residual")))
         .transpose()?;
 
     let target_dn = if let Some(adj) = &collapsed.mu_adjusted {
-        adj.posterior_sample()?
+        adj.posterior_sample_seeded(name_seed(seed, "adjusted"))?
     } else {
         mixed_dn.clone()
     };
@@ -402,12 +410,15 @@ pub(crate) fn build_level_data(
     collapsed_levels: &[CollapsedOut],
     level_coarsenings: &[Option<FeatureCoarsening>],
     enc_coarsening: Option<&FeatureCoarsening>,
+    seed: u64,
 ) -> anyhow::Result<Vec<(Mat, Option<Mat>, Mat)>> {
     collapsed_levels
         .iter()
         .zip(level_coarsenings.iter())
-        .map(|(collapsed, dec_fc)| {
-            let (mixed_nd, batch_nd, target_nd) = sample_collapsed_data(collapsed)?;
+        .enumerate()
+        .map(|(level, (collapsed, dec_fc))| {
+            let (mixed_nd, batch_nd, target_nd) =
+                sample_collapsed_data(collapsed, posterior_seed(seed, level))?;
 
             let enc_nd = if let Some(fc) = enc_coarsening {
                 fc.aggregate_columns_nd(&mixed_nd)

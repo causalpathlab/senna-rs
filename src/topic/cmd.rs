@@ -166,6 +166,18 @@ pub struct TopicArgs {
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     pub(crate) epochs: usize,
 
+    #[arg(
+        long,
+        default_value_t = 42,
+        value_name = "N",
+        help = "Seed for every random choice the fit makes",
+        long_help = "The pseudobulk posterior draw it trains on, the feature grouping,\n\
+                     the initial weights, the minibatch order and the\n\
+                     reparameterization noise are each drawn from their own\n\
+                     sub-stream of it. A GPU run may still differ in its last bits."
+    )]
+    pub(crate) seed: u64,
+
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     pub(crate) minibatch_size: usize,
 
@@ -424,7 +436,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         },
         num_levels,
         n_features_full,
-        crate::topic::common::COARSENING_SEED,
+        args.seed,
         gene_axis.as_ref(),
     )?;
 
@@ -789,13 +801,16 @@ struct FeatureStats<'a> {
     fisher_per_level: &'a [Vec<f32>],
 }
 
-/// Load an `--init-from` checkpoint into this run's weights, if one was named.
+/// Draw this run's weights from `--seed`, then load an `--init-from`
+/// checkpoint over them, if one was named (a var it does not cover, such as
+/// an added topic, keeps its seeded draw).
 ///
-/// Both dense pipelines warm-start identically — same architecture invariants,
-/// same growth surface — so the check lives here rather than being written out
-/// at each of them.
-fn warm_start_dense(ctx: &PipelineCtx<'_>) -> anyhow::Result<()> {
+/// Both dense pipelines initialize identically — same architecture
+/// invariants, same growth surface — so the check lives here rather than
+/// being written out at each of them.
+fn initialize_dense(ctx: &PipelineCtx<'_>) -> anyhow::Result<()> {
     use crate::topic::warm_start::{warm_start_load, GeneAxisGrowth, WarmStartCheck};
+    legume_numeric::candle::nn::seed_declared_vars(ctx.parameters, ctx.args.seed, |_| false)?;
     let Some(prefix) = ctx.args.init_from.as_deref() else {
         return Ok(());
     };
@@ -858,9 +873,9 @@ where
     // prior during training. Warm-starting logits with log(anchor) can lock
     // the dictionary too early.
 
-    // Optional model-checkpoint warm-start: load encoder + decoder weights
-    // from a previously trained run (must match this run's architecture).
-    warm_start_dense(ctx)?;
+    // Seeded weights, then an optional model-checkpoint warm-start: encoder +
+    // decoder weights from a previously trained run (same architecture).
+    initialize_dense(ctx)?;
 
     let train_config = TrainConfig {
         parameters: ctx.parameters,
@@ -883,7 +898,12 @@ where
     // PB aggregates, no zarr reopen needed).
     {
         let enc_fc = ctx.level_coarsenings.last().and_then(|c| c.as_ref());
-        let (mixed, batch, _) = crate::topic::common::sample_collapsed_data(ctx.finest_collapsed)?;
+        // The finest level's draw, the same one it trained on.
+        let finest = ctx.collapsed_levels.len() - 1;
+        let (mixed, batch, _) = crate::topic::common::sample_collapsed_data(
+            ctx.finest_collapsed,
+            crate::topic::common::posterior_seed(ctx.args.seed, finest),
+        )?;
         let enc_nd = if let Some(fc) = enc_fc {
             fc.aggregate_columns_nd(&mixed)
         } else {
@@ -1167,8 +1187,8 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
         })
         .collect();
 
-    // Optional model-checkpoint warm-start (multi-decoder variant).
-    warm_start_dense(ctx)?;
+    // Seeded weights, then an optional warm-start (multi-decoder variant).
+    initialize_dense(ctx)?;
 
     let train_config = TrainConfig {
         parameters: ctx.parameters,

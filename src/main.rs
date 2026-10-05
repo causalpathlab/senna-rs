@@ -59,6 +59,9 @@ mod joint_topic;
 mod logging;
 mod masked_topic;
 mod pbg_train_args;
+#[cfg(test)]
+#[path = "tests/planted.rs"]
+mod planted;
 mod postprocess;
 mod predict;
 mod predict_tmle;
@@ -68,6 +71,9 @@ mod resolve_embedding_space;
 mod resolve_topics;
 #[cfg(feature = "view")]
 mod run;
+#[cfg(test)]
+#[path = "tests/seed_replay.rs"]
+mod seed_replay_tests;
 mod simba;
 mod svd;
 mod topic;

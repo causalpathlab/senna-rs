@@ -115,6 +115,18 @@ pub struct VaeArgs {
 
     #[arg(
         long,
+        default_value_t = 42,
+        value_name = "N",
+        help = "Seed for every random choice the fit makes",
+        long_help = "The pseudobulk posterior draw it trains on, the feature grouping,\n\
+                     the initial weights, the minibatch order and the\n\
+                     reparameterization noise are each drawn from their own\n\
+                     sub-stream of it. A GPU run may still differ in its last bits."
+    )]
+    pub(crate) seed: u64,
+
+    #[arg(
+        long,
         help = "Training minibatch size (unset: 100, shrunk to fit GPU memory on CUDA)",
         long_help = "Cells per training minibatch.\n\
                      Unset, the default is 100 on CPU.\n\
@@ -342,7 +354,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         },
         num_levels,
         n_features,
-        crate::topic::common::COARSENING_SEED,
+        args.seed,
         gene_axis.as_ref(),
     )?;
     let finest_coarsening = level_coarsenings.last().and_then(Option::as_ref);
@@ -395,6 +407,8 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         })
         .collect::<candle_core::Result<Vec<_>>>()?;
 
+    // Seeded weights; an `--init-from` checkpoint then loads over them.
+    legume_numeric::candle::nn::seed_declared_vars(&parameters, args.seed, |_| false)?;
     if let Some(prefix) = args.init_from.as_deref() {
         use crate::topic::warm_start::{warm_start_load, GeneAxisGrowth, WarmStartCheck};
         // `vae` has no coarsening: its encoder's first layer and every level's
@@ -436,6 +450,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         &collapsed_levels,
         &level_coarsenings,
         finest_coarsening,
+        args.seed,
     )?;
     let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()
@@ -458,6 +473,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         grad_clip: args.grad_clip,
         stop: &stop,
         loss_hook: None,
+        seed: args.seed,
     };
     let scores = legume_numeric::candle::vae::topic::train_mixed(
         &level_refs,

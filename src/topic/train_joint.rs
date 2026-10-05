@@ -277,6 +277,10 @@ where
 {
     let num_levels = collapsed_levels.len();
     let total_epochs = config.args.epochs;
+    // The reparameterization noise follows `--seed` for the length of the run.
+    let _noise = legume_numeric::candle::loss::seed_noise(
+        legume_numeric::matrix::rand_util::name_seed(config.args.seed, "noise"),
+    );
 
     let level_epochs = compute_level_epochs(total_epochs, num_levels);
 
@@ -287,6 +291,8 @@ where
         level_epochs.iter().sum::<usize>()
     );
 
+    // Every var is declared by now: draw them from `--seed`.
+    legume_numeric::candle::nn::seed_declared_vars(config.parameters, config.args.seed, |_| false)?;
     let mut adam = AdamW::new_lr(
         config.parameters.all_vars(),
         f64::from(config.args.learning_rate),
@@ -302,16 +308,26 @@ where
     let output_null: Vec<Option<Mat>> = vec![None; num_modalities];
 
     type LevelEntry = (Vec<Mat>, Vec<Option<Mat>>, Vec<Option<Mat>>);
+    // Each level's draw is keyed on (seed, level), each modality's on its index.
+    use legume_numeric::matrix::rand_util::name_seed;
+    let draw_seed = |level: usize, m: usize, what: &str| {
+        name_seed(
+            crate::topic::common::posterior_seed(config.args.seed, level),
+            &format!("{what}.{m}"),
+        )
+    };
     let level_data: Vec<LevelEntry> = collapsed_levels
         .iter()
-        .map(|collapsed_data_vec| -> anyhow::Result<_> {
+        .enumerate()
+        .map(|(level, collapsed_data_vec)| -> anyhow::Result<_> {
             let input = collapsed_data_vec
                 .iter()
                 .zip(config.coarsenings)
-                .map(|(x, fc)| -> anyhow::Result<Mat> {
+                .enumerate()
+                .map(|(m, (x, fc))| -> anyhow::Result<Mat> {
                     let mat = x
                         .mu_observed
-                        .posterior_sample()?
+                        .posterior_sample_seeded(draw_seed(level, m, "observed"))?
                         .sum_to_one_columns()
                         .scale(config.args.column_sum_norm);
                     let mat = mat.transpose();
@@ -327,11 +343,14 @@ where
             let input_null = collapsed_data_vec
                 .iter()
                 .zip(config.coarsenings)
-                .map(|(x, fc)| -> anyhow::Result<Option<Mat>> {
+                .enumerate()
+                .map(|(m, (x, fc))| -> anyhow::Result<Option<Mat>> {
                     x.mu_residual
                         .as_ref()
                         .map(|y| {
-                            let mut mat = y.posterior_sample()?.transpose();
+                            let mut mat = y
+                                .posterior_sample_seeded(draw_seed(level, m, "residual"))?
+                                .transpose();
                             if let Some(fc) = fc {
                                 mat = fc.aggregate_columns_nd(&mat);
                             }
@@ -344,10 +363,11 @@ where
             let output = collapsed_data_vec
                 .iter()
                 .zip(config.coarsenings)
-                .map(|(x, fc)| -> anyhow::Result<Option<Mat>> {
+                .enumerate()
+                .map(|(m, (x, fc))| -> anyhow::Result<Option<Mat>> {
                     Ok(x.mu_adjusted
                         .as_ref()
-                        .map(legume_numeric::param::traits::Inference::posterior_sample)
+                        .map(|y| y.posterior_sample_seeded(draw_seed(level, m, "adjusted")))
                         .transpose()?
                         .map(|y| {
                             let mat = y.sum_to_one_columns().scale(config.args.column_sum_norm);
@@ -401,7 +421,15 @@ where
         let data_loader = &mut data_loaders[level];
 
         for epoch in 0..level_ep {
-            data_loader.shuffle_minibatch_on_device(config.args.minibatch_size)?;
+            data_loader.shuffle_minibatch_on_device(
+                config.args.minibatch_size,
+                legume_numeric::matrix::rand_util::stream_seed(
+                    config.args.seed,
+                    "batch",
+                    epoch,
+                    level,
+                ),
+            )?;
 
             let mut llik_tot = 0f32;
             let mut kl_tot = 0f32;

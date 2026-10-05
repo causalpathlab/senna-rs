@@ -1,4 +1,4 @@
-use crate::topic::common::{create_device, setup_stop_handler, COARSENING_SEED};
+use crate::topic::common::{create_device, setup_stop_handler};
 use crate::topic::train_joint::{train_and_save, ProgressiveTrainConfig, SaveContext};
 use senna::embed_common::*;
 use senna::senna_input::{
@@ -111,6 +111,18 @@ pub struct JointTopicArgs {
 
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     pub(crate) epochs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 42,
+        value_name = "N",
+        help = "Seed for every random choice the fit makes",
+        long_help = "The pseudobulk posterior draw it trains on, the feature grouping,\n\
+                     the initial weights, the minibatch order and the\n\
+                     reparameterization noise are each drawn from their own\n\
+                     sub-stream of it. A GPU run may still differ in its last bits."
+    )]
+    pub(crate) seed: u64,
 
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     pub(crate) minibatch_size: usize,
@@ -295,7 +307,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let coarsen_one = |collapsed: &CollapsedOut| -> anyhow::Result<FeatureCoarsening> {
         let (counts, sizes) = collapsed.observed_counts(cell_to_pb_finest)?;
         let targets = [cap.map_or(0, std::num::NonZeroUsize::get)];
-        let mut levels = coarsen_features(&counts, &sizes, &targets, COARSENING_SEED)?;
+        let mut levels = coarsen_features(&counts, &sizes, &targets, args.seed)?;
         Ok(levels.remove(0))
     };
 

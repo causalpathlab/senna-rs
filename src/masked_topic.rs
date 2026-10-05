@@ -526,7 +526,7 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 42,
         value_name = "N",
-        help = "Seed for the masking and thinning draws",
+        help = "Seed for every random choice the fit makes",
         long_help = "Seed for the stochastic training choices this subcommand owns:\n\
                      the hidden set (and its rate under --mask-schedule uniform),\n\
                      and --poisson-thin's per-epoch draw.\n\
@@ -536,9 +536,10 @@ pub struct MaskedTopicArgs {
                      draw on (seed, epoch, level, column) — so all are reproducible\n\
                      whatever the thread count, the batch size or the shuffle.\n\
                      \n\
-                     It does NOT make a run bit-reproducible on its own.\n\
-                     Parameter initialization, the pseudobulk posterior draw and\n\
-                     minibatch order sit outside this stream."
+                     The pseudobulk posterior draw, the feature grouping, the\n\
+                     initial weights and the minibatch order follow it too, so\n\
+                     the same seed replays the fit (a GPU run may still differ\n\
+                     in its last bits)."
     )]
     seed: u64,
 
@@ -1030,6 +1031,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // with modules the rows are computed, so a copy would freeze them.
     let shared_features = base_encoder.features_shared();
     let mut decoders: Vec<EmbeddedNbTopicDecoder> = Vec::with_capacity(num_levels);
+    let mut backgrounds = Vec::with_capacity(num_levels);
     for (i, fc) in level_coarsenings.iter().enumerate() {
         let (map, coarse_mass) =
             crate::topic::train_masked::coarsening_map_for(fc.as_ref(), &feature_mean, &dev)?;
@@ -1039,11 +1041,16 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             map,
             param_builder.pp(format!("dec_{i}")),
         )?);
-        // Pin the level's background at the data's marginal over its output
-        // axis: the home for shared abundance that centering α removes from
-        // the topics.
-        let log_pi = log_background_from_mean(&coarse_mass, &dev)?;
-        pin_background(&parameters, &format!("dec_{i}"), &log_pi)?;
+        backgrounds.push(log_background_from_mean(&coarse_mass, &dev)?);
+    }
+    // Every var is declared: draw them from `--seed`, before anything below
+    // (a background, a pre-trained ρ, a checkpoint) sets one from data.
+    legume_numeric::candle::nn::seed_declared_vars(&parameters, args.seed, |_| false)?;
+    // Pin each level's background at the data's marginal over its output
+    // axis: the home for shared abundance that centering α removes from the
+    // topics.
+    for (i, log_pi) in backgrounds.iter().enumerate() {
+        pin_background(&parameters, &format!("dec_{i}"), log_pi)?;
     }
     let level_decoder_dims: Vec<usize> = decoders.iter().map(|d| d.dim_obs()).collect();
     let has_coarsening = level_coarsenings.iter().any(Option::is_some);

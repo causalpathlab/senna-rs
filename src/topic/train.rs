@@ -49,6 +49,7 @@ fn make_candle_config<'a>(
         grad_clip: config.args.grad_clip,
         stop: config.stop,
         loss_hook: hook,
+        seed: config.args.seed,
     }
 }
 
@@ -65,7 +66,12 @@ where
     Dec: DecoderModuleT,
 {
     let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
-    let level_data = build_level_data(collapsed_levels, level_coarsenings, enc_coarsening)?;
+    let level_data = build_level_data(
+        collapsed_levels,
+        level_coarsenings,
+        enc_coarsening,
+        config.args.seed,
+    )?;
     let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()
         .map(|(a, b, c)| (a, b.as_ref(), c))
@@ -104,7 +110,12 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
     config: &TrainConfig,
 ) -> anyhow::Result<TrainScores> {
     let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
-    let level_data = build_level_data(collapsed_levels, level_coarsenings, enc_coarsening)?;
+    let level_data = build_level_data(
+        collapsed_levels,
+        level_coarsenings,
+        enc_coarsening,
+        config.args.seed,
+    )?;
     let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()
         .map(|(a, b, c)| (a, b.as_ref(), c))
