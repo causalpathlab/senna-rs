@@ -4,11 +4,32 @@ fn line_view(x: &[f32], valid: &[bool]) -> View {
     View::compact(Mat::from_column_slice(x.len(), 1, x), valid)
 }
 
+fn names(v: &[&str]) -> Vec<Box<str>> {
+    v.iter().map(|&s| s.into()).collect()
+}
+
 #[test]
 fn tolerant_alignment_marks_missing_names() {
-    let src: Vec<Box<str>> = vec!["a".into(), "x".into(), "c".into()];
-    let tgt: Vec<Box<str>> = vec!["c".into(), "b".into(), "a".into()];
-    assert_eq!(tolerant_align(&src, &tgt), vec![2, usize::MAX, 0]);
+    let (src, tgt) = (names(&["a", "x", "c"]), names(&["c", "b", "a"]));
+    assert_eq!(tolerant_align(&src, &tgt).unwrap(), vec![2, usize::MAX, 0]);
+}
+
+/// A repeated name matches by position when both lists are the same, and is
+/// refused on either side otherwise, when it would be matched, rather than
+/// every copy landing on one row.
+#[test]
+fn tolerant_alignment_refuses_an_ambiguous_repeat() {
+    let same = names(&["c1", "c2", "c1"]);
+    assert_eq!(tolerant_align(&same, &same).unwrap(), vec![0, 1, 2]);
+    let err = tolerant_align(&names(&["c1", "c2"]), &same).unwrap_err();
+    assert!(
+        err.to_string().contains("c1 appears more than once"),
+        "{err}"
+    );
+    assert!(tolerant_align(&same, &names(&["c1", "c2"])).is_err());
+    // A repeat that matches nothing places no cell, so it is no ambiguity.
+    let extra = names(&["c2", "x", "x"]);
+    assert_eq!(tolerant_align(&names(&["c2"]), &extra).unwrap(), vec![0]);
 }
 
 #[test]
@@ -63,8 +84,8 @@ fn level_keeps_pseudobulks_with_enough_cells() {
 // ---- Bounds -----------------------------------------------------------------------
 
 /// "Far" must be well clear of "near": beyond max(2K, P/4), never just K + 1.
-/// Swept against expert cell types on two donors: rules set by K alone do not
-/// carry over between datasets; the P/4 part does.
+/// Rules set by K alone do not carry over between levels of different sizes;
+/// the P/4 part does.
 #[test]
 fn far_leaves_a_gap_after_near() {
     let far = |p, k| Bounds::for_level(p, k, 0.25).map(|b| b.far);
@@ -209,15 +230,15 @@ fn non_finite_rows_leave_the_view() {
 
 #[test]
 fn cell_labels_read_the_named_column() {
-    let tsv = "barcode\tDonor\tCellType\nc1\tBM1\tB\nc2\tBM1\tNA\nc3\tBM1\tT\nc4\tBM1\t\n";
+    let tsv = "barcode\tsample\tCellType\nc1\tS1\tCT1\nc2\tS1\tNA\nc3\tS1\tCT2\nc4\tS1\t\n";
     let m = parse_cell_labels(tsv.as_bytes(), "CellType").unwrap();
-    assert_eq!(m.get("c1").map(AsRef::as_ref), Some("B"));
-    assert_eq!(m.get("c3").map(AsRef::as_ref), Some("T"));
+    assert_eq!(m.get("c1").map(AsRef::as_ref), Some("CT1"));
+    assert_eq!(m.get("c3").map(AsRef::as_ref), Some("CT2"));
     assert_eq!(m.len(), 2, "NA and empty labels are left out");
     assert!(parse_cell_labels(tsv.as_bytes(), "Missing").is_err());
 }
 
-/// pb 0 holds B, B, T; pb 1 holds T; pb 2's one cell has no label.
+/// pb 0 holds CT1, CT1, CT2; pb 1 holds CT2; pb 2's one cell has no label.
 #[test]
 fn composition_is_the_fraction_of_each_label() {
     let pb_of_cell = [0, 0, 0, 1, 2, usize::MAX];

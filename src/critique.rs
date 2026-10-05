@@ -30,6 +30,7 @@
 //!
 //! Levels are numbered as in `cell_to_pb.parquet`: `0` is the coarsest.
 
+use anyhow::Context;
 use legume_numeric::matrix::knn::all_pairs::knn_rows_l2;
 use legume_numeric::matrix::knn::metric::l2_sq;
 use legume_numeric::matrix::parquet::{write_named_table, Column};
@@ -178,16 +179,42 @@ pub(crate) fn check_params(knn: usize, far_frac: f64, min_cells: usize) -> anyho
 }
 
 /// Position of every source name in `target`, or `usize::MAX` when absent.
-pub(crate) fn tolerant_align(source: &[Box<str>], target: &[Box<str>]) -> Vec<usize> {
-    let at: FxHashMap<&str, usize> = target
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.as_ref(), i))
-        .collect();
+/// Identical lists match by position, repeats included. Otherwise a name
+/// that would be matched is refused when it repeats on either side, since no
+/// order says which row it means; a repeat that matches nothing is harmless.
+pub(crate) fn tolerant_align(
+    source: &[Box<str>],
+    target: &[Box<str>],
+) -> anyhow::Result<Vec<usize>> {
+    if source == target {
+        return Ok((0..source.len()).collect());
+    }
+    // A name repeated in `target` maps to `REPEATED`, refused only if looked up.
+    const REPEATED: usize = usize::MAX - 1;
+    let mut at: FxHashMap<&str, usize> =
+        FxHashMap::with_capacity_and_hasher(target.len(), Default::default());
+    for (i, n) in target.iter().enumerate() {
+        at.entry(n.as_ref())
+            .and_modify(|j| *j = REPEATED)
+            .or_insert(i);
+    }
+    let mut seen = vec![false; target.len()];
     source
         .iter()
-        .map(|n| at.get(n.as_ref()).copied().unwrap_or(usize::MAX))
+        .map(|n| match at.get(n.as_ref()).copied() {
+            None => Ok(usize::MAX),
+            Some(REPEATED) => Err(repeated(n)),
+            Some(j) if std::mem::replace(&mut seen[j], true) => Err(repeated(n)),
+            Some(j) => Ok(j),
+        })
         .collect()
+}
+
+fn repeated(name: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "cell name {name} appears more than once, so cells cannot be matched by name; \
+         make the names unique (e.g. suffix each sample's barcodes)"
+    )
 }
 
 /// Rank of a point at distance `d` among `sorted` (ascending) distances: one
@@ -205,9 +232,9 @@ pub(crate) struct Bounds {
 
 impl Bounds {
     /// `far = max(2·knn, ⌈P·frac⌉)`, well clear of near. The `P·frac` part does
-    /// the work: swept against expert cell types on two HCA donors, a far set by
-    /// `knn` alone admits merges of one cell type on one donor and not the other;
-    /// `2·knn` only guards tiny levels. `None` when no rank
+    /// the work: a far set by `knn` alone does not carry over between samples
+    /// of different sizes, while a share of the level does; `2·knn` only
+    /// guards tiny levels. `None` when no rank
     /// can lie beyond it: ranks run from 1 to `P − 1`.
     pub(crate) fn for_level(n_pb: usize, knn: usize, frac: f64) -> Option<Self> {
         let far = (2 * knn).max((n_pb as f64 * frac).ceil() as usize);
@@ -950,7 +977,8 @@ fn load_model(
         mat: mut latent,
         ..
     } = Mat::from_parquet_with_row_names(&path, Some(0))?;
-    let row_of_cell = tolerant_align(part_cells, &rows);
+    let row_of_cell = tolerant_align(part_cells, &rows)
+        .with_context(|| format!("model {name}: matching {path} to the partition's cells"))?;
     let matched = row_of_cell.iter().filter(|&&r| r != usize::MAX).count();
     let coverage = matched as f64 / part_cells.len().max(1) as f64;
     let space = m.kind.cell_space();
