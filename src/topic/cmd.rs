@@ -170,8 +170,8 @@ pub struct TopicArgs {
         long,
         default_value_t = 42,
         value_name = "N",
-        help = "Seed for initial weights, minibatch order and training noise",
-        long_help = "The same seed on the same data and settings replays the fit:\n\
+        help = "Seed for every random choice the fit makes",
+        long_help = "The pseudobulk posterior draw it trains on, the feature grouping,\n\
                      the initial weights, the minibatch order and the\n\
                      reparameterization noise are each drawn from their own\n\
                      sub-stream of it. A GPU run may still differ in its last bits."
@@ -436,7 +436,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         },
         num_levels,
         n_features_full,
-        crate::topic::common::COARSENING_SEED,
+        args.seed,
         gene_axis.as_ref(),
     )?;
 
@@ -898,7 +898,12 @@ where
     // PB aggregates, no zarr reopen needed).
     {
         let enc_fc = ctx.level_coarsenings.last().and_then(|c| c.as_ref());
-        let (mixed, batch, _) = crate::topic::common::sample_collapsed_data(ctx.finest_collapsed)?;
+        // The finest level's draw, the same one it trained on.
+        let finest = ctx.collapsed_levels.len() - 1;
+        let (mixed, batch, _) = crate::topic::common::sample_collapsed_data(
+            ctx.finest_collapsed,
+            crate::topic::common::posterior_seed(ctx.args.seed, finest),
+        )?;
         let enc_nd = if let Some(fc) = enc_fc {
             fc.aggregate_columns_nd(&mixed)
         } else {

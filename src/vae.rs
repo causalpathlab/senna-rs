@@ -117,8 +117,8 @@ pub struct VaeArgs {
         long,
         default_value_t = 42,
         value_name = "N",
-        help = "Seed for initial weights, minibatch order and training noise",
-        long_help = "The same seed on the same data and settings replays the fit:\n\
+        help = "Seed for every random choice the fit makes",
+        long_help = "The pseudobulk posterior draw it trains on, the feature grouping,\n\
                      the initial weights, the minibatch order and the\n\
                      reparameterization noise are each drawn from their own\n\
                      sub-stream of it. A GPU run may still differ in its last bits."
@@ -354,7 +354,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         },
         num_levels,
         n_features,
-        crate::topic::common::COARSENING_SEED,
+        args.seed,
         gene_axis.as_ref(),
     )?;
     let finest_coarsening = level_coarsenings.last().and_then(Option::as_ref);
@@ -450,6 +450,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         &collapsed_levels,
         &level_coarsenings,
         finest_coarsening,
+        args.seed,
     )?;
     let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()

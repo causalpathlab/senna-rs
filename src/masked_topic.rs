@@ -526,7 +526,7 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 42,
         value_name = "N",
-        help = "Seed for the masking and thinning draws",
+        help = "Seed for every random choice the fit makes",
         long_help = "Seed for the stochastic training choices this subcommand owns:\n\
                      the hidden set (and its rate under --mask-schedule uniform),\n\
                      and --poisson-thin's per-epoch draw.\n\
@@ -536,9 +536,10 @@ pub struct MaskedTopicArgs {
                      draw on (seed, epoch, level, column) — so all are reproducible\n\
                      whatever the thread count, the batch size or the shuffle.\n\
                      \n\
-                     It does NOT make a run bit-reproducible on its own.\n\
-                     Parameter initialization, the pseudobulk posterior draw and\n\
-                     minibatch order sit outside this stream."
+                     The pseudobulk posterior draw, the feature grouping, the\n\
+                     initial weights and the minibatch order follow it too, so\n\
+                     the same seed replays the fit (a GPU run may still differ\n\
+                     in its last bits)."
     )]
     seed: u64,
 

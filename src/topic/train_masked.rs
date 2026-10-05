@@ -7,7 +7,7 @@
 //! writers. The `pub(crate) use` re-exports keep existing call sites
 //! (the `masked_topic` command, `train_cell_embedded`) on stable import paths.
 
-use super::common::sample_collapsed_data_dp;
+use super::common::{posterior_seed, sample_collapsed_data_dp};
 use senna::embed_common::*;
 
 use candle_core::Tensor;
@@ -24,10 +24,12 @@ pub(crate) use legume_numeric::candle::vae::masked_topic::IndexedTrainConfig;
 /// host transpose the `[P, D]` form costs would only be undone again.
 fn build_level_data(
     collapsed_levels: &[CollapsedOut],
+    seed: u64,
 ) -> anyhow::Result<Vec<(Mat, Option<Mat>, Mat)>> {
     collapsed_levels
         .iter()
-        .map(sample_collapsed_data_dp)
+        .enumerate()
+        .map(|(level, c)| sample_collapsed_data_dp(c, posterior_seed(seed, level)))
         .collect()
 }
 
@@ -41,7 +43,7 @@ pub(crate) fn train_masked(
     mask_fraction: f64,
     opts: &legume_numeric::candle::vae::masked_topic::MaskedTrainOpts,
 ) -> anyhow::Result<TrainScores> {
-    let level_data = build_level_data(collapsed_levels)?;
+    let level_data = build_level_data(collapsed_levels, opts.seed)?;
     let level_refs: Vec<legume_numeric::candle::vae::masked_topic::LevelData> = level_data
         .iter()
         .map(|(a, b, c)| (a, b.as_ref(), c))

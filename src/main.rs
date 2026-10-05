@@ -71,6 +71,9 @@ mod resolve_embedding_space;
 mod resolve_topics;
 #[cfg(feature = "view")]
 mod run;
+#[cfg(test)]
+#[path = "tests/seed_replay.rs"]
+mod seed_replay_tests;
 mod simba;
 mod svd;
 mod topic;

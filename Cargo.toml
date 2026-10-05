@@ -51,7 +51,7 @@ hdf5 = ["data-beans/hdf5"]
 [dependencies]
 mimalloc = "0.1"
 data-beans = { version = "0.8.0", features = ["aux", "alg"] }
-legume-numeric = { version = "0.9.0", features = ["matrix", "param", "candle", "mcmc"] }
+legume-numeric = { version = "0.9.1", features = ["matrix", "param", "candle", "mcmc"] }
 genomic-data = { version = "0.6.0", package = "legume-genomic-types" }
 graph-embedding-util = { version = "0.9.0", package = "legume-graph-embedding" }
 hsblock = { version = "0.2.0", package = "hsblock-rs" }
