@@ -115,6 +115,18 @@ pub struct VaeArgs {
 
     #[arg(
         long,
+        default_value_t = 42,
+        value_name = "N",
+        help = "Seed for initial weights, minibatch order and training noise",
+        long_help = "The same seed on the same data and settings replays the fit:\n\
+                     the initial weights, the minibatch order and the\n\
+                     reparameterization noise are each drawn from their own\n\
+                     sub-stream of it. A GPU run may still differ in its last bits."
+    )]
+    pub(crate) seed: u64,
+
+    #[arg(
+        long,
         help = "Training minibatch size (unset: 100, shrunk to fit GPU memory on CUDA)",
         long_help = "Cells per training minibatch.\n\
                      Unset, the default is 100 on CPU.\n\
@@ -395,6 +407,8 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         })
         .collect::<candle_core::Result<Vec<_>>>()?;
 
+    // Seeded weights; an `--init-from` checkpoint then loads over them.
+    legume_numeric::candle::nn::seed_declared_vars(&parameters, args.seed, |_| false)?;
     if let Some(prefix) = args.init_from.as_deref() {
         use crate::topic::warm_start::{warm_start_load, GeneAxisGrowth, WarmStartCheck};
         // `vae` has no coarsening: its encoder's first layer and every level's
@@ -458,6 +472,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         grad_clip: args.grad_clip,
         stop: &stop,
         loss_hook: None,
+        seed: args.seed,
     };
     let scores = legume_numeric::candle::vae::topic::train_mixed(
         &level_refs,

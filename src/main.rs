@@ -59,6 +59,9 @@ mod joint_topic;
 mod logging;
 mod masked_topic;
 mod pbg_train_args;
+#[cfg(test)]
+#[path = "tests/planted.rs"]
+mod planted;
 mod postprocess;
 mod predict;
 mod predict_tmle;

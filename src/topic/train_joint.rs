@@ -277,6 +277,10 @@ where
 {
     let num_levels = collapsed_levels.len();
     let total_epochs = config.args.epochs;
+    // The reparameterization noise follows `--seed` for the length of the run.
+    let _noise = legume_numeric::candle::loss::seed_noise(
+        legume_numeric::matrix::rand_util::name_seed(config.args.seed, "noise"),
+    );
 
     let level_epochs = compute_level_epochs(total_epochs, num_levels);
 
@@ -287,6 +291,8 @@ where
         level_epochs.iter().sum::<usize>()
     );
 
+    // Every var is declared by now: draw them from `--seed`.
+    legume_numeric::candle::nn::seed_declared_vars(config.parameters, config.args.seed, |_| false)?;
     let mut adam = AdamW::new_lr(
         config.parameters.all_vars(),
         f64::from(config.args.learning_rate),
@@ -401,7 +407,15 @@ where
         let data_loader = &mut data_loaders[level];
 
         for epoch in 0..level_ep {
-            data_loader.shuffle_minibatch_on_device(config.args.minibatch_size)?;
+            data_loader.shuffle_minibatch_on_device(
+                config.args.minibatch_size,
+                legume_numeric::matrix::rand_util::stream_seed(
+                    config.args.seed,
+                    "batch",
+                    epoch,
+                    level,
+                ),
+            )?;
 
             let mut llik_tot = 0f32;
             let mut kl_tot = 0f32;

@@ -112,6 +112,18 @@ pub struct JointTopicArgs {
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     pub(crate) epochs: usize,
 
+    #[arg(
+        long,
+        default_value_t = 42,
+        value_name = "N",
+        help = "Seed for initial weights, minibatch order and training noise",
+        long_help = "The same seed on the same data and settings replays the fit:\n\
+                     the initial weights, the minibatch order and the\n\
+                     reparameterization noise are each drawn from their own\n\
+                     sub-stream of it. A GPU run may still differ in its last bits."
+    )]
+    pub(crate) seed: u64,
+
     #[arg(long, default_value_t = 100, help = "Training minibatch size")]
     pub(crate) minibatch_size: usize,
 

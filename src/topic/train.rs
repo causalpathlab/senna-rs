@@ -49,6 +49,7 @@ fn make_candle_config<'a>(
         grad_clip: config.args.grad_clip,
         stop: config.stop,
         loss_hook: hook,
+        seed: config.args.seed,
     }
 }
 
