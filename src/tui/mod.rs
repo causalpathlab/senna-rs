@@ -43,10 +43,63 @@ impl<T: Send + 'static> Pending<T> {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(stopped.into())),
         }
     }
+}
 
-    /// Wait for the answer; `stopped` when the worker died first.
-    pub(crate) fn wait(self, stopped: &str) -> Result<T, String> {
-        self.0.recv().unwrap_or_else(|_| Err(stopped.into()))
+/// What a [`Loading`] does when started.
+type Work<T> = Box<dyn FnOnce() -> Result<T, String> + Send>;
+
+/// Work started once on a worker thread and read by anyone holding it:
+/// waited for where the answer is needed now ([`Self::get`]), looked at
+/// where it is not ([`Self::try_get`]).
+pub(crate) struct Loading<T> {
+    work: std::sync::Mutex<Option<Work<T>>>,
+    value: std::sync::Arc<std::sync::OnceLock<Result<T, String>>>,
+    since: std::sync::OnceLock<std::time::Instant>,
+}
+
+impl<T: Send + Sync + 'static> Loading<T> {
+    /// `work`, not started yet.
+    pub(crate) fn new(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Self {
+        Self {
+            work: std::sync::Mutex::new(Some(Box::new(work))),
+            value: std::sync::Arc::default(),
+            since: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// An answer known already.
+    #[cfg(test)]
+    pub(crate) fn ready(value: Result<T, String>) -> Self {
+        let done = Self::new(|| Err(String::new()));
+        done.work.lock().map(|mut w| w.take()).ok();
+        let _ = done.value.set(value);
+        done
+    }
+
+    /// Start the work on a worker thread, unless it was started already.
+    pub(crate) fn start(&self) {
+        let Some(work) = self.work.lock().ok().and_then(|mut w| w.take()) else {
+            return;
+        };
+        let _ = self.since.set(std::time::Instant::now());
+        let value = self.value.clone();
+        std::thread::spawn(move || {
+            // A panic is an answer too, so a waiter never waits for ever.
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                .unwrap_or_else(|_| Err("the work stopped with a panic".into()));
+            let _ = value.set(out);
+        });
+    }
+
+    /// The answer, if it has come.
+    pub(crate) fn try_get(&self) -> Option<&Result<T, String>> {
+        self.value.get()
+    }
+
+    /// The answer, starting the work if need be and waiting for it.
+    pub(crate) fn get(&self) -> &Result<T, String> {
+        self.start();
+        self.value.wait()
     }
 }
 

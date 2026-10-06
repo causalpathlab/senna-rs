@@ -331,7 +331,7 @@ impl Scene {
     pub(super) fn activity(&mut self) -> Option<&mut Activity> {
         if self.activity.is_none() {
             let (m, dir) = self.data.run.clone()?;
-            self.activity = Some(Activity::new(m, dir));
+            self.activity = Some(Activity::new(m, dir, self.data.files.clone()));
         }
         self.activity.as_mut()
     }

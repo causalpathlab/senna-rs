@@ -262,10 +262,8 @@ pub struct Activity {
     manifest: RunManifest,
     dir: PathBuf,
     expected: Option<Result<Expected, String>>,
-    observed: Option<Result<Observed, String>>,
-    /// The observed counts while a read on the side is under way: taken
-    /// from it rather than read again.
-    observed_coming: Option<crate::tui::Pending<Observed>>,
+    /// The run's data files, read once and shared with every view of it.
+    files: Arc<RunFiles>,
     /// Row of each point of a view in a source's cell table, by (source,
     /// view key).
     rows: HashMap<(Source, usize), Arc<Vec<u32>>>,
@@ -293,13 +291,12 @@ fn read_table(dir: &Path, rel: &str) -> anyhow::Result<MatWithNames<Mat>> {
 
 impl Activity {
     #[must_use]
-    pub fn new(manifest: RunManifest, dir: PathBuf) -> Self {
+    pub fn new(manifest: RunManifest, dir: PathBuf, files: Arc<RunFiles>) -> Self {
         Self {
             manifest,
             dir,
             expected: None,
-            observed: None,
-            observed_coming: None,
+            files,
             rows: HashMap::default(),
             mixture: None,
         }
@@ -444,14 +441,6 @@ impl Activity {
         }
     }
 
-    /// Take the observed counts from a read on the side
-    /// ([`read_run_data`]) when they come, rather than read them again.
-    pub(crate) fn observed_from(&mut self, coming: crate::tui::Pending<Observed>) {
-        if self.observed.is_none() {
-            self.observed_coming = Some(coming);
-        }
-    }
-
     fn expected(&mut self) -> Result<&Expected, String> {
         if self.expected.is_none() {
             self.expected = Some(self.load_expected().map_err(|e| e.to_string()));
@@ -491,25 +480,15 @@ impl Activity {
     /// Whether the observed counts could not be opened at all (as opposed
     /// to one feature missing from them).
     pub fn observed_failed(&self) -> bool {
-        matches!(self.observed, Some(Err(_)))
+        matches!(self.files.try_get(), Some(Err(_)))
     }
 
+    /// The observed counts, from the run's one read of its data files.
     fn observed(&mut self) -> Result<&Observed, String> {
-        if self.observed.is_none() {
-            // A read on the side is waited for, not repeated.
-            let read = match self.observed_coming.take() {
-                Some(coming) => coming.wait("the data read stopped"),
-                None => read_run_data(&self.manifest, &self.dir)
-                    .map(|(observed, _)| observed)
-                    .map_err(|e| e.to_string()),
-            };
-            self.observed = Some(read);
+        match self.files.get() {
+            Ok(read) => Ok(&read.observed),
+            Err(e) => Err(e.clone()),
         }
-        self.observed
-            .as_ref()
-            .expect("just set")
-            .as_ref()
-            .map_err(Clone::clone)
     }
 
     /// Feature names on `source`'s axis, for search and completion.
@@ -1131,10 +1110,7 @@ fn row_sum(m: &Mat, rows: &[usize]) -> Vector {
 /// Open the run's data files once: the observed counts, and each cell's
 /// batch when there is more than one. Slow on a large run (every data file
 /// is opened), so the screen does it on the side.
-pub(crate) fn read_run_data(
-    m: &RunManifest,
-    dir: &Path,
-) -> anyhow::Result<(Observed, Option<super::data::Labels>)> {
+pub(crate) fn read_run_data(m: &RunManifest, dir: &Path) -> anyhow::Result<RunRead> {
     anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
     let files = m.data_inputs(dir);
     if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
@@ -1177,7 +1153,26 @@ pub(crate) fn read_run_data(
         n_cells,
         data,
     };
-    Ok((observed, batches))
+    Ok(RunRead { observed, batches })
+}
+
+/// What reading a run's data files gives: its observed counts, and each
+/// cell's batch when there is more than one.
+pub(crate) struct RunRead {
+    observed: Observed,
+    pub batches: Option<super::data::Labels>,
+}
+
+/// A run's data files, read once on a worker thread and shared by every
+/// view of the run.
+pub(crate) type RunFiles = crate::tui::Loading<RunRead>;
+
+/// The data files of the run at `dir` (manifest `m`), not read yet.
+pub(crate) fn run_files(m: &RunManifest, dir: &Path) -> Arc<RunFiles> {
+    let (m, dir) = (m.clone(), dir.to_path_buf());
+    Arc::new(RunFiles::new(move || {
+        read_run_data(&m, &dir).map_err(|e| e.to_string())
+    }))
 }
 
 /// An embedding model from cell table `z` and feature table `rho` of one
@@ -1303,6 +1298,7 @@ mod tests {
         let mut a = Activity::new(
             RunManifest::new(senna::run_manifest::RunKind::Topic, "r"),
             PathBuf::new(),
+            Arc::new(RunFiles::ready(Err("no data files".into()))),
         );
         a.expected = Some(Ok(Expected::new(Axis::new(names("GENE", 3)), cells, model)));
         a
@@ -1416,7 +1412,8 @@ mod tests {
         let mut m = RunManifest::new(kind, "r");
         m.outputs.latent = Some("r.latent.parquet".into());
         m.outputs.dictionary = Some("r.dictionary.parquet".into());
-        Activity::new(m, dir.to_path_buf())
+        let files = run_files(&m, dir);
+        Activity::new(m, dir.to_path_buf(), files)
     }
 
     #[test]

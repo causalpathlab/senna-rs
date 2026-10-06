@@ -311,6 +311,8 @@ pub struct Dataset {
     pub run: Option<(RunManifest, PathBuf)>,
     /// Where this manifest sits among annotation rounds.
     pub round: Option<super::rounds::Round>,
+    /// The run's data files: read once, shared by every view of the run.
+    pub files: std::sync::Arc<super::activity::RunFiles>,
 }
 
 fn read_xy(path: &Path) -> anyhow::Result<Points> {
@@ -475,12 +477,6 @@ fn load_spaces(m: &RunManifest, dir: &Path) -> anyhow::Result<Vec<Space>> {
 /// Each cell's batch, as the fit had it: the run's batch files, else each
 /// data file's `@batch` tags or its name (senna's own rule, applied by the
 /// same loader). Opens the data files, not their counts.
-/// The batch of every cell, when the run has more than one batch: read from
-/// the data files themselves, so slow on a large run.
-pub(crate) fn batch_labels(m: &RunManifest, dir: &Path) -> anyhow::Result<Option<Labels>> {
-    super::activity::read_run_data(m, dir).map(|(_, batches)| batches)
-}
-
 /// Every grouping the run carries. One that fails to read is skipped with a
 /// warning rather than failing the view.
 /// The run's groupings. `prefix` names its other files (feature types): the
@@ -491,7 +487,6 @@ fn load_labels(
     dir: &Path,
     round: &super::rounds::Round,
     prefix: &str,
-    with_batch: bool,
 ) -> Vec<Labels> {
     let at = |rel: &str| run_manifest::resolve(dir, rel);
     let mut labels = Vec::new();
@@ -554,15 +549,7 @@ fn load_labels(
     if let Some(p) = m.outputs.latent.as_deref().filter(|_| latent_is_topics) {
         keep("topics", read_topic_labels(&at(p)));
     }
-    // Only worth a colouring with more than one batch. Reading it opens
-    // every data file, so the screen reads it on the side (`with_batch`).
-    if with_batch {
-        match batch_labels(m, dir) {
-            Ok(Some(l)) => keep("batch", Ok(l)),
-            Ok(None) => {}
-            Err(e) => keep("batch", Err(e)),
-        }
-    }
+    // The batches come with the data files (`Dataset::files`).
     if let Some(p) = &m.annotate.markers {
         keep("markers", read_marker_labels(&at(p)));
     }
@@ -591,19 +578,10 @@ impl Dataset {
         self.spaces.iter().any(|s| s.axis() == axis)
     }
 
-    /// The run at `from` with every grouping, its cells' batches included.
+    /// The run at `from` and its groupings. Its data files (the observed
+    /// counts and the cells' batches) are read apart, once, when first
+    /// asked for ([`Self::files`]).
     pub fn load(from: &str) -> anyhow::Result<Self> {
-        Self::read(from, true)
-    }
-
-    /// [`Self::load`] without the batches, which mean opening every data
-    /// file: for the screen, which reads them on the side
-    /// ([`super::Scene::start_batch`]).
-    pub fn load_quick(from: &str) -> anyhow::Result<Self> {
-        Self::read(from, false)
-    }
-
-    fn read(from: &str, with_batch: bool) -> anyhow::Result<Self> {
         let manifest_path = PathBuf::from(from);
         let (m, dir) = RunManifest::load(&manifest_path)?;
         let spaces = load_spaces(&m, &dir)?;
@@ -613,14 +591,25 @@ impl Dataset {
         );
         let round = super::rounds::Round::load(&m, &dir, &manifest_path);
         let prefix = run_manifest::derive_out_prefix(from);
-        let labels = load_labels(&m, &dir, &round, &prefix, with_batch);
+        let labels = load_labels(&m, &dir, &round, &prefix);
         Ok(Self {
             prefix,
             spaces,
             labels,
+            files: super::activity::run_files(&m, &dir),
             run: Some((m, dir)),
             round: Some(round),
         })
+    }
+
+    /// Wait for the data files and add the cells' batches to the
+    /// groupings, for what needs every grouping at once (a PDF, a batch
+    /// colouring asked for on the command line).
+    pub fn with_batches(&mut self) {
+        match self.files.get() {
+            Ok(read) => self.labels.extend(read.batches.clone()),
+            Err(e) => log::warn!("view: skipping batch: {e}"),
+        }
     }
 }
 

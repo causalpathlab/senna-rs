@@ -270,7 +270,7 @@ impl App {
     /// changed (on screen, lupin's elapsed time counts as a change).
     fn background(&mut self, on_screen: bool) -> bool {
         let mut changed = self.finish_zoom()
-            | self.scene.poll_batch()
+            | self.scene.take_batches()
             | self.finish_relabel()
             | self.finish_recompute()
             | self.keep_scores_current()
@@ -617,7 +617,7 @@ impl App {
     /// Open the manifest at `path` (a reload, or another round), keeping the
     /// camera, layout, grouping and focus where they still apply.
     fn open_round(&mut self, path: &std::path::Path, what: &str) {
-        match super::Dataset::load_quick(&path.to_string_lossy()) {
+        match super::Dataset::load(&path.to_string_lossy()) {
             Ok(data) => {
                 let before = self.scene.current().points.bounds;
                 self.scene.replace_data(data);

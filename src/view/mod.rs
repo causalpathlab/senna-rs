@@ -169,14 +169,6 @@ pub struct ViewArgs {
 }
 
 /// Features suggested for one view, best first.
-/// Where the reading of a run's data files stands.
-enum BatchRead {
-    Idle,
-    Reading(crate::tui::Pending<Option<data::Labels>>),
-    /// Read: its batches are among the groupings, or it had one or none.
-    Done,
-}
-
 struct Suggestions {
     space: usize,
     title: String,
@@ -271,8 +263,8 @@ pub(crate) struct Scene {
     pub chart: Option<chart::Chart>,
     /// Features near the last clicked cell, and sets locked on screen.
     pub near: Option<features::Near>,
-    /// The cells' batches, read once per run on a worker thread.
-    batch: BatchRead,
+    /// Whether the cells' batches, read with the data files, were added.
+    batches_taken: bool,
     /// How many neighbours a click lists.
     pub near_count: usize,
     pub locked: Vec<features::Near>,
@@ -312,7 +304,7 @@ impl Scene {
             review: None,
             chart: None,
             near: None,
-            batch: BatchRead::Idle,
+            batches_taken: false,
             near_count: features::NEAR_COUNTS[1],
             locked: Vec::new(),
             orders: std::cell::RefCell::new(Vec::new()),
@@ -395,7 +387,7 @@ impl Scene {
             feature_embedding: None,
             review: None,
             near: self.near.clone(),
-            batch: BatchRead::Idle,
+            batches_taken: self.batches_taken,
             near_count: self.near_count,
             locked: self.locked.clone(),
             note: None,
@@ -543,21 +535,18 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         .colour_by
         .as_deref()
         .is_some_and(|c| c.eq_ignore_ascii_case("batch"));
-    let quick = args.pdf.is_none() && !args.relabel && !wants_batch;
-    let data = crate::tui::busy::during_inline(&what, || {
+    let on_screen = args.pdf.is_none() && !args.relabel && !wants_batch;
+    let mut data = crate::tui::busy::during_inline(&what, || {
         from.par_iter()
-            .map(|f| {
-                if quick {
-                    Dataset::load_quick(f)
-                } else {
-                    Dataset::load(f)
-                }
-            })
+            .map(|f| Dataset::load(f))
             .collect::<anyhow::Result<Vec<_>>>()
     })?;
+    if !on_screen {
+        data.iter_mut().for_each(Dataset::with_batches);
+    }
     let mut scenes: Vec<Scene> = data.into_iter().map(|d| Scene::new(d, args)).collect();
-    if quick {
-        scenes.iter_mut().for_each(Scene::start_batch);
+    if on_screen {
+        scenes.iter_mut().for_each(Scene::start_loads);
     }
 
     if args.relabel {
@@ -672,6 +661,7 @@ mod tests {
             ],
             run: None,
             round: None,
+            files: std::sync::Arc::new(activity::RunFiles::ready(Err("no data files".into()))),
             labels: vec![
                 Labels::clusters(
                     LabelKind::Cluster,
@@ -712,23 +702,25 @@ mod tests {
     }
 
     #[test]
-    fn batches_read_on_the_side_join_the_groupings_when_they_come() {
+    fn batches_wait_for_the_data_files_and_are_taken_once() {
         let mut s = scene();
         let before = s.data.labels.len();
-        assert!(!s.poll_batch(), "nothing pending");
-        let (tx, pending) = crate::tui::Pending::pair();
-        s.batch = BatchRead::Reading(pending);
-        assert!(!s.poll_batch(), "not read yet");
-        let batch = Labels::new(
-            LabelKind::Batch,
-            [("c1", "b1"), ("c2", "b2")].map(|(a, b)| (a.into(), b.into())),
-            &[],
-        );
-        tx.send(Ok(Some(batch))).unwrap();
-        assert!(s.poll_batch());
-        assert_eq!(s.data.labels.len(), before + 1);
-        assert!(s.label_index(LabelKind::Batch).is_some());
-        assert!(matches!(s.batch, BatchRead::Done));
+        // Not read yet: nothing to take, and asked again later.
+        s.data.files = std::sync::Arc::new(activity::RunFiles::new(|| Err("slow".into())));
+        assert!(!s.take_batches());
+        assert!(!s.batches_taken);
+        // Read, but failed: taken (nothing added), not asked again.
+        s.data.files = std::sync::Arc::new(activity::RunFiles::ready(Err("gone".into())));
+        assert!(!s.take_batches());
+        assert!(s.batches_taken);
+        assert_eq!(s.data.labels.len(), before);
+    }
+
+    #[test]
+    fn a_copied_view_shares_the_run_s_data_files() {
+        let s = scene();
+        let copy = s.duplicate();
+        assert!(std::sync::Arc::ptr_eq(&s.data.files, &copy.data.files));
     }
 
     #[test]
