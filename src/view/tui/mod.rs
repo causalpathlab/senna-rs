@@ -291,6 +291,7 @@ impl App {
     /// changed (on screen, lupin's elapsed time counts as a change).
     fn background(&mut self, on_screen: bool) -> bool {
         let mut changed = self.finish_zoom()
+            | self.scene.poll_batch()
             | self.finish_relabel()
             | self.finish_recompute()
             | self.keep_scores_current()
@@ -410,10 +411,15 @@ impl App {
         let Some(name) = hit else {
             return false;
         };
-        if matches!(self.modal, Some(Modal::Search(..))) {
-            self.modal = None;
+        match self.modal.take() {
+            Some(Modal::Search(query, hits, _)) => {
+                self.change(|s| s.keep_matches(&query, hits, name));
+            }
+            other => {
+                self.modal = other;
+                self.change(|s| s.set_pick(Pick::One(name)));
+            }
         }
-        self.change(|s| s.set_pick(Pick::One(name)));
         true
     }
 
@@ -629,7 +635,7 @@ impl App {
     /// Open the manifest at `path` (a reload, or another round), keeping the
     /// camera, layout, grouping and focus where they still apply.
     fn open_round(&mut self, path: &std::path::Path, what: &str) {
-        match super::Dataset::load(&path.to_string_lossy()) {
+        match super::Dataset::load_quick(&path.to_string_lossy()) {
             Ok(data) => {
                 let before = self.scene.current().points.bounds;
                 self.scene.replace_data(data);
@@ -828,6 +834,18 @@ mod pane_tests {
         press(&mut a, KeyCode::Enter);
         assert!(a.modal.is_none());
         assert_eq!(shown(&a), Some("GENE2"));
+        // The matches stay listed, the chosen one marked, and the arrows go
+        // on through them.
+        let lines = a.side_lines().unwrap();
+        assert!(
+            lines.iter().any(|l| l.starts_with("▸  2  GENE2")),
+            "{lines:?}"
+        );
+        press(&mut a, KeyCode::Up);
+        assert_eq!(shown(&a), Some("GENE1"));
+        // A click on a cell lists its own neighbours instead.
+        a.scene.show_near("c1");
+        assert!(a.scene.suggestion_rows().is_none());
     }
 
     #[test]

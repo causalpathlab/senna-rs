@@ -175,14 +175,14 @@ impl App {
                 self.modal = None;
                 return true;
             }
+            // The matches stay as the sidebar's list, the chosen one shown.
             KeyCode::Enter => {
-                let pick = match self.modal.take() {
-                    Some(Modal::Search(_, hits, at)) => hits.into_iter().nth(at),
-                    _ => None,
-                };
-                match pick {
-                    Some(name) => self.change(|s| s.set_pick(Pick::One(name))),
-                    None => self.message = Some("no matching feature".into()),
+                match self.modal.take() {
+                    Some(Modal::Search(query, hits, at)) if at < hits.len() => {
+                        let chosen = hits[at].clone();
+                        self.change(|s| s.keep_matches(&query, hits, chosen));
+                    }
+                    _ => self.message = Some("no matching feature".into()),
                 }
                 return true;
             }

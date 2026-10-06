@@ -3,6 +3,48 @@
 use super::*;
 
 impl Scene {
+    /// Read the cells' batches on a worker thread, unless the run has them;
+    /// [`Self::poll_batch`] adds them when they come.
+    pub fn start_batch(&mut self) {
+        let has = self.data.labels.iter().any(|l| l.kind == LabelKind::Batch);
+        let Some((m, dir)) = self.data.run.clone().filter(|_| !has) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(data::batch_labels(&m, &dir));
+        });
+        self.batch = Some(rx);
+    }
+
+    /// Add the cells' batches once read. Returns whether they were added.
+    pub fn poll_batch(&mut self) -> bool {
+        let Some(rx) = &self.batch else {
+            return false;
+        };
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.batch = None;
+                false
+            }
+            Ok(read) => {
+                self.batch = None;
+                match read {
+                    Ok(Some(labels)) => {
+                        self.data.labels.push(labels);
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(e) => {
+                        log::warn!("view: skipping batch: {e}");
+                        false
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn label_index(&self, kind: LabelKind) -> Option<usize> {
         self.data.labels.iter().position(|l| l.kind == kind)
     }
@@ -164,7 +206,21 @@ impl Scene {
             }
             _ => false,
         };
+        // The same run read again keeps the batches it had; another run
+        // reads its own on the side.
+        let batch = self
+            .data
+            .labels
+            .iter()
+            .position(|l| l.kind == LabelKind::Batch)
+            .map(|i| self.data.labels[i].clone());
         self.data = data;
+        let has_batch = self.data.labels.iter().any(|l| l.kind == LabelKind::Batch);
+        match batch {
+            Some(b) if same_run && !has_batch => self.data.labels.push(b),
+            _ if same_run && self.batch.is_some() => {}
+            _ => self.start_batch(),
+        }
         self.near = None;
         self.locked.clear();
         self.orders.borrow_mut().clear();

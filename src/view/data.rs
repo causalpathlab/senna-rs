@@ -507,6 +507,12 @@ fn read_batch_labels(m: &RunManifest, dir: &Path) -> anyhow::Result<Labels> {
     ))
 }
 
+/// The batch of every cell, when the run has more than one batch: read from
+/// the data files themselves, so slow on a large run.
+pub(crate) fn batch_labels(m: &RunManifest, dir: &Path) -> anyhow::Result<Option<Labels>> {
+    read_batch_labels(m, dir).map(|l| (l.levels.len() > 1).then_some(l))
+}
+
 /// Every grouping the run carries. One that fails to read is skipped with a
 /// warning rather than failing the view.
 /// The run's groupings. `prefix` names its other files (feature types): the
@@ -517,6 +523,7 @@ fn load_labels(
     dir: &Path,
     round: &super::rounds::Round,
     prefix: &str,
+    with_batch: bool,
 ) -> Vec<Labels> {
     let at = |rel: &str| run_manifest::resolve(dir, rel);
     let mut labels = Vec::new();
@@ -579,10 +586,14 @@ fn load_labels(
     if let Some(p) = m.outputs.latent.as_deref().filter(|_| latent_is_topics) {
         keep("topics", read_topic_labels(&at(p)));
     }
-    // Only worth a colouring with more than one batch.
-    let batches = read_batch_labels(m, dir);
-    if batches.as_ref().map_or(true, |l| l.levels.len() > 1) {
-        keep("batch", batches);
+    // Only worth a colouring with more than one batch. Reading it opens
+    // every data file, so the screen reads it on the side (`with_batch`).
+    if with_batch {
+        match batch_labels(m, dir) {
+            Ok(Some(l)) => keep("batch", Ok(l)),
+            Ok(None) => {}
+            Err(e) => keep("batch", Err(e)),
+        }
     }
     if let Some(p) = &m.annotate.markers {
         keep("markers", read_marker_labels(&at(p)));
@@ -612,7 +623,19 @@ impl Dataset {
         self.spaces.iter().any(|s| s.axis() == axis)
     }
 
+    /// The run at `from` with every grouping, its cells' batches included.
     pub fn load(from: &str) -> anyhow::Result<Self> {
+        Self::read(from, true)
+    }
+
+    /// [`Self::load`] without the batches, which mean opening every data
+    /// file: for the screen, which reads them on the side
+    /// ([`super::Scene::start_batch`]).
+    pub fn load_quick(from: &str) -> anyhow::Result<Self> {
+        Self::read(from, false)
+    }
+
+    fn read(from: &str, with_batch: bool) -> anyhow::Result<Self> {
         let manifest_path = PathBuf::from(from);
         let (m, dir) = RunManifest::load(&manifest_path)?;
         let spaces = load_spaces(&m, &dir)?;
@@ -622,7 +645,7 @@ impl Dataset {
         );
         let round = super::rounds::Round::load(&m, &dir, &manifest_path);
         let prefix = run_manifest::derive_out_prefix(from);
-        let labels = load_labels(&m, &dir, &round, &prefix);
+        let labels = load_labels(&m, &dir, &round, &prefix, with_batch);
         Ok(Self {
             prefix,
             spaces,

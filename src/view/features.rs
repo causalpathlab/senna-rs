@@ -198,6 +198,17 @@ impl Scene {
         }
     }
 
+    /// Keep a search's `matches` as the sidebar's list, `chosen` shown; the
+    /// arrows then step through the matches as through suggestions.
+    pub fn keep_matches(&mut self, query: &str, matches: Vec<Box<str>>, chosen: Box<str>) {
+        self.suggestions = Some(Suggestions {
+            space: self.space,
+            title: format!("matches for “{query}”"),
+            list: matches.into_iter().map(|m| (m, f32::NAN)).collect(),
+        });
+        self.set_pick(Pick::One(chosen));
+    }
+
     /// Drop the suggestions. Returns whether there were any.
     pub fn clear_suggestions(&mut self) -> bool {
         self.suggestions.take().is_some()
@@ -418,6 +429,8 @@ impl Scene {
             return;
         }
         let (metric, found) = self.rank_near(&[cell]);
+        // The sidebar shows what was asked last: this click's list.
+        self.clear_suggestions();
         self.keep_near(cell.into(), Centre::Cell, metric, found);
     }
 

@@ -263,6 +263,8 @@ pub(crate) struct Scene {
     pub chart: Option<chart::Chart>,
     /// Features near the last clicked cell, and sets locked on screen.
     pub near: Option<features::Near>,
+    /// The cells' batches, read on a worker thread while the view is up.
+    batch: Option<std::sync::mpsc::Receiver<anyhow::Result<Option<data::Labels>>>>,
     /// How many neighbours a click lists.
     pub near_count: usize,
     pub locked: Vec<features::Near>,
@@ -302,6 +304,7 @@ impl Scene {
             review: None,
             chart: None,
             near: None,
+            batch: None,
             near_count: features::NEAR_COUNTS[1],
             locked: Vec::new(),
             orders: std::cell::RefCell::new(Vec::new()),
@@ -384,6 +387,7 @@ impl Scene {
             feature_embedding: None,
             review: None,
             near: self.near.clone(),
+            batch: None,
             near_count: self.near_count,
             locked: self.locked.clone(),
             note: None,
@@ -524,12 +528,29 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         [one] => format!("reading {}", crate::tui::name(std::path::Path::new(&**one))),
         many => format!("reading {} runs", many.len()),
     };
+    // On screen, the cells' batches are read on the side (they mean opening
+    // every data file); a PDF, --relabel or a batch colouring asked for
+    // here waits for them.
+    let wants_batch = args
+        .colour_by
+        .as_deref()
+        .is_some_and(|c| c.eq_ignore_ascii_case("batch"));
+    let quick = args.pdf.is_none() && !args.relabel && !wants_batch;
     let data = crate::tui::busy::during_inline(&what, || {
         from.par_iter()
-            .map(|f| Dataset::load(f))
+            .map(|f| {
+                if quick {
+                    Dataset::load_quick(f)
+                } else {
+                    Dataset::load(f)
+                }
+            })
             .collect::<anyhow::Result<Vec<_>>>()
     })?;
     let mut scenes: Vec<Scene> = data.into_iter().map(|d| Scene::new(d, args)).collect();
+    if quick {
+        scenes.iter_mut().for_each(Scene::start_batch);
+    }
 
     if args.relabel {
         let scene = &mut scenes[0];
@@ -680,6 +701,26 @@ mod tests {
             no_compute: true,
         };
         Scene::new(data, &args)
+    }
+
+    #[test]
+    fn batches_read_on_the_side_join_the_groupings_when_they_come() {
+        let mut s = scene();
+        let before = s.data.labels.len();
+        assert!(!s.poll_batch(), "nothing pending");
+        let (tx, rx) = std::sync::mpsc::channel();
+        s.batch = Some(rx);
+        assert!(!s.poll_batch(), "not read yet");
+        let batch = Labels::new(
+            LabelKind::Batch,
+            [("c1", "b1"), ("c2", "b2")].map(|(a, b)| (a.into(), b.into())),
+            &[],
+        );
+        tx.send(Ok(Some(batch))).unwrap();
+        assert!(s.poll_batch());
+        assert_eq!(s.data.labels.len(), before + 1);
+        assert!(s.data.labels.iter().any(|l| l.kind == LabelKind::Batch));
+        assert!(s.batch.is_none());
     }
 
     #[test]
