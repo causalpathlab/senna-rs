@@ -3,6 +3,7 @@
 //! processes they start and follow.
 
 pub(crate) mod browse;
+pub(crate) mod busy;
 pub(crate) mod child;
 pub(crate) mod style;
 

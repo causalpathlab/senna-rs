@@ -132,7 +132,18 @@ impl Deck {
                 // Drain everything queued so a burst of scroll events costs
                 // one re-render, not one per event.
                 loop {
-                    dirty |= self.event(terminal, event::read()?)?;
+                    let ev = event::read()?;
+                    // A slow answer (a run read again, a model's tables
+                    // read on the first click) says it is loading.
+                    let (changed, spun) = if self.save.is_some() {
+                        (self.event(terminal, ev), false)
+                    } else {
+                        crate::tui::busy::during("loading", || self.event(terminal, ev))
+                    };
+                    if spun {
+                        self.drawn = None;
+                    }
+                    dirty |= changed? || spun;
                     if self.quit || !event::poll(Duration::ZERO)? {
                         break;
                     }

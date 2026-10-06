@@ -276,7 +276,12 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
             if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                 return Ok(None);
             }
-            match b.key(k) {
+            // A large folder listed says it is loading.
+            let (out, spun) = crate::tui::busy::during("loading", || b.key(k));
+            if spun {
+                terminal.clear()?;
+            }
+            match out {
                 Outcome::Cancelled => return Ok(None),
                 Outcome::Chosen(c) => return Ok(Some(c.file())),
                 Outcome::Moved | Outcome::Ignored => {}

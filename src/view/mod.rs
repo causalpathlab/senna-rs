@@ -520,10 +520,15 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         }
     }
     // Reading runs is independent work; the scenes are built in order.
-    let data = from
-        .par_iter()
-        .map(|f| Dataset::load(f))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let what = match from {
+        [one] => format!("reading {}", crate::tui::name(std::path::Path::new(&**one))),
+        many => format!("reading {} runs", many.len()),
+    };
+    let data = crate::tui::busy::during_inline(&what, || {
+        from.par_iter()
+            .map(|f| Dataset::load(f))
+            .collect::<anyhow::Result<Vec<_>>>()
+    })?;
     let mut scenes: Vec<Scene> = data.into_iter().map(|d| Scene::new(d, args)).collect();
 
     if args.relabel {
