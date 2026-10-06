@@ -5,6 +5,9 @@ use super::*;
 
 const NEAR: usize = 12;
 
+/// Names ranked best first with their scores, or why there are none.
+type Ranked = Result<Vec<(Box<str>, f32)>, String>;
+
 /// What a set of neighbours is drawn around.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Centre {
@@ -405,7 +408,7 @@ impl Scene {
     /// The features near `cells`: those whose co-embedding is nearest the
     /// cells' mean embedding (Euclidean, as the map is laid out), or, on a
     /// run with no co-embedding, those most up in the cells.
-    fn rank_near(&mut self, cells: &[&str]) -> (Metric, Result<Vec<(Box<str>, f32)>, String>) {
+    fn rank_near(&mut self, cells: &[&str]) -> (Metric, Ranked) {
         let z = match self.activity() {
             Some(a) => a.cells_z(cells.iter().copied()),
             None => return (Metric::Distance, Err("no run to find features in".into())),
