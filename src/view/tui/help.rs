@@ -146,13 +146,13 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "r",
-                "recompute this run's layouts or clusters: choose in a menu, then enter",
+                "recompute this run's layouts or clusters: choose in a menu, then ctrl-r (or enter) runs it",
             ),
             (
                 "s",
                 "save as PDF: this view, or every run (one grid, or a page each); width, dpi, file name",
             ),
-            ("ctrl-r  ctrl-l", "reload the run from disk and redraw the screen"),
+            ("ctrl-l", "reload the run from disk and redraw the screen"),
             ("q", "quit"),
         ],
     ),
@@ -283,7 +283,7 @@ impl App {
             ],
             Context::Chart => [
                 "H next chart (structure plot, heatmap, map)   c group by another grouping   + / - features per group (heatmap)",
-                "s save PDF   ctrl-r redraw   ? all keys   q quit",
+                "s save PDF   ctrl-l redraw   ? all keys   q quit",
             ],
             // The popup says what the keys do.
             Context::Submit | Context::Recompute | Context::File => ["", ""],

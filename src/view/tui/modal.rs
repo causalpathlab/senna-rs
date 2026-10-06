@@ -59,7 +59,10 @@ impl App {
             Some(Modal::Recompute(..)) => self.recompute_key(k),
             Some(Modal::Submit(_)) => {
                 self.modal = None;
-                if matches!(k.code, KeyCode::Char('S') | KeyCode::Enter) {
+                let ctrl_r = k.code == KeyCode::Char('r')
+                    && k.modifiers
+                        .contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
+                if ctrl_r || matches!(k.code, KeyCode::Char('S') | KeyCode::Enter) {
                     self.send_draft(Mode::Next);
                 } else {
                     self.message = Some("not submitted · the draft is kept".into());

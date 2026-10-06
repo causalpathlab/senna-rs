@@ -20,7 +20,7 @@ pub(super) struct Recomputing {
 /// rather than leave it rewriting the run unseen.
 impl Drop for Recomputing {
     fn drop(&mut self) {
-        self.stopper.stop();
+        self.stopper.kill();
     }
 }
 
@@ -62,6 +62,9 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => menu.step_setting(-1),
             KeyCode::Right | KeyCode::Char('l') => menu.step_setting(1),
             KeyCode::Enter => self.start_recompute(),
+            KeyCode::Char('r') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.start_recompute();
+            }
             KeyCode::Esc => self.modal = None,
             _ => return false,
         }
@@ -162,8 +165,11 @@ impl App {
         };
         match k.code {
             KeyCode::Esc => {
-                r.stopper.stop();
-                self.message = Some("stopping senna…".into());
+                self.message = Some(if r.stopper.stop() {
+                    "senna killed".into()
+                } else {
+                    "interrupting senna… · esc again kills it".into()
+                });
             }
             KeyCode::Char(',' | '.' | 'A' | 'S' | 'P') => {
                 self.message = Some(format!(
@@ -217,7 +223,7 @@ impl App {
             hint(),
         )));
         lines.push(Line::from(
-            " ↑ ↓ move   space choose   ← → method or resolution   enter run   esc cancel",
+            " ↑ ↓ move   space choose   ← → method or resolution   ctrl+r / enter run   esc cancel",
         ));
         lines
     }

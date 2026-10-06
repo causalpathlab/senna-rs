@@ -22,11 +22,7 @@ use data::Pair;
 use data::Pick;
 use form::{Field, Kind, Method};
 use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG};
-use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
-use ratatui::crossterm::{execute, terminal};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -173,9 +169,6 @@ pub(crate) struct App {
     browsing: Option<Target>,
     field_row: usize,
     advanced: bool,
-    /// Whether the terminal tells shift-enter from enter. When it cannot,
-    /// `G` reviews and runs instead.
-    shift_enter: bool,
     filter: String,
     editor: Option<Editor>,
     confirm: Option<Vec<Planned>>,
@@ -198,6 +191,9 @@ pub(crate) struct App {
     view: Vec<PathBuf>,
 }
 
+/// How long a fit has to wrap up when senna run quits under it.
+const STOP_GRACE: Duration = Duration::from_secs(10);
+
 /// A data file and what reading it found.
 type Read = (PathBuf, data::Described);
 
@@ -212,14 +208,6 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
     let level = log::max_level();
     log::set_max_level(log::LevelFilter::Off);
     let mut terminal = ratatui::init();
-    // Shift-enter reaches us as plain enter unless the terminal is asked
-    // to tell them apart.
-    app.shift_enter = matches!(terminal::supports_keyboard_enhancement(), Ok(true))
-        && execute!(
-            std::io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        )
-        .is_ok();
     let result = (|| -> anyhow::Result<()> {
         while !app.quit {
             app.poll();
@@ -241,12 +229,13 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
         Ok(())
     })();
     if let Some(q) = &app.queue {
-        // Wait for the worker, so no fit it was starting outlives us.
-        q.stop();
-        q.join();
-    }
-    if app.shift_enter {
-        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+        // Wait for the worker, so no fit it was starting outlives us: the
+        // fit running has a moment to wrap up, then it is killed.
+        if !q.finished() {
+            app.message = Some("stopping the fits…".into());
+            let _ = terminal.draw(|f| app.draw(f));
+        }
+        q.stop_within(STOP_GRACE);
     }
     ratatui::restore();
     log::set_max_level(level);
@@ -305,7 +294,6 @@ impl App {
             browsing: None,
             field_row: 0,
             advanced: true,
-            shift_enter: true,
             filter: String::new(),
             // The output header is asked first: every result is named
             // after it.
@@ -422,23 +410,15 @@ impl App {
         self.field_row = self.field_row.min(self.visible().len().saturating_sub(1));
     }
 
-    /// Whether `k` reviews and runs the queue: shift-enter, or `G` where
-    /// the terminal cannot tell shift-enter apart.
+    /// Whether `k` reviews and runs the queue: ctrl-r, which every
+    /// terminal passes on as it is (shift-enter often reaches us as enter).
     fn is_go(&self, k: KeyEvent) -> bool {
-        if self.shift_enter {
-            k.code == KeyCode::Enter && k.modifiers.contains(KeyModifiers::SHIFT)
-        } else {
-            k.code == KeyCode::Char('G')
-        }
+        k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL)
     }
 
     /// The key [`Self::is_go`] takes, as the screens name it.
     fn go_key(&self) -> &'static str {
-        if self.shift_enter {
-            "shift+enter"
-        } else {
-            "G"
-        }
+        "ctrl+r"
     }
 
     /// Switch to screen `s`. Arriving at the parameters with two fits or
@@ -1446,8 +1426,11 @@ impl App {
             KeyCode::End => self.log_top = None,
             KeyCode::Char('s') => {
                 if let Some(q) = &self.queue {
-                    q.stop();
-                    self.message = Some("stopping".into());
+                    self.message = Some(if q.stop() {
+                        "killed".into()
+                    } else {
+                        "interrupted: the fit wraps up and stops · s again kills it".into()
+                    });
                 }
             }
             KeyCode::Char('v') => {

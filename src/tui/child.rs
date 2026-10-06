@@ -8,27 +8,58 @@
 
 use std::process::{Command, Stdio};
 
-/// Stops a run of child commands: the one running is killed, and none
+/// Stops a run of child commands: the one running is interrupted, as
+/// Ctrl+C would, so a fit can wrap up; asked again it is killed. None
 /// after it starts.
 #[derive(Default)]
 pub(crate) struct Stopper {
     stopped: std::sync::atomic::AtomicBool,
+    /// Whether the child was interrupted already: the next stop kills.
+    interrupted: std::sync::atomic::AtomicBool,
     child: std::sync::Mutex<Option<std::process::Child>>,
 }
 
 impl Stopper {
-    pub fn stop(&self) {
-        self.stopped
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    /// Interrupt the child the first time, kill it after. Returns whether
+    /// this stop kills.
+    pub fn stop(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.stopped.store(true, SeqCst);
+        let kill = self.interrupted.swap(true, SeqCst);
         if let Ok(mut c) = self.child.lock() {
             if let Some(c) = c.as_mut() {
-                let _ = c.kill();
+                signal(c, kill);
             }
         }
+        kill
+    }
+
+    /// Kill the child now, interrupted or not.
+    pub fn kill(&self) {
+        self.interrupted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stop();
     }
 
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Interrupt (SIGINT) or kill (SIGKILL) `child` and every process it
+/// started: it leads its own process group, and anything left holding its
+/// stderr would keep the log open.
+fn signal(child: &mut std::process::Child, kill: bool) {
+    #[cfg(unix)]
+    {
+        use rustix::process::{kill_process_group, Pid, Signal};
+        // Not waited on yet: the group is still ours, even with the child
+        // gone and what it started holding the log open.
+        let sig = if kill { Signal::KILL } else { Signal::INT };
+        let _ = kill_process_group(Pid::from_child(child), sig);
+    }
+    if kill || cfg!(not(unix)) {
+        let _ = child.kill();
     }
 }
 
@@ -116,6 +147,9 @@ pub(crate) fn run_one(
 ) -> Result<(), Failed> {
     let program = super::name(std::path::Path::new(command.get_program()));
     let terminal = stderr_for(&mut command);
+    // Its own group, so a stop reaches what it starts too.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())

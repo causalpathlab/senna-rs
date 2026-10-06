@@ -226,7 +226,9 @@ impl Queue {
                 match ask(&s, &answered, told(job)) {
                     Keep::Use => {}
                     Keep::Without => js[i + 1..].iter_mut().for_each(|j| j.clones = None),
-                    Keep::Stop => st.stop(),
+                    Keep::Stop => {
+                        st.stop();
+                    }
                 }
             }
             if let Ok(mut s) = s.lock() {
@@ -253,11 +255,33 @@ impl Queue {
         let _ = self.answers.send(keep);
     }
 
-    /// Kill the fit running and start none after it.
-    pub fn stop(&self) {
-        self.stopper.stop();
+    /// Interrupt the fit running, as Ctrl+C would, and start none after
+    /// it; asked again, kill it. Returns whether this stop kills.
+    pub fn stop(&self) -> bool {
+        let kill = self.stopper.stop();
         // A queue waiting on the clones stops waiting.
         self.answer(Keep::Stop);
+        kill
+    }
+
+    /// Stop, give the fit running `grace` to wrap up, then kill it and
+    /// wait for the worker.
+    pub fn stop_within(&self, grace: std::time::Duration) {
+        self.stop();
+        let start = std::time::Instant::now();
+        while start.elapsed() < grace && !self.worker_done() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !self.worker_done() {
+            self.stopper.kill();
+        }
+        self.join();
+    }
+
+    fn worker_done(&self) -> bool {
+        self.worker
+            .lock()
+            .map_or(true, |w| w.as_ref().is_none_or(std::thread::JoinHandle::is_finished))
     }
 
     /// Wait for the worker to finish: after [`Queue::stop`], until the fit

@@ -223,7 +223,7 @@ fn enter_on_a_problem_goes_to_the_flag_clap_blamed() {
     let svd = METHODS.iter().position(|m| *m == "svd").unwrap();
     a.rows[svd].on = true;
     a.rows[svd].form.fields[0].value = "many".into();
-    a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    a.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     assert!(a.confirm.is_some());
     key(&mut a, KeyCode::Enter);
     assert!(a.confirm.is_none() && a.queue.is_none());
@@ -656,13 +656,15 @@ fn hidden_flags_are_listed_until_a_hides_them() {
 }
 
 #[test]
-fn g_reviews_and_runs_where_shift_enter_cannot_be_told() {
+fn ctrl_r_reviews_and_runs_and_shift_enter_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
-    a.shift_enter = false;
     a.pairs = data(dir.path(), &["d.zarr"]);
     a.rows[0].on = true;
+    a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
     key(&mut a, KeyCode::Char('G'));
+    assert!(a.confirm.is_none());
+    a.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     assert!(a.confirm.is_some());
 }
 

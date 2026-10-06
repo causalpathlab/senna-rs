@@ -122,7 +122,7 @@ impl App {
                 " lupin writes a new round from these; this one stays as it is",
             ));
             lines.push(Line::from(Span::styled(
-                " S or enter submits   any other key cancels",
+                " ctrl+r, S or enter submits   any other key cancels",
                 hint(),
             )));
             popup(f, map, lines, 76, At::Middle, color::TEXT);

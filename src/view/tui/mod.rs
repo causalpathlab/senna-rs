@@ -559,7 +559,7 @@ impl App {
         }
     }
 
-    /// Ctrl-R / Ctrl-L: read the run again and draw it afresh (relabel
+    /// Ctrl-L: read the run again and draw it afresh (relabel
     /// mode, if on, stays on at the same cluster).
     fn refresh(&mut self) {
         let from = self.from.clone();
