@@ -311,6 +311,9 @@ pub struct Dataset {
     pub run: Option<(RunManifest, PathBuf)>,
     /// Where this manifest sits among annotation rounds.
     pub round: Option<super::rounds::Round>,
+    /// The run's slow reads (data files, model tables, feature embedding):
+    /// each done once, shared by every view of the run.
+    pub loads: super::activity::RunLoads,
 }
 
 fn read_xy(path: &Path) -> anyhow::Result<Points> {
@@ -475,38 +478,6 @@ fn load_spaces(m: &RunManifest, dir: &Path) -> anyhow::Result<Vec<Space>> {
 /// Each cell's batch, as the fit had it: the run's batch files, else each
 /// data file's `@batch` tags or its name (senna's own rule, applied by the
 /// same loader). Opens the data files, not their counts.
-fn read_batch_labels(m: &RunManifest, dir: &Path) -> anyhow::Result<Labels> {
-    use data_beans::aux::data_loading::{
-        read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch,
-    };
-    anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
-    let files = m.data_inputs(dir);
-    if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
-        anyhow::bail!("the data is not here ({gone})");
-    }
-    let batch_files = m.data_batches(dir);
-    let reload = senna::multiome_layout::recorded_layout(m.data.multiome.as_ref(), files.len())?;
-    let SparseDataWithBatch { data, batch, .. } =
-        read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
-            data_files: files,
-            batch_files: (!batch_files.is_empty()).then_some(batch_files),
-            keep_empty_barcodes: true,
-            ..Default::default()
-        })?)?;
-    let cells = data.column_names()?;
-    anyhow::ensure!(
-        cells.len() == batch.len(),
-        "{} cells but {} batch labels",
-        cells.len(),
-        batch.len()
-    );
-    Ok(Labels::new(
-        LabelKind::Batch,
-        cells.into_iter().zip(batch),
-        &[],
-    ))
-}
-
 /// Every grouping the run carries. One that fails to read is skipped with a
 /// warning rather than failing the view.
 /// The run's groupings. `prefix` names its other files (feature types): the
@@ -579,11 +550,7 @@ fn load_labels(
     if let Some(p) = m.outputs.latent.as_deref().filter(|_| latent_is_topics) {
         keep("topics", read_topic_labels(&at(p)));
     }
-    // Only worth a colouring with more than one batch.
-    let batches = read_batch_labels(m, dir);
-    if batches.as_ref().map_or(true, |l| l.levels.len() > 1) {
-        keep("batch", batches);
-    }
+    // The batches come with the data files (`Dataset::files`).
     if let Some(p) = &m.annotate.markers {
         keep("markers", read_marker_labels(&at(p)));
     }
@@ -612,6 +579,9 @@ impl Dataset {
         self.spaces.iter().any(|s| s.axis() == axis)
     }
 
+    /// The run at `from` and its groupings. Its data files (the observed
+    /// counts and the cells' batches) are read apart, once, when first
+    /// asked for ([`Self::files`]).
     pub fn load(from: &str) -> anyhow::Result<Self> {
         let manifest_path = PathBuf::from(from);
         let (m, dir) = RunManifest::load(&manifest_path)?;
@@ -627,9 +597,20 @@ impl Dataset {
             prefix,
             spaces,
             labels,
+            loads: super::activity::RunLoads::new(&m, &dir),
             run: Some((m, dir)),
             round: Some(round),
         })
+    }
+
+    /// Wait for the data files and add the cells' batches to the
+    /// groupings, for what needs every grouping at once (a PDF, a batch
+    /// colouring asked for on the command line).
+    pub fn with_batches(&mut self) {
+        match self.loads.files.get() {
+            Ok(read) => self.labels.extend(read.batches.clone()),
+            Err(e) => log::warn!("view: skipping batch: {e}"),
+        }
     }
 }
 

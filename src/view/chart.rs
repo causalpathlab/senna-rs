@@ -180,6 +180,10 @@ impl Scene {
             Kind::Structure => self.structure().map(Data::Structure),
             Kind::Heatmap => self.heatmap(top).map(Data::Heatmap),
         };
+        // Not read yet: drawn again once it is, not kept as a failure.
+        if crate::view::features::is_loading(&data) {
+            return;
+        }
         if let Some(c) = self.chart.as_mut() {
             c.made = Some((key, data));
         }

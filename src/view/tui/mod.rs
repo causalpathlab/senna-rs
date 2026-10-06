@@ -14,6 +14,7 @@ mod help;
 mod input;
 mod locate;
 mod modal;
+mod panel;
 mod recompute;
 mod relabel;
 
@@ -23,11 +24,13 @@ use modal::Modal;
 
 use super::color;
 use super::decide::{Action, Decision, Mode, Rescore, Watcher};
+use super::features::PaneRow;
 use super::files::{self, modified, same_file};
 use super::render::{Frame, Job, Viewport};
 use super::style::{swatches, Shape};
 use super::{Axis, Graphics, Pick, Scene};
 use crate::tui::style::{first_row, hint, page, popup, rgb, selected, toast, At};
+use crate::tui::Pending;
 use image::DynamicImage;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -109,28 +112,6 @@ const TOAST_FOR: Duration = Duration::from_millis(2500);
 /// Lines at the bottom: what is on screen, then two lines of keys.
 const STATUS_LINES: u16 = 3;
 
-/// The answer of work running on a worker thread.
-struct Pending<T>(std::sync::mpsc::Receiver<Result<T, String>>);
-
-impl<T: Send + 'static> Pending<T> {
-    fn spawn(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(work());
-        });
-        Self(rx)
-    }
-
-    /// The answer once it has come; `stopped` when the worker died first.
-    fn poll(&self, stopped: &str) -> Option<Result<T, String>> {
-        match self.0.try_recv() {
-            Ok(r) => Some(r),
-            Err(std::sync::mpsc::TryRecvError::Empty) => None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(stopped.into())),
-        }
-    }
-}
-
 /// A decision lupin is applying on a worker thread.
 struct Relabeling {
     job: RelabelJob,
@@ -210,9 +191,13 @@ struct App {
     info: Option<Vec<String>>,
     /// Sidebar area, beside the map; empty when there is nothing to show.
     side: Rect,
+    /// The settings panel at the top of the sidebar; empty when not shown.
+    panel: Rect,
+    /// Where each feature row of the sidebar was last drawn, for clicks.
+    pane_hits: std::cell::RefCell<Vec<(Rect, usize)>>,
     /// The cluster overview on the left of the map (relabel mode only).
     left: Rect,
-    /// Whether the sidebar may open (`b` toggles).
+    /// Whether the sidebar may open (space or `b` toggles).
     sidebar: bool,
     /// A `lupin relabel --watch` on this chain, whose latest round is followed.
     watcher: Option<Watcher>,
@@ -257,6 +242,8 @@ impl App {
             checked: std::time::Instant::now(),
             info: None,
             side: Rect::default(),
+            panel: Rect::default(),
+            pane_hits: std::cell::RefCell::default(),
             left: Rect::default(),
             sidebar: true,
             scene,
@@ -282,7 +269,20 @@ impl App {
     /// chain moving on, a toast running out. Returns whether the view
     /// changed (on screen, lupin's elapsed time counts as a change).
     fn background(&mut self, on_screen: bool) -> bool {
-        let mut changed = self.finish_zoom()
+        // A slow read answered: what waited on it is done again, and drawn.
+        let answered = self.scene.poll_loads();
+        if answered {
+            self.restart();
+        }
+        // A file browser's folder listed on the side.
+        let listed = match &mut self.modal {
+            Some(Modal::MarkersFile(b)) => b.poll() || b.listing().is_some(),
+            Some(Modal::DataFile(b, _)) => b.poll() || b.listing().is_some(),
+            _ => false,
+        };
+        let mut changed = answered
+            | listed
+            | self.finish_zoom()
             | self.finish_relabel()
             | self.finish_recompute()
             | self.keep_scores_current()
@@ -304,8 +304,11 @@ impl App {
             self.toast = None;
             changed = true;
         }
-        // On screen, lupin's or senna's elapsed time keeps ticking.
-        changed || (on_screen && (self.relabeling.is_some() || self.recomputing.is_some()))
+        // On screen, lupin's, senna's or a slow read's time keeps ticking.
+        let ticking = self.relabeling.is_some()
+            || self.recomputing.is_some()
+            || !self.scene.data.loads.busy().is_empty();
+        changed || (on_screen && ticking)
     }
 
     /// How long to wait for input while this view is on screen.
@@ -326,12 +329,95 @@ impl App {
 
     /// The sidebar's text, when it shows text rather than the style menu.
     fn side_lines(&self) -> Option<Vec<String>> {
+        self.side_rows()
+            .map(|rows| rows.into_iter().map(|(text, _)| text).collect())
+    }
+
+    /// The sidebar's rows, each with the feature it names, if any.
+    fn side_rows(&self) -> Option<Vec<PaneRow>> {
+        let plain =
+            |lines: Vec<String>| -> Vec<PaneRow> { lines.into_iter().map(|l| (l, None)).collect() };
+        if let Some(Modal::Search(query, hits, at)) = &self.modal {
+            return Some(input::search_rows(query, hits, *at));
+        }
         self.scene
             .merge_lines()
             .or_else(|| self.scene.review_lines())
-            .or_else(|| self.info.clone())
-            .or_else(|| self.scene.suggestion_lines())
-            .or_else(|| self.scene.near_lines())
+            .map(plain)
+            .or_else(|| {
+                // A clicked cell's cluster summary above the features near
+                // it: the summary never hides the list.
+                let features = self
+                    .scene
+                    .suggestion_rows()
+                    .or_else(|| self.scene.near_rows());
+                match (self.info.clone().map(plain), features) {
+                    (Some(mut info), Some(features)) => {
+                        info.push((String::new(), None));
+                        info.extend(features);
+                        Some(info)
+                    }
+                    (info, features) => info.or(features),
+                }
+            })
+    }
+
+    /// The features the sidebar lists, in order, while it is on screen:
+    /// what the arrows step through.
+    fn pane_features(&self) -> Vec<Box<str>> {
+        if !self.sidebar || self.scene.review.is_some() {
+            return Vec::new();
+        }
+        self.side_rows()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, f)| f)
+            .collect()
+    }
+
+    /// Show the feature `delta` rows from the one shown in the sidebar's
+    /// list (the first or last when none is), stopping at its ends. Returns
+    /// whether there was a list to step through.
+    pub(super) fn step_pane(&mut self, delta: i64) -> bool {
+        let list = self.pane_features();
+        let Some(last) = list.len().checked_sub(1) else {
+            return false;
+        };
+        let at = match &self.scene.pick {
+            Some(Pick::One(f)) => list.iter().position(|x| x == f),
+            _ => None,
+        };
+        let next = match at {
+            Some(i) => (i as i64 + delta).clamp(0, last as i64) as usize,
+            None if delta > 0 => 0,
+            None => last,
+        };
+        let name = list[next].clone();
+        self.change(|s| s.set_pick(Pick::One(name)));
+        true
+    }
+
+    /// A click at terminal cell (`col`, `row`) on a feature in the sidebar:
+    /// show it (a search takes it and closes). Returns whether it was one.
+    pub(super) fn pane_click(&mut self, col: u16, row: u16) -> bool {
+        let hit = self.pane_hits.borrow().iter().find_map(|(r, k)| {
+            r.contains(ratatui::layout::Position::new(col, row))
+                .then_some(*k)
+        });
+        // The row as drawn names its feature.
+        let Some(name) = hit.and_then(|k| self.side_rows()?.into_iter().nth(k)?.1) else {
+            return false;
+        };
+        match self.modal.take() {
+            Some(Modal::Search(query, hits, _)) => {
+                self.change(|s| s.keep_matches(&query, hits, name));
+            }
+            other => {
+                self.modal = other;
+                self.change(|s| s.set_pick(Pick::One(name)));
+            }
+        }
+        true
     }
 
     /// Map and sidebar areas and the viewport for the current terminal size.
@@ -341,7 +427,9 @@ impl App {
             ..area
         };
         // The sidebar takes its columns from the map rather than covering it.
-        let side_w = if self.sidebar && (self.menu.is_some() || self.side_lines().is_some()) {
+        let side_w = if self.sidebar
+            && (self.menu.is_some() || self.panel_shown() || self.side_lines().is_some())
+        {
             (area.width / 3)
                 .clamp(30, 48)
                 .min(area.width.saturating_sub(20))
@@ -363,6 +451,14 @@ impl App {
         };
         self.left = Rect::new(body.x, body.y, left_w, body.height);
         self.side = Rect::new(map.x + map.width, body.y, side_w, body.height);
+        self.panel = if side_w > 0 && self.panel_shown() {
+            Rect {
+                height: panel::PANEL_ROWS.min(body.height),
+                ..self.side
+            }
+        } else {
+            Rect::default()
+        };
         if map != self.map {
             let had_map = self.map.width > 0 && self.map.height > 0;
             self.map = map;
@@ -559,7 +655,7 @@ impl App {
         }
     }
 
-    /// Ctrl-R / Ctrl-L: read the run again and draw it afresh (relabel
+    /// Ctrl-L: read the run again and draw it afresh (relabel
     /// mode, if on, stays on at the same cluster).
     fn refresh(&mut self) {
         let from = self.from.clone();
@@ -609,34 +705,6 @@ impl App {
         self.message = Some(format!("{} · {}", s.method, s.title()));
     }
 
-    /// Same axis and title on the next method, if that method has it.
-    fn next_method(&mut self) {
-        let spaces = &self.scene.data.spaces;
-        let cur = self.scene.current();
-        let mut methods: Vec<&str> = Vec::new();
-        for s in spaces {
-            if !methods.contains(&s.method.as_str()) {
-                methods.push(&s.method);
-            }
-        }
-        if methods.len() < 2 {
-            self.message = Some("only one layout method in this run".into());
-            return;
-        }
-        let at = methods.iter().position(|m| *m == cur.method).unwrap_or(0);
-        for k in 1..methods.len() {
-            let m = methods[(at + k) % methods.len()];
-            let same = spaces
-                .iter()
-                .position(|s| s.method == m && s.kind == cur.kind);
-            let any = spaces.iter().position(|s| s.method == m);
-            if let Some(i) = same.or(any) {
-                self.switch_space(i);
-                return;
-            }
-        }
-    }
-
     /// Where this view's PDF goes unless another name is typed (`.pdf`
     /// follows).
     fn pdf_name(&self) -> String {
@@ -647,5 +715,148 @@ impl App {
             None => format!("{}.{}", s.method, s.kind.slug()),
         };
         format!("{}.view.{what}", here(&self.scene.data.prefix))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_clicked_cells_summary_sits_above_the_features_near_it() {
+        let mut app = App::new(
+            crate::view::tests::scene(),
+            Picker::halfblocks(),
+            "r.senna.json".into(),
+            "lupin".into(),
+        );
+        app.info = Some(vec!["C1 · no summary recorded for this round".into()]);
+        app.scene.near = Some(crate::view::features::Near {
+            name: "c1".into(),
+            centre: crate::view::features::Centre::Cell,
+            metric: crate::view::features::Metric::Distance,
+            features: vec![("GENE1".into(), -0.5)],
+            cells: Vec::new(),
+        });
+        let lines = app.side_lines().unwrap();
+        assert!(lines[0].starts_with("C1"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("GENE1")), "{lines:?}");
+        // Without a summary, the list alone.
+        app.info = None;
+        let lines = app.side_lines().unwrap();
+        assert!(lines[0].contains("features nearest"), "{lines:?}");
+    }
+}
+
+#[cfg(test)]
+mod pane_tests {
+    use super::*;
+
+    fn app() -> App {
+        App::new(
+            crate::view::tests::scene(),
+            Picker::halfblocks(),
+            "r.senna.json".into(),
+            "lupin".into(),
+        )
+    }
+
+    fn press(app: &mut App, c: KeyCode) {
+        app.key(KeyEvent::new(c, KeyModifiers::NONE));
+    }
+
+    fn shown(app: &App) -> Option<&str> {
+        match &app.scene.pick {
+            Some(Pick::One(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    fn near(app: &mut App) {
+        app.scene.near = Some(crate::view::features::Near {
+            name: "c1".into(),
+            centre: crate::view::features::Centre::Cell,
+            metric: crate::view::features::Metric::Distance,
+            features: vec![
+                ("g1".into(), -0.1),
+                ("g2".into(), -0.2),
+                ("g3".into(), -0.3),
+            ],
+            cells: Vec::new(),
+        });
+    }
+
+    #[test]
+    fn the_arrows_step_through_the_feature_list_in_the_sidebar() {
+        let mut a = app();
+        near(&mut a);
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), Some("g1"));
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), Some("g2"));
+        press(&mut a, KeyCode::PageDown);
+        assert_eq!(shown(&a), Some("g3"), "stops at the end");
+        press(&mut a, KeyCode::Up);
+        assert_eq!(shown(&a), Some("g2"));
+        // The feature shown is marked in the list.
+        let lines = a.side_lines().unwrap();
+        assert!(lines.iter().any(|l| l.starts_with("▸ g2")), "{lines:?}");
+    }
+
+    #[test]
+    fn without_a_list_or_with_the_sidebar_hidden_the_arrows_do_not_pick() {
+        let mut a = app();
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), None);
+        near(&mut a);
+        a.sidebar = false;
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), None);
+    }
+
+    #[test]
+    fn a_search_lists_its_matches_and_enter_shows_the_one_chosen() {
+        let mut a = app();
+        let names: Vec<Box<str>> = ["GENE1", "GENE2", "OTHER"].map(Into::into).to_vec();
+        let lower = names.iter().map(|n| n.to_lowercase()).collect();
+        a.names = Some(SearchNames { names, lower });
+        a.modal = Some(Modal::Search(String::new(), Vec::new(), 0));
+        for c in "gene".chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        let lines = a.side_lines().unwrap();
+        assert!(lines.iter().any(|l| l == "▸ GENE1"), "{lines:?}");
+        assert_eq!(a.pane_features(), ["GENE1", "GENE2"].map(Into::into));
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Enter);
+        assert!(a.modal.is_none());
+        assert_eq!(shown(&a), Some("GENE2"));
+        // The matches stay listed, the chosen one marked, and the arrows go
+        // on through them.
+        let lines = a.side_lines().unwrap();
+        assert!(lines.iter().any(|l| l == "▸  2  GENE2"), "{lines:?}");
+        // A search's matches have no score: none is printed.
+        assert!(!lines.iter().any(|l| l.contains("NaN")), "{lines:?}");
+        press(&mut a, KeyCode::Up);
+        assert_eq!(shown(&a), Some("GENE1"));
+        // A click on a cell lists its own neighbours instead.
+        a.scene.show_near("c1");
+        assert!(a.scene.suggestion_rows().is_none());
+    }
+
+    #[test]
+    fn a_click_on_a_feature_row_shows_it() {
+        let mut a = app();
+        near(&mut a);
+        let g3 = a
+            .side_rows()
+            .unwrap()
+            .iter()
+            .position(|(_, f)| f.as_deref() == Some("g3"))
+            .unwrap();
+        a.pane_hits.borrow_mut().push((Rect::new(80, 5, 30, 1), g3));
+        assert!(!a.pane_click(10, 5));
+        assert!(a.pane_click(90, 5));
+        assert_eq!(shown(&a), Some("g3"));
     }
 }

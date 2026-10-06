@@ -173,7 +173,7 @@ impl App {
             Line::from(Span::styled(
                 format!(
                     " tab / 1-4 screens   {} review and run   q quit",
-                    self.go_key()
+                    crate::tui::RUN_KEY
                 ),
                 hint(),
             )),

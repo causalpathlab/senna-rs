@@ -3,6 +3,37 @@
 use super::*;
 
 impl Scene {
+    /// Start reading the run's data files on a worker thread (once per
+    /// run, whichever view asks first).
+    pub fn start_loads(&mut self) {
+        self.data.loads.start();
+    }
+
+    /// Add the cells' batches to the groupings once the data files are
+    /// read. Returns whether they were added.
+    pub fn take_batches(&mut self) -> bool {
+        if self.batches_taken {
+            return false;
+        }
+        let Some(read) = self.data.loads.files.try_get() else {
+            return false;
+        };
+        self.batches_taken = true;
+        match read {
+            Ok(read) => match read.batches.clone() {
+                Some(b) if self.label_index(LabelKind::Batch).is_none() => {
+                    self.data.labels.push(b);
+                    true
+                }
+                _ => false,
+            },
+            Err(e) => {
+                log::warn!("view: skipping batch: {e}");
+                false
+            }
+        }
+    }
+
     pub(super) fn label_index(&self, kind: LabelKind) -> Option<usize> {
         self.data.labels.iter().position(|l| l.kind == kind)
     }
@@ -164,7 +195,24 @@ impl Scene {
             }
             _ => false,
         };
+        // The same run read again keeps the batches it had (or is reading,
+        // or found none of); another run reads its own on the side.
+        let batch = self
+            .label_index(LabelKind::Batch)
+            .map(|i| self.data.labels[i].clone());
+        let loads = self.data.loads.clone();
         self.data = data;
+        if same_run {
+            // One read of each per run.
+            self.data.loads = loads;
+            if let Some(b) = batch.filter(|_| self.label_index(LabelKind::Batch).is_none()) {
+                self.data.labels.push(b);
+            }
+        } else {
+            self.batches_taken = false;
+            self.answered = 0;
+            self.redo = None;
+        }
         self.near = None;
         self.locked.clear();
         self.orders.borrow_mut().clear();
@@ -196,8 +244,8 @@ impl Scene {
         } else {
             self.activity = None;
             self.geometry = None;
-            self.feature_embedding = None;
         }
+        self.start_loads();
         self.suggestions = None;
         self.refresh_activity();
         if let Some((round, id)) = left {
@@ -303,25 +351,40 @@ impl Scene {
 
     /// Labels on the map in turn: small, medium, large, largest, off.
     pub fn cycle_labels(&mut self) {
+        self.step_labels(1);
+    }
+
+    /// The label size `step` along small, medium, large, largest, off,
+    /// wrapping.
+    pub fn step_labels(&mut self, step: isize) {
+        let n = TEXT_SCALES.len() as isize + 1;
+        let at = self.label_size().map_or(n - 1, |k| k as isize);
+        let next = (at + step).rem_euclid(n) as usize;
+        self.show_labels = next < TEXT_SCALES.len();
+        if self.show_labels {
+            self.text_scale = TEXT_SCALES[next];
+        }
+        self.note = Some(format!(
+            "labels {} · t for the next size",
+            self.labels_said()
+        ));
+    }
+
+    /// The label size as said: small, medium, large, largest, or off.
+    pub fn labels_said(&self) -> &'static str {
         const SIZES: [&str; 4] = ["small", "medium", "large", "largest"];
-        let next = if self.show_labels {
-            let at = TEXT_SCALES
+        self.label_size()
+            .map_or("off", |k| SIZES[k.min(SIZES.len() - 1)])
+    }
+
+    /// Which of [`TEXT_SCALES`] the labels are drawn at; none when off.
+    fn label_size(&self) -> Option<usize> {
+        self.show_labels.then(|| {
+            TEXT_SCALES
                 .iter()
                 .position(|&t| t >= self.text_scale)
-                .unwrap_or(0);
-            (at + 1 < TEXT_SCALES.len()).then_some(at + 1)
-        } else {
-            Some(0)
-        };
-        self.show_labels = next.is_some();
-        self.note = Some(match next {
-            Some(k) => {
-                self.text_scale = TEXT_SCALES[k];
-                let then = SIZES.get(k + 1).copied().unwrap_or("off");
-                format!("labels {} · t for {then}", SIZES[k])
-            }
-            None => "labels off · t shows them small".into(),
-        });
+                .unwrap_or(0)
+        })
     }
 
     /// Colour by the grouping of `kind`, when the run has one.
@@ -333,18 +396,28 @@ impl Scene {
 
     /// Next grouping. The feature shown is cleared, its suggestions stay.
     pub fn cycle_colour(&mut self) {
-        let choices = self.colour_choices();
-        let next = match self
-            .colour
-            .and_then(|c| choices.iter().position(|&i| i == c))
-        {
-            Some(p) if p + 1 < choices.len() => Some(choices[p + 1]),
-            Some(_) => None,
-            None => choices.first().copied(),
-        };
+        self.step_colour(1);
+    }
+
+    /// The grouping `step` along those that apply here and then group
+    /// colours, wrapping.
+    pub fn step_colour(&mut self, step: isize) {
+        let mut ring: Vec<Option<usize>> = self.colour_choices().into_iter().map(Some).collect();
+        ring.push(None);
+        let at = ring
+            .iter()
+            .position(|&c| c == self.colour)
+            .unwrap_or(ring.len() - 1) as isize;
+        let next = ring[(at + step).rem_euclid(ring.len() as isize) as usize];
         if self.set_colour(next) {
             self.note = Some("back to group colours · g brings the features back".into());
         }
+    }
+
+    /// What the map is coloured by, as said.
+    pub fn colour_said(&self) -> &'static str {
+        self.colour
+            .map_or("groups", |c| self.data.labels[c].kind.title())
     }
 
     /// Focus the next or previous group. Activity and suggestions shown for

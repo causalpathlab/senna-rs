@@ -1,11 +1,13 @@
 use super::*;
 
 /// Text files, several at once when `many`; `.zarr` stores too.
+#[derive(Clone)]
 struct Txt {
     many: bool,
 }
 
 /// Text files, refusing any named `no.txt`.
+#[derive(Clone)]
 struct Picky;
 
 impl Wanted for Picky {
@@ -174,6 +176,7 @@ fn a_refused_file_is_not_taken_and_the_popup_says_why() {
 }
 
 /// Text files that can be taken several at once, refusing `no.txt`.
+#[derive(Clone)]
 struct PickyMany;
 
 impl Wanted for PickyMany {
@@ -238,4 +241,118 @@ fn the_key_hints_fit_however_short_the_popup() {
     let lines = b.lines(20);
     assert!(lines.len() + 2 <= 20, "{}", lines.len());
     assert!(lines.last().unwrap().to_string().contains("esc cancel"));
+}
+
+/// Type `text` into the browser a key at a time.
+fn type_in<W: Wanted>(b: &mut Browser<W>, text: &str) {
+    for c in text.chars() {
+        b.key(key(KeyCode::Char(c)));
+    }
+}
+
+#[test]
+fn a_typed_path_is_followed_and_a_folder_it_reaches_is_entered_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().canonicalize().unwrap();
+    for sub in ["data", "data2", "other"] {
+        std::fs::create_dir(d.join(sub)).unwrap();
+    }
+    write(&d.join("data2"), "a.txt");
+    let start = d.join("other");
+    let mut b = Browser::open(start.clone(), Txt { many: false }, None);
+    // The whole path typed as it is: each folder it passes is listed.
+    let root = format!("{}/", d.display());
+    type_in(&mut b, &root);
+    assert_eq!(b.dir, d);
+    assert_eq!(b.filter, root);
+    // `data` is a folder, but `data2` begins with it too: wait.
+    type_in(&mut b, "data");
+    assert_eq!(b.dir, d);
+    assert_eq!(names(&b), ["..", "data", "data2"]);
+    // `data2` is the only one: its folder is listed at once, and what was
+    // typed stays as typed.
+    type_in(&mut b, "2");
+    assert_eq!(b.dir, d.join("data2"));
+    assert_eq!(b.filter, format!("{root}data2"));
+    assert_eq!(names(&b), ["..", "a.txt"]);
+    // The `/` typed next is just that: the same folder.
+    type_in(&mut b, "/");
+    assert_eq!(b.filter, format!("{root}data2/"));
+    assert_eq!(b.dir, d.join("data2"));
+    // Backspace back past the folder lists its parent again.
+    b.key(key(KeyCode::Backspace));
+    b.key(key(KeyCode::Backspace));
+    assert_eq!(b.dir, d);
+    assert_eq!(names(&b), ["..", "data", "data2"]);
+    // Enter takes the file the path ends on.
+    type_in(&mut b, "2/a");
+    assert_eq!(taken(b.key(key(KeyCode::Enter))), [d.join("data2/a.txt")]);
+}
+
+#[test]
+fn letters_without_a_leading_slash_still_narrow_names() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("data2")).unwrap();
+    write(dir.path(), "a.txt");
+    let mut b = Browser::open(dir.path().to_path_buf(), Txt { many: false }, None);
+    type_in(&mut b, "data2");
+    assert_eq!(b.dir, dir.path());
+    assert_eq!(names(&b), ["..", "data2"]);
+}
+
+#[test]
+fn a_typed_path_that_is_not_there_stays_where_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let mut b = Browser::open(dir.path().to_path_buf(), Txt { many: false }, None);
+    let gone = format!("{}/nowhere/x", dir.path().display());
+    type_in(&mut b, &gone);
+    assert_eq!(b.dir, dir.path());
+    assert!(!b.completed());
+    assert_eq!(names(&b), [".."]);
+}
+
+/// Text files, each described slowly: a folder that takes a while to list.
+#[derive(Clone)]
+struct Slow;
+
+impl Wanted for Slow {
+    type About = ();
+
+    fn header(&self) -> Header {
+        Txt { many: false }.header()
+    }
+
+    fn file(&self, _path: &Path, name: &str) -> Option<()> {
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        name.ends_with(".txt").then_some(())
+    }
+
+    fn describe<'a>(&self, (): &'a ()) -> std::borrow::Cow<'a, str> {
+        std::borrow::Cow::Borrowed("")
+    }
+}
+
+#[test]
+fn a_slow_folder_is_listed_on_the_side_and_shown_when_done() {
+    let dir = tempfile::tempdir().unwrap();
+    for f in ["a.txt", "b.txt", "c.txt"] {
+        write(dir.path(), f);
+    }
+    let mut b = Browser::open(dir.path().to_path_buf(), Slow, Some("b.txt"));
+    // Too slow to wait for: the browser is up at once, listing.
+    assert!(b.listing().is_some());
+    assert_eq!(names(&b), [".."]);
+    let lines: Vec<String> = b.lines(30).iter().map(ToString::to_string).collect();
+    assert!(
+        lines.iter().any(|l| l.contains("listing this folder")),
+        "{lines:?}"
+    );
+    while !b.poll() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(b.listing().is_none());
+    assert_eq!(names(&b), ["..", "a.txt", "b.txt", "c.txt"]);
+    // The cursor goes where it was asked, once the folder is there.
+    assert_eq!(b.current().map(Entry::name), Some("b.txt"));
 }

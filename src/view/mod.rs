@@ -256,13 +256,23 @@ pub(crate) struct Scene {
     medians: std::cell::RefCell<Option<((usize, usize), render::Medians)>>,
     /// The run's geometry table, read on the first zoom into a group.
     geometry: Option<std::sync::Arc<sublayout::Geometry>>,
-    /// The run's feature embedding, read on the first click on a feature.
-    feature_embedding: Option<Result<features::FeatureEmbedding, String>>,
+    /// Whether to wait for a slow read not done yet (a PDF, the command
+    /// line), or carry on and do again what needed it once it comes (the
+    /// screen).
+    pub patient: bool,
     pub review: Option<relabel::Review>,
     /// A chart drawn in place of the map (`H`), when one is on.
     pub chart: Option<chart::Chart>,
     /// Features near the last clicked cell, and sets locked on screen.
     pub near: Option<features::Near>,
+    /// Whether the cells' batches, read with the data files, were added.
+    batches_taken: bool,
+    /// What to do again once a slow read answers.
+    redo: Option<features::Ask>,
+    /// How many of the run's slow reads had answered at the last look.
+    answered: usize,
+    /// How many neighbours a click lists.
+    pub near_count: usize,
     pub locked: Vec<features::Near>,
     /// A message for the status line, taken by the front end.
     pub note: Option<String>,
@@ -295,11 +305,15 @@ impl Scene {
             shown: None,
             ramp: color::activity_ramp(256),
             geometry: None,
-            feature_embedding: None,
+            patient: true,
             suggestions: None,
             review: None,
             chart: None,
             near: None,
+            batches_taken: false,
+            redo: None,
+            answered: 0,
+            near_count: features::NEAR_COUNTS[1],
             locked: Vec::new(),
             orders: std::cell::RefCell::new(Vec::new()),
             shown_ids: 0,
@@ -378,9 +392,13 @@ impl Scene {
             name_index: std::cell::RefCell::default(),
             medians: std::cell::RefCell::new(None),
             geometry: self.geometry.clone(),
-            feature_embedding: None,
+            patient: self.patient,
             review: None,
             near: self.near.clone(),
+            batches_taken: self.batches_taken,
+            redo: None,
+            answered: self.answered,
+            near_count: self.near_count,
             locked: self.locked.clone(),
             note: None,
             missing_data: None,
@@ -516,11 +534,35 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         }
     }
     // Reading runs is independent work; the scenes are built in order.
-    let data = from
-        .par_iter()
-        .map(|f| Dataset::load(f))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let what = match from {
+        [one] => format!("reading {}", crate::tui::name(std::path::Path::new(&**one))),
+        many => format!("reading {} runs", many.len()),
+    };
+    // On screen, the cells' batches are read on the side (they mean opening
+    // every data file); a PDF, --relabel or a batch colouring asked for
+    // here waits for them.
+    let wants_batch = args
+        .colour_by
+        .as_deref()
+        .is_some_and(|c| c.eq_ignore_ascii_case("batch"));
+    let on_screen = args.pdf.is_none() && !args.relabel && !wants_batch;
+    let mut data = crate::tui::busy::during_inline(&what, || {
+        from.par_iter()
+            .map(|f| Dataset::load(f))
+            .collect::<anyhow::Result<Vec<_>>>()
+    })?;
+    if !on_screen {
+        data.iter_mut().for_each(Dataset::with_batches);
+    }
     let mut scenes: Vec<Scene> = data.into_iter().map(|d| Scene::new(d, args)).collect();
+    if on_screen {
+        // The screen does not wait for a slow read: it starts them all now
+        // and does again what needed one once it answers.
+        for scene in &mut scenes {
+            scene.patient = false;
+            scene.start_loads();
+        }
+    }
 
     if args.relabel {
         let scene = &mut scenes[0];
@@ -634,6 +676,7 @@ mod tests {
             ],
             run: None,
             round: None,
+            loads: activity::RunLoads::none(),
             labels: vec![
                 Labels::clusters(
                     LabelKind::Cluster,
@@ -671,6 +714,64 @@ mod tests {
             no_compute: true,
         };
         Scene::new(data, &args)
+    }
+
+    #[test]
+    fn batches_wait_for_the_data_files_and_are_taken_once() {
+        let mut s = scene();
+        let before = s.data.labels.len();
+        // Not read yet: nothing to take, and asked again later.
+        s.data.loads.files = std::sync::Arc::new(activity::RunFiles::new(|| Err("slow".into())));
+        assert!(!s.take_batches());
+        assert!(!s.batches_taken);
+        // Read, but failed: taken (nothing added), not asked again.
+        s.data.loads.files = std::sync::Arc::new(activity::RunFiles::ready(Err("gone".into())));
+        assert!(!s.take_batches());
+        assert!(s.batches_taken);
+        assert_eq!(s.data.labels.len(), before);
+    }
+
+    #[test]
+    fn what_needed_a_read_not_done_yet_is_done_again_when_it_answers() {
+        let mut s = scene();
+        s.patient = false;
+        s.data.run = Some((
+            senna::run_manifest::RunManifest::new(senna::run_manifest::RunKind::Bge, "r"),
+            std::path::PathBuf::new(),
+        ));
+        let (gate, wait) = std::sync::mpsc::channel::<()>();
+        s.data.loads.model = std::sync::Arc::new(activity::ModelTables::new(move || {
+            let _ = wait.recv();
+            Err("no model here".into())
+        }));
+        s.poll_loads();
+        s.suggest();
+        assert_eq!(s.note.take().as_deref(), Some(crate::tui::LOADING));
+        assert!(s.loading_line().is_some_and(|l| l.contains("model tables")));
+        // Nothing new yet: nothing done again.
+        assert!(!s.poll_loads());
+        gate.send(()).unwrap();
+        while s.data.loads.model.try_get().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(s.poll_loads());
+        // The suggestion was asked again and got the model's answer.
+        assert_eq!(s.note.take().as_deref(), Some("no model here"));
+        assert!(s.loading_line().is_none());
+    }
+
+    #[test]
+    fn a_copied_view_shares_the_run_s_data_files() {
+        let s = scene();
+        let copy = s.duplicate();
+        assert!(std::sync::Arc::ptr_eq(
+            &s.data.loads.files,
+            &copy.data.loads.files
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &s.data.loads.model,
+            &copy.data.loads.model
+        ));
     }
 
     #[test]
@@ -892,6 +993,7 @@ mod tests {
         s.near = Some(features::Near {
             name: "c1".into(),
             centre: features::Centre::Cell,
+            metric: features::Metric::Distance,
             features: vec![("g1".into(), 1.0), ("nowhere".into(), 0.5)],
             cells: Vec::new(),
         });
@@ -981,6 +1083,7 @@ mod tests {
                 space: 0,
                 xy: centre,
             },
+            metric: features::Metric::Distance,
             features: vec![("g1".into(), 1.0)],
             cells: Vec::new(),
         });

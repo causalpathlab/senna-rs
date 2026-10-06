@@ -11,6 +11,9 @@ pub(super) struct Recomputing {
     what: String,
     /// The run being rewritten, reloaded when it is done.
     from: std::path::PathBuf,
+    /// The layout asked for, shown once the run reloads: the map on screen
+    /// is otherwise kept, which would hide a new method behind the old.
+    show: Option<(String, crate::view::SpaceKind)>,
     progress: std::sync::Arc<std::sync::Mutex<String>>,
     stopper: std::sync::Arc<crate::tui::child::Stopper>,
     done: Pending<()>,
@@ -20,13 +23,19 @@ pub(super) struct Recomputing {
 /// rather than leave it rewriting the run unseen.
 impl Drop for Recomputing {
     fn drop(&mut self) {
-        self.stopper.stop();
+        self.stopper.kill();
     }
 }
 
 impl App {
     /// Open the menu for the run on screen, the map on screen chosen.
     pub(super) fn open_recompute(&mut self) {
+        self.open_recompute_with(None);
+    }
+
+    /// Open the menu with the map on screen chosen, laid out with `method`
+    /// when given (else the one on screen).
+    pub(super) fn open_recompute_with(&mut self, method: Option<&str>) {
         if self.recomputing.is_some() {
             self.message = Some("already recomputing · it reloads when done".into());
             return;
@@ -44,7 +53,10 @@ impl App {
         }
         // A zoom was laid out from its root map: redo that one.
         let kind = self.scene.current().kind;
-        let method = self.scene.data.spaces[self.scene.root()].method.clone();
+        let method = method.map_or_else(
+            || self.scene.data.spaces[self.scene.root()].method.clone(),
+            str::to_string,
+        );
         let on_screen = Step::on_screen(kind, &method);
         let menu = Menu::new(&target, on_screen, &method);
         self.modal = Some(Modal::Recompute(target, menu));
@@ -61,7 +73,7 @@ impl App {
             KeyCode::Char(' ') => menu.toggle(),
             KeyCode::Left | KeyCode::Char('h') => menu.step_setting(-1),
             KeyCode::Right | KeyCode::Char('l') => menu.step_setting(1),
-            KeyCode::Enter => self.start_recompute(),
+            _ if k.code == KeyCode::Enter || crate::tui::is_run_key(&k) => self.start_recompute(),
             KeyCode::Esc => self.modal = None,
             _ => return false,
         }
@@ -115,6 +127,7 @@ impl App {
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let show = chosen.iter().find_map(|(s, m)| s.shows(m));
         let progress: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
         let stopper = std::sync::Arc::new(crate::tui::child::Stopper::default());
         let (shared, stops) = (progress.clone(), stopper.clone());
@@ -123,6 +136,7 @@ impl App {
             started: std::time::Instant::now(),
             what,
             from: self.from.clone(),
+            show,
             progress,
             stopper,
             done,
@@ -141,6 +155,9 @@ impl App {
         };
         let r = self.recomputing.take().expect("checked above");
         self.open_round(&r.from.clone(), "reloaded");
+        if let Some((method, kind)) = &r.show {
+            self.show_layout(method, *kind);
+        }
         match result {
             Ok(()) => self.pop(format!("recomputed {}", r.what)),
             Err(e) if e == "stopped" => {
@@ -154,6 +171,25 @@ impl App {
         true
     }
 
+    /// Put the map of `method` on screen, of `kind` when the run has it.
+    /// Returns whether the run has that method at all.
+    pub(super) fn show_layout(&mut self, method: &str, kind: crate::view::SpaceKind) -> bool {
+        let spaces = &self.scene.data.spaces;
+        let same = spaces
+            .iter()
+            .position(|s| s.method == method && s.kind == kind);
+        let any = spaces.iter().position(|s| s.method == method);
+        match same.or(any) {
+            Some(i) => {
+                if i != self.scene.space {
+                    self.switch_space(i);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// While senna rewrites the run: esc stops it, and nothing that changes
     /// the run (another round, lupin) starts. Returns whether `k` was taken.
     pub(super) fn guard_recompute(&mut self, k: KeyEvent) -> bool {
@@ -162,8 +198,11 @@ impl App {
         };
         match k.code {
             KeyCode::Esc => {
-                r.stopper.stop();
-                self.message = Some("stopping senna…".into());
+                self.message = Some(if r.stopper.stop() {
+                    "senna killed".into()
+                } else {
+                    "interrupting senna… · esc again kills it".into()
+                });
             }
             KeyCode::Char(',' | '.' | 'A' | 'S' | 'P') => {
                 self.message = Some(format!(
@@ -217,7 +256,7 @@ impl App {
             hint(),
         )));
         lines.push(Line::from(
-            " ↑ ↓ move   space choose   ← → method or resolution   enter run   esc cancel",
+            " ↑ ↓ move   space choose   ← → method or resolution   ctrl+r / enter run   esc cancel",
         ));
         lines
     }
@@ -245,6 +284,7 @@ mod tests {
             started: std::time::Instant::now(),
             what: "cell layout (umap)".into(),
             from: "r.senna.json".into(),
+            show: None,
             progress: Default::default(),
             stopper: stopper.clone(),
             done: Pending(rx),
@@ -281,6 +321,32 @@ mod tests {
         // It tried the recomputed run (not the one now on screen).
         let said = app.message.clone().unwrap_or_default();
         assert!(said.contains("r.senna.json"), "{said}");
+    }
+
+    #[test]
+    fn a_recomputed_layout_is_put_on_screen() {
+        let (mut app, _stopper, _tx) = busy();
+        assert_eq!(app.scene.current().method, "umap");
+        assert!(app.show_layout("phate", crate::view::SpaceKind::Cells));
+        assert_eq!(app.scene.current().method, "phate");
+        assert_eq!(app.scene.current().kind, crate::view::SpaceKind::Cells);
+        // A method the run lacks leaves the map as it is.
+        assert!(!app.show_layout("tsne", crate::view::SpaceKind::Cells));
+        assert_eq!(app.scene.current().method, "phate");
+    }
+
+    #[test]
+    fn a_layout_step_shows_its_method_and_a_clustering_nothing() {
+        use crate::view::SpaceKind;
+        assert_eq!(
+            Step::CellLayout.shows("tsne"),
+            Some(("tsne".into(), SpaceKind::Cells))
+        );
+        assert_eq!(
+            Step::FeatureLayout.shows("phate"),
+            Some(("phate".into(), SpaceKind::Features))
+        );
+        assert_eq!(Step::CellClusters.shows("1"), None);
     }
 
     #[test]

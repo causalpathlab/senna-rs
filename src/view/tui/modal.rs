@@ -7,7 +7,8 @@ use crate::tui::browse::Browser;
 
 pub(super) enum Modal {
     /// Feature search: the query and its current matches.
-    Search(String, Vec<Box<str>>),
+    /// The query, its matches, and the one under the cursor.
+    Search(String, Vec<Box<str>>, usize),
     /// A decision: its label, then its rationale.
     Prompt(Prompt),
     /// Browsing for the marker panel `lupin annotate` reads.
@@ -35,10 +36,12 @@ impl Modal {
     /// The status line while typing; none when a popup asks instead.
     pub(super) fn line(&self) -> Option<String> {
         Some(match self {
-            Modal::Search(q, hits) => {
-                let shown: Vec<&str> = hits.iter().take(6).map(AsRef::as_ref).collect();
-                format!("/{q}   {}", shown.join("  "))
-            }
+            Modal::Search(q, hits, _) => match hits.len() {
+                0 if q.is_empty() => "/ type part of a feature name".into(),
+                0 => format!("/{q}   no match"),
+                1 => format!("/{q}   1 match"),
+                n => format!("/{q}   {n} matches"),
+            },
             Modal::Prompt(p) => p.line(),
             Modal::Submit(_)
             | Modal::Recompute(..)
@@ -59,7 +62,9 @@ impl App {
             Some(Modal::Recompute(..)) => self.recompute_key(k),
             Some(Modal::Submit(_)) => {
                 self.modal = None;
-                if matches!(k.code, KeyCode::Char('S') | KeyCode::Enter) {
+                if crate::tui::is_run_key(&k)
+                    || matches!(k.code, KeyCode::Char('S') | KeyCode::Enter)
+                {
                     self.send_draft(Mode::Next);
                 } else {
                     self.message = Some("not submitted · the draft is kept".into());

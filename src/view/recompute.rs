@@ -87,6 +87,18 @@ impl Step {
         }
     }
 
+    /// The map a layout step makes with `setting`: its method and kind;
+    /// none for a clustering or topics.
+    pub fn shows(self, setting: &str) -> Option<(String, crate::view::SpaceKind)> {
+        use crate::view::SpaceKind;
+        match self {
+            Step::CellLayout => Some((setting.into(), SpaceKind::Cells)),
+            Step::FeatureLayout => Some((setting.into(), SpaceKind::Features)),
+            Step::JointLayout => Some(("joint".into(), SpaceKind::Cells)),
+            _ => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Step::CellLayout => "cell layout",

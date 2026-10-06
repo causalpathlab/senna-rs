@@ -8,27 +8,72 @@
 
 use std::process::{Command, Stdio};
 
-/// Stops a run of child commands: the one running is killed, and none
+/// Stops a run of child commands: the one running is interrupted, as
+/// Ctrl+C would, so a fit can wrap up; asked again it is killed. None
 /// after it starts.
 #[derive(Default)]
 pub(crate) struct Stopper {
-    stopped: std::sync::atomic::AtomicBool,
+    /// How far stopping has gone: [`RUNNING`], interrupted (1), or [`KILL`].
+    level: std::sync::atomic::AtomicU8,
     child: std::sync::Mutex<Option<std::process::Child>>,
 }
 
+const RUNNING: u8 = 0;
+const KILL: u8 = 2;
+
 impl Stopper {
-    pub fn stop(&self) {
-        self.stopped
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Ok(mut c) = self.child.lock() {
-            if let Some(c) = c.as_mut() {
-                let _ = c.kill();
-            }
-        }
+    /// Go one step further, interrupt then kill, and tell the child.
+    /// Returns whether this stop kills.
+    pub fn stop(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let raise = |l: u8| Some((l + 1).min(KILL));
+        let now = raise(
+            self.level
+                .fetch_update(SeqCst, SeqCst, raise)
+                .unwrap_or(KILL),
+        );
+        self.deliver();
+        now == Some(KILL)
+    }
+
+    /// Kill the child now, interrupted or not.
+    pub fn kill(&self) {
+        self.level.store(KILL, std::sync::atomic::Ordering::SeqCst);
+        self.deliver();
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+        self.level.load(std::sync::atomic::Ordering::SeqCst) > RUNNING
+    }
+
+    /// Send the child the stop asked for so far, if any.
+    fn deliver(&self) {
+        let level = self.level.load(std::sync::atomic::Ordering::SeqCst);
+        if level == RUNNING {
+            return;
+        }
+        if let Ok(mut c) = self.child.lock() {
+            if let Some(c) = c.as_mut() {
+                signal(c, level == KILL);
+            }
+        }
+    }
+}
+
+/// Interrupt (SIGINT) or kill (SIGKILL) `child` and every process it
+/// started: it leads its own process group, and anything left holding its
+/// stderr would keep the log open.
+fn signal(child: &mut std::process::Child, kill: bool) {
+    #[cfg(unix)]
+    {
+        use rustix::process::{kill_process_group, Pid, Signal};
+        // Not waited on yet: the group is still ours, even with the child
+        // gone and what it started holding the log open.
+        let sig = if kill { Signal::KILL } else { Signal::INT };
+        let _ = kill_process_group(Pid::from_child(child), sig);
+    }
+    if kill || cfg!(not(unix)) {
+        let _ = child.kill();
     }
 }
 
@@ -116,6 +161,9 @@ pub(crate) fn run_one(
 ) -> Result<(), Failed> {
     let program = super::name(std::path::Path::new(command.get_program()));
     let terminal = stderr_for(&mut command);
+    // Its own group, so a stop reaches what it starts too.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -130,13 +178,12 @@ pub(crate) fn run_one(
             .take()
             .map(|e| Box::new(e) as Box<dyn std::io::Read + Send>),
     };
-    // Where `stop` can reach it; stopped meanwhile, it goes at once.
+    // Where `stop` can reach it.
     if let Ok(mut c) = stopper.child.lock() {
         *c = Some(child);
     }
-    if stopper.is_stopped() {
-        stopper.stop();
-    }
+    // Stopped meanwhile: it gets the stop asked for, no further.
+    stopper.deliver();
     let last = follow(log, each);
     let status = stopper
         .child
@@ -211,15 +258,12 @@ pub(crate) fn follow_log(log: Option<impl std::io::Read>, mut each: impl FnMut(&
     })
 }
 
-/// Frames of the spinners the workspace draws.
-const SPINNER: &str = "⠁⠂⠄⡀⢀⠠⠐⠈";
-
 /// A progress bar's frame, its elapsed time already gone: the bar of `#`
 /// and `-`, `pos/len`, the time left in brackets, then what it counts. A
 /// spinner's frame starts with one of its ticks.
 pub(crate) fn progress_of(line: &str) -> Option<Progress> {
     let (head, rest) = line.split_once(char::is_whitespace)?;
-    if head.chars().all(|c| SPINNER.contains(c)) {
+    if head.chars().all(|c| super::SPINNER.contains(&c)) {
         return Some(Progress {
             what: rest.trim().to_string(),
             ..Progress::default()

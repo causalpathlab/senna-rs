@@ -289,7 +289,7 @@ impl Deck {
             n > 1
         };
         match k.code {
-            KeyCode::Char('r' | 'l') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('l') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.drawn = None;
                 app.refresh();
             }

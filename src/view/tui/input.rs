@@ -40,6 +40,10 @@ impl App {
                 return true;
             }
         }
+        // With a feature list in the sidebar, the arrows go through it.
+        if list_step(k.code).is_some_and(|d| self.step_pane(d)) {
+            return true;
+        }
         let step = |app: &App| app.vp.map_or(0.0, |v| 0.1 * v.w.min(v.h) as f32);
         match k.code {
             KeyCode::Char('q') => self.quit = true,
@@ -71,15 +75,18 @@ impl App {
                 }
                 if self.names.as_ref().is_some_and(|n| n.names.is_empty()) {
                     self.names = None;
-                    self.message = Some("no feature names to search in this run".into());
+                    self.message = Some(match self.scene.loading_line() {
+                        Some(loading) => format!("{loading} · / searches once it is read"),
+                        None => "no feature names to search in this run".into(),
+                    });
                 } else {
-                    self.modal = Some(Modal::Search(String::new(), Vec::new()));
+                    self.modal = Some(Modal::Search(String::new(), Vec::new(), 0));
                 }
             }
             KeyCode::Char('?') => self.help = true,
             KeyCode::Tab => self.step_view(1),
             KeyCode::BackTab => self.step_view(-1),
-            KeyCode::Char('m') => self.next_method(),
+            KeyCode::Char('m') => self.step_method(1, false),
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
             KeyCode::Char(']') => self.change(|s| s.step_focus(1)),
             KeyCode::Char('[') => self.change(|s| s.step_focus(-1)),
@@ -113,12 +120,8 @@ impl App {
             KeyCode::Char('L' | 'M' | 'K') => {
                 self.message = Some("decisions are made in relabel mode: press R".into());
             }
-            KeyCode::Char('b') => {
-                self.sidebar = !self.sidebar;
-                if !self.sidebar {
-                    self.message = Some("sidebar hidden · b to show".into());
-                }
-            }
+            KeyCode::Char(' ' | 'b') if self.sidebar => self.hide_sidebar(),
+            KeyCode::Char(' ' | 'b') => self.sidebar = true,
             KeyCode::Char(',') => self.step_round(true),
             KeyCode::Char('.') => self.step_round(false),
             KeyCode::Char('Z') | KeyCode::Backspace => {
@@ -154,38 +157,54 @@ impl App {
 
     /// A key while searching. Returns whether anything changed.
     pub(super) fn search_key(&mut self, k: KeyEvent) -> bool {
-        let Some(Modal::Search(query, _)) = self.modal.as_mut() else {
+        let Some(Modal::Search(query, hits, at)) = self.modal.as_mut() else {
             return false;
         };
+        let last = hits.len().saturating_sub(1);
         match k.code {
             KeyCode::Esc => {
                 self.modal = None;
                 return true;
             }
+            // The matches stay as the sidebar's list, the chosen one shown.
             KeyCode::Enter => {
-                let pick = match self.modal.take() {
-                    Some(Modal::Search(_, hits)) => hits.into_iter().next(),
-                    _ => None,
-                };
-                match pick {
-                    Some(name) => self.change(|s| s.set_pick(Pick::One(name))),
-                    None => self.message = Some("no matching feature".into()),
+                match self.modal.take() {
+                    Some(Modal::Search(query, hits, at)) if at < hits.len() => {
+                        let chosen = hits[at].clone();
+                        self.change(|s| s.keep_matches(&query, hits, chosen));
+                    }
+                    _ => self.message = Some("no matching feature".into()),
                 }
                 return true;
             }
+            // The cursor moves through the matches listed in the sidebar.
+            code if list_step(code).is_some() => {
+                let d = list_step(code).unwrap_or_default();
+                *at = (*at as i64 + d).clamp(0, last as i64) as usize;
+            }
             KeyCode::Backspace => {
                 query.pop();
+                self.research();
             }
-            KeyCode::Char(c) => query.push(c),
+            KeyCode::Char(c) => {
+                query.push(c);
+                self.research();
+            }
             _ => return false,
         }
-        let query = std::mem::take(query);
-        let hits = self
+        true
+    }
+
+    /// The matches of the query typed so far, the cursor on the first.
+    fn research(&mut self) {
+        let Some(Modal::Search(query, hits, at)) = self.modal.as_mut() else {
+            return;
+        };
+        *hits = self
             .names
             .as_ref()
-            .map_or_else(Vec::new, |n| search(&n.names, &n.lower, &query));
-        self.modal = Some(Modal::Search(query, hits));
-        true
+            .map_or_else(Vec::new, |n| search(&n.names, &n.lower, query));
+        *at = 0;
     }
 
     /// A key in the style menu. Returns whether anything changed.
@@ -246,6 +265,11 @@ impl App {
 
     /// A mouse event. Returns whether anything changed.
     pub(super) fn mouse(&mut self, m: MouseEvent) -> bool {
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            if self.panel_click(m.column, m.row) || self.pane_click(m.column, m.row) {
+                return true;
+            }
+        }
         // A chart has no points to hover, click, pan or zoom.
         if self.scene.chart.is_some() {
             return false;
@@ -305,7 +329,7 @@ impl App {
             Some(g) => {
                 let name = &self.scene.levels()[g as usize];
                 self.message = Some(format!(
-                    "{name} · click for the features most up in this cluster"
+                    "{name} · click for the features placed nearest this cluster"
                 ));
             }
             // Leaving a label takes its note with it.
@@ -497,10 +521,45 @@ fn adjust(
     }
 }
 
+/// How far a key moves through a list: ±1 for the arrows, ±10 a page.
+pub(super) fn list_step(code: KeyCode) -> Option<i64> {
+    match code {
+        KeyCode::Up => Some(-1),
+        KeyCode::Down => Some(1),
+        KeyCode::PageUp => Some(-10),
+        KeyCode::PageDown => Some(10),
+        _ => None,
+    }
+}
+
+/// The sidebar while searching: what was typed, then the matches, the one
+/// under the cursor marked.
+pub(super) fn search_rows(query: &str, hits: &[Box<str>], at: usize) -> Vec<PaneRow> {
+    let mut out: Vec<PaneRow> = vec![
+        (format!("search “{query}”"), None),
+        ("↑ ↓ choose · enter or click shows · esc back".into(), None),
+    ];
+    if hits.is_empty() {
+        out.push((
+            if query.is_empty() {
+                "  type part of a feature name".into()
+            } else {
+                "  no match".into()
+            },
+            None,
+        ));
+    }
+    out.extend(hits.iter().enumerate().map(|(k, f)| {
+        let mark = if k == at { "▸" } else { " " };
+        (format!("{mark} {f}"), Some(f.clone()))
+    }));
+    out
+}
+
 /// Features matching `query`: exact name first, then symbol (the part after
 /// an `ID_` prefix), then prefix, then substring; case-insensitive.
 fn search(names: &[Box<str>], lower: &[String], query: &str) -> Vec<Box<str>> {
-    const MAX: usize = 8;
+    const MAX: usize = 200;
     let q = query.to_lowercase();
     if q.is_empty() {
         return Vec::new();

@@ -44,6 +44,9 @@ impl App {
         if self.job.is_some() {
             first.push_str("   · drawing…");
         }
+        if let Some(loading) = self.scene.loading_line() {
+            first.push_str(&format!("   · {loading}"));
+        }
         let [main, more] = self.status_keys();
         let lines = vec![
             Line::from(format!(" {first}")),
@@ -54,29 +57,69 @@ impl App {
 
         let side = self.side;
         if side.width > 0 {
+            // The settings panel first, what the click or the suggestions
+            // said below it.
+            let side = if self.panel.height > 0 {
+                f.render_widget(
+                    Paragraph::new(self.panel_lines())
+                        .block(side_block())
+                        .style(page),
+                    self.panel,
+                );
+                Rect {
+                    y: side.y + self.panel.height,
+                    height: side.height - self.panel.height,
+                    ..side
+                }
+            } else {
+                side
+            };
             if let Some(menu) = &self.menu {
                 self.draw_menu(f, side, menu, page);
-            } else if let Some(lines) = self.side_lines() {
+            } else if let Some(rows) = self.side_rows().filter(|_| side.height > 0) {
                 // A list longer than the panel scrolls to keep its cursor
                 // (the last `▸` line) in sight, counted in wrapped rows.
-                let rows = usize::from(side.height);
+                let height = usize::from(side.height);
                 let width = usize::from(side.width.saturating_sub(1)).max(1);
-                let tall = |l: &String| (l.chars().count() + 1).div_ceil(width).max(1);
-                let at = lines.iter().rposition(|l| l.starts_with('▸')).unwrap_or(0);
-                let above: usize = lines[..at].iter().map(tall).sum();
-                let total: usize = lines.iter().map(tall).sum();
-                let skip = (above + rows / 2)
-                    .saturating_sub(rows)
-                    .min(total.saturating_sub(rows));
-                let text: Vec<Line> = lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
+                let tall = |l: &str| (l.chars().count() + 1).div_ceil(width).max(1);
+                let at = rows
+                    .iter()
+                    .rposition(|(l, _)| l.starts_with('▸'))
+                    .unwrap_or(0);
+                let above: usize = rows[..at].iter().map(|(l, _)| tall(l)).sum();
+                let total: usize = rows.iter().map(|(l, _)| tall(l)).sum();
+                let skip = (above + height / 2)
+                    .saturating_sub(height)
+                    .min(total.saturating_sub(height));
+                // Only the rows in sight are drawn; each feature's row is
+                // kept by index, for a click on it.
+                let mut hits = Vec::new();
+                let mut text: Vec<Line> = Vec::new();
+                let (mut y, mut first) = (0, None);
+                for (k, (l, f)) in rows.iter().enumerate() {
+                    let h = tall(l);
+                    if y + h > skip && y < skip + height {
+                        first.get_or_insert(y);
+                        text.push(Line::from(format!(" {l}")));
+                        if f.is_some() && y >= skip && y + h <= skip + height {
+                            let top = side.y + u16::try_from(y - skip).unwrap_or(u16::MAX);
+                            hits.push((Rect::new(side.x, top, side.width, h as u16), k));
+                        }
+                    }
+                    y += h;
+                }
+                *self.pane_hits.borrow_mut() = hits;
+                let within = skip - first.unwrap_or(skip);
                 f.render_widget(
                     Paragraph::new(text)
                         .wrap(ratatui::widgets::Wrap { trim: false })
-                        .scroll((u16::try_from(skip).unwrap_or(u16::MAX), 0))
+                        .scroll((u16::try_from(within).unwrap_or(u16::MAX), 0))
                         .block(side_block())
                         .style(page),
                     side,
                 );
+            } else {
+                self.pane_hits.borrow_mut().clear();
             }
         }
 
@@ -122,7 +165,7 @@ impl App {
                 " lupin writes a new round from these; this one stays as it is",
             ));
             lines.push(Line::from(Span::styled(
-                " S or enter submits   any other key cancels",
+                " ctrl+r, S or enter submits   any other key cancels",
                 hint(),
             )));
             popup(f, map, lines, 76, At::Middle, color::TEXT);

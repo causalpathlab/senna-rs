@@ -19,14 +19,14 @@ use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunManifest};
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
-use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// Per group, a score per feature; and the features, in column order.
 type GroupContrasts<'a> = (Vec<Vec<f32>>, &'a [Box<str>]);
 
-type Vector = nalgebra::DVector<f32>;
+pub(super) type Vector = nalgebra::DVector<f32>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -79,21 +79,21 @@ enum Model {
     Topic { log_theta: Mat, log_beta: Mat },
 }
 
-struct Expected {
+pub(crate) struct Expected {
     features: Axis,
     cells: Vec<Box<str>>,
     model: Model,
     /// Each feature's expected variance over all cells (embedding runs), for
     /// the "varies most here" ranking; computed on first use.
-    variance_everywhere: OnceCell<Vec<f32>>,
+    variance_everywhere: OnceLock<Vec<f32>>,
     /// θ and β out of log space (topic runs); computed on first use.
-    topic_linear: OnceCell<(Mat, Mat)>,
+    topic_linear: OnceLock<(Mat, Mat)>,
     /// Median of the finite baselines (`None`: no usable baseline).
-    bias_median: OnceCell<Option<f32>>,
+    bias_median: OnceLock<Option<f32>>,
     /// Mean of `z` over all cells (embedding runs).
-    z_mean: OnceCell<Vector>,
+    z_mean: OnceLock<Vector>,
     /// Row of each cell name.
-    cell_index: OnceCell<HashMap<Box<str>, u32>>,
+    cell_index: OnceLock<HashMap<Box<str>, u32>>,
 }
 
 impl Expected {
@@ -102,11 +102,11 @@ impl Expected {
             features,
             cells,
             model,
-            variance_everywhere: OnceCell::new(),
-            topic_linear: OnceCell::new(),
-            bias_median: OnceCell::new(),
-            z_mean: OnceCell::new(),
-            cell_index: OnceCell::new(),
+            variance_everywhere: OnceLock::new(),
+            topic_linear: OnceLock::new(),
+            bias_median: OnceLock::new(),
+            z_mean: OnceLock::new(),
+            cell_index: OnceLock::new(),
         }
     }
 
@@ -197,7 +197,7 @@ const NO_ROW: u32 = u32::MAX;
 
 const NO_CONTRAST: &str = "the focused group has no cells, or no other cells are in view";
 
-struct Observed {
+pub(crate) struct Observed {
     data: SparseIoVec,
     features: Axis,
     /// Column of each cell name.
@@ -261,8 +261,11 @@ impl Levels {
 pub struct Activity {
     manifest: RunManifest,
     dir: PathBuf,
-    expected: Option<Result<Expected, String>>,
-    observed: Option<Result<Observed, String>>,
+    /// The run's slow reads, shared with every view of it.
+    loads: RunLoads,
+    /// Whether to wait for a read not done yet, or answer [`LOADING`]
+    /// (the screen does not wait).
+    patient: bool,
     /// Row of each point of a view in a source's cell table, by (source,
     /// view key).
     rows: HashMap<(Source, usize), Arc<Vec<u32>>>,
@@ -290,12 +293,12 @@ fn read_table(dir: &Path, rel: &str) -> anyhow::Result<MatWithNames<Mat>> {
 
 impl Activity {
     #[must_use]
-    pub fn new(manifest: RunManifest, dir: PathBuf) -> Self {
+    pub fn new(manifest: RunManifest, dir: PathBuf, loads: RunLoads, patient: bool) -> Self {
         Self {
             manifest,
             dir,
-            expected: None,
-            observed: None,
+            loads,
+            patient,
             rows: HashMap::default(),
             mixture: None,
         }
@@ -379,105 +382,8 @@ impl Activity {
         Ok(rows)
     }
 
-    fn load_expected(&self) -> anyhow::Result<Expected> {
-        let m = &self.manifest;
-        let o = &m.outputs;
-        if let (Some(z_rel), Ok((rho_path, bias_path))) = (
-            o.cell_embedding.as_deref(),
-            run_manifest::resolve_feature_embedding_for(m, &self.dir),
-        ) {
-            let z = read_table(&self.dir, z_rel)?;
-            let rho = Mat::from_parquet_with_row_names(&rho_path, Some(0))?;
-            anyhow::ensure!(
-                z.mat.ncols() == rho.mat.ncols(),
-                "cell embedding has {} dims, feature embedding {}",
-                z.mat.ncols(),
-                rho.mat.ncols()
-            );
-            // Only used when it lines up with the feature table.
-            let bias = bias_path
-                .and_then(|p| Mat::from_parquet_with_row_names(&p, Some(0)).ok())
-                .filter(|b| b.rows == rho.rows && b.mat.ncols() >= 1)
-                .map(|b| b.mat.column(0).iter().copied().collect());
-            return Ok(Expected::new(
-                Axis::new(rho.rows),
-                z.rows,
-                Model::Embedding {
-                    z: z.mat,
-                    rho: rho.mat,
-                    bias,
-                },
-            ));
-        }
-        if let (true, Some(theta_rel), Some(beta_rel)) = (
-            m.kind.latent_is_log_simplex(),
-            o.latent.as_deref(),
-            o.gene_dictionary(),
-        ) {
-            let theta = read_table(&self.dir, theta_rel)?;
-            let beta = read_table(&self.dir, beta_rel)?;
-            anyhow::ensure!(
-                theta.mat.ncols() == beta.mat.ncols(),
-                "latent has {} topics, dictionary {}",
-                theta.mat.ncols(),
-                beta.mat.ncols()
-            );
-            return Ok(Expected::new(
-                Axis::new(beta.rows),
-                theta.rows,
-                Model::Topic {
-                    log_theta: theta.mat,
-                    log_beta: beta.mat,
-                },
-            ));
-        }
-        anyhow::bail!("this run has no model tables to predict a feature from")
-    }
-
-    fn load_observed(&self) -> anyhow::Result<Observed> {
-        let m = &self.manifest;
-        anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
-        let files = m.data_inputs(&self.dir);
-        // Observed counts are the one thing here that needs the data.
-        if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
-            anyhow::bail!("the data is not here ({gone})");
-        }
-        let reload =
-            senna::multiome_layout::recorded_layout(m.data.multiome.as_ref(), files.len())?;
-        info!(
-            "view: opening {} data file(s) for observed counts",
-            files.len()
-        );
-        let SparseDataWithBatch { data, .. } =
-            read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
-                data_files: files,
-                keep_empty_barcodes: true,
-                ..Default::default()
-            })?)?;
-        let cells = data.column_names()?;
-        let n_cells = cells.len();
-        let cell_index = cells
-            .into_iter()
-            .enumerate()
-            .map(|(i, n)| (n, i as u32))
-            .collect();
-        Ok(Observed {
-            features: Axis::new(data.row_names()?),
-            cell_index,
-            n_cells,
-            data,
-        })
-    }
-
     fn expected(&mut self) -> Result<&Expected, String> {
-        if self.expected.is_none() {
-            self.expected = Some(self.load_expected().map_err(|e| e.to_string()));
-        }
-        self.expected
-            .as_ref()
-            .expect("just set")
-            .as_ref()
-            .map_err(Clone::clone)
+        self.loads.model.answer(self.patient)
     }
 
     /// The data files the observed counts need that are not here, even
@@ -508,18 +414,15 @@ impl Activity {
     /// Whether the observed counts could not be opened at all (as opposed
     /// to one feature missing from them).
     pub fn observed_failed(&self) -> bool {
-        matches!(self.observed, Some(Err(_)))
+        matches!(self.loads.files.try_get(), Some(Err(_)))
     }
 
+    /// The observed counts, from the run's one read of its data files.
     fn observed(&mut self) -> Result<&Observed, String> {
-        if self.observed.is_none() {
-            self.observed = Some(self.load_observed().map_err(|e| e.to_string()));
-        }
-        self.observed
-            .as_ref()
-            .expect("just set")
-            .as_ref()
-            .map_err(Clone::clone)
+        self.loads
+            .files
+            .answer(self.patient)
+            .map(|read| &read.observed)
     }
 
     /// Feature names on `source`'s axis, for search and completion.
@@ -599,6 +502,32 @@ impl Activity {
     }
 
     /// `feature` on each of the points `names` (the view `key`).
+    /// Which of `features` `source` can draw on view `key`: those on its
+    /// feature axis, when any of the view's points is among its cells. The
+    /// rest would show as missing values everywhere.
+    pub fn drawable(
+        &mut self,
+        features: &[(Box<str>, f32)],
+        source: Source,
+        key: usize,
+        names: &[Box<str>],
+    ) -> Vec<bool> {
+        let covers = self
+            .rows(source, key, names)
+            .is_ok_and(|rows| rows.iter().any(|&r| r != NO_ROW));
+        let axis = match source {
+            Source::Expected => self.expected().map(|e| &e.features),
+            Source::Observed => self.observed().map(|o| &o.features),
+        };
+        match axis {
+            Ok(axis) if covers => features
+                .iter()
+                .map(|(f, _)| axis.index.match_gene(f).is_some())
+                .collect(),
+            _ => vec![false; features.len()],
+        }
+    }
+
     pub fn levels(
         &mut self,
         feature: &str,
@@ -992,9 +921,26 @@ impl Activity {
         cells: impl IntoIterator<Item = &'a str>,
         top: usize,
     ) -> Result<Vec<(Box<str>, f32)>, String> {
+        let at = self.cells_z(cells)?;
         let e = self.expected()?;
         let Model::Embedding { z, rho, .. } = &e.model else {
             return Err("neighbouring features need an embedding run".into());
+        };
+        let d = at - e.z_mean(z);
+        let mut scores: Vec<f32> = (rho * d).iter().copied().collect();
+        drop_below_median(&mut scores, e.baseline());
+        Ok(best(&scores, &e.features.names, top))
+    }
+
+    /// The mean cell embedding `z` of `cells` (those in the model): where
+    /// they sit in the space the cell map was laid out from.
+    pub fn cells_z<'a>(
+        &mut self,
+        cells: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vector, String> {
+        let e = self.expected()?;
+        let Model::Embedding { z, .. } = &e.model else {
+            return Err("placing cells needs an embedding run".into());
         };
         let index = e.cell_index();
         let rows: Vec<usize> = cells
@@ -1004,10 +950,18 @@ impl Activity {
         if rows.is_empty() {
             return Err("none of these cells is in the model".into());
         }
-        let d = row_mean(z, &rows) - e.z_mean(z);
-        let mut scores: Vec<f32> = (rho * d).iter().copied().collect();
-        drop_below_median(&mut scores, e.baseline());
-        Ok(best(&scores, &e.features.names, top))
+        Ok(row_mean(z, &rows))
+    }
+
+    /// The `top` cells whose embedding is nearest `at` (Euclidean), scored
+    /// by minus the distance.
+    pub fn cells_near(&mut self, at: &Vector, top: usize) -> Result<Vec<(Box<str>, f32)>, String> {
+        let e = self.expected()?;
+        let Model::Embedding { z, .. } = &e.model else {
+            return Err("placing cells needs an embedding run".into());
+        };
+        nearest_rows(z, at, &e.cells, None, top)
+            .ok_or_else(|| "the co-embedding and the cell embedding differ in width".into())
     }
 
     /// Cells whose expected level of `feature` is highest relative to the
@@ -1087,6 +1041,254 @@ fn row_sum(m: &Mat, rows: &[usize]) -> Vector {
     acc
 }
 
+/// Open the run's data files once: the observed counts, and each cell's
+/// batch when there is more than one. Slow on a large run (every data file
+/// is opened), so the screen does it on the side.
+pub(crate) fn read_run_data(m: &RunManifest, dir: &Path) -> anyhow::Result<RunRead> {
+    anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
+    let files = m.data_inputs(dir);
+    if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
+        anyhow::bail!("the data is not here ({gone})");
+    }
+    let batch_files = m.data_batches(dir);
+    let reload = senna::multiome_layout::recorded_layout(m.data.multiome.as_ref(), files.len())?;
+    info!("view: opening {} data file(s)", files.len());
+    let SparseDataWithBatch { data, batch, .. } =
+        read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
+            data_files: files,
+            batch_files: (!batch_files.is_empty()).then_some(batch_files),
+            keep_empty_barcodes: true,
+            ..Default::default()
+        })?)?;
+    let cells = data.column_names()?;
+    anyhow::ensure!(
+        cells.len() == batch.len(),
+        "{} cells but {} batch labels",
+        cells.len(),
+        batch.len()
+    );
+    // A colouring only when there is more than one batch.
+    let batches = batch.iter().any(|b| *b != batch[0]).then(|| {
+        super::data::Labels::new(
+            super::data::LabelKind::Batch,
+            cells.iter().cloned().zip(batch),
+            &[],
+        )
+    });
+    let n_cells = cells.len();
+    let cell_index = cells
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| (n, i as u32))
+        .collect();
+    let observed = Observed {
+        features: Axis::new(data.row_names()?),
+        cell_index,
+        n_cells,
+        data,
+    };
+    Ok(RunRead { observed, batches })
+}
+
+/// What reading a run's data files gives: its observed counts, and each
+/// cell's batch when there is more than one.
+pub(crate) struct RunRead {
+    observed: Observed,
+    pub batches: Option<super::data::Labels>,
+}
+
+/// A run's data files, read once on a worker thread and shared by every
+/// view of the run.
+pub(crate) type RunFiles = crate::tui::Loading<RunRead>;
+
+/// A run's model of expression, read once on a worker thread.
+pub(crate) type ModelTables = crate::tui::Loading<Expected>;
+
+/// A run's feature embedding, read once on a worker thread.
+pub(crate) type FeatureTables = crate::tui::Loading<super::features::FeatureEmbedding>;
+
+/// A run's slow reads, each started once on a worker thread and shared by
+/// every view of the run: its data files, its model of expression, and
+/// its feature embedding.
+#[derive(Clone)]
+pub(crate) struct RunLoads {
+    pub files: Arc<RunFiles>,
+    pub model: Arc<ModelTables>,
+    pub features: Arc<FeatureTables>,
+}
+
+impl RunLoads {
+    /// The reads of the run at `dir` (manifest `m`), none started.
+    pub(crate) fn new(m: &RunManifest, dir: &Path) -> Self {
+        let run = || (m.clone(), dir.to_path_buf());
+        let (fm, fd) = run();
+        let (mm, md) = run();
+        let (em, ed) = run();
+        Self {
+            files: Arc::new(RunFiles::new(move || {
+                read_run_data(&fm, &fd).map_err(|e| e.to_string())
+            })),
+            model: Arc::new(ModelTables::new(move || {
+                load_expected(&mm, &md).map_err(|e| e.to_string())
+            })),
+            features: Arc::new(FeatureTables::new(move || {
+                super::features::FeatureEmbedding::load(Some(&(em, ed)))
+            })),
+        }
+    }
+
+    /// No run to read from.
+    #[cfg(test)]
+    pub(crate) fn none() -> Self {
+        const NO: &str = "no run to read from";
+        let loads = Self {
+            files: Arc::new(RunFiles::new(|| Err(NO.into()))),
+            model: Arc::new(ModelTables::new(|| Err(NO.into()))),
+            features: Arc::new(FeatureTables::new(|| Err(NO.into()))),
+        };
+        loads.start();
+        loads
+    }
+
+    /// Start every read (each once).
+    pub(crate) fn start(&self) {
+        self.files.start();
+        self.model.start();
+        self.features.start();
+    }
+
+    /// What is still being read, and for how long: the longest first.
+    pub(crate) fn busy(&self) -> Vec<(&'static str, std::time::Duration)> {
+        let mut out: Vec<_> = [
+            ("model tables", self.model.busy()),
+            ("data files", self.files.busy()),
+            ("feature embedding", self.features.busy()),
+        ]
+        .into_iter()
+        .filter_map(|(what, t)| t.map(|t| (what, t)))
+        .collect();
+        out.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
+        out
+    }
+
+    /// How many of the reads have answered.
+    pub(crate) fn answered(&self) -> usize {
+        usize::from(self.files.try_get().is_some())
+            + usize::from(self.model.try_get().is_some())
+            + usize::from(self.features.try_get().is_some())
+    }
+}
+
+/// The run's model of expression, read the way its kind's decoder reads
+/// its tables ([`senna::run_manifest::RunKind::expression_model`]).
+fn load_expected(m: &RunManifest, dir: &Path) -> anyhow::Result<Expected> {
+    use senna::run_manifest::ExpressionModel as E;
+    let o = &m.outputs;
+    let slot = |slot: Option<&str>, what: &str| {
+        slot.map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("this {} run records no {what}", m.kind))
+    };
+    let model = m.kind.expression_model();
+    match model {
+        E::Embedding => {
+            let z_rel = slot(o.cell_embedding.as_deref(), "cell embedding")?;
+            let (rho_path, bias_path) =
+                run_manifest::resolve_feature_embedding_for(m, dir)?;
+            let z = read_table(dir, &z_rel)?;
+            let rho = Mat::from_parquet_with_row_names(&rho_path, Some(0))?;
+            // Only used when it lines up with the feature table.
+            let bias = bias_path
+                .and_then(|p| Mat::from_parquet_with_row_names(&p, Some(0)).ok())
+                .filter(|b| b.rows == rho.rows && b.mat.ncols() >= 1)
+                .map(|b| b.mat.column(0).iter().copied().collect());
+            embedding(z, rho, bias)
+        }
+        E::LatentLoadings => {
+            let z = read_table(dir, &slot(o.latent.as_deref(), "latent")?)?;
+            let w = read_table(dir, &slot(o.dictionary.as_deref(), "dictionary")?)?;
+            embedding(z, w, None)
+        }
+        E::Topic | E::TopicOfLogits => {
+            let mut theta = read_table(dir, &slot(o.latent.as_deref(), "latent")?)?;
+            let beta = read_table(dir, &slot(o.gene_dictionary(), "dictionary")?)?;
+            anyhow::ensure!(
+                theta.mat.ncols() == beta.mat.ncols(),
+                "latent has {} topics, dictionary {}",
+                theta.mat.ncols(),
+                beta.mat.ncols()
+            );
+            if model == E::TopicOfLogits {
+                // The decoder reads the raw latent through a softmax.
+                use legume_numeric::candle::vae::masked_topic::LatentHead;
+                theta.mat = senna::embed_common::latent_to_theta(&theta.mat, LatentHead::Gaussian)
+                    .map(f32::ln);
+            }
+            Ok(Expected::new(
+                Axis::new(beta.rows),
+                theta.rows,
+                Model::Topic {
+                    log_theta: theta.mat,
+                    log_beta: beta.mat,
+                },
+            ))
+        }
+        E::Unmodelled => anyhow::bail!(
+            "a {} run has no model of expression to predict a feature from · o shows the observed counts",
+            m.kind
+        ),
+    }
+}
+
+/// An embedding model from cell table `z` and feature table `rho` of one
+/// width.
+fn embedding(
+    z: MatWithNames<Mat>,
+    rho: MatWithNames<Mat>,
+    bias: Option<Vec<f32>>,
+) -> anyhow::Result<Expected> {
+    anyhow::ensure!(
+        z.mat.ncols() == rho.mat.ncols(),
+        "cell table has {} dims, feature table {}",
+        z.mat.ncols(),
+        rho.mat.ncols()
+    );
+    Ok(Expected::new(
+        Axis::new(rho.rows),
+        z.rows,
+        Model::Embedding {
+            z: z.mat,
+            rho: rho.mat,
+            bias,
+        },
+    ))
+}
+
+/// The `top` rows of `m` nearest `at` (Euclidean), with their `names`,
+/// scored by minus the distance; `skip` left out. None when `at` is not of
+/// `m`'s width.
+pub(super) fn nearest_rows(
+    m: &Mat,
+    at: &Vector,
+    names: &[Box<str>],
+    skip: Option<usize>,
+    top: usize,
+) -> Option<Vec<(Box<str>, f32)>> {
+    if m.ncols() != at.len() {
+        return None;
+    }
+    let mut scores: Vec<f32> = (0..m.nrows())
+        .into_par_iter()
+        .map(|i| {
+            let d2: f32 = (0..m.ncols()).map(|j| (m[(i, j)] - at[j]).powi(2)).sum();
+            -d2.sqrt()
+        })
+        .collect();
+    if let Some(i) = skip {
+        scores[i] = f32::NAN;
+    }
+    Some(best(&scores, names, top))
+}
+
 /// Mean of the given rows of `m`, as a column vector.
 fn row_mean(m: &Mat, rows: &[usize]) -> Vector {
     row_sum(m, rows) / rows.len().max(1) as f32
@@ -1157,12 +1359,18 @@ mod tests {
                 bias: Some(vec![0.5, 0.1, 0.9]),
             }
         };
-        let mut a = Activity::new(
+        let mut loads = RunLoads::none();
+        loads.model = Arc::new(ModelTables::ready(Ok(Expected::new(
+            Axis::new(names("GENE", 3)),
+            cells,
+            model,
+        ))));
+        Activity::new(
             RunManifest::new(senna::run_manifest::RunKind::Topic, "r"),
             PathBuf::new(),
-        );
-        a.expected = Some(Ok(Expected::new(Axis::new(names("GENE", 3)), cells, model)));
-        a
+            loads,
+            true,
+        )
     }
 
     #[test]
@@ -1244,5 +1452,115 @@ mod tests {
         let q = quadratic_forms(&rho, &c);
         assert!((q[0] - 1.0).abs() < 1e-5);
         assert!(q[1].abs() < 1e-6);
+    }
+
+    /// Write `rows × k` table `file` into `dir`, rows named `{p}{i}`.
+    fn table(dir: &Path, file: &str, p: &str, data: &[f32], k: usize) {
+        let rows: Vec<Box<str>> = (0..data.len() / k)
+            .map(|i| format!("{p}{i}").into())
+            .collect();
+        let cols: Vec<Box<str>> = (0..k).map(|j| format!("T{j}").into()).collect();
+        Mat::from_row_slice(rows.len(), k, data)
+            .to_parquet_with_names(
+                &dir.join(file).to_string_lossy(),
+                (Some(&rows), Some("name")),
+                Some(&cols),
+            )
+            .unwrap();
+    }
+
+    /// A run of `kind` whose `latent` and `dictionary` are the given tables.
+    fn run_of(
+        kind: senna::run_manifest::RunKind,
+        dir: &Path,
+        latent: &[f32],
+        dict: &[f32],
+    ) -> Activity {
+        table(dir, "r.latent.parquet", "c", latent, 2);
+        table(dir, "r.dictionary.parquet", "GENE", dict, 2);
+        let mut m = RunManifest::new(kind, "r");
+        m.outputs.latent = Some("r.latent.parquet".into());
+        m.outputs.dictionary = Some("r.dictionary.parquet".into());
+        let loads = RunLoads::new(&m, dir);
+        Activity::new(m, dir.to_path_buf(), loads, true)
+    }
+
+    #[test]
+    fn a_vae_run_predicts_from_its_latent_and_loadings() {
+        // π = softmax_d(z · W + b): the latent and the dictionary are z and W.
+        let dir = tempfile::tempdir().unwrap();
+        let z = [0.5, -1.0, 2.0, 0.0];
+        let w = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut a = run_of(senna::run_manifest::RunKind::Vae, dir.path(), &z, &w);
+        let e = a.expected().unwrap();
+        let Model::Embedding {
+            z: got_z,
+            rho,
+            bias,
+        } = &e.model
+        else {
+            panic!("a vae run is z · W");
+        };
+        assert_eq!(got_z.as_slice(), Mat::from_row_slice(2, 2, &z).as_slice());
+        assert_eq!(rho.as_slice(), Mat::from_row_slice(3, 2, &w).as_slice());
+        assert!(bias.is_none());
+    }
+
+    #[test]
+    fn a_masked_vae_run_reads_its_latent_through_a_softmax() {
+        // Its latent is the raw z; the decoder reads log θ = log_softmax(z)
+        // against the log β of its dictionary.
+        let dir = tempfile::tempdir().unwrap();
+        let z = [0.5, -1.0, 2.0, 0.0];
+        let log_beta = [-0.1, -2.0, -3.0, -0.2, -2.5, -2.6];
+        let mut a = run_of(
+            senna::run_manifest::RunKind::MaskedVae,
+            dir.path(),
+            &z,
+            &log_beta,
+        );
+        let e = a.expected().unwrap();
+        let Model::Topic { log_theta, .. } = &e.model else {
+            panic!("a masked-vae run is a topic model of softmax(z)");
+        };
+        for r in 0..2 {
+            let total: f32 = log_theta.row(r).iter().map(|v| v.exp()).sum();
+            assert!((total - 1.0).abs() < 1e-5, "row {r} sums to {total}");
+        }
+        // The softmax keeps the order within a cell.
+        assert!(log_theta[(0, 0)] > log_theta[(0, 1)]);
+    }
+
+    #[test]
+    fn a_run_with_no_model_of_expression_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = run_of(
+            senna::run_manifest::RunKind::Svd,
+            dir.path(),
+            &[1.0; 4],
+            &[1.0; 6],
+        );
+        let Err(e) = a.expected() else {
+            panic!("svd has no model of expression");
+        };
+        assert!(e.contains("observed"), "{e}");
+    }
+
+    #[test]
+    fn a_feature_shows_only_where_its_source_has_values_for_the_view() {
+        let mut a = tiny(false);
+        let listed: Vec<(Box<str>, f32)> = vec![("GENE0".into(), 1.0), ("NOPE".into(), 0.5)];
+        let view: Vec<Box<str>> = ["c0", "c3"].map(Into::into).to_vec();
+        // Not in the model: nothing to draw.
+        assert_eq!(
+            a.drawable(&listed, Source::Expected, 0, &view),
+            [true, false]
+        );
+        // None of the view's cells is in the model: missing everywhere.
+        let elsewhere: Vec<Box<str>> = ["x0", "x1"].map(Into::into).to_vec();
+        assert_eq!(
+            a.drawable(&listed, Source::Expected, 1, &elsewhere),
+            [false, false]
+        );
     }
 }

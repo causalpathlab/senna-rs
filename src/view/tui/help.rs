@@ -34,15 +34,15 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "click a cell",
-                "its cluster's summary, and the features nearest it, with edges to them",
+                "its cluster's summary, and the features placed nearest it (Euclidean, as the map), with edges to them",
             ),
             (
                 "click a feature",
-                "on a feature map: the features nearest it (cosine), and the cells nearest it",
+                "on a feature map: the features nearest it (cosine) and the cells most up in it; on the cell map, the features and cells nearest where it sits",
             ),
             (
                 "click a label",
-                "a cluster's label on the map: the features most up in that cluster",
+                "a cluster's label on the map: the features placed nearest that cluster",
             ),
             ("[  ]", "focus the previous / next group (drawn on top)"),
             (
@@ -66,11 +66,16 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "n",
                 "suggest features: what sets the focused group apart, or what varies here",
             ),
+
+            (
+                "↑ ↓  PgUp PgDn",
+                "with a feature list in the sidebar (suggestions, features near a click): step through it, each shown on the map; a click on one shows it",
+            ),
             (
                 "g  G",
                 "step through the suggestions (else the focused group's markers)",
             ),
-            ("/", "search a feature by name"),
+            ("/", "search a feature by name: matches list in the sidebar, ↑ ↓ choose, enter shows"),
             ("a", "activity of the focused group's whole marker set"),
             ("o", "expected (model) or observed (counts)"),
             ("p", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
@@ -132,6 +137,30 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Settings panel (top of the sidebar)",
+        &[
+            (
+                "click ‹  ›",
+                "previous / next value: layout (a method the run lacks opens the recompute menu), map, colour, values, labels, dots, how many neighbours a click lists; hide × on its title hides the sidebar",
+            ),
+            ("keys", "the key beside each setting steps it too"),
+        ],
+    ),
+    (
+        "How the keys read",
+        &[
+            ("lowercase", "looks: changes what is on screen, never the run's files"),
+            (
+                "R A T X",
+                "uppercase opens a mode or writes: relabel, annotate, make topics, close a view for good",
+            ),
+            ("r", "recompute opens a menu first; nothing is written until it runs"),
+            ("ctrl-r", "runs what a menu or popup set up (recompute, submit)"),
+            ("ctrl-l", "reloads the run from disk"),
+            ("esc  x", "back out: close a popup, clear a click or a feature"),
+        ],
+    ),
+    (
         "Other",
         &[
             (
@@ -139,20 +168,20 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "style of a group: colour, shape, opacity, size, hidden",
             ),
             ("t", "labels on the map: small, medium, large, largest, off, in turn"),
-            ("b", "sidebar on or off"),
+            ("space  b", "sidebar on or off"),
             (
                 "<  >",
                 "every dot and all text smaller / bigger (each group's own style stays)",
             ),
             (
                 "r",
-                "recompute this run's layouts or clusters: choose in a menu, then enter",
+                "recompute this run's layouts or clusters: choose in a menu, then ctrl-r (or enter) runs it",
             ),
             (
                 "s",
                 "save as PDF: this view, or every run (one grid, or a page each); width, dpi, file name",
             ),
-            ("ctrl-r  ctrl-l", "reload the run from disk and redraw the screen"),
+            ("ctrl-l", "reload the run from disk and redraw the screen"),
             ("q", "quit"),
         ],
     ),
@@ -262,11 +291,11 @@ impl App {
     pub(super) fn status_keys(&self) -> [&'static str; 2] {
         match self.context() {
             Context::Browse => [
-                "click a cell: its cluster and the features nearest it (p pins their names)   [ ] focus a group   c change the colouring   n suggest features",
-                "R relabel clusters   A annotate with lupin   , . rounds   tab / m other layouts   z lay out a group   d copy view   w all views   s save PDF   ? all keys   q quit",
+                "click a cell: its cluster and the features nearest it (p pins their names)   [ ] focus a group   n suggest features   settings: click ‹ › on the right",
+                "R relabel clusters   A annotate with lupin   r recompute   , . rounds   z lay out a group   d copy view   w all views   s save PDF   ? all keys   q quit",
             ],
             Context::Feature => [
-                "g / G next or previous feature   o switch between counts and model   a the group's whole marker set   x back to group colours",
+                "↑ ↓ next or previous feature in the list   o switch between counts and model   a the group's whole marker set   x back to group colours",
                 "/ search a feature   n new suggestions   p pin its name   [ ] focus a group   ? all keys",
             ],
             Context::Merge => [
@@ -283,13 +312,13 @@ impl App {
             ],
             Context::Chart => [
                 "H next chart (structure plot, heatmap, map)   c group by another grouping   + / - features per group (heatmap)",
-                "s save PDF   ctrl-r redraw   ? all keys   q quit",
+                "s save PDF   ctrl-l redraw   ? all keys   q quit",
             ],
             // The popup says what the keys do.
             Context::Submit | Context::Recompute | Context::File => ["", ""],
             Context::Search => [
-                "type part of a feature name   enter shows the first match   esc cancels",
-                "",
+                "type part of a feature name   ↑ ↓ choose a match in the sidebar   enter or click shows it",
+                "esc cancels",
             ],
             Context::StyleMenu => [
                 "↑ ↓ choose a group   ← → change the value   tab next property",

@@ -78,3 +78,43 @@ fn a_child_runs_on_a_terminal_so_its_bars_draw() {
         ]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_stop_interrupts_the_child_and_what_it_started() {
+    // The child traps the interrupt and wraps up, as a fit does, but only
+    // once the grandchild it waits on is interrupted too.
+    let script = "trap 'echo wrapped >&2; exit 0' INT; sleep 30";
+    let mut command = Command::new("sh");
+    command.args(["-c", script]);
+    let stopper = std::sync::Arc::new(Stopper::default());
+    let s = stopper.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!s.stop());
+    });
+    let start = std::time::Instant::now();
+    let mut said = Vec::new();
+    let out = run_one(command, &stopper, |s| said.push(s));
+    assert_eq!(out, Err(Failed::Stopped));
+    assert!(said.contains(&Said::Line("wrapped".into())));
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_second_stop_kills_a_child_that_ignores_the_interrupt() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "trap '' INT; sleep 30"]);
+    let stopper = std::sync::Arc::new(Stopper::default());
+    let s = stopper.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!s.stop());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(s.stop());
+    });
+    let start = std::time::Instant::now();
+    assert_eq!(run_one(command, &stopper, |_| {}), Err(Failed::Stopped));
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+}

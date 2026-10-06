@@ -6,7 +6,7 @@ use super::review::{Draft, Mark, Merge, Verdict};
 use super::{Axis, Pick, Scene};
 use fit::Evidence;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 mod fit;
 mod live;
@@ -74,7 +74,7 @@ pub(crate) struct Review {
     pub preview: Option<Vec<String>>,
     /// lupin's scores with the staged marker edits, when there are any.
     pub live: Option<Live>,
-    evidence: Rc<Evidence>,
+    evidence: Arc<Evidence>,
     /// Per-group sums for the (space, grouping) on screen, taken once.
     sums: Option<(SumsKey, Result<GroupSums, String>)>,
 }
@@ -131,7 +131,7 @@ impl Review {
             merge: None,
             preview: None,
             live: None,
-            evidence: Rc::default(),
+            evidence: Arc::default(),
             sums: None,
         }
     }
@@ -166,7 +166,7 @@ impl Scene {
             .and_then(|a| a.feature_names(Source::Expected).ok().map(<[_]>::to_vec))
             .unwrap_or_default();
         let mut review = Review::new(Vec::new(), draft);
-        review.evidence = Rc::new(Evidence::new(markers, features));
+        review.evidence = Arc::new(Evidence::new(markers, features));
         self.review = Some(review);
         let overview = self.cluster_overview(li);
         if let Some(r) = self.review.as_mut() {
@@ -381,10 +381,10 @@ impl Scene {
         })
     }
 
-    fn evidence(&self) -> Rc<Evidence> {
+    fn evidence(&self) -> Arc<Evidence> {
         self.review
             .as_ref()
-            .map_or_else(Rc::default, |r| r.evidence.clone())
+            .map_or_else(Arc::default, |r| r.evidence.clone())
     }
 
     /// The activity, and the review's per-group sums for the space and
