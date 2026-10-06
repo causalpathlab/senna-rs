@@ -892,6 +892,7 @@ mod tests {
         s.near = Some(features::Near {
             name: "c1".into(),
             centre: features::Centre::Cell,
+            metric: features::Metric::Distance,
             features: vec![("g1".into(), 1.0), ("nowhere".into(), 0.5)],
             cells: Vec::new(),
         });
@@ -981,6 +982,7 @@ mod tests {
                 space: 0,
                 xy: centre,
             },
+            metric: features::Metric::Distance,
             features: vec![("g1".into(), 1.0)],
             cells: Vec::new(),
         });

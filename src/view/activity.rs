@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// Per group, a score per feature; and the features, in column order.
 type GroupContrasts<'a> = (Vec<Vec<f32>>, &'a [Box<str>]);
 
-type Vector = nalgebra::DVector<f32>;
+pub(super) type Vector = nalgebra::DVector<f32>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -1008,6 +1008,41 @@ impl Activity {
         let mut scores: Vec<f32> = (rho * d).iter().copied().collect();
         drop_below_median(&mut scores, e.baseline());
         Ok(best(&scores, &e.features.names, top))
+    }
+
+    /// The mean cell embedding `z` of `cells` (those in the model): where
+    /// they sit in the space the cell map was laid out from.
+    pub fn cells_z<'a>(
+        &mut self,
+        cells: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vector, String> {
+        let e = self.expected()?;
+        let Model::Embedding { z, .. } = &e.model else {
+            return Err("placing cells needs an embedding run".into());
+        };
+        let index = e.cell_index();
+        let rows: Vec<usize> = cells
+            .into_iter()
+            .filter_map(|c| index.get(c).map(|&n| n as usize))
+            .collect();
+        if rows.is_empty() {
+            return Err("none of these cells is in the model".into());
+        }
+        Ok(row_mean(z, &rows))
+    }
+
+    /// The `top` cells whose embedding is nearest `at` (Euclidean), scored
+    /// by minus the distance.
+    pub fn cells_near(&mut self, at: &Vector, top: usize) -> Result<Vec<(Box<str>, f32)>, String> {
+        let e = self.expected()?;
+        let Model::Embedding { z, .. } = &e.model else {
+            return Err("placing cells needs an embedding run".into());
+        };
+        if z.ncols() != at.len() {
+            return Err("the co-embedding and the cell embedding differ in width".into());
+        }
+        let scores: Vec<f32> = z.row_iter().map(|r| -(r.transpose() - at).norm()).collect();
+        Ok(best(&scores, &e.cells, top))
     }
 
     /// Cells whose expected level of `feature` is highest relative to the

@@ -34,15 +34,15 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "click a cell",
-                "its cluster's summary, and the features nearest it, with edges to them",
+                "its cluster's summary, and the features placed nearest it (Euclidean, as the map), with edges to them",
             ),
             (
                 "click a feature",
-                "on a feature map: the features nearest it (cosine), and the cells nearest it",
+                "on a feature map: the features nearest it (cosine) and the cells most up in it; on the cell map, the features and cells nearest where it sits",
             ),
             (
                 "click a label",
-                "a cluster's label on the map: the features most up in that cluster",
+                "a cluster's label on the map: the features placed nearest that cluster",
             ),
             ("[  ]", "focus the previous / next group (drawn on top)"),
             (
@@ -66,6 +66,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "n",
                 "suggest features: what sets the focused group apart, or what varies here",
             ),
+
             (
                 "g  G",
                 "step through the suggestions (else the focused group's markers)",

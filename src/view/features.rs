@@ -19,12 +19,27 @@ pub(crate) enum Centre {
     None,
 }
 
+/// What the scores of a set of neighbours measure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Metric {
+    /// Euclidean distance in the cells' space, the metric the cell map is
+    /// laid out and features are placed on it by; scores are minus it.
+    Distance,
+    /// Cosine of feature embeddings, the metric a feature map is laid out by.
+    Cosine,
+    /// `ρ_g · (z − z̄)`: how far the cells lean the feature's way, for a run
+    /// with no co-embedding to place features by.
+    Direction,
+}
+
 /// Features shown around one clicked cell, or features and cells around one
 /// clicked feature.
 #[derive(Clone)]
 pub(crate) struct Near {
     pub name: Box<str>,
     pub centre: Centre,
+    /// What the scores measure.
+    pub metric: Metric,
     pub features: Vec<(Box<str>, f32)>,
     /// Cells nearest a clicked feature (runs with cells in an embedding).
     pub cells: Vec<(Box<str>, f32)>,
@@ -35,6 +50,9 @@ pub(crate) struct Near {
 pub(crate) struct FeatureEmbedding {
     axis: activity::Axis,
     rows: Mat,
+    /// The co-embedding as written, rows as `rows`, when the run has one:
+    /// where each feature sits among the cells.
+    places: Option<Mat>,
 }
 
 impl FeatureEmbedding {
@@ -46,10 +64,48 @@ impl FeatureEmbedding {
         use crate::postprocess::fit_layout_features::{read_feature_rows, FeatureSpace};
         let (names, rows) = read_feature_rows(m, dir, FeatureSpace::Auto)
             .map_err(|e| format!("no feature embedding: {e}"))?;
+        // Auto reads the co-embedding when there is one: the same rows,
+        // before they were normalized.
+        let places = m.outputs.feature_coembedding.as_deref().and_then(|rel| {
+            let path = senna::run_manifest::resolve(dir, rel);
+            Mat::from_parquet_with_row_names(&path.to_string_lossy(), Some(0))
+                .ok()
+                .filter(|t| t.rows == names)
+                .map(|t| t.mat)
+        });
         Ok(Self {
             axis: activity::Axis::new(names),
             rows,
+            places,
         })
+    }
+
+    /// The `top` features whose co-embedding is nearest `z` (Euclidean),
+    /// scored by minus the distance, `skip` left out; none without a
+    /// co-embedding of `z`'s width.
+    fn near_place(
+        &self,
+        z: &activity::Vector,
+        skip: Option<usize>,
+        top: usize,
+    ) -> Option<Vec<(Box<str>, f32)>> {
+        let places = self.places.as_ref().filter(|p| p.ncols() == z.len())?;
+        let mut scores: Vec<f32> = places
+            .row_iter()
+            .map(|r| -(r.transpose() - z).norm())
+            .collect();
+        if let Some(i) = skip {
+            scores[i] = f32::NAN;
+        }
+        Some(activity::best(&scores, &self.axis.names, top))
+    }
+
+    /// Where `feature` sits among the cells, and its row; none without a
+    /// co-embedding.
+    fn place_of(&self, feature: &str) -> Option<(activity::Vector, usize)> {
+        let places = self.places.as_ref()?;
+        let i = self.axis.index.match_gene(feature)?;
+        Some((places.row(i).transpose(), i))
     }
 
     /// The `top` features of highest cosine to `feature`, itself left out.
@@ -337,20 +393,40 @@ impl Scene {
         }
     }
 
-    /// Features nearest cell `cell` in the embedding.
+    /// Features nearest cell `cell` (see [`Self::rank_near`]).
     pub fn show_near(&mut self, cell: &str) {
         if self.current().kind != SpaceKind::Cells {
             return;
         }
-        let Some(activity) = self.activity() else {
-            return;
-        };
-        let found = activity.near_cells([cell], NEAR);
-        self.keep_near(cell.into(), Centre::Cell, found);
+        let (metric, found) = self.rank_near(&[cell]);
+        self.keep_near(cell.into(), Centre::Cell, metric, found);
     }
 
-    /// Features nearest group `g` of the grouping on screen: those most up
-    /// in its cells against the average cell, drawn from its label.
+    /// The features near `cells`: those whose co-embedding is nearest the
+    /// cells' mean embedding (Euclidean, as the map is laid out), or, on a
+    /// run with no co-embedding, those most up in the cells.
+    fn rank_near(&mut self, cells: &[&str]) -> (Metric, Result<Vec<(Box<str>, f32)>, String>) {
+        let z = match self.activity() {
+            Some(a) => a.cells_z(cells.iter().copied()),
+            None => return (Metric::Distance, Err("no run to find features in".into())),
+        };
+        let embedding = self
+            .feature_embedding
+            .get_or_insert_with(|| FeatureEmbedding::load(self.data.run.as_ref()));
+        if let (Ok(z), Ok(e)) = (&z, embedding.as_ref()) {
+            if let Some(found) = e.near_place(z, None, NEAR) {
+                return (Metric::Distance, Ok(found));
+            }
+        }
+        let found = match self.activity() {
+            Some(a) => a.near_cells(cells.iter().copied(), NEAR),
+            None => Err("no run to find features in".into()),
+        };
+        (Metric::Direction, found)
+    }
+
+    /// Features nearest group `g` of the grouping on screen, as for a cell
+    /// (see [`Self::rank_near`]), drawn from its label.
     pub fn show_near_group(&mut self, g: u32) {
         let (Some(xy), Some(groups)) = (self.group_centre(g), self.groups()) else {
             return;
@@ -360,11 +436,9 @@ impl Scene {
         let members: Vec<usize> = (0..groups.len()).filter(|&i| groups[i] == g).collect();
         let points = self.current().points.clone();
         let (name, space) = (self.levels()[g as usize].clone(), self.space);
-        let Some(activity) = self.activity() else {
-            return;
-        };
-        let found = activity.near_cells(members.iter().map(|&i| &*points.names[i]), NEAR);
-        self.keep_near(name, Centre::Group { space, xy }, found);
+        let cells: Vec<&str> = members.iter().map(|&i| &*points.names[i]).collect();
+        let (metric, found) = self.rank_near(&cells);
+        self.keep_near(name, Centre::Group { space, xy }, metric, found);
     }
 
     /// Show the features `found` around `centre`, or say why there are none.
@@ -372,6 +446,7 @@ impl Scene {
         &mut self,
         name: Box<str>,
         centre: Centre,
+        metric: Metric,
         found: Result<Vec<(Box<str>, f32)>, String>,
     ) {
         match found {
@@ -390,6 +465,7 @@ impl Scene {
                 self.near = Some(Near {
                     name,
                     centre,
+                    metric,
                     features,
                     cells: Vec::new(),
                 });
@@ -401,20 +477,39 @@ impl Scene {
         }
     }
 
-    /// Features nearest feature `feature` in the run's feature embedding,
-    /// by cosine, and on a run with cells, the cells nearest it.
+    /// Features nearest feature `feature`, and on a run with cells, the
+    /// cells nearest it, by the metric of the map on screen: on a cell map,
+    /// Euclidean from where it sits among the cells (its co-embedding); on a
+    /// feature map, cosine of feature embeddings, and cells most up in it.
     pub fn show_near_feature(&mut self, feature: &str) {
+        let on_cells = self.current().kind == SpaceKind::FeaturesOnCells;
         let embedding = self
             .feature_embedding
             .get_or_insert_with(|| FeatureEmbedding::load(self.data.run.as_ref()));
-        let features = embedding
-            .as_ref()
-            .map_err(Clone::clone)
-            .and_then(|e| e.near(feature, NEAR));
+        let placed = embedding.as_ref().ok().filter(|_| on_cells).and_then(|e| {
+            let (at, i) = e.place_of(feature)?;
+            Some((e.near_place(&at, Some(i), NEAR)?, at))
+        });
         let has_cells = self.data.has_axis(Axis::Cells);
-        let cells = match self.activity().filter(|_| has_cells) {
-            Some(a) => a.near_feature(feature, NEAR),
-            None => Ok(Vec::new()),
+        let (metric, features, cells) = match placed {
+            Some((features, at)) => {
+                let cells = match self.activity().filter(|_| has_cells) {
+                    Some(a) => a.cells_near(&at, NEAR),
+                    None => Ok(Vec::new()),
+                };
+                (Metric::Distance, Ok(features), cells)
+            }
+            None => {
+                let features = embedding
+                    .as_ref()
+                    .map_err(Clone::clone)
+                    .and_then(|e| e.near(feature, NEAR));
+                let cells = match self.activity().filter(|_| has_cells) {
+                    Some(a) => a.near_feature(feature, NEAR),
+                    None => Ok(Vec::new()),
+                };
+                (Metric::Cosine, features, cells)
+            }
         };
         // Whatever failed is said, even when the other half has neighbours.
         let (features, cells, why) = match (features, cells) {
@@ -427,6 +522,7 @@ impl Scene {
         self.near = (!features.is_empty() || !cells.is_empty()).then(|| Near {
             name: feature.into(),
             centre: Centre::Feature,
+            metric,
             features,
             cells,
         });
@@ -465,6 +561,7 @@ impl Scene {
                     self.locked.push(Near {
                         name: f.clone(),
                         centre: Centre::None,
+                        metric: Metric::Distance,
                         features: vec![(f.clone(), f32::NAN)],
                         cells: Vec::new(),
                     });
@@ -530,12 +627,25 @@ impl Scene {
     pub fn near_lines(&self) -> Option<Vec<String>> {
         let near = self.near.as_ref()?;
         let mut out = Vec::new();
+        let say = match near.metric {
+            Metric::Distance => "nearest (distance)",
+            Metric::Cosine => "nearest (cosine)",
+            Metric::Direction => "most up (ρ·(z − z̄))",
+        };
         for (what, list) in [("features", &near.features), ("cells", &near.cells)] {
             if list.is_empty() {
                 continue;
             }
-            out.push(format!("{what} nearest {}", near.name));
-            out.extend(list.iter().map(|(f, v)| format!("  {f:<14} {v:+.2}")));
+            // Cells near a feature on a feature map lean its way.
+            let say = match (what, near.metric) {
+                ("cells", Metric::Cosine) => "most up in it",
+                _ => say,
+            };
+            out.push(format!("{what} {say}: {}", near.name));
+            out.extend(list.iter().map(|(f, v)| match near.metric {
+                Metric::Distance => format!("  {f:<14} {:.2}", -v),
+                _ => format!("  {f:<14} {v:+.2}"),
+            }));
             out.push(String::new());
         }
         out.push("p pins their names on the map".into());
@@ -556,11 +666,39 @@ mod tests {
         let e = FeatureEmbedding {
             axis: activity::Axis::new(names.map(Into::into).to_vec()),
             rows,
+            places: None,
         };
         let near = e.near("a", 2).unwrap();
         let got: Vec<&str> = near.iter().map(|(n, _)| n.as_ref()).collect();
         assert_eq!(got, ["b", "c"]);
         assert!((near[1].1).abs() < 1e-6);
         assert!(e.near("z", 2).is_err());
+    }
+
+    #[test]
+    fn features_near_a_place_rank_by_distance_as_the_map_is_laid_out() {
+        let names = ["near", "long", "off"];
+        // "long" points the same way as the query but sits far out: cosine
+        // would tie it with "near", distance does not.
+        let places = Mat::from_row_slice(3, 2, &[1.0, 0.0, 10.0, 0.0, 0.0, 1.5]);
+        let mut rows = places.clone();
+        l2_normalize_rows_inplace(&mut rows);
+        let e = FeatureEmbedding {
+            axis: activity::Axis::new(names.map(Into::into).to_vec()),
+            rows,
+            places: Some(places),
+        };
+        let z = activity::Vector::from_vec(vec![1.2, 0.0]);
+        let got = e.near_place(&z, None, 3).unwrap();
+        let order: Vec<&str> = got.iter().map(|(n, _)| &**n).collect();
+        assert_eq!(order, ["near", "off", "long"]);
+        assert!((got[0].1 + 0.2).abs() < 1e-6);
+        // A feature's own place: itself left out.
+        let (at, i) = e.place_of("near").unwrap();
+        let got = e.near_place(&at, Some(i), 1).unwrap();
+        assert_eq!(&*got[0].0, "off");
+        // No co-embedding of this width: no ranking by place.
+        let wide = activity::Vector::from_vec(vec![1.0, 0.0, 0.0]);
+        assert!(e.near_place(&wide, None, 1).is_none());
     }
 }
