@@ -136,7 +136,8 @@ pub(crate) struct Browser<W: Wanted> {
     pub dir: PathBuf,
     pub want: W,
     entries: Vec<Entry<W::About>>,
-    /// Typed letters narrow the list to names containing them.
+    /// Typed letters narrow the list to names containing them; typed from
+    /// a `/`, they are a path the browser follows (see [`Self::follow`]).
     pub filter: String,
     /// Position among the shown entries.
     pub row: usize,
@@ -167,6 +168,16 @@ impl<W: Wanted> Browser<W> {
     /// Read the current folder; the cursor goes to `select` if it is
     /// listed, else to the best file, else to the first entry after `..`.
     pub fn read(&mut self, select: Option<&str>) {
+        self.load();
+        self.filter.clear();
+        let want = select.map(str::to_string).or_else(|| self.best.clone());
+        self.row = want
+            .and_then(|w| self.shown().iter().position(|e| e.name() == w))
+            .unwrap_or(usize::from(self.shown().len() > 1));
+    }
+
+    /// List the current folder and find its best file; the filter stays.
+    fn load(&mut self) {
         self.entries = list_dir(&self.dir, &self.want);
         let files: Vec<(&str, &W::About)> = self
             .entries
@@ -177,17 +188,60 @@ impl<W: Wanted> Browser<W> {
             })
             .collect();
         self.best = self.want.best(&self.dir, &files);
-        self.filter.clear();
-        let want = select.map(str::to_string).or_else(|| self.best.clone());
-        self.row = want
-            .and_then(|w| self.shown().iter().position(|e| e.name() == w))
-            .unwrap_or(usize::from(self.shown().len() > 1));
+    }
+
+    /// The typed path's folder (up to its last `/`) and the name begun
+    /// after it, when the filter is a path.
+    fn typed_path(&self) -> Option<(&str, &str)> {
+        if !self.filter.starts_with('/') {
+            return None;
+        }
+        let at = self.filter.rfind('/')? + 1;
+        Some((&self.filter[..at], &self.filter[at..]))
+    }
+
+    /// Follow a typed path: list its folder as soon as that folder exists,
+    /// and, with `enter`, go into a folder the name reaches as soon as no
+    /// other entry begins with it (`/data2` steps in at once; `/data` beside
+    /// `/data2` waits for a `/`). Deleting back never steps in again.
+    fn follow(&mut self, enter: bool) {
+        let Some((folder, _)) = self.typed_path() else {
+            return;
+        };
+        let folder: PathBuf = Path::new(folder).components().collect();
+        if folder.is_dir() && folder != self.dir {
+            self.dir = folder;
+            self.load();
+        }
+        let Some((folder, name)) = self.typed_path() else {
+            return;
+        };
+        if !enter || name.is_empty() || Path::new(folder) != self.dir {
+            return;
+        }
+        let begun: Vec<&Entry<W::About>> = self
+            .entries
+            .iter()
+            .filter(|e| !matches!(e, Entry::Up) && e.name().starts_with(name))
+            .collect();
+        if let [Entry::Dir(d)] = begun[..] {
+            if d == name {
+                self.filter.push('/');
+                self.follow(true);
+            }
+        }
     }
 
     /// The entries the filter lets through, `..` always first. Hidden ones
     /// only when the filter starts with `.`.
     pub fn shown(&self) -> Vec<&Entry<W::About>> {
-        let f = self.filter.to_lowercase();
+        // A typed path narrows by the name begun after its last `/`, once
+        // the browser is in that path's folder.
+        let f = match self.typed_path() {
+            Some((folder, name)) if Path::new(folder) == self.dir => name.to_lowercase(),
+            Some(_) => self.filter.to_lowercase(),
+            None => self.filter.to_lowercase(),
+        };
         let hidden = f.starts_with('.');
         self.entries
             .iter()
@@ -273,6 +327,7 @@ impl<W: Wanted> Browser<W> {
                 if self.filter.pop().is_none() {
                     self.go_up();
                 } else {
+                    self.follow(false);
                     self.row = usize::from(self.shown().len() > 1);
                 }
             }
@@ -293,9 +348,13 @@ impl<W: Wanted> Browser<W> {
                 Some(Entry::File(..)) if k.code == KeyCode::Enter => return self.take_here(),
                 Some(Entry::File(..)) => return Outcome::Ignored,
             },
+            // A typed path stepped into a folder already: the `/` the user
+            // types next is that one.
+            KeyCode::Char('/') if self.typed_path().is_some() && self.filter.ends_with('/') => {}
             KeyCode::Char(c) => {
                 let on = self.current().map(|e| e.name().to_string());
                 self.filter.push(c);
+                self.follow(true);
                 let shown = self.shown();
                 // Stay where the cursor was if it still shows, else on the
                 // best file, else on the first entry after `..`.
@@ -378,7 +437,9 @@ impl<W: Wanted> Browser<W> {
             format!(" {}", super::shown(&self.dir)),
             hint(),
         )));
-        if !self.filter.is_empty() {
+        if self.typed_path().is_some() {
+            head.push(Line::from(format!(" go to “{}”", self.filter)));
+        } else if !self.filter.is_empty() {
             head.push(Line::from(format!(" names with “{}”", self.filter)));
         }
         head.push(Line::from(""));
