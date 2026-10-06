@@ -15,10 +15,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// What a browser looks for, and how it speaks of it.
-pub(crate) trait Wanted {
+/// Cloned to the worker that lists a folder.
+pub(crate) trait Wanted: Clone + Send + 'static {
     /// What is shown about a listed file: its size, a run's kind, a
     /// panel's counts.
-    type About: Clone;
+    type About: Clone + Send + 'static;
 
     /// The popup's words.
     fn header(&self) -> Header;
@@ -147,7 +148,18 @@ pub(crate) struct Browser<W: Wanted> {
     pub marked: BTreeSet<PathBuf>,
     /// Why the file just chosen was refused.
     pub refused: Option<String>,
+    /// A folder still being listed on a worker thread, and since when.
+    listing: Option<(Listing<W>, std::time::Instant)>,
+    /// The entry to put the cursor on once the folder is listed.
+    select: Option<String>,
 }
+
+/// A folder's entries, coming from a worker thread.
+type Listing<W> = super::Pending<Vec<Entry<<W as Wanted>::About>>>;
+
+/// How long a folder may take to list before the browser shows it is
+/// listing and carries on; a quicker one is shown at once.
+const LIST_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl<W: Wanted> Browser<W> {
     pub fn open(dir: PathBuf, want: W, select: Option<&str>) -> Self {
@@ -160,6 +172,8 @@ impl<W: Wanted> Browser<W> {
             best: None,
             marked: BTreeSet::new(),
             refused: None,
+            listing: None,
+            select: None,
         };
         b.read(select);
         b
@@ -168,17 +182,52 @@ impl<W: Wanted> Browser<W> {
     /// Read the current folder; the cursor goes to `select` if it is
     /// listed, else to the best file, else to the first entry after `..`.
     pub fn read(&mut self, select: Option<&str>) {
-        self.load();
         self.filter.clear();
-        let want = select.map(str::to_string).or_else(|| self.best.clone());
-        self.row = want
-            .and_then(|w| self.shown().iter().position(|e| e.name() == w))
-            .unwrap_or(usize::from(self.shown().len() > 1));
+        self.select = select.map(str::to_string);
+        self.load();
     }
 
-    /// List the current folder and find its best file; the filter stays.
+    /// List the current folder on a worker thread (describing its files
+    /// can be slow): shown at once when quick, else when [`Self::poll`]
+    /// finds it done. The filter stays.
     fn load(&mut self) {
-        self.entries = list_dir(&self.dir, &self.want);
+        let (dir, want) = (self.dir.clone(), self.want.clone());
+        let listing = super::Pending::spawn(move || Ok(list_dir(&dir, &want)));
+        match listing.0.recv_timeout(LIST_GRACE) {
+            Ok(entries) => self.install(entries.unwrap_or_default()),
+            Err(_) => {
+                self.entries = vec![Entry::Up];
+                self.best = None;
+                self.listing = Some((listing, std::time::Instant::now()));
+            }
+        }
+    }
+
+    /// Show a folder listed on a worker thread once it is. Returns whether
+    /// it was.
+    pub fn poll(&mut self) -> bool {
+        let Some(entries) = self
+            .listing
+            .as_ref()
+            .and_then(|(l, _)| l.poll("listing stopped"))
+        else {
+            return false;
+        };
+        self.listing = None;
+        self.install(entries.unwrap_or_else(|_| vec![Entry::Up]));
+        true
+    }
+
+    /// Whether a folder is still being listed, and for how long.
+    pub fn listing(&self) -> Option<std::time::Duration> {
+        self.listing.as_ref().map(|(_, since)| since.elapsed())
+    }
+
+    /// Take a folder's `entries`: its best file found, the cursor on the
+    /// entry asked for, else the best file, else the first after `..`.
+    fn install(&mut self, entries: Vec<Entry<W::About>>) {
+        self.listing = None;
+        self.entries = entries;
         let files: Vec<(&str, &W::About)> = self
             .entries
             .iter()
@@ -188,6 +237,10 @@ impl<W: Wanted> Browser<W> {
             })
             .collect();
         self.best = self.want.best(&self.dir, &files);
+        let want = self.select.take().or_else(|| self.best.clone());
+        self.row = want
+            .and_then(|w| self.shown().iter().position(|e| e.name() == w))
+            .unwrap_or(usize::from(self.shown().len() > 1));
     }
 
     /// The typed path's folder (up to its last `/`) and the name begun
@@ -463,7 +516,13 @@ impl<W: Wanted> Browser<W> {
         let shown = self.shown();
         let many = self.want.many();
         let mut foot = Vec::new();
-        if !shown.iter().any(|e| e.is_file()) {
+        if let Some(t) = self.listing() {
+            let spin = super::SPINNER[(t.as_millis() / 100) as usize % super::SPINNER.len()];
+            foot.push(Line::from(Span::styled(
+                format!("  {spin} listing this folder… {}s", t.as_secs()),
+                hint(),
+            )));
+        } else if !shown.iter().any(|e| e.is_file()) {
             foot.push(Line::from(Span::styled(
                 format!("  no {} here", h.what),
                 hint(),

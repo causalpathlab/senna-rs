@@ -213,7 +213,8 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
             app.poll();
             terminal.draw(|f| app.draw(f))?;
             // Redraw often only while something changes on its own.
-            let wait = if app.running() || app.describing > 0 {
+            let listing = app.browser.as_ref().is_some_and(|b| b.listing().is_some());
+            let wait = if app.running() || app.describing > 0 || listing {
                 Duration::from_millis(200)
             } else {
                 Duration::from_secs(60)
@@ -685,6 +686,9 @@ impl App {
 
     /// Take in what the workers found out about data files.
     fn poll(&mut self) {
+        if let Some(b) = self.browser.as_mut() {
+            b.poll();
+        }
         while let Ok((path, d)) = self.described.1.try_recv() {
             self.describing = self.describing.saturating_sub(1);
             if let Some(p) = self.pairs.iter_mut().find(|p| p.data == path) {

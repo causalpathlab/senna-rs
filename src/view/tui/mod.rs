@@ -274,7 +274,14 @@ impl App {
         if answered {
             self.restart();
         }
+        // A file browser's folder listed on the side.
+        let listed = match &mut self.modal {
+            Some(Modal::MarkersFile(b)) => b.poll() || b.listing().is_some(),
+            Some(Modal::DataFile(b, _)) => b.poll() || b.listing().is_some(),
+            _ => false,
+        };
         let mut changed = answered
+            | listed
             | self.finish_zoom()
             | self.finish_relabel()
             | self.finish_recompute()

@@ -18,7 +18,7 @@ impl App {
             return;
         }
         let names = self.scene.searchable();
-        let genes = (!names.is_empty()).then(|| GeneIndex::build(&names));
+        let genes = (!names.is_empty()).then(|| std::sync::Arc::new(GeneIndex::build(&names)));
         let guess = self.markers_guess();
         let dir = guess
             .as_deref()

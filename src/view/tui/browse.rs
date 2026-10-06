@@ -25,8 +25,10 @@ const NOT_PANELS: &[&str] = &[
 
 /// Marker panels, counted against the run's genes when known, and whether
 /// lupin also tests GO terms on the clusters (tab turns it on and off).
+#[derive(Clone)]
 pub(super) struct Panels {
-    pub genes: Option<GeneIndex>,
+    /// Shared with the worker that lists a folder.
+    pub genes: Option<std::sync::Arc<GeneIndex>>,
     pub go: bool,
 }
 
@@ -57,7 +59,7 @@ impl Wanted for Panels {
     }
 
     fn file(&self, path: &Path, _name: &str) -> Option<Panel> {
-        read_panel(path, self.genes.as_ref())
+        read_panel(path, self.genes.as_deref())
     }
 
     /// Tab turns GO terms on and off.
@@ -102,6 +104,7 @@ impl Wanted for Panels {
 }
 
 /// Run manifests (`*.senna.json`).
+#[derive(Clone)]
 pub(super) struct Runs;
 
 impl Wanted for Runs {
@@ -136,6 +139,7 @@ impl Wanted for Runs {
 }
 
 /// A data file recorded at this path, which is not there.
+#[derive(Clone)]
 pub(super) struct Missing(pub String);
 
 impl Wanted for Missing {
@@ -263,12 +267,18 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
     log::set_max_level(log::LevelFilter::Off);
     let mut terminal = ratatui::init();
     let picked = (|| loop {
+        b.poll();
         terminal.draw(|f| {
             let area = f.area();
             f.render_widget(Block::default().style(page()), area);
             let lines = b.lines(usize::from(area.height).saturating_sub(2));
             popup(f, area, lines, 110, At::Middle, color::TEXT);
         })?;
+        // A folder still being listed is shown once it is, the spinner
+        // ticking meanwhile.
+        if b.listing().is_some() && !event::poll(std::time::Duration::from_millis(200))? {
+            continue;
+        }
         if let Event::Key(k) = event::read()? {
             if k.kind == KeyEventKind::Release {
                 continue;
@@ -321,7 +331,7 @@ mod tests {
 
         let names: Vec<Box<str>> = ["GENE1", "GENE2", "GENE3", "GENE4"].map(Box::from).to_vec();
         let want = Panels {
-            genes: Some(GeneIndex::build(&names)),
+            genes: Some(std::sync::Arc::new(GeneIndex::build(&names))),
             go: false,
         };
         let entries = list_dir(d, &want);
