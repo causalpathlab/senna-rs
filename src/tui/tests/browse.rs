@@ -257,8 +257,7 @@ fn a_typed_path_is_followed_and_a_folder_it_reaches_is_entered_at_once() {
     write(&d.join("data2"), "a.txt");
     let start = d.join("other");
     let mut b = Browser::open(start.clone(), Txt { many: false }, None);
-    // The whole path typed as it is: each folder it passes is entered, and
-    // the `/` after it is not doubled.
+    // The whole path typed as it is: each folder it passes is listed.
     let root = format!("{}/", d.display());
     type_in(&mut b, &root);
     assert_eq!(b.dir, d);
@@ -267,14 +266,16 @@ fn a_typed_path_is_followed_and_a_folder_it_reaches_is_entered_at_once() {
     type_in(&mut b, "data");
     assert_eq!(b.dir, d);
     assert_eq!(names(&b), ["..", "data", "data2"]);
-    // `data2` is the only one: in at once, the list its own.
+    // `data2` is the only one: its folder is listed at once, and what was
+    // typed stays as typed.
     type_in(&mut b, "2");
     assert_eq!(b.dir, d.join("data2"));
-    assert_eq!(b.filter, format!("{root}data2/"));
+    assert_eq!(b.filter, format!("{root}data2"));
     assert_eq!(names(&b), ["..", "a.txt"]);
-    // A `/` typed out of habit is the one already there.
+    // The `/` typed next is just that: the same folder.
     type_in(&mut b, "/");
     assert_eq!(b.filter, format!("{root}data2/"));
+    assert_eq!(b.dir, d.join("data2"));
     // Backspace back past the folder lists its parent again.
     b.key(key(KeyCode::Backspace));
     b.key(key(KeyCode::Backspace));
@@ -294,4 +295,16 @@ fn letters_without_a_leading_slash_still_narrow_names() {
     type_in(&mut b, "data2");
     assert_eq!(b.dir, dir.path());
     assert_eq!(names(&b), ["..", "data2"]);
+}
+
+#[test]
+fn a_typed_path_that_is_not_there_stays_where_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let mut b = Browser::open(dir.path().to_path_buf(), Txt { many: false }, None);
+    let gone = format!("{}/nowhere/x", dir.path().display());
+    type_in(&mut b, &gone);
+    assert_eq!(b.dir, dir.path());
+    assert!(!b.completed());
+    assert_eq!(names(&b), [".."]);
 }
