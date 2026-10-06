@@ -417,6 +417,28 @@ pub enum RunKind {
     Simba,
 }
 
+/// How a run's tables give each cell's expected level of each feature, up
+/// to a constant per cell (its depth) and, where no bias was kept, per
+/// feature. See [`RunKind::expression_model`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpressionModel {
+    /// `log rate = ρ_g · z_n + a_g`: `cell_embedding` (z), `feature_embedding`
+    /// (ρ) and, when kept, `feature_bias` (a).
+    Embedding,
+    /// `π_n = softmax_g(z_n · W + b)`: `latent` (z) and `dictionary` (W, gene
+    /// × factor). The bias b lives only in the checkpoint, per coarse
+    /// feature group, so it is left out.
+    LatentLoadings,
+    /// `rate = Σ_k θ_nk β_kg`: `latent` is log θ, the dictionary log β.
+    Topic,
+    /// As [`Self::Topic`], with `latent` the raw z the decoder reads through
+    /// `log θ = log_softmax(z)`.
+    TopicOfLogits,
+    /// No model of expression (a decomposition, or no cells): only the
+    /// observed counts.
+    Unmodelled,
+}
+
 /// What the table [`RunOutputs::geometry_latent`] returns actually IS.
 ///
 /// Every downstream geometry decision — exponentiate or not, cosine or z-scored
@@ -627,6 +649,38 @@ impl RunKind {
             | RunKind::Simba => false,
         }
     }
+
+    /// How this kind's tables give a cell's expected expression, which the
+    /// viewer colours and ranks features by. A full `match`, so a new kind
+    /// must say how its decoder reads its tables (or that it has none).
+    #[must_use]
+    pub fn expression_model(self) -> ExpressionModel {
+        match self {
+            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => ExpressionModel::Topic,
+            RunKind::MaskedVae => ExpressionModel::TopicOfLogits,
+            RunKind::Vae => ExpressionModel::LatentLoadings,
+            RunKind::Bge | RunKind::ResolveEmbeddingSpace | RunKind::Gem | RunKind::Simba => {
+                ExpressionModel::Embedding
+            }
+            RunKind::Svd | RunKind::JointSvd | RunKind::Fne => ExpressionModel::Unmodelled,
+        }
+    }
+
+    /// Every kind, for checks that must hold for each.
+    pub const ALL: [RunKind; 12] = [
+        RunKind::Topic,
+        RunKind::Itopic,
+        RunKind::MaskedVae,
+        RunKind::JointTopic,
+        RunKind::Vae,
+        RunKind::Svd,
+        RunKind::JointSvd,
+        RunKind::Bge,
+        RunKind::Fne,
+        RunKind::ResolveEmbeddingSpace,
+        RunKind::Gem,
+        RunKind::Simba,
+    ];
 }
 
 impl std::fmt::Display for RunKind {
@@ -2063,6 +2117,24 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_kind_says_how_its_tables_predict_expression() {
+        use ExpressionModel as E;
+        assert_eq!(RunKind::Topic.expression_model(), E::Topic);
+        assert_eq!(RunKind::MaskedVae.expression_model(), E::TopicOfLogits);
+        assert_eq!(RunKind::Vae.expression_model(), E::LatentLoadings);
+        assert_eq!(RunKind::Bge.expression_model(), E::Embedding);
+        assert_eq!(RunKind::Svd.expression_model(), E::Unmodelled);
+        // A log-θ latent and a topic model go together.
+        for k in RunKind::ALL {
+            assert_eq!(
+                k.latent_is_log_simplex(),
+                k.expression_model() == E::Topic,
+                "{k}"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

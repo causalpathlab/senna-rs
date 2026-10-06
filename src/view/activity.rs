@@ -379,59 +379,61 @@ impl Activity {
         Ok(rows)
     }
 
+    /// The run's model of expression, read the way its kind's decoder reads
+    /// its tables ([`senna::run_manifest::RunKind::expression_model`]).
     fn load_expected(&self) -> anyhow::Result<Expected> {
+        use senna::run_manifest::ExpressionModel as E;
         let m = &self.manifest;
         let o = &m.outputs;
-        if let (Some(z_rel), Ok((rho_path, bias_path))) = (
-            o.cell_embedding.as_deref(),
-            run_manifest::resolve_feature_embedding_for(m, &self.dir),
-        ) {
-            let z = read_table(&self.dir, z_rel)?;
-            let rho = Mat::from_parquet_with_row_names(&rho_path, Some(0))?;
-            anyhow::ensure!(
-                z.mat.ncols() == rho.mat.ncols(),
-                "cell embedding has {} dims, feature embedding {}",
-                z.mat.ncols(),
-                rho.mat.ncols()
-            );
-            // Only used when it lines up with the feature table.
-            let bias = bias_path
-                .and_then(|p| Mat::from_parquet_with_row_names(&p, Some(0)).ok())
-                .filter(|b| b.rows == rho.rows && b.mat.ncols() >= 1)
-                .map(|b| b.mat.column(0).iter().copied().collect());
-            return Ok(Expected::new(
-                Axis::new(rho.rows),
-                z.rows,
-                Model::Embedding {
-                    z: z.mat,
-                    rho: rho.mat,
-                    bias,
-                },
-            ));
+        let slot = |slot: Option<&str>, what: &str| {
+            slot.map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("this {} run records no {what}", m.kind))
+        };
+        match m.kind.expression_model() {
+            E::Embedding => {
+                let z_rel = slot(o.cell_embedding.as_deref(), "cell embedding")?;
+                let (rho_path, bias_path) =
+                    run_manifest::resolve_feature_embedding_for(m, &self.dir)?;
+                let z = read_table(&self.dir, &z_rel)?;
+                let rho = Mat::from_parquet_with_row_names(&rho_path, Some(0))?;
+                // Only used when it lines up with the feature table.
+                let bias = bias_path
+                    .and_then(|p| Mat::from_parquet_with_row_names(&p, Some(0)).ok())
+                    .filter(|b| b.rows == rho.rows && b.mat.ncols() >= 1)
+                    .map(|b| b.mat.column(0).iter().copied().collect());
+                embedding(z, rho, bias)
+            }
+            E::LatentLoadings => {
+                let z = read_table(&self.dir, &slot(o.latent.as_deref(), "latent")?)?;
+                let w = read_table(&self.dir, &slot(o.dictionary.as_deref(), "dictionary")?)?;
+                embedding(z, w, None)
+            }
+            E::Topic | E::TopicOfLogits => {
+                let mut theta = read_table(&self.dir, &slot(o.latent.as_deref(), "latent")?)?;
+                let beta = read_table(&self.dir, &slot(o.gene_dictionary(), "dictionary")?)?;
+                anyhow::ensure!(
+                    theta.mat.ncols() == beta.mat.ncols(),
+                    "latent has {} topics, dictionary {}",
+                    theta.mat.ncols(),
+                    beta.mat.ncols()
+                );
+                if m.kind.expression_model() == E::TopicOfLogits {
+                    log_softmax_rows(&mut theta.mat);
+                }
+                Ok(Expected::new(
+                    Axis::new(beta.rows),
+                    theta.rows,
+                    Model::Topic {
+                        log_theta: theta.mat,
+                        log_beta: beta.mat,
+                    },
+                ))
+            }
+            E::Unmodelled => anyhow::bail!(
+                "a {} run has no model of expression to predict a feature from · o shows the observed counts",
+                m.kind
+            ),
         }
-        if let (true, Some(theta_rel), Some(beta_rel)) = (
-            m.kind.latent_is_log_simplex(),
-            o.latent.as_deref(),
-            o.gene_dictionary(),
-        ) {
-            let theta = read_table(&self.dir, theta_rel)?;
-            let beta = read_table(&self.dir, beta_rel)?;
-            anyhow::ensure!(
-                theta.mat.ncols() == beta.mat.ncols(),
-                "latent has {} topics, dictionary {}",
-                theta.mat.ncols(),
-                beta.mat.ncols()
-            );
-            return Ok(Expected::new(
-                Axis::new(beta.rows),
-                theta.rows,
-                Model::Topic {
-                    log_theta: theta.mat,
-                    log_beta: beta.mat,
-                },
-            ));
-        }
-        anyhow::bail!("this run has no model tables to predict a feature from")
     }
 
     fn load_observed(&self) -> anyhow::Result<Observed> {
@@ -1122,6 +1124,39 @@ fn row_sum(m: &Mat, rows: &[usize]) -> Vector {
     acc
 }
 
+/// An embedding model from cell table `z` and feature table `rho` of one
+/// width.
+fn embedding(
+    z: MatWithNames<Mat>,
+    rho: MatWithNames<Mat>,
+    bias: Option<Vec<f32>>,
+) -> anyhow::Result<Expected> {
+    anyhow::ensure!(
+        z.mat.ncols() == rho.mat.ncols(),
+        "cell table has {} dims, feature table {}",
+        z.mat.ncols(),
+        rho.mat.ncols()
+    );
+    Ok(Expected::new(
+        Axis::new(rho.rows),
+        z.rows,
+        Model::Embedding {
+            z: z.mat,
+            rho: rho.mat,
+            bias,
+        },
+    ))
+}
+
+/// Each row of `m` through `log_softmax`.
+fn log_softmax_rows(m: &mut Mat) {
+    for mut row in m.row_iter_mut() {
+        let top = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let lse = top + row.iter().map(|v| (v - top).exp()).sum::<f32>().ln();
+        row.apply(|v| *v -= lse);
+    }
+}
+
 /// Mean of the given rows of `m`, as a column vector.
 fn row_mean(m: &Mat, rows: &[usize]) -> Vector {
     row_sum(m, rows) / rows.len().max(1) as f32
@@ -1279,5 +1314,96 @@ mod tests {
         let q = quadratic_forms(&rho, &c);
         assert!((q[0] - 1.0).abs() < 1e-5);
         assert!(q[1].abs() < 1e-6);
+    }
+
+    /// Write `rows × k` table `file` into `dir`, rows named `{p}{i}`.
+    fn table(dir: &Path, file: &str, p: &str, data: &[f32], k: usize) {
+        let rows: Vec<Box<str>> = (0..data.len() / k)
+            .map(|i| format!("{p}{i}").into())
+            .collect();
+        let cols: Vec<Box<str>> = (0..k).map(|j| format!("T{j}").into()).collect();
+        Mat::from_row_slice(rows.len(), k, data)
+            .to_parquet_with_names(
+                &dir.join(file).to_string_lossy(),
+                (Some(&rows), Some("name")),
+                Some(&cols),
+            )
+            .unwrap();
+    }
+
+    /// A run of `kind` whose `latent` and `dictionary` are the given tables.
+    fn run_of(
+        kind: senna::run_manifest::RunKind,
+        dir: &Path,
+        latent: &[f32],
+        dict: &[f32],
+    ) -> Activity {
+        table(dir, "r.latent.parquet", "c", latent, 2);
+        table(dir, "r.dictionary.parquet", "GENE", dict, 2);
+        let mut m = RunManifest::new(kind, "r");
+        m.outputs.latent = Some("r.latent.parquet".into());
+        m.outputs.dictionary = Some("r.dictionary.parquet".into());
+        Activity::new(m, dir.to_path_buf())
+    }
+
+    #[test]
+    fn a_vae_run_predicts_from_its_latent_and_loadings() {
+        // π = softmax_d(z · W + b): the latent and the dictionary are z and W.
+        let dir = tempfile::tempdir().unwrap();
+        let z = [0.5, -1.0, 2.0, 0.0];
+        let w = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut a = run_of(senna::run_manifest::RunKind::Vae, dir.path(), &z, &w);
+        let e = a.expected().unwrap();
+        let Model::Embedding {
+            z: got_z,
+            rho,
+            bias,
+        } = &e.model
+        else {
+            panic!("a vae run is z · W");
+        };
+        assert_eq!(got_z.as_slice(), Mat::from_row_slice(2, 2, &z).as_slice());
+        assert_eq!(rho.as_slice(), Mat::from_row_slice(3, 2, &w).as_slice());
+        assert!(bias.is_none());
+    }
+
+    #[test]
+    fn a_masked_vae_run_reads_its_latent_through_a_softmax() {
+        // Its latent is the raw z; the decoder reads log θ = log_softmax(z)
+        // against the log β of its dictionary.
+        let dir = tempfile::tempdir().unwrap();
+        let z = [0.5, -1.0, 2.0, 0.0];
+        let log_beta = [-0.1, -2.0, -3.0, -0.2, -2.5, -2.6];
+        let mut a = run_of(
+            senna::run_manifest::RunKind::MaskedVae,
+            dir.path(),
+            &z,
+            &log_beta,
+        );
+        let e = a.expected().unwrap();
+        let Model::Topic { log_theta, .. } = &e.model else {
+            panic!("a masked-vae run is a topic model of softmax(z)");
+        };
+        for r in 0..2 {
+            let total: f32 = log_theta.row(r).iter().map(|v| v.exp()).sum();
+            assert!((total - 1.0).abs() < 1e-5, "row {r} sums to {total}");
+        }
+        // The softmax keeps the order within a cell.
+        assert!(log_theta[(0, 0)] > log_theta[(0, 1)]);
+    }
+
+    #[test]
+    fn a_run_with_no_model_of_expression_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = run_of(
+            senna::run_manifest::RunKind::Svd,
+            dir.path(),
+            &[1.0; 4],
+            &[1.0; 6],
+        );
+        let Err(e) = a.expected() else {
+            panic!("svd has no model of expression");
+        };
+        assert!(e.contains("observed"), "{e}");
     }
 }
