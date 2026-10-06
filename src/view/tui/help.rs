@@ -133,6 +133,30 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Settings panel (top of the sidebar)",
+        &[
+            (
+                "click ‹  ›",
+                "previous / next value: layout (a method the run lacks opens the recompute menu), map, colour, values, labels, dots, how many neighbours a click lists, sidebar",
+            ),
+            ("keys", "the key beside each setting steps it too"),
+        ],
+    ),
+    (
+        "How the keys read",
+        &[
+            ("lowercase", "looks: changes what is on screen, never the run's files"),
+            (
+                "R A T X",
+                "uppercase opens a mode or writes: relabel, annotate, make topics, close a view for good",
+            ),
+            ("r", "recompute opens a menu first; nothing is written until it runs"),
+            ("ctrl-r", "runs what a menu or popup set up (recompute, submit)"),
+            ("ctrl-l", "reloads the run from disk"),
+            ("esc  x", "back out: close a popup, clear a click or a feature"),
+        ],
+    ),
+    (
         "Other",
         &[
             (
@@ -263,8 +287,8 @@ impl App {
     pub(super) fn status_keys(&self) -> [&'static str; 2] {
         match self.context() {
             Context::Browse => [
-                "click a cell: its cluster and the features nearest it (p pins their names)   [ ] focus a group   c change the colouring   n suggest features",
-                "R relabel clusters   A annotate with lupin   , . rounds   tab / m other layouts   z lay out a group   d copy view   w all views   s save PDF   ? all keys   q quit",
+                "click a cell: its cluster and the features nearest it (p pins their names)   [ ] focus a group   n suggest features   settings: click ‹ › on the right",
+                "R relabel clusters   A annotate with lupin   r recompute   , . rounds   z lay out a group   d copy view   w all views   s save PDF   ? all keys   q quit",
             ],
             Context::Feature => [
                 "g / G next or previous feature   o switch between counts and model   a the group's whole marker set   x back to group colours",

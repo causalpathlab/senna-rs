@@ -263,6 +263,8 @@ pub(crate) struct Scene {
     pub chart: Option<chart::Chart>,
     /// Features near the last clicked cell, and sets locked on screen.
     pub near: Option<features::Near>,
+    /// How many neighbours a click lists.
+    pub near_count: usize,
     pub locked: Vec<features::Near>,
     /// A message for the status line, taken by the front end.
     pub note: Option<String>,
@@ -300,6 +302,7 @@ impl Scene {
             review: None,
             chart: None,
             near: None,
+            near_count: features::NEAR_COUNTS[1],
             locked: Vec::new(),
             orders: std::cell::RefCell::new(Vec::new()),
             shown_ids: 0,
@@ -381,6 +384,7 @@ impl Scene {
             feature_embedding: None,
             review: None,
             near: self.near.clone(),
+            near_count: self.near_count,
             locked: self.locked.clone(),
             note: None,
             missing_data: None,

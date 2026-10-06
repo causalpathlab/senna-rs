@@ -3,7 +3,8 @@
 
 use super::*;
 
-const NEAR: usize = 12;
+/// How many neighbours a click lists, in turn; the second by default.
+pub(crate) const NEAR_COUNTS: [usize; 5] = [6, 12, 20, 30, 50];
 
 /// Names ranked best first with their scores, or why there are none.
 type Ranked = Result<Vec<(Box<str>, f32)>, String>;
@@ -409,6 +410,7 @@ impl Scene {
     /// cells' mean embedding (Euclidean, as the map is laid out), or, on a
     /// run with no co-embedding, those most up in the cells.
     fn rank_near(&mut self, cells: &[&str]) -> (Metric, Ranked) {
+        let top = self.near_count;
         let z = match self.activity() {
             Some(a) => a.cells_z(cells.iter().copied()),
             None => return (Metric::Distance, Err("no run to find features in".into())),
@@ -417,15 +419,37 @@ impl Scene {
             .feature_embedding
             .get_or_insert_with(|| FeatureEmbedding::load(self.data.run.as_ref()));
         if let (Ok(z), Ok(e)) = (&z, embedding.as_ref()) {
-            if let Some(found) = e.near_place(z, None, NEAR) {
+            if let Some(found) = e.near_place(z, None, top) {
                 return (Metric::Distance, Ok(found));
             }
         }
         let found = match self.activity() {
-            Some(a) => a.near_cells(cells.iter().copied(), NEAR),
+            Some(a) => a.near_cells(cells.iter().copied(), top),
             None => Err("no run to find features in".into()),
         };
         (Metric::Direction, found)
+    }
+
+    /// List `step` more or fewer neighbours along [`NEAR_COUNTS`], and list
+    /// those of the last click again.
+    pub fn step_near_count(&mut self, step: isize) {
+        let n = NEAR_COUNTS.len() as isize;
+        let at = NEAR_COUNTS
+            .iter()
+            .position(|&c| c >= self.near_count)
+            .unwrap_or(1) as isize;
+        self.near_count = NEAR_COUNTS[(at + step).clamp(0, n - 1) as usize];
+        let again = self.near.as_ref().map(|n| (n.name.clone(), n.centre));
+        match again {
+            Some((name, Centre::Cell)) => self.show_near(&name),
+            Some((name, Centre::Feature)) => self.show_near_feature(&name),
+            Some((name, Centre::Group { .. })) => {
+                if let Some(g) = self.levels().iter().position(|l| **l == *name) {
+                    self.show_near_group(g as u32);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Features nearest group `g` of the grouping on screen, as for a cell
@@ -485,19 +509,20 @@ impl Scene {
     /// Euclidean from where it sits among the cells (its co-embedding); on a
     /// feature map, cosine of feature embeddings, and cells most up in it.
     pub fn show_near_feature(&mut self, feature: &str) {
+        let top = self.near_count;
         let on_cells = self.current().kind == SpaceKind::FeaturesOnCells;
         let embedding = self
             .feature_embedding
             .get_or_insert_with(|| FeatureEmbedding::load(self.data.run.as_ref()));
         let placed = embedding.as_ref().ok().filter(|_| on_cells).and_then(|e| {
             let (at, i) = e.place_of(feature)?;
-            Some((e.near_place(&at, Some(i), NEAR)?, at))
+            Some((e.near_place(&at, Some(i), top)?, at))
         });
         let has_cells = self.data.has_axis(Axis::Cells);
         let (metric, features, cells) = match placed {
             Some((features, at)) => {
                 let cells = match self.activity().filter(|_| has_cells) {
-                    Some(a) => a.cells_near(&at, NEAR),
+                    Some(a) => a.cells_near(&at, top),
                     None => Ok(Vec::new()),
                 };
                 (Metric::Distance, Ok(features), cells)
@@ -506,9 +531,9 @@ impl Scene {
                 let features = embedding
                     .as_ref()
                     .map_err(Clone::clone)
-                    .and_then(|e| e.near(feature, NEAR));
+                    .and_then(|e| e.near(feature, top));
                 let cells = match self.activity().filter(|_| has_cells) {
-                    Some(a) => a.near_feature(feature, NEAR),
+                    Some(a) => a.near_feature(feature, top),
                     None => Ok(Vec::new()),
                 };
                 (Metric::Cosine, features, cells)

@@ -14,6 +14,7 @@ mod help;
 mod input;
 mod locate;
 mod modal;
+mod panel;
 mod recompute;
 mod relabel;
 
@@ -210,6 +211,8 @@ struct App {
     info: Option<Vec<String>>,
     /// Sidebar area, beside the map; empty when there is nothing to show.
     side: Rect,
+    /// The settings panel at the top of the sidebar; empty when not shown.
+    panel: Rect,
     /// The cluster overview on the left of the map (relabel mode only).
     left: Rect,
     /// Whether the sidebar may open (`b` toggles).
@@ -257,6 +260,7 @@ impl App {
             checked: std::time::Instant::now(),
             info: None,
             side: Rect::default(),
+            panel: Rect::default(),
             left: Rect::default(),
             sidebar: true,
             scene,
@@ -341,7 +345,9 @@ impl App {
             ..area
         };
         // The sidebar takes its columns from the map rather than covering it.
-        let side_w = if self.sidebar && (self.menu.is_some() || self.side_lines().is_some()) {
+        let side_w = if self.sidebar
+            && (self.menu.is_some() || self.panel_shown() || self.side_lines().is_some())
+        {
             (area.width / 3)
                 .clamp(30, 48)
                 .min(area.width.saturating_sub(20))
@@ -363,6 +369,14 @@ impl App {
         };
         self.left = Rect::new(body.x, body.y, left_w, body.height);
         self.side = Rect::new(map.x + map.width, body.y, side_w, body.height);
+        self.panel = if side_w > 0 && self.panel_shown() {
+            Rect {
+                height: panel::PANEL_ROWS.min(body.height),
+                ..self.side
+            }
+        } else {
+            Rect::default()
+        };
         if map != self.map {
             let had_map = self.map.width > 0 && self.map.height > 0;
             self.map = map;
@@ -607,34 +621,6 @@ impl App {
         self.switch_space(i);
         let s = self.scene.current();
         self.message = Some(format!("{} · {}", s.method, s.title()));
-    }
-
-    /// Same axis and title on the next method, if that method has it.
-    fn next_method(&mut self) {
-        let spaces = &self.scene.data.spaces;
-        let cur = self.scene.current();
-        let mut methods: Vec<&str> = Vec::new();
-        for s in spaces {
-            if !methods.contains(&s.method.as_str()) {
-                methods.push(&s.method);
-            }
-        }
-        if methods.len() < 2 {
-            self.message = Some("only one layout method in this run".into());
-            return;
-        }
-        let at = methods.iter().position(|m| *m == cur.method).unwrap_or(0);
-        for k in 1..methods.len() {
-            let m = methods[(at + k) % methods.len()];
-            let same = spaces
-                .iter()
-                .position(|s| s.method == m && s.kind == cur.kind);
-            let any = spaces.iter().position(|s| s.method == m);
-            if let Some(i) = same.or(any) {
-                self.switch_space(i);
-                return;
-            }
-        }
     }
 
     /// Where this view's PDF goes unless another name is typed (`.pdf`

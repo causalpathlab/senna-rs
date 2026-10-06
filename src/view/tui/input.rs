@@ -79,7 +79,7 @@ impl App {
             KeyCode::Char('?') => self.help = true,
             KeyCode::Tab => self.step_view(1),
             KeyCode::BackTab => self.step_view(-1),
-            KeyCode::Char('m') => self.next_method(),
+            KeyCode::Char('m') => self.step_method(1, false),
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
             KeyCode::Char(']') => self.change(|s| s.step_focus(1)),
             KeyCode::Char('[') => self.change(|s| s.step_focus(-1)),
@@ -246,6 +246,11 @@ impl App {
 
     /// A mouse event. Returns whether anything changed.
     pub(super) fn mouse(&mut self, m: MouseEvent) -> bool {
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            if self.panel_click(m.column, m.row) {
+                return true;
+            }
+        }
         // A chart has no points to hover, click, pan or zoom.
         if self.scene.chart.is_some() {
             return false;
@@ -305,7 +310,7 @@ impl App {
             Some(g) => {
                 let name = &self.scene.levels()[g as usize];
                 self.message = Some(format!(
-                    "{name} · click for the features most up in this cluster"
+                    "{name} · click for the features placed nearest this cluster"
                 ));
             }
             // Leaving a label takes its note with it.

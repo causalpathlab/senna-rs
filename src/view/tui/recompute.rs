@@ -30,6 +30,12 @@ impl Drop for Recomputing {
 impl App {
     /// Open the menu for the run on screen, the map on screen chosen.
     pub(super) fn open_recompute(&mut self) {
+        self.open_recompute_with(None);
+    }
+
+    /// Open the menu with the map on screen chosen, laid out with `method`
+    /// when given (else the one on screen).
+    pub(super) fn open_recompute_with(&mut self, method: Option<&str>) {
         if self.recomputing.is_some() {
             self.message = Some("already recomputing · it reloads when done".into());
             return;
@@ -47,7 +53,10 @@ impl App {
         }
         // A zoom was laid out from its root map: redo that one.
         let kind = self.scene.current().kind;
-        let method = self.scene.data.spaces[self.scene.root()].method.clone();
+        let method = method.map_or_else(
+            || self.scene.data.spaces[self.scene.root()].method.clone(),
+            str::to_string,
+        );
         let on_screen = Step::on_screen(kind, &method);
         let menu = Menu::new(&target, on_screen, &method);
         self.modal = Some(Modal::Recompute(target, menu));

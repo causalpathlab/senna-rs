@@ -54,9 +54,26 @@ impl App {
 
         let side = self.side;
         if side.width > 0 {
+            // The settings panel first, what the click or the suggestions
+            // said below it.
+            let side = if self.panel.height > 0 {
+                f.render_widget(
+                    Paragraph::new(self.panel_lines())
+                        .block(side_block())
+                        .style(page),
+                    self.panel,
+                );
+                Rect {
+                    y: side.y + self.panel.height,
+                    height: side.height - self.panel.height,
+                    ..side
+                }
+            } else {
+                side
+            };
             if let Some(menu) = &self.menu {
                 self.draw_menu(f, side, menu, page);
-            } else if let Some(lines) = self.side_lines() {
+            } else if let Some(lines) = self.side_lines().filter(|_| side.height > 0) {
                 // A list longer than the panel scrolls to keep its cursor
                 // (the last `▸` line) in sight, counted in wrapped rows.
                 let rows = usize::from(side.height);
