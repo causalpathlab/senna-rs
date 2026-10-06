@@ -88,26 +88,29 @@ impl App {
                 let skip = (above + height / 2)
                     .saturating_sub(height)
                     .min(total.saturating_sub(height));
-                // Where each feature's row lands, for a click on it.
+                // Only the rows in sight are drawn; each feature's row is
+                // kept by index, for a click on it.
                 let mut hits = Vec::new();
-                let mut y = 0;
-                for (l, f) in &rows {
+                let mut text: Vec<Line> = Vec::new();
+                let (mut y, mut first) = (0, None);
+                for (k, (l, f)) in rows.iter().enumerate() {
                     let h = tall(l);
-                    if let (Some(f), true) = (f, y >= skip && y + h <= skip + height) {
-                        let top = side.y + u16::try_from(y - skip).unwrap_or(u16::MAX);
-                        hits.push((Rect::new(side.x, top, side.width, h as u16), f.clone()));
+                    if y + h > skip && y < skip + height {
+                        first.get_or_insert(y);
+                        text.push(Line::from(format!(" {l}")));
+                        if f.is_some() && y >= skip && y + h <= skip + height {
+                            let top = side.y + u16::try_from(y - skip).unwrap_or(u16::MAX);
+                            hits.push((Rect::new(side.x, top, side.width, h as u16), k));
+                        }
                     }
                     y += h;
                 }
                 *self.pane_hits.borrow_mut() = hits;
-                let text: Vec<Line> = rows
-                    .iter()
-                    .map(|(l, _)| Line::from(format!(" {l}")))
-                    .collect();
+                let within = skip - first.unwrap_or(skip);
                 f.render_widget(
                     Paragraph::new(text)
                         .wrap(ratatui::widgets::Wrap { trim: false })
-                        .scroll((u16::try_from(skip).unwrap_or(u16::MAX), 0))
+                        .scroll((u16::try_from(within).unwrap_or(u16::MAX), 0))
                         .block(side_block())
                         .style(page),
                     side,

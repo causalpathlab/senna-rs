@@ -141,7 +141,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "click ‹  ›",
-                "previous / next value: layout (a method the run lacks opens the recompute menu), map, colour, values, labels, dots, how many neighbours a click lists, sidebar",
+                "previous / next value: layout (a method the run lacks opens the recompute menu), map, colour, values, labels, dots, how many neighbours a click lists; hide × on its title hides the sidebar",
             ),
             ("keys", "the key beside each setting steps it too"),
         ],

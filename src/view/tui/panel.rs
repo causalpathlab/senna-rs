@@ -15,11 +15,10 @@ pub(super) enum Setting {
     Labels,
     Dots,
     Near,
-    Sidebar,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 8] = [
+    pub const ALL: [Setting; 7] = [
         Setting::Layout,
         Setting::Map,
         Setting::Colour,
@@ -27,7 +26,6 @@ impl Setting {
         Setting::Labels,
         Setting::Dots,
         Setting::Near,
-        Setting::Sidebar,
     ];
 
     fn label(self) -> &'static str {
@@ -39,7 +37,6 @@ impl Setting {
             Setting::Labels => "labels",
             Setting::Dots => "dots",
             Setting::Near => "near",
-            Setting::Sidebar => "sidebar",
         }
     }
 
@@ -53,7 +50,6 @@ impl Setting {
             Setting::Labels => "t",
             Setting::Dots => "< >",
             Setting::Near => "",
-            Setting::Sidebar => "space",
         }
     }
 }
@@ -64,7 +60,18 @@ pub(super) const PANEL_ROWS: u16 = Setting::ALL.len() as u16 + 2;
 /// Columns before a value: the frame, a space and the label.
 const LABEL_W: u16 = 10;
 
+/// The title row: its words, then the control that hides the sidebar.
+const TITLE: &str = " Settings";
+const TITLE_HINT: &str = "  click ‹ › to change";
+const HIDE: &str = "   hide ×";
+
 impl App {
+    /// Hide the sidebar (space or `b` shows it again).
+    pub(super) fn hide_sidebar(&mut self) {
+        self.sidebar = false;
+        self.message = Some("sidebar hidden · space shows it".into());
+    }
+
     /// Whether the sidebar starts with the panel: not in relabel mode, whose
     /// panels need the room.
     pub(super) fn panel_shown(&self) -> bool {
@@ -85,7 +92,6 @@ impl App {
             Setting::Labels => scene.labels_said().into(),
             Setting::Dots => format!("{:.2}×", scene.scale),
             Setting::Near => format!("{} features", scene.near_count),
-            Setting::Sidebar => "on".into(),
         }
     }
 
@@ -102,10 +108,6 @@ impl App {
             }
             Setting::Dots => self.change(|sc| sc.resize(d)),
             Setting::Near => self.change(|sc| sc.step_near_count(d)),
-            Setting::Sidebar => {
-                self.sidebar = false;
-                self.message = Some("sidebar hidden · space shows it".into());
-            }
         }
     }
 
@@ -152,8 +154,9 @@ impl App {
     pub(super) fn panel_lines(&self) -> Vec<Line<'static>> {
         let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
         let mut lines = vec![Line::from(vec![
-            Span::styled(" Settings", bold),
-            Span::styled("  click ‹ › to change", hint()),
+            Span::styled(TITLE, bold),
+            Span::styled(TITLE_HINT, hint()),
+            Span::raw(HIDE),
         ])];
         for s in Setting::ALL {
             let label = format!(" {:<w$}", s.label(), w = usize::from(LABEL_W) - 2);
@@ -176,10 +179,15 @@ impl App {
         if !p.contains(ratatui::layout::Position::new(col, row)) {
             return false;
         }
-        let Some(&s) = (row - p.y)
-            .checked_sub(1)
-            .and_then(|i| Setting::ALL.get(usize::from(i)))
-        else {
+        // The title row: its end hides the sidebar.
+        let hide_at = p.x + 1 + (TITLE.chars().count() + TITLE_HINT.chars().count()) as u16;
+        if row == p.y {
+            if col >= hide_at {
+                self.hide_sidebar();
+            }
+            return true;
+        }
+        let Some(&s) = Setting::ALL.get(usize::from(row - p.y - 1)) else {
             return true;
         };
         // `‹ ` is the two columns after the label.
@@ -239,5 +247,10 @@ mod tests {
         assert_eq!(a.setting_value(Setting::Labels), "medium");
         // Off the panel: not taken.
         assert!(!a.panel_click(10, labels_row));
+        // The title row's end hides the sidebar.
+        assert!(a.panel_click(50 + 2, 0));
+        assert!(a.sidebar);
+        assert!(a.panel_click(50 + 38, 0));
+        assert!(!a.sidebar);
     }
 }

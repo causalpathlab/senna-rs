@@ -194,7 +194,7 @@ struct App {
     /// The settings panel at the top of the sidebar; empty when not shown.
     panel: Rect,
     /// Where each feature row of the sidebar was last drawn, for clicks.
-    pane_hits: std::cell::RefCell<Vec<(Rect, Box<str>)>>,
+    pane_hits: std::cell::RefCell<Vec<(Rect, usize)>>,
     /// The cluster overview on the left of the map (relabel mode only).
     left: Rect,
     /// Whether the sidebar may open (space or `b` toggles).
@@ -385,11 +385,12 @@ impl App {
     /// A click at terminal cell (`col`, `row`) on a feature in the sidebar:
     /// show it (a search takes it and closes). Returns whether it was one.
     pub(super) fn pane_click(&mut self, col: u16, row: u16) -> bool {
-        let hit = self.pane_hits.borrow().iter().find_map(|(r, f)| {
+        let hit = self.pane_hits.borrow().iter().find_map(|(r, k)| {
             r.contains(ratatui::layout::Position::new(col, row))
-                .then(|| f.clone())
+                .then_some(*k)
         });
-        let Some(name) = hit else {
+        // The row as drawn names its feature.
+        let Some(name) = hit.and_then(|k| self.side_rows()?.into_iter().nth(k)?.1) else {
             return false;
         };
         match self.modal.take() {
@@ -832,9 +833,13 @@ mod pane_tests {
     fn a_click_on_a_feature_row_shows_it() {
         let mut a = app();
         near(&mut a);
-        a.pane_hits
-            .borrow_mut()
-            .push((Rect::new(80, 5, 30, 1), "g3".into()));
+        let g3 = a
+            .side_rows()
+            .unwrap()
+            .iter()
+            .position(|(_, f)| f.as_deref() == Some("g3"))
+            .unwrap();
+        a.pane_hits.borrow_mut().push((Rect::new(80, 5, 30, 1), g3));
         assert!(!a.pane_click(10, 5));
         assert!(a.pane_click(90, 5));
         assert_eq!(shown(&a), Some("g3"));
