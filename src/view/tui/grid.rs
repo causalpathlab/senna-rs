@@ -135,7 +135,17 @@ impl Deck {
                     let ev = event::read()?;
                     // A slow answer (a run read again, a model's tables
                     // read on the first click) says it is loading.
-                    let (changed, spun) = if self.save.is_some() {
+                    // Only a key or a click can start slow work; moves,
+                    // drags and scrolls are handled as they come.
+                    let may_load = matches!(
+                        ev,
+                        Event::Key(_)
+                            | Event::Mouse(MouseEvent {
+                                kind: MouseEventKind::Down(_),
+                                ..
+                            })
+                    );
+                    let (changed, spun) = if self.save.is_some() || !may_load {
                         (self.event(terminal, ev), false)
                     } else {
                         crate::tui::busy::during("loading", || self.event(terminal, ev))

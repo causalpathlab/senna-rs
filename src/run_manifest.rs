@@ -636,18 +636,7 @@ impl RunKind {
     /// rather than on [`Self::is_topic_family`].
     #[must_use]
     pub fn latent_is_log_simplex(self) -> bool {
-        match self {
-            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => true,
-            RunKind::MaskedVae
-            | RunKind::Vae
-            | RunKind::Svd
-            | RunKind::JointSvd
-            | RunKind::Bge
-            | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace
-            | RunKind::Gem
-            | RunKind::Simba => false,
-        }
+        self.expression_model() == ExpressionModel::Topic
     }
 
     /// How this kind's tables give a cell's expected expression, which the
@@ -665,22 +654,6 @@ impl RunKind {
             RunKind::Svd | RunKind::JointSvd | RunKind::Fne => ExpressionModel::Unmodelled,
         }
     }
-
-    /// Every kind, for checks that must hold for each.
-    pub const ALL: [RunKind; 12] = [
-        RunKind::Topic,
-        RunKind::Itopic,
-        RunKind::MaskedVae,
-        RunKind::JointTopic,
-        RunKind::Vae,
-        RunKind::Svd,
-        RunKind::JointSvd,
-        RunKind::Bge,
-        RunKind::Fne,
-        RunKind::ResolveEmbeddingSpace,
-        RunKind::Gem,
-        RunKind::Simba,
-    ];
 }
 
 impl std::fmt::Display for RunKind {
@@ -2125,14 +2098,9 @@ mod tests {
         assert_eq!(RunKind::Vae.expression_model(), E::LatentLoadings);
         assert_eq!(RunKind::Bge.expression_model(), E::Embedding);
         assert_eq!(RunKind::Svd.expression_model(), E::Unmodelled);
-        // A log-θ latent and a topic model go together.
-        for k in RunKind::ALL {
-            assert_eq!(
-                k.latent_is_log_simplex(),
-                k.expression_model() == E::Topic,
-                "{k}"
-            );
-        }
+        // The log-θ latent rule follows the model.
+        assert!(RunKind::Topic.latent_is_log_simplex());
+        assert!(!RunKind::MaskedVae.latent_is_log_simplex());
     }
 
     use super::*;

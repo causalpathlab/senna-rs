@@ -16,6 +16,40 @@ pub(crate) const SPINNER: [char; 8] = ['⠁', '⠂', '⠄', '⡀', '⢀', '⠠',
 /// which every terminal passes on as it is.
 pub(crate) const RUN_KEY: &str = "ctrl+r";
 
+/// The answer of work running on a worker thread.
+pub(crate) struct Pending<T>(pub(crate) std::sync::mpsc::Receiver<Result<T, String>>);
+
+impl<T: Send + 'static> Pending<T> {
+    pub(crate) fn spawn(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Self {
+        let (tx, pending) = Self::pair();
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        pending
+    }
+
+    /// A pending answer and where to send it, for a worker that answers
+    /// more than one waiter.
+    pub(crate) fn pair() -> (std::sync::mpsc::Sender<Result<T, String>>, Self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (tx, Self(rx))
+    }
+
+    /// The answer once it has come; `stopped` when the worker died first.
+    pub(crate) fn poll(&self, stopped: &str) -> Option<Result<T, String>> {
+        match self.0.try_recv() {
+            Ok(r) => Some(r),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(stopped.into())),
+        }
+    }
+
+    /// Wait for the answer; `stopped` when the worker died first.
+    pub(crate) fn wait(self, stopped: &str) -> Result<T, String> {
+        self.0.recv().unwrap_or_else(|_| Err(stopped.into()))
+    }
+}
+
 /// Whether `k` is [`RUN_KEY`].
 #[must_use]
 pub(crate) fn is_run_key(k: &ratatui::crossterm::event::KeyEvent) -> bool {

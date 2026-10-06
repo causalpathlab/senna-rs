@@ -265,7 +265,7 @@ pub struct Activity {
     observed: Option<Result<Observed, String>>,
     /// The observed counts while a read on the side is under way: taken
     /// from it rather than read again.
-    observed_coming: Option<std::sync::mpsc::Receiver<Result<Observed, String>>>,
+    observed_coming: Option<crate::tui::Pending<Observed>>,
     /// Row of each point of a view in a source's cell table, by (source,
     /// view key).
     rows: HashMap<(Source, usize), Arc<Vec<u32>>>,
@@ -393,7 +393,8 @@ impl Activity {
             slot.map(str::to_string)
                 .ok_or_else(|| anyhow::anyhow!("this {} run records no {what}", m.kind))
         };
-        match m.kind.expression_model() {
+        let model = m.kind.expression_model();
+        match model {
             E::Embedding => {
                 let z_rel = slot(o.cell_embedding.as_deref(), "cell embedding")?;
                 let (rho_path, bias_path) =
@@ -421,7 +422,7 @@ impl Activity {
                     theta.mat.ncols(),
                     beta.mat.ncols()
                 );
-                if m.kind.expression_model() == E::TopicOfLogits {
+                if model == E::TopicOfLogits {
                     // The decoder reads the raw latent through a softmax.
                     use legume_numeric::candle::vae::masked_topic::LatentHead;
                     theta.mat = senna::embed_common::latent_to_theta(&theta.mat, LatentHead::Gaussian)
@@ -443,16 +444,9 @@ impl Activity {
         }
     }
 
-    fn load_observed(&self) -> anyhow::Result<Observed> {
-        read_run_data(&self.manifest, &self.dir).map(|(observed, _)| observed)
-    }
-
     /// Take the observed counts from a read on the side
     /// ([`read_run_data`]) when they come, rather than read them again.
-    pub(crate) fn observed_from(
-        &mut self,
-        coming: std::sync::mpsc::Receiver<Result<Observed, String>>,
-    ) {
+    pub(crate) fn observed_from(&mut self, coming: crate::tui::Pending<Observed>) {
         if self.observed.is_none() {
             self.observed_coming = Some(coming);
         }
@@ -503,9 +497,11 @@ impl Activity {
     fn observed(&mut self) -> Result<&Observed, String> {
         if self.observed.is_none() {
             // A read on the side is waited for, not repeated.
-            let read = match self.observed_coming.take().map(|rx| rx.recv()) {
-                Some(Ok(read)) => read,
-                _ => self.load_observed().map_err(|e| e.to_string()),
+            let read = match self.observed_coming.take() {
+                Some(coming) => coming.wait("the data read stopped"),
+                None => read_run_data(&self.manifest, &self.dir)
+                    .map(|(observed, _)| observed)
+                    .map_err(|e| e.to_string()),
             };
             self.observed = Some(read);
         }
@@ -1161,12 +1157,14 @@ pub(crate) fn read_run_data(
         cells.len(),
         batch.len()
     );
-    let labels = super::data::Labels::new(
-        super::data::LabelKind::Batch,
-        cells.iter().cloned().zip(batch),
-        &[],
-    );
-    let batches = (labels.levels.len() > 1).then_some(labels);
+    // A colouring only when there is more than one batch.
+    let batches = batch.iter().any(|b| *b != batch[0]).then(|| {
+        super::data::Labels::new(
+            super::data::LabelKind::Batch,
+            cells.iter().cloned().zip(batch),
+            &[],
+        )
+    });
     let n_cells = cells.len();
     let cell_index = cells
         .into_iter()

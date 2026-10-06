@@ -169,6 +169,14 @@ pub struct ViewArgs {
 }
 
 /// Features suggested for one view, best first.
+/// Where the reading of a run's data files stands.
+enum BatchRead {
+    Idle,
+    Reading(crate::tui::Pending<Option<data::Labels>>),
+    /// Read: its batches are among the groupings, or it had one or none.
+    Done,
+}
+
 struct Suggestions {
     space: usize,
     title: String,
@@ -263,8 +271,8 @@ pub(crate) struct Scene {
     pub chart: Option<chart::Chart>,
     /// Features near the last clicked cell, and sets locked on screen.
     pub near: Option<features::Near>,
-    /// The cells' batches, read on a worker thread while the view is up.
-    batch: Option<std::sync::mpsc::Receiver<anyhow::Result<Option<data::Labels>>>>,
+    /// The cells' batches, read once per run on a worker thread.
+    batch: BatchRead,
     /// How many neighbours a click lists.
     pub near_count: usize,
     pub locked: Vec<features::Near>,
@@ -304,7 +312,7 @@ impl Scene {
             review: None,
             chart: None,
             near: None,
-            batch: None,
+            batch: BatchRead::Idle,
             near_count: features::NEAR_COUNTS[1],
             locked: Vec::new(),
             orders: std::cell::RefCell::new(Vec::new()),
@@ -387,7 +395,7 @@ impl Scene {
             feature_embedding: None,
             review: None,
             near: self.near.clone(),
-            batch: None,
+            batch: BatchRead::Idle,
             near_count: self.near_count,
             locked: self.locked.clone(),
             note: None,
@@ -708,8 +716,8 @@ mod tests {
         let mut s = scene();
         let before = s.data.labels.len();
         assert!(!s.poll_batch(), "nothing pending");
-        let (tx, rx) = std::sync::mpsc::channel();
-        s.batch = Some(rx);
+        let (tx, pending) = crate::tui::Pending::pair();
+        s.batch = BatchRead::Reading(pending);
         assert!(!s.poll_batch(), "not read yet");
         let batch = Labels::new(
             LabelKind::Batch,
@@ -719,8 +727,8 @@ mod tests {
         tx.send(Ok(Some(batch))).unwrap();
         assert!(s.poll_batch());
         assert_eq!(s.data.labels.len(), before + 1);
-        assert!(s.data.labels.iter().any(|l| l.kind == LabelKind::Batch));
-        assert!(s.batch.is_none());
+        assert!(s.label_index(LabelKind::Batch).is_some());
+        assert!(matches!(s.batch, BatchRead::Done));
     }
 
     #[test]

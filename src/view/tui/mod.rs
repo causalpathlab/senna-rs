@@ -30,6 +30,7 @@ use super::render::{Frame, Job, Viewport};
 use super::style::{swatches, Shape};
 use super::{Axis, Graphics, Pick, Scene};
 use crate::tui::style::{first_row, hint, page, popup, rgb, selected, toast, At};
+use crate::tui::Pending;
 use image::DynamicImage;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -110,28 +111,6 @@ const TOAST_FOR: Duration = Duration::from_millis(2500);
 
 /// Lines at the bottom: what is on screen, then two lines of keys.
 const STATUS_LINES: u16 = 3;
-
-/// The answer of work running on a worker thread.
-struct Pending<T>(std::sync::mpsc::Receiver<Result<T, String>>);
-
-impl<T: Send + 'static> Pending<T> {
-    fn spawn(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(work());
-        });
-        Self(rx)
-    }
-
-    /// The answer once it has come; `stopped` when the worker died first.
-    fn poll(&self, stopped: &str) -> Option<Result<T, String>> {
-        match self.0.try_recv() {
-            Ok(r) => Some(r),
-            Err(std::sync::mpsc::TryRecvError::Empty) => None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(stopped.into())),
-        }
-    }
-}
 
 /// A decision lupin is applying on a worker thread.
 struct Relabeling {

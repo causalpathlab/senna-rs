@@ -13,36 +13,50 @@ use std::process::{Command, Stdio};
 /// after it starts.
 #[derive(Default)]
 pub(crate) struct Stopper {
-    stopped: std::sync::atomic::AtomicBool,
-    /// Whether the child was interrupted already: the next stop kills.
-    interrupted: std::sync::atomic::AtomicBool,
+    /// How far stopping has gone: [`RUNNING`], interrupted (1), or [`KILL`].
+    level: std::sync::atomic::AtomicU8,
     child: std::sync::Mutex<Option<std::process::Child>>,
 }
 
+const RUNNING: u8 = 0;
+const KILL: u8 = 2;
+
 impl Stopper {
-    /// Interrupt the child the first time, kill it after. Returns whether
-    /// this stop kills.
+    /// Go one step further, interrupt then kill, and tell the child.
+    /// Returns whether this stop kills.
     pub fn stop(&self) -> bool {
         use std::sync::atomic::Ordering::SeqCst;
-        self.stopped.store(true, SeqCst);
-        let kill = self.interrupted.swap(true, SeqCst);
-        if let Ok(mut c) = self.child.lock() {
-            if let Some(c) = c.as_mut() {
-                signal(c, kill);
-            }
-        }
-        kill
+        let raise = |l: u8| Some((l + 1).min(KILL));
+        let now = raise(
+            self.level
+                .fetch_update(SeqCst, SeqCst, raise)
+                .unwrap_or(KILL),
+        );
+        self.deliver();
+        now == Some(KILL)
     }
 
     /// Kill the child now, interrupted or not.
     pub fn kill(&self) {
-        self.interrupted
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.stop();
+        self.level.store(KILL, std::sync::atomic::Ordering::SeqCst);
+        self.deliver();
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+        self.level.load(std::sync::atomic::Ordering::SeqCst) > RUNNING
+    }
+
+    /// Send the child the stop asked for so far, if any.
+    fn deliver(&self) {
+        let level = self.level.load(std::sync::atomic::Ordering::SeqCst);
+        if level == RUNNING {
+            return;
+        }
+        if let Ok(mut c) = self.child.lock() {
+            if let Some(c) = c.as_mut() {
+                signal(c, level == KILL);
+            }
+        }
     }
 }
 
@@ -164,13 +178,12 @@ pub(crate) fn run_one(
             .take()
             .map(|e| Box::new(e) as Box<dyn std::io::Read + Send>),
     };
-    // Where `stop` can reach it; stopped meanwhile, it goes at once.
+    // Where `stop` can reach it.
     if let Ok(mut c) = stopper.child.lock() {
         *c = Some(child);
     }
-    if stopper.is_stopped() {
-        stopper.stop();
-    }
+    // Stopped meanwhile: it gets the stop asked for, no further.
+    stopper.deliver();
     let last = follow(log, each);
     let status = stopper
         .child

@@ -3,55 +3,50 @@
 use super::*;
 
 impl Scene {
-    /// Open the run's data files on a worker thread: the cells' batches go
-    /// to the groupings ([`Self::poll_batch`]) and the observed counts to
-    /// the activity, so `o` never opens them a second time.
+    /// Open the run's data files on a worker thread, once per run: the
+    /// cells' batches go to the groupings ([`Self::poll_batch`]) and the
+    /// observed counts to the activity, so `o` never opens them again.
     pub fn start_batch(&mut self) {
-        let has = self.data.labels.iter().any(|l| l.kind == LabelKind::Batch);
-        let Some((m, dir)) = self.data.run.clone().filter(|_| !has) else {
+        if !matches!(self.batch, BatchRead::Idle) || self.label_index(LabelKind::Batch).is_some() {
+            return;
+        }
+        let Some((m, dir)) = self.data.run.clone() else {
             return;
         };
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (counts_tx, counts_rx) = std::sync::mpsc::channel();
+        let (batches_tx, batches) = crate::tui::Pending::pair();
+        let (counts_tx, counts) = crate::tui::Pending::pair();
         if let Some(a) = self.activity() {
-            a.observed_from(counts_rx);
+            a.observed_from(counts);
         }
         std::thread::spawn(move || {
-            let read = activity::read_run_data(&m, &dir);
-            let (counts, batches) = match read {
-                Ok((observed, batches)) => (Ok(observed), Ok(batches)),
-                Err(e) => (Err(e.to_string()), Err(e)),
+            let (c, b) = match activity::read_run_data(&m, &dir) {
+                Ok((observed, labels)) => (Ok(observed), Ok(labels)),
+                Err(e) => (Err(e.to_string()), Err(e.to_string())),
             };
-            let _ = counts_tx.send(counts);
-            let _ = tx.send(batches);
+            let _ = counts_tx.send(c);
+            let _ = batches_tx.send(b);
         });
-        self.batch = Some(rx);
+        self.batch = BatchRead::Reading(batches);
     }
 
     /// Add the cells' batches once read. Returns whether they were added.
     pub fn poll_batch(&mut self) -> bool {
-        let Some(rx) = &self.batch else {
+        let BatchRead::Reading(p) = &self.batch else {
             return false;
         };
-        match rx.try_recv() {
-            Err(std::sync::mpsc::TryRecvError::Empty) => false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.batch = None;
-                false
+        let Some(read) = p.poll("the data read stopped") else {
+            return false;
+        };
+        self.batch = BatchRead::Done;
+        match read {
+            Ok(Some(labels)) => {
+                self.data.labels.push(labels);
+                true
             }
-            Ok(read) => {
-                self.batch = None;
-                match read {
-                    Ok(Some(labels)) => {
-                        self.data.labels.push(labels);
-                        true
-                    }
-                    Ok(None) => false,
-                    Err(e) => {
-                        log::warn!("view: skipping batch: {e}");
-                        false
-                    }
-                }
+            Ok(None) => false,
+            Err(e) => {
+                log::warn!("view: skipping batch: {e}");
+                false
             }
         }
     }
@@ -217,23 +212,19 @@ impl Scene {
             }
             _ => false,
         };
-        // The same run read again keeps the batches it had; another run
-        // reads its own on the side.
+        // The same run read again keeps the batches it had (or is reading,
+        // or found none of); another run reads its own on the side.
         let batch = self
-            .data
-            .labels
-            .iter()
-            .position(|l| l.kind == LabelKind::Batch)
+            .label_index(LabelKind::Batch)
             .map(|i| self.data.labels[i].clone());
         self.data = data;
-        let has_batch = self.data.labels.iter().any(|l| l.kind == LabelKind::Batch);
-        let read_data = match batch {
-            Some(b) if same_run && !has_batch => {
+        if same_run {
+            if let Some(b) = batch.filter(|_| self.label_index(LabelKind::Batch).is_none()) {
                 self.data.labels.push(b);
-                false
             }
-            _ => !(same_run && self.batch.is_some()),
-        };
+        } else {
+            self.batch = BatchRead::Idle;
+        }
         self.near = None;
         self.locked.clear();
         self.orders.borrow_mut().clear();
@@ -268,9 +259,7 @@ impl Scene {
             self.feature_embedding = None;
         }
         // After the activity is settled, so the counts go to the one kept.
-        if read_data {
-            self.start_batch();
-        }
+        self.start_batch();
         self.suggestions = None;
         self.refresh_activity();
         if let Some((round, id)) = left {
