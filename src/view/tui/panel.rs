@@ -53,7 +53,7 @@ impl Setting {
             Setting::Labels => "t",
             Setting::Dots => "< >",
             Setting::Near => "",
-            Setting::Sidebar => "b",
+            Setting::Sidebar => "space",
         }
     }
 }
@@ -104,7 +104,7 @@ impl App {
             Setting::Near => self.change(|sc| sc.step_near_count(d)),
             Setting::Sidebar => {
                 self.sidebar = false;
-                self.message = Some("sidebar hidden · b to show".into());
+                self.message = Some("sidebar hidden · space shows it".into());
             }
         }
     }

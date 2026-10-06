@@ -164,7 +164,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "style of a group: colour, shape, opacity, size, hidden",
             ),
             ("t", "labels on the map: small, medium, large, largest, off, in turn"),
-            ("b", "sidebar on or off"),
+            ("space  b", "sidebar on or off"),
             (
                 "<  >",
                 "every dot and all text smaller / bigger (each group's own style stays)",

@@ -113,10 +113,10 @@ impl App {
             KeyCode::Char('L' | 'M' | 'K') => {
                 self.message = Some("decisions are made in relabel mode: press R".into());
             }
-            KeyCode::Char('b') => {
+            KeyCode::Char(' ' | 'b') => {
                 self.sidebar = !self.sidebar;
                 if !self.sidebar {
-                    self.message = Some("sidebar hidden · b to show".into());
+                    self.message = Some("sidebar hidden · space shows it".into());
                 }
             }
             KeyCode::Char(',') => self.step_round(true),

@@ -215,7 +215,7 @@ struct App {
     panel: Rect,
     /// The cluster overview on the left of the map (relabel mode only).
     left: Rect,
-    /// Whether the sidebar may open (`b` toggles).
+    /// Whether the sidebar may open (space or `b` toggles).
     sidebar: bool,
     /// A `lupin relabel --watch` on this chain, whose latest round is followed.
     watcher: Option<Watcher>,
@@ -333,9 +333,22 @@ impl App {
         self.scene
             .merge_lines()
             .or_else(|| self.scene.review_lines())
-            .or_else(|| self.info.clone())
-            .or_else(|| self.scene.suggestion_lines())
-            .or_else(|| self.scene.near_lines())
+            .or_else(|| {
+                // A clicked cell's cluster summary above the features near
+                // it: the summary never hides the list.
+                let features = self
+                    .scene
+                    .suggestion_lines()
+                    .or_else(|| self.scene.near_lines());
+                match (self.info.clone(), features) {
+                    (Some(mut info), Some(features)) => {
+                        info.push(String::new());
+                        info.extend(features);
+                        Some(info)
+                    }
+                    (info, features) => info.or(features),
+                }
+            })
     }
 
     /// Map and sidebar areas and the viewport for the current terminal size.
@@ -633,5 +646,35 @@ impl App {
             None => format!("{}.{}", s.method, s.kind.slug()),
         };
         format!("{}.view.{what}", here(&self.scene.data.prefix))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_clicked_cells_summary_sits_above_the_features_near_it() {
+        let mut app = App::new(
+            crate::view::tests::scene(),
+            Picker::halfblocks(),
+            "r.senna.json".into(),
+            "lupin".into(),
+        );
+        app.info = Some(vec!["C1 · no summary recorded for this round".into()]);
+        app.scene.near = Some(crate::view::features::Near {
+            name: "c1".into(),
+            centre: crate::view::features::Centre::Cell,
+            metric: crate::view::features::Metric::Distance,
+            features: vec![("GENE1".into(), -0.5)],
+            cells: Vec::new(),
+        });
+        let lines = app.side_lines().unwrap();
+        assert!(lines[0].starts_with("C1"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("GENE1")), "{lines:?}");
+        // Without a summary, the list alone.
+        app.info = None;
+        let lines = app.side_lines().unwrap();
+        assert!(lines[0].contains("features nearest"), "{lines:?}");
     }
 }
