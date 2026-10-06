@@ -221,11 +221,7 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
             if event::poll(wait)? {
                 if let Event::Key(k) = event::read()? {
                     if k.kind != KeyEventKind::Release {
-                        // A large folder listed, or a file read, says so.
-                        let ((), spun) = crate::tui::busy::during("loading", || app.key(k));
-                        if spun {
-                            terminal.clear()?;
-                        }
+                        app.key(k);
                     }
                 }
             }

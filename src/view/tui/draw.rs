@@ -44,6 +44,9 @@ impl App {
         if self.job.is_some() {
             first.push_str("   · drawing…");
         }
+        if let Some(loading) = self.scene.loading_line() {
+            first.push_str(&format!("   · {loading}"));
+        }
         let [main, more] = self.status_keys();
         let lines = vec![
             Line::from(format!(" {first}")),

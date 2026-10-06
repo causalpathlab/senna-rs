@@ -75,7 +75,10 @@ impl App {
                 }
                 if self.names.as_ref().is_some_and(|n| n.names.is_empty()) {
                     self.names = None;
-                    self.message = Some("no feature names to search in this run".into());
+                    self.message = Some(match self.scene.loading_line() {
+                        Some(loading) => format!("{loading} · / searches once it is read"),
+                        None => "no feature names to search in this run".into(),
+                    });
                 } else {
                     self.modal = Some(Modal::Search(String::new(), Vec::new(), 0));
                 }

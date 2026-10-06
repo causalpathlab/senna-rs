@@ -76,8 +76,8 @@ fn a_scene_takes_the_batches_once_its_run_s_data_files_are_read() {
     let mut m = RunManifest::new(RunKind::Svd, "r");
     m.data.input = vec!["lib1.zarr".into(), "lib2.zarr".into()];
     let mut s = crate::view::tests::scene();
-    s.data.files = crate::view::activity::run_files(&m, d);
-    assert!(s.data.files.get().is_ok());
+    s.data.loads = crate::view::activity::RunLoads::new(&m, d);
+    assert!(s.data.loads.files.get().is_ok());
     assert!(s.take_batches());
     let batch = s.label_index(LabelKind::Batch).unwrap();
     assert_eq!(s.data.labels[batch].levels.len(), 2);

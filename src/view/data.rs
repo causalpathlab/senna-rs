@@ -311,8 +311,9 @@ pub struct Dataset {
     pub run: Option<(RunManifest, PathBuf)>,
     /// Where this manifest sits among annotation rounds.
     pub round: Option<super::rounds::Round>,
-    /// The run's data files: read once, shared by every view of the run.
-    pub files: std::sync::Arc<super::activity::RunFiles>,
+    /// The run's slow reads (data files, model tables, feature embedding):
+    /// each done once, shared by every view of the run.
+    pub loads: super::activity::RunLoads,
 }
 
 fn read_xy(path: &Path) -> anyhow::Result<Points> {
@@ -596,7 +597,7 @@ impl Dataset {
             prefix,
             spaces,
             labels,
-            files: super::activity::run_files(&m, &dir),
+            loads: super::activity::RunLoads::new(&m, &dir),
             run: Some((m, dir)),
             round: Some(round),
         })
@@ -606,7 +607,7 @@ impl Dataset {
     /// groupings, for what needs every grouping at once (a PDF, a batch
     /// colouring asked for on the command line).
     pub fn with_batches(&mut self) {
-        match self.files.get() {
+        match self.loads.files.get() {
             Ok(read) => self.labels.extend(read.batches.clone()),
             Err(e) => log::warn!("view: skipping batch: {e}"),
         }

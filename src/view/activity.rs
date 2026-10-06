@@ -19,9 +19,9 @@ use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunManifest};
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
-use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// Per group, a score per feature; and the features, in column order.
 type GroupContrasts<'a> = (Vec<Vec<f32>>, &'a [Box<str>]);
@@ -79,21 +79,21 @@ enum Model {
     Topic { log_theta: Mat, log_beta: Mat },
 }
 
-struct Expected {
+pub(crate) struct Expected {
     features: Axis,
     cells: Vec<Box<str>>,
     model: Model,
     /// Each feature's expected variance over all cells (embedding runs), for
     /// the "varies most here" ranking; computed on first use.
-    variance_everywhere: OnceCell<Vec<f32>>,
+    variance_everywhere: OnceLock<Vec<f32>>,
     /// θ and β out of log space (topic runs); computed on first use.
-    topic_linear: OnceCell<(Mat, Mat)>,
+    topic_linear: OnceLock<(Mat, Mat)>,
     /// Median of the finite baselines (`None`: no usable baseline).
-    bias_median: OnceCell<Option<f32>>,
+    bias_median: OnceLock<Option<f32>>,
     /// Mean of `z` over all cells (embedding runs).
-    z_mean: OnceCell<Vector>,
+    z_mean: OnceLock<Vector>,
     /// Row of each cell name.
-    cell_index: OnceCell<HashMap<Box<str>, u32>>,
+    cell_index: OnceLock<HashMap<Box<str>, u32>>,
 }
 
 impl Expected {
@@ -102,11 +102,11 @@ impl Expected {
             features,
             cells,
             model,
-            variance_everywhere: OnceCell::new(),
-            topic_linear: OnceCell::new(),
-            bias_median: OnceCell::new(),
-            z_mean: OnceCell::new(),
-            cell_index: OnceCell::new(),
+            variance_everywhere: OnceLock::new(),
+            topic_linear: OnceLock::new(),
+            bias_median: OnceLock::new(),
+            z_mean: OnceLock::new(),
+            cell_index: OnceLock::new(),
         }
     }
 
@@ -261,9 +261,11 @@ impl Levels {
 pub struct Activity {
     manifest: RunManifest,
     dir: PathBuf,
-    expected: Option<Result<Expected, String>>,
-    /// The run's data files, read once and shared with every view of it.
-    files: Arc<RunFiles>,
+    /// The run's slow reads, shared with every view of it.
+    loads: RunLoads,
+    /// Whether to wait for a read not done yet, or answer [`LOADING`]
+    /// (the screen does not wait).
+    patient: bool,
     /// Row of each point of a view in a source's cell table, by (source,
     /// view key).
     rows: HashMap<(Source, usize), Arc<Vec<u32>>>,
@@ -291,12 +293,12 @@ fn read_table(dir: &Path, rel: &str) -> anyhow::Result<MatWithNames<Mat>> {
 
 impl Activity {
     #[must_use]
-    pub fn new(manifest: RunManifest, dir: PathBuf, files: Arc<RunFiles>) -> Self {
+    pub fn new(manifest: RunManifest, dir: PathBuf, loads: RunLoads, patient: bool) -> Self {
         Self {
             manifest,
             dir,
-            expected: None,
-            files,
+            loads,
+            patient,
             rows: HashMap::default(),
             mixture: None,
         }
@@ -380,76 +382,8 @@ impl Activity {
         Ok(rows)
     }
 
-    /// The run's model of expression, read the way its kind's decoder reads
-    /// its tables ([`senna::run_manifest::RunKind::expression_model`]).
-    fn load_expected(&self) -> anyhow::Result<Expected> {
-        use senna::run_manifest::ExpressionModel as E;
-        let m = &self.manifest;
-        let o = &m.outputs;
-        let slot = |slot: Option<&str>, what: &str| {
-            slot.map(str::to_string)
-                .ok_or_else(|| anyhow::anyhow!("this {} run records no {what}", m.kind))
-        };
-        let model = m.kind.expression_model();
-        match model {
-            E::Embedding => {
-                let z_rel = slot(o.cell_embedding.as_deref(), "cell embedding")?;
-                let (rho_path, bias_path) =
-                    run_manifest::resolve_feature_embedding_for(m, &self.dir)?;
-                let z = read_table(&self.dir, &z_rel)?;
-                let rho = Mat::from_parquet_with_row_names(&rho_path, Some(0))?;
-                // Only used when it lines up with the feature table.
-                let bias = bias_path
-                    .and_then(|p| Mat::from_parquet_with_row_names(&p, Some(0)).ok())
-                    .filter(|b| b.rows == rho.rows && b.mat.ncols() >= 1)
-                    .map(|b| b.mat.column(0).iter().copied().collect());
-                embedding(z, rho, bias)
-            }
-            E::LatentLoadings => {
-                let z = read_table(&self.dir, &slot(o.latent.as_deref(), "latent")?)?;
-                let w = read_table(&self.dir, &slot(o.dictionary.as_deref(), "dictionary")?)?;
-                embedding(z, w, None)
-            }
-            E::Topic | E::TopicOfLogits => {
-                let mut theta = read_table(&self.dir, &slot(o.latent.as_deref(), "latent")?)?;
-                let beta = read_table(&self.dir, &slot(o.gene_dictionary(), "dictionary")?)?;
-                anyhow::ensure!(
-                    theta.mat.ncols() == beta.mat.ncols(),
-                    "latent has {} topics, dictionary {}",
-                    theta.mat.ncols(),
-                    beta.mat.ncols()
-                );
-                if model == E::TopicOfLogits {
-                    // The decoder reads the raw latent through a softmax.
-                    use legume_numeric::candle::vae::masked_topic::LatentHead;
-                    theta.mat = senna::embed_common::latent_to_theta(&theta.mat, LatentHead::Gaussian)
-                        .map(f32::ln);
-                }
-                Ok(Expected::new(
-                    Axis::new(beta.rows),
-                    theta.rows,
-                    Model::Topic {
-                        log_theta: theta.mat,
-                        log_beta: beta.mat,
-                    },
-                ))
-            }
-            E::Unmodelled => anyhow::bail!(
-                "a {} run has no model of expression to predict a feature from · o shows the observed counts",
-                m.kind
-            ),
-        }
-    }
-
     fn expected(&mut self) -> Result<&Expected, String> {
-        if self.expected.is_none() {
-            self.expected = Some(self.load_expected().map_err(|e| e.to_string()));
-        }
-        self.expected
-            .as_ref()
-            .expect("just set")
-            .as_ref()
-            .map_err(Clone::clone)
+        self.loads.model.answer(self.patient)
     }
 
     /// The data files the observed counts need that are not here, even
@@ -480,15 +414,15 @@ impl Activity {
     /// Whether the observed counts could not be opened at all (as opposed
     /// to one feature missing from them).
     pub fn observed_failed(&self) -> bool {
-        matches!(self.files.try_get(), Some(Err(_)))
+        matches!(self.loads.files.try_get(), Some(Err(_)))
     }
 
     /// The observed counts, from the run's one read of its data files.
     fn observed(&mut self) -> Result<&Observed, String> {
-        match self.files.get() {
-            Ok(read) => Ok(&read.observed),
-            Err(e) => Err(e.clone()),
-        }
+        self.loads
+            .files
+            .answer(self.patient)
+            .map(|read| &read.observed)
     }
 
     /// Feature names on `source`'s axis, for search and completion.
@@ -1167,12 +1101,142 @@ pub(crate) struct RunRead {
 /// view of the run.
 pub(crate) type RunFiles = crate::tui::Loading<RunRead>;
 
-/// The data files of the run at `dir` (manifest `m`), not read yet.
-pub(crate) fn run_files(m: &RunManifest, dir: &Path) -> Arc<RunFiles> {
-    let (m, dir) = (m.clone(), dir.to_path_buf());
-    Arc::new(RunFiles::new(move || {
-        read_run_data(&m, &dir).map_err(|e| e.to_string())
-    }))
+/// A run's model of expression, read once on a worker thread.
+pub(crate) type ModelTables = crate::tui::Loading<Expected>;
+
+/// A run's feature embedding, read once on a worker thread.
+pub(crate) type FeatureTables = crate::tui::Loading<super::features::FeatureEmbedding>;
+
+/// A run's slow reads, each started once on a worker thread and shared by
+/// every view of the run: its data files, its model of expression, and
+/// its feature embedding.
+#[derive(Clone)]
+pub(crate) struct RunLoads {
+    pub files: Arc<RunFiles>,
+    pub model: Arc<ModelTables>,
+    pub features: Arc<FeatureTables>,
+}
+
+impl RunLoads {
+    /// The reads of the run at `dir` (manifest `m`), none started.
+    pub(crate) fn new(m: &RunManifest, dir: &Path) -> Self {
+        let run = || (m.clone(), dir.to_path_buf());
+        let (fm, fd) = run();
+        let (mm, md) = run();
+        let (em, ed) = run();
+        Self {
+            files: Arc::new(RunFiles::new(move || {
+                read_run_data(&fm, &fd).map_err(|e| e.to_string())
+            })),
+            model: Arc::new(ModelTables::new(move || {
+                load_expected(&mm, &md).map_err(|e| e.to_string())
+            })),
+            features: Arc::new(FeatureTables::new(move || {
+                super::features::FeatureEmbedding::load(Some(&(em, ed)))
+            })),
+        }
+    }
+
+    /// No run to read from.
+    #[cfg(test)]
+    pub(crate) fn none() -> Self {
+        const NO: &str = "no run to read from";
+        let loads = Self {
+            files: Arc::new(RunFiles::new(|| Err(NO.into()))),
+            model: Arc::new(ModelTables::new(|| Err(NO.into()))),
+            features: Arc::new(FeatureTables::new(|| Err(NO.into()))),
+        };
+        loads.start();
+        loads
+    }
+
+    /// Start every read (each once).
+    pub(crate) fn start(&self) {
+        self.files.start();
+        self.model.start();
+        self.features.start();
+    }
+
+    /// What is still being read, and for how long: the longest first.
+    pub(crate) fn busy(&self) -> Vec<(&'static str, std::time::Duration)> {
+        let mut out: Vec<_> = [
+            ("model tables", self.model.busy()),
+            ("data files", self.files.busy()),
+            ("feature embedding", self.features.busy()),
+        ]
+        .into_iter()
+        .filter_map(|(what, t)| t.map(|t| (what, t)))
+        .collect();
+        out.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
+        out
+    }
+
+    /// How many of the reads have answered.
+    pub(crate) fn answered(&self) -> usize {
+        usize::from(self.files.try_get().is_some())
+            + usize::from(self.model.try_get().is_some())
+            + usize::from(self.features.try_get().is_some())
+    }
+}
+
+/// The run's model of expression, read the way its kind's decoder reads
+/// its tables ([`senna::run_manifest::RunKind::expression_model`]).
+fn load_expected(m: &RunManifest, dir: &Path) -> anyhow::Result<Expected> {
+    use senna::run_manifest::ExpressionModel as E;
+    let o = &m.outputs;
+    let slot = |slot: Option<&str>, what: &str| {
+        slot.map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("this {} run records no {what}", m.kind))
+    };
+    let model = m.kind.expression_model();
+    match model {
+        E::Embedding => {
+            let z_rel = slot(o.cell_embedding.as_deref(), "cell embedding")?;
+            let (rho_path, bias_path) =
+                run_manifest::resolve_feature_embedding_for(m, dir)?;
+            let z = read_table(dir, &z_rel)?;
+            let rho = Mat::from_parquet_with_row_names(&rho_path, Some(0))?;
+            // Only used when it lines up with the feature table.
+            let bias = bias_path
+                .and_then(|p| Mat::from_parquet_with_row_names(&p, Some(0)).ok())
+                .filter(|b| b.rows == rho.rows && b.mat.ncols() >= 1)
+                .map(|b| b.mat.column(0).iter().copied().collect());
+            embedding(z, rho, bias)
+        }
+        E::LatentLoadings => {
+            let z = read_table(dir, &slot(o.latent.as_deref(), "latent")?)?;
+            let w = read_table(dir, &slot(o.dictionary.as_deref(), "dictionary")?)?;
+            embedding(z, w, None)
+        }
+        E::Topic | E::TopicOfLogits => {
+            let mut theta = read_table(dir, &slot(o.latent.as_deref(), "latent")?)?;
+            let beta = read_table(dir, &slot(o.gene_dictionary(), "dictionary")?)?;
+            anyhow::ensure!(
+                theta.mat.ncols() == beta.mat.ncols(),
+                "latent has {} topics, dictionary {}",
+                theta.mat.ncols(),
+                beta.mat.ncols()
+            );
+            if model == E::TopicOfLogits {
+                // The decoder reads the raw latent through a softmax.
+                use legume_numeric::candle::vae::masked_topic::LatentHead;
+                theta.mat = senna::embed_common::latent_to_theta(&theta.mat, LatentHead::Gaussian)
+                    .map(f32::ln);
+            }
+            Ok(Expected::new(
+                Axis::new(beta.rows),
+                theta.rows,
+                Model::Topic {
+                    log_theta: theta.mat,
+                    log_beta: beta.mat,
+                },
+            ))
+        }
+        E::Unmodelled => anyhow::bail!(
+            "a {} run has no model of expression to predict a feature from · o shows the observed counts",
+            m.kind
+        ),
+    }
 }
 
 /// An embedding model from cell table `z` and feature table `rho` of one
@@ -1295,13 +1359,18 @@ mod tests {
                 bias: Some(vec![0.5, 0.1, 0.9]),
             }
         };
-        let mut a = Activity::new(
+        let mut loads = RunLoads::none();
+        loads.model = Arc::new(ModelTables::ready(Ok(Expected::new(
+            Axis::new(names("GENE", 3)),
+            cells,
+            model,
+        ))));
+        Activity::new(
             RunManifest::new(senna::run_manifest::RunKind::Topic, "r"),
             PathBuf::new(),
-            Arc::new(RunFiles::ready(Err("no data files".into()))),
-        );
-        a.expected = Some(Ok(Expected::new(Axis::new(names("GENE", 3)), cells, model)));
-        a
+            loads,
+            true,
+        )
     }
 
     #[test]
@@ -1412,8 +1481,8 @@ mod tests {
         let mut m = RunManifest::new(kind, "r");
         m.outputs.latent = Some("r.latent.parquet".into());
         m.outputs.dictionary = Some("r.dictionary.parquet".into());
-        let files = run_files(&m, dir);
-        Activity::new(m, dir.to_path_buf(), files)
+        let loads = RunLoads::new(&m, dir);
+        Activity::new(m, dir.to_path_buf(), loads, true)
     }
 
     #[test]

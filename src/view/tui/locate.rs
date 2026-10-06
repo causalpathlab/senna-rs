@@ -82,8 +82,9 @@ impl App {
             Err(e) => return self.refuse(format!("could not record the data file: {e}")),
         };
         let name = files::name(chosen);
-        let files = crate::view::activity::run_files(&m, &dir);
-        let mut activity = Activity::new(m.clone(), dir, files.clone());
+        // The data files were just chosen: wait for them to be checked.
+        let loads = crate::view::activity::RunLoads::new(&m, &dir);
+        let mut activity = Activity::new(m.clone(), dir, loads.clone(), true);
         if let Some((next, recorded)) = activity.missing_inputs().into_iter().next() {
             self.message = Some(format!(
                 "{name} found · where is {}?",
@@ -113,7 +114,7 @@ impl App {
         self.open_round(&from, "reloaded");
         // The data is open already: the scene keeps it rather than reading
         // it again.
-        self.scene.data.files = files;
+        self.scene.data.loads = loads;
         self.scene.activity = Some(activity);
         self.change(|s| {
             s.source = crate::view::activity::Source::Observed;

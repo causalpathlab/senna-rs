@@ -6,7 +6,7 @@ impl Scene {
     /// Start reading the run's data files on a worker thread (once per
     /// run, whichever view asks first).
     pub fn start_loads(&mut self) {
-        self.data.files.start();
+        self.data.loads.start();
     }
 
     /// Add the cells' batches to the groupings once the data files are
@@ -15,7 +15,7 @@ impl Scene {
         if self.batches_taken {
             return false;
         }
-        let Some(read) = self.data.files.try_get() else {
+        let Some(read) = self.data.loads.files.try_get() else {
             return false;
         };
         self.batches_taken = true;
@@ -200,16 +200,18 @@ impl Scene {
         let batch = self
             .label_index(LabelKind::Batch)
             .map(|i| self.data.labels[i].clone());
-        let files = self.data.files.clone();
+        let loads = self.data.loads.clone();
         self.data = data;
         if same_run {
-            // One read of the data files per run.
-            self.data.files = files;
+            // One read of each per run.
+            self.data.loads = loads;
             if let Some(b) = batch.filter(|_| self.label_index(LabelKind::Batch).is_none()) {
                 self.data.labels.push(b);
             }
         } else {
             self.batches_taken = false;
+            self.answered = 0;
+            self.redo = None;
         }
         self.near = None;
         self.locked.clear();
@@ -242,7 +244,6 @@ impl Scene {
         } else {
             self.activity = None;
             self.geometry = None;
-            self.feature_embedding = None;
         }
         self.start_loads();
         self.suggestions = None;

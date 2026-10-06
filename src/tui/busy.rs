@@ -1,6 +1,7 @@
-//! A spinner on the bottom line while a key or click takes long to answer
-//! (a run read from disk, a model's tables, a large folder), so a front end
-//! never sits frozen without a word.
+//! A spinner on stderr while work runs before a front end has the screen
+//! (reading the runs to show), so the terminal never sits blank without a
+//! word. On screen, slow reads run on the side ([`super::Loading`]) and the
+//! front end's status line says so.
 
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -9,17 +10,9 @@ use std::time::{Duration, Instant};
 /// never flickers the screen.
 const GRACE: Duration = Duration::from_millis(150);
 
-/// Run `work`; when it takes longer than a moment, show a spinner, `what`
-/// it does and the seconds on the terminal's bottom line until it is done.
-/// Returns its result and whether the spinner showed: it is written past
-/// the front end's own frame, so the screen then wants drawing afresh.
-pub(crate) fn during<T: Send>(what: &str, work: impl FnOnce() -> T + Send) -> (T, bool) {
-    waiting(work, |elapsed| show(what, elapsed))
-}
-
-/// [`during`] before a front end has the screen: the spinner on stderr's
-/// own line, rewritten in place and wiped when done; nothing when stderr
-/// is not a terminal.
+/// Run `work`; when it takes longer than a moment, a spinner, `what` it
+/// does and the seconds on stderr's own line, rewritten in place and wiped
+/// when done; nothing when stderr is not a terminal.
 pub(crate) fn during_inline<T: Send>(what: &str, work: impl FnOnce() -> T + Send) -> T {
     use std::io::{IsTerminal, Write};
     if !std::io::stderr().is_terminal() {
@@ -64,7 +57,7 @@ fn waiting<T: Send>(work: impl FnOnce() -> T + Send, mut tick: impl FnMut(Durati
     })
 }
 
-/// The bottom line, across the terminal: ` ⠂ loading… 3s`.
+/// The spinner's line, across the terminal: ` ⠂ reading BMM_vae… 3s`.
 fn line(what: &str, elapsed: Duration, width: usize) -> String {
     let frames = super::SPINNER;
     let spin = frames[(elapsed.as_millis() / 100) as usize % frames.len()];
@@ -75,33 +68,13 @@ fn line(what: &str, elapsed: Duration, width: usize) -> String {
     out
 }
 
-fn show(what: &str, elapsed: Duration) {
-    use ratatui::crossterm::{
-        cursor::MoveTo,
-        queue,
-        style::{Attribute, Print, SetAttribute},
-        terminal::size,
-    };
-    use std::io::Write;
-    let (w, h) = size().unwrap_or((80, 24));
-    let mut out = std::io::stdout();
-    let _ = queue!(
-        out,
-        MoveTo(0, h.saturating_sub(1)),
-        SetAttribute(Attribute::Reverse),
-        Print(line(what, elapsed, usize::from(w))),
-        SetAttribute(Attribute::Reset),
-    );
-    let _ = out.flush();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn quick_work_shows_nothing() {
-        let (out, shown) = during("loading", || 7);
+        let (out, shown) = waiting(|| 7, |_| {});
         assert_eq!(out, 7);
         assert!(!shown);
     }

@@ -45,6 +45,10 @@ impl<T: Send + 'static> Pending<T> {
     }
 }
 
+/// What an answer not come yet says ([`Loading::answer`]); an action that
+/// got it is done again when the answer comes.
+pub(crate) const LOADING: &str = "loading…";
+
 /// What a [`Loading`] does when started.
 type Work<T> = Box<dyn FnOnce() -> Result<T, String> + Send>;
 
@@ -94,6 +98,27 @@ impl<T: Send + Sync + 'static> Loading<T> {
     /// The answer, if it has come.
     pub(crate) fn try_get(&self) -> Option<&Result<T, String>> {
         self.value.get()
+    }
+
+    /// The answer: waited for when `wait`, else [`LOADING`] until it
+    /// comes (the work started meanwhile).
+    pub(crate) fn answer(&self, wait: bool) -> Result<&T, String> {
+        let read = if wait {
+            self.get()
+        } else {
+            self.start();
+            self.try_get().ok_or_else(|| LOADING.to_string())?
+        };
+        read.as_ref().map_err(Clone::clone)
+    }
+
+    /// How long the work has been running, while it runs.
+    pub(crate) fn busy(&self) -> Option<std::time::Duration> {
+        self.value
+            .get()
+            .is_none()
+            .then(|| self.since.get().map(std::time::Instant::elapsed))
+            .flatten()
     }
 
     /// The answer, starting the work if need be and waiting for it.
@@ -159,4 +184,47 @@ pub fn shown(p: &Path) -> String {
         .unwrap_or_else(|| p.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod loading_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A Loading that answers `v` once `gate` sends, counting its starts.
+    fn gated(
+        v: Result<u32, String>,
+    ) -> (Loading<u32>, std::sync::mpsc::Sender<()>, Arc<AtomicUsize>) {
+        let (gate, wait) = std::sync::mpsc::channel::<()>();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let n = starts.clone();
+        let l = Loading::new(move || {
+            n.fetch_add(1, Ordering::SeqCst);
+            let _ = wait.recv();
+            v
+        });
+        (l, gate, starts)
+    }
+
+    #[test]
+    fn a_loading_starts_once_and_answers_loading_until_done() {
+        let (l, gate, starts) = gated(Ok(7));
+        assert!(l.try_get().is_none() && l.busy().is_none(), "not started");
+        assert_eq!(l.answer(false), Err(LOADING.to_string()));
+        l.start();
+        l.start();
+        assert!(l.busy().is_some());
+        gate.send(()).unwrap();
+        assert_eq!(l.get(), &Ok(7));
+        assert_eq!(l.answer(false), Ok(&7));
+        assert!(l.busy().is_none());
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_panic_in_the_work_is_an_answer() {
+        let l: Loading<u32> = Loading::new(|| panic!("boom"));
+        assert!(l.get().as_ref().is_err_and(|e| e.contains("panic")));
+    }
 }

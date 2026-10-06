@@ -269,8 +269,13 @@ impl App {
     /// chain moving on, a toast running out. Returns whether the view
     /// changed (on screen, lupin's elapsed time counts as a change).
     fn background(&mut self, on_screen: bool) -> bool {
-        let mut changed = self.finish_zoom()
-            | self.scene.take_batches()
+        // A slow read answered: what waited on it is done again, and drawn.
+        let answered = self.scene.poll_loads();
+        if answered {
+            self.restart();
+        }
+        let mut changed = answered
+            | self.finish_zoom()
             | self.finish_relabel()
             | self.finish_recompute()
             | self.keep_scores_current()
@@ -292,8 +297,11 @@ impl App {
             self.toast = None;
             changed = true;
         }
-        // On screen, lupin's or senna's elapsed time keeps ticking.
-        changed || (on_screen && (self.relabeling.is_some() || self.recomputing.is_some()))
+        // On screen, lupin's, senna's or a slow read's time keeps ticking.
+        let ticking = self.relabeling.is_some()
+            || self.recomputing.is_some()
+            || !self.scene.data.loads.busy().is_empty();
+        changed || (on_screen && ticking)
     }
 
     /// How long to wait for input while this view is on screen.

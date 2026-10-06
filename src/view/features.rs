@@ -2,6 +2,7 @@
 //! features near a clicked cell.
 
 use super::*;
+use crate::tui::LOADING;
 
 /// How many neighbours a click lists, in turn; the second by default.
 pub(crate) const NEAR_COUNTS: [usize; 5] = [6, 12, 20, 30, 50];
@@ -9,6 +10,21 @@ pub(crate) const NEAR_COUNTS: [usize; 5] = [6, 12, 20, 30, 50];
 /// A sidebar row: its text, and the feature it names, if it names one
 /// (arrows step through those rows, a click shows its feature).
 pub(crate) type PaneRow = (String, Option<Box<str>>);
+
+/// What was asked while a slow read was not done yet, done again when it
+/// is ([`Scene::poll_loads`]).
+#[derive(Clone)]
+pub(crate) enum Ask {
+    /// The features (and cells) near a click.
+    Near { name: Box<str>, centre: Centre },
+    /// Features suggested for the view (`n`).
+    Suggest,
+}
+
+/// Whether `r` is an answer not come yet ([`LOADING`]).
+pub(crate) fn is_loading<T>(r: &Result<T, String>) -> bool {
+    matches!(r, Err(e) if e == LOADING)
+}
 
 /// Names ranked best first with their scores, or why there are none.
 type Ranked = Result<Vec<(Box<str>, f32)>, String>;
@@ -64,7 +80,7 @@ pub(crate) struct FeatureEmbedding {
 }
 
 impl FeatureEmbedding {
-    fn load(
+    pub(crate) fn load(
         run: Option<&(senna::run_manifest::RunManifest, std::path::PathBuf)>,
     ) -> Result<Self, String> {
         let (m, dir) = run.ok_or("no run to read a feature embedding from")?;
@@ -192,7 +208,12 @@ impl Scene {
                 self.set_pick(Pick::One(first));
             }
             Ok(_) => self.note = Some("no feature stands out here".into()),
-            Err(e) => self.note = Some(e),
+            Err(e) => {
+                if e == LOADING {
+                    self.redo = Some(Ask::Suggest);
+                }
+                self.note = Some(e);
+            }
         }
     }
 
@@ -331,7 +352,7 @@ impl Scene {
     pub(super) fn activity(&mut self) -> Option<&mut Activity> {
         if self.activity.is_none() {
             let (m, dir) = self.data.run.clone()?;
-            self.activity = Some(Activity::new(m, dir, self.data.files.clone()));
+            self.activity = Some(Activity::new(m, dir, self.data.loads.clone(), self.patient));
         }
         self.activity.as_mut()
     }
@@ -448,10 +469,13 @@ impl Scene {
             Some(a) => a.cells_z(cells.iter().copied()),
             None => return (Metric::Distance, Err("no run to find features in".into())),
         };
-        let embedding = self
-            .feature_embedding
-            .get_or_insert_with(|| FeatureEmbedding::load(self.data.run.as_ref()));
-        if let (Ok(z), Ok(e)) = (&z, embedding.as_ref()) {
+        let loads = self.data.loads.clone();
+        let embedding = loads.features.answer(self.patient);
+        // Not read yet: ranked once it is, not by another metric meanwhile.
+        if is_loading(&z) || is_loading(&embedding) {
+            return (Metric::Distance, Err(LOADING.into()));
+        }
+        if let (Ok(z), Ok(e)) = (&z, &embedding) {
             if let Some(found) = e.near_place(z, None, top) {
                 return (Metric::Distance, Ok(found));
             }
@@ -481,6 +505,52 @@ impl Scene {
             .filter_map(|(f, k)| k.then_some(f))
             .take(count)
             .collect()
+    }
+
+    /// Take in what the run's slow reads answered since the last look: the
+    /// batches, then what was asked before they came, done again. Returns
+    /// whether anything changed.
+    pub fn poll_loads(&mut self) -> bool {
+        let batches = self.take_batches();
+        let answered = self.data.loads.answered();
+        if answered == self.answered {
+            return batches;
+        }
+        self.answered = answered;
+        match self.redo.take() {
+            Some(Ask::Near { name, centre }) => match centre {
+                Centre::Cell => self.show_near(&name),
+                Centre::Feature => self.show_near_feature(&name),
+                Centre::Group { .. } => {
+                    if let Some(g) = self.levels().iter().position(|l| **l == *name) {
+                        self.show_near_group(g as u32);
+                    }
+                }
+                Centre::None => {}
+            },
+            Some(Ask::Suggest) => self.suggest(),
+            None => {}
+        }
+        // A feature shown while its values could not be read yet.
+        if self.pick.is_some() && self.shown.is_none() {
+            self.refresh_activity();
+        }
+        true
+    }
+
+    /// What the run is still reading, for the status line: `⠂ loading
+    /// model tables… 2s`.
+    pub fn loading_line(&self) -> Option<String> {
+        let busy = self.data.loads.busy();
+        let (_, longest) = busy.first()?;
+        let frames = crate::tui::SPINNER;
+        let spin = frames[(longest.as_millis() / 100) as usize % frames.len()];
+        let what: Vec<&str> = busy.iter().map(|(w, _)| *w).collect();
+        Some(format!(
+            "{spin} loading {}… {}s",
+            what.join(", "),
+            longest.as_secs()
+        ))
     }
 
     /// List the neighbours of the last click again (after its count or the
@@ -560,6 +630,9 @@ impl Scene {
                 }));
             }
             Err(e) => {
+                if e == LOADING {
+                    self.redo = Some(Ask::Near { name, centre });
+                }
                 self.set_near(None);
                 self.note = Some(e);
             }
@@ -573,9 +646,8 @@ impl Scene {
     pub fn show_near_feature(&mut self, feature: &str) {
         let top = self.near_count;
         let on_cells = self.current().kind == SpaceKind::FeaturesOnCells;
-        let embedding = self
-            .feature_embedding
-            .get_or_insert_with(|| FeatureEmbedding::load(self.data.run.as_ref()));
+        let loads = self.data.loads.clone();
+        let embedding = loads.features.answer(self.patient);
         let placed = embedding.as_ref().ok().filter(|_| on_cells).and_then(|e| {
             let (at, i) = e.place_of(feature)?;
             Some((e.near_place(&at, Some(i), top)?, at))
@@ -583,10 +655,7 @@ impl Scene {
         let (metric, features, at) = match placed {
             Some((features, at)) => (Metric::Distance, Ok(features), Some(at)),
             None => {
-                let features = embedding
-                    .as_ref()
-                    .map_err(Clone::clone)
-                    .and_then(|e| e.near(feature, top));
+                let features = embedding.and_then(|e| e.near(feature, top));
                 (Metric::Cosine, features, None)
             }
         };
@@ -596,6 +665,12 @@ impl Scene {
             (Some(a), None) => a.near_feature(feature, top),
             (None, _) => Ok(Vec::new()),
         };
+        if is_loading(&features) || is_loading(&cells) {
+            self.redo = Some(Ask::Near {
+                name: feature.into(),
+                centre: Centre::Feature,
+            });
+        }
         // Whatever failed is said, even when the other half has neighbours.
         let (features, cells, why) = match (features, cells) {
             (Ok(f), Ok(c)) => (f, c, None),
