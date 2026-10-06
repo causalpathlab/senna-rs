@@ -197,7 +197,7 @@ const NO_ROW: u32 = u32::MAX;
 
 const NO_CONTRAST: &str = "the focused group has no cells, or no other cells are in view";
 
-struct Observed {
+pub(crate) struct Observed {
     data: SparseIoVec,
     features: Axis,
     /// Column of each cell name.
@@ -263,6 +263,9 @@ pub struct Activity {
     dir: PathBuf,
     expected: Option<Result<Expected, String>>,
     observed: Option<Result<Observed, String>>,
+    /// The observed counts while a read on the side is under way: taken
+    /// from it rather than read again.
+    observed_coming: Option<std::sync::mpsc::Receiver<Result<Observed, String>>>,
     /// Row of each point of a view in a source's cell table, by (source,
     /// view key).
     rows: HashMap<(Source, usize), Arc<Vec<u32>>>,
@@ -296,6 +299,7 @@ impl Activity {
             dir,
             expected: None,
             observed: None,
+            observed_coming: None,
             rows: HashMap::default(),
             mixture: None,
         }
@@ -437,38 +441,18 @@ impl Activity {
     }
 
     fn load_observed(&self) -> anyhow::Result<Observed> {
-        let m = &self.manifest;
-        anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
-        let files = m.data_inputs(&self.dir);
-        // Observed counts are the one thing here that needs the data.
-        if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
-            anyhow::bail!("the data is not here ({gone})");
+        read_run_data(&self.manifest, &self.dir).map(|(observed, _)| observed)
+    }
+
+    /// Take the observed counts from a read on the side
+    /// ([`read_run_data`]) when they come, rather than read them again.
+    pub(crate) fn observed_from(
+        &mut self,
+        coming: std::sync::mpsc::Receiver<Result<Observed, String>>,
+    ) {
+        if self.observed.is_none() {
+            self.observed_coming = Some(coming);
         }
-        let reload =
-            senna::multiome_layout::recorded_layout(m.data.multiome.as_ref(), files.len())?;
-        info!(
-            "view: opening {} data file(s) for observed counts",
-            files.len()
-        );
-        let SparseDataWithBatch { data, .. } =
-            read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
-                data_files: files,
-                keep_empty_barcodes: true,
-                ..Default::default()
-            })?)?;
-        let cells = data.column_names()?;
-        let n_cells = cells.len();
-        let cell_index = cells
-            .into_iter()
-            .enumerate()
-            .map(|(i, n)| (n, i as u32))
-            .collect();
-        Ok(Observed {
-            features: Axis::new(data.row_names()?),
-            cell_index,
-            n_cells,
-            data,
-        })
     }
 
     fn expected(&mut self) -> Result<&Expected, String> {
@@ -515,7 +499,12 @@ impl Activity {
 
     fn observed(&mut self) -> Result<&Observed, String> {
         if self.observed.is_none() {
-            self.observed = Some(self.load_observed().map_err(|e| e.to_string()));
+            // A read on the side is waited for, not repeated.
+            let read = match self.observed_coming.take().map(|rx| rx.recv()) {
+                Some(Ok(read)) => read,
+                _ => self.load_observed().map_err(|e| e.to_string()),
+            };
+            self.observed = Some(read);
         }
         self.observed
             .as_ref()
@@ -601,6 +590,21 @@ impl Activity {
     }
 
     /// `feature` on each of the points `names` (the view `key`).
+    /// Whether `feature` has a value to draw on some point of view `key`
+    /// from `source` (for observed counts, a count above zero): a feature
+    /// without one would show as nothing but missing values.
+    pub fn shows(&mut self, feature: &str, source: Source, key: usize, names: &[Box<str>]) -> bool {
+        let Ok(rows) = self.rows(source, key, names) else {
+            return false;
+        };
+        let Ok((raw, _)) = self.raw(feature, source) else {
+            return false;
+        };
+        Self::on_points(&raw, &rows)
+            .iter()
+            .any(|v| v.is_finite() && (source == Source::Expected || *v > 0.0))
+    }
+
     pub fn levels(
         &mut self,
         feature: &str,
@@ -1124,6 +1128,56 @@ fn row_sum(m: &Mat, rows: &[usize]) -> Vector {
     acc
 }
 
+/// Open the run's data files once: the observed counts, and each cell's
+/// batch when there is more than one. Slow on a large run (every data file
+/// is opened), so the screen does it on the side.
+pub(crate) fn read_run_data(
+    m: &RunManifest,
+    dir: &Path,
+) -> anyhow::Result<(Observed, Option<super::data::Labels>)> {
+    anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
+    let files = m.data_inputs(dir);
+    if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
+        anyhow::bail!("the data is not here ({gone})");
+    }
+    let batch_files = m.data_batches(dir);
+    let reload = senna::multiome_layout::recorded_layout(m.data.multiome.as_ref(), files.len())?;
+    info!("view: opening {} data file(s)", files.len());
+    let SparseDataWithBatch { data, batch, .. } =
+        read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
+            data_files: files,
+            batch_files: (!batch_files.is_empty()).then_some(batch_files),
+            keep_empty_barcodes: true,
+            ..Default::default()
+        })?)?;
+    let cells = data.column_names()?;
+    anyhow::ensure!(
+        cells.len() == batch.len(),
+        "{} cells but {} batch labels",
+        cells.len(),
+        batch.len()
+    );
+    let labels = super::data::Labels::new(
+        super::data::LabelKind::Batch,
+        cells.iter().cloned().zip(batch),
+        &[],
+    );
+    let batches = (labels.levels.len() > 1).then_some(labels);
+    let n_cells = cells.len();
+    let cell_index = cells
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| (n, i as u32))
+        .collect();
+    let observed = Observed {
+        features: Axis::new(data.row_names()?),
+        cell_index,
+        n_cells,
+        data,
+    };
+    Ok((observed, batches))
+}
+
 /// An embedding model from cell table `z` and feature table `rho` of one
 /// width.
 fn embedding(
@@ -1405,5 +1459,17 @@ mod tests {
             panic!("svd has no model of expression");
         };
         assert!(e.contains("observed"), "{e}");
+    }
+
+    #[test]
+    fn a_feature_shows_only_where_its_source_has_values_for_the_view() {
+        let mut a = tiny(false);
+        let view: Vec<Box<str>> = ["c0", "c3"].map(Into::into).to_vec();
+        assert!(a.shows("GENE0", Source::Expected, 0, &view));
+        // Not in the model: nothing to draw.
+        assert!(!a.shows("NOPE", Source::Expected, 0, &view));
+        // None of the view's cells is in the model: missing everywhere.
+        let elsewhere: Vec<Box<str>> = ["x0", "x1"].map(Into::into).to_vec();
+        assert!(!a.shows("GENE0", Source::Expected, 1, &elsewhere));
     }
 }

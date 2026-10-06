@@ -305,6 +305,13 @@ impl Scene {
 
     pub fn toggle_source(&mut self) {
         self.source = self.source.other();
+        // A click's list holds the features with values in the source shown;
+        // suggestions on screen stay as they are.
+        if self.current_suggestions().is_none() {
+            let shown = self.pick.clone();
+            self.rerun_near();
+            self.pick = shown;
+        }
         self.refresh_activity();
     }
 
@@ -458,15 +465,25 @@ impl Scene {
         (Metric::Direction, found)
     }
 
-    /// List `step` more or fewer neighbours along [`NEAR_COUNTS`], and list
-    /// those of the last click again.
-    pub fn step_near_count(&mut self, step: isize) {
-        let n = NEAR_COUNTS.len() as isize;
-        let at = NEAR_COUNTS
-            .iter()
-            .position(|&c| c >= self.near_count)
-            .unwrap_or(1) as isize;
-        self.near_count = NEAR_COUNTS[(at + step).clamp(0, n - 1) as usize];
+    /// The features of `list` that have values to draw on this cell map from
+    /// the source on screen: one without would show as missing everywhere.
+    fn with_values(&mut self, list: Vec<(Box<str>, f32)>) -> Vec<(Box<str>, f32)> {
+        if self.current().axis() != Axis::Cells {
+            return list;
+        }
+        let (space, source) = (self.space, self.source);
+        let Some((activity, data)) = self.activity_and_data() else {
+            return list;
+        };
+        let names = &data.spaces[space].points.names;
+        list.into_iter()
+            .filter(|(f, _)| activity.shows(f, source, space, names))
+            .collect()
+    }
+
+    /// List the neighbours of the last click again (after its count or the
+    /// source changed).
+    fn rerun_near(&mut self) {
         let again = self.near.as_ref().map(|n| (n.name.clone(), n.centre));
         match again {
             Some((name, Centre::Cell)) => self.show_near(&name),
@@ -478,6 +495,18 @@ impl Scene {
             }
             _ => {}
         }
+    }
+
+    /// List `step` more or fewer neighbours along [`NEAR_COUNTS`], and list
+    /// those of the last click again.
+    pub fn step_near_count(&mut self, step: isize) {
+        let n = NEAR_COUNTS.len() as isize;
+        let at = NEAR_COUNTS
+            .iter()
+            .position(|&c| c >= self.near_count)
+            .unwrap_or(1) as isize;
+        self.near_count = NEAR_COUNTS[(at + step).clamp(0, n - 1) as usize];
+        self.rerun_near();
     }
 
     /// Features nearest group `g` of the grouping on screen, as for a cell
@@ -504,7 +533,7 @@ impl Scene {
         metric: Metric,
         found: Result<Vec<(Box<str>, f32)>, String>,
     ) {
-        match found {
+        match found.map(|f| self.with_values(f)) {
             Ok(features) => {
                 if self.feature_space().is_none() {
                     self.note = Some(if self.root() == self.space {

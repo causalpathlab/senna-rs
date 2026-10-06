@@ -32,7 +32,7 @@ fn each_cell_gets_the_batch_the_fit_gave_it() {
     m.data.input = vec!["lib1.zarr".into(), "lib2.zarr".into()];
 
     // No batch files: each file is its own batch.
-    let l = read_batch_labels(&m, d).unwrap();
+    let l = batch_labels(&m, d).unwrap().unwrap();
     assert_eq!(l.kind, LabelKind::Batch);
     assert_eq!(l.levels.len(), 2);
     assert_eq!(l.by_name.len(), 5);
@@ -43,7 +43,7 @@ fn each_cell_gets_the_batch_the_fit_gave_it() {
     std::fs::write(d.join("b1.txt"), "x\ny\n").unwrap();
     std::fs::write(d.join("b2.txt"), "y\ny\nz\n").unwrap();
     m.data.batch = vec!["b1.txt".into(), "b2.txt".into()];
-    let l = read_batch_labels(&m, d).unwrap();
+    let l = batch_labels(&m, d).unwrap().unwrap();
     assert_eq!(l.levels.len(), 3);
     assert_eq!(level(&l, "c0@lib1"), "x");
     assert_eq!(level(&l, "c1@lib1"), "y");
@@ -55,7 +55,7 @@ fn missing_data_skips_the_batch_colouring() {
     let dir = tempfile::tempdir().unwrap();
     let mut m = RunManifest::new(RunKind::Svd, "r");
     m.data.input = vec!["gone.zarr".into()];
-    let Err(e) = read_batch_labels(&m, dir.path()) else {
+    let Err(e) = batch_labels(&m, dir.path()) else {
         panic!("labels from data that is not there");
     };
     assert!(e.to_string().contains("not here"));

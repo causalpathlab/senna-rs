@@ -475,42 +475,10 @@ fn load_spaces(m: &RunManifest, dir: &Path) -> anyhow::Result<Vec<Space>> {
 /// Each cell's batch, as the fit had it: the run's batch files, else each
 /// data file's `@batch` tags or its name (senna's own rule, applied by the
 /// same loader). Opens the data files, not their counts.
-fn read_batch_labels(m: &RunManifest, dir: &Path) -> anyhow::Result<Labels> {
-    use data_beans::aux::data_loading::{
-        read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch,
-    };
-    anyhow::ensure!(!m.data.input.is_empty(), "the manifest lists no data files");
-    let files = m.data_inputs(dir);
-    if let Some(gone) = files.iter().find(|f| !Path::new(f.as_ref()).exists()) {
-        anyhow::bail!("the data is not here ({gone})");
-    }
-    let batch_files = m.data_batches(dir);
-    let reload = senna::multiome_layout::recorded_layout(m.data.multiome.as_ref(), files.len())?;
-    let SparseDataWithBatch { data, batch, .. } =
-        read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
-            data_files: files,
-            batch_files: (!batch_files.is_empty()).then_some(batch_files),
-            keep_empty_barcodes: true,
-            ..Default::default()
-        })?)?;
-    let cells = data.column_names()?;
-    anyhow::ensure!(
-        cells.len() == batch.len(),
-        "{} cells but {} batch labels",
-        cells.len(),
-        batch.len()
-    );
-    Ok(Labels::new(
-        LabelKind::Batch,
-        cells.into_iter().zip(batch),
-        &[],
-    ))
-}
-
 /// The batch of every cell, when the run has more than one batch: read from
 /// the data files themselves, so slow on a large run.
 pub(crate) fn batch_labels(m: &RunManifest, dir: &Path) -> anyhow::Result<Option<Labels>> {
-    read_batch_labels(m, dir).map(|l| (l.levels.len() > 1).then_some(l))
+    super::activity::read_run_data(m, dir).map(|(_, batches)| batches)
 }
 
 /// Every grouping the run carries. One that fails to read is skipped with a

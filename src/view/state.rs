@@ -3,16 +3,27 @@
 use super::*;
 
 impl Scene {
-    /// Read the cells' batches on a worker thread, unless the run has them;
-    /// [`Self::poll_batch`] adds them when they come.
+    /// Open the run's data files on a worker thread: the cells' batches go
+    /// to the groupings ([`Self::poll_batch`]) and the observed counts to
+    /// the activity, so `o` never opens them a second time.
     pub fn start_batch(&mut self) {
         let has = self.data.labels.iter().any(|l| l.kind == LabelKind::Batch);
         let Some((m, dir)) = self.data.run.clone().filter(|_| !has) else {
             return;
         };
         let (tx, rx) = std::sync::mpsc::channel();
+        let (counts_tx, counts_rx) = std::sync::mpsc::channel();
+        if let Some(a) = self.activity() {
+            a.observed_from(counts_rx);
+        }
         std::thread::spawn(move || {
-            let _ = tx.send(data::batch_labels(&m, &dir));
+            let read = activity::read_run_data(&m, &dir);
+            let (counts, batches) = match read {
+                Ok((observed, batches)) => (Ok(observed), Ok(batches)),
+                Err(e) => (Err(e.to_string()), Err(e)),
+            };
+            let _ = counts_tx.send(counts);
+            let _ = tx.send(batches);
         });
         self.batch = Some(rx);
     }
@@ -216,11 +227,13 @@ impl Scene {
             .map(|i| self.data.labels[i].clone());
         self.data = data;
         let has_batch = self.data.labels.iter().any(|l| l.kind == LabelKind::Batch);
-        match batch {
-            Some(b) if same_run && !has_batch => self.data.labels.push(b),
-            _ if same_run && self.batch.is_some() => {}
-            _ => self.start_batch(),
-        }
+        let read_data = match batch {
+            Some(b) if same_run && !has_batch => {
+                self.data.labels.push(b);
+                false
+            }
+            _ => !(same_run && self.batch.is_some()),
+        };
         self.near = None;
         self.locked.clear();
         self.orders.borrow_mut().clear();
@@ -253,6 +266,10 @@ impl Scene {
             self.activity = None;
             self.geometry = None;
             self.feature_embedding = None;
+        }
+        // After the activity is settled, so the counts go to the one kept.
+        if read_data {
+            self.start_batch();
         }
         self.suggestions = None;
         self.refresh_activity();
