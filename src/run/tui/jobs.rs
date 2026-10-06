@@ -279,9 +279,9 @@ impl Queue {
     }
 
     fn worker_done(&self) -> bool {
-        self.worker
-            .lock()
-            .map_or(true, |w| w.as_ref().is_none_or(std::thread::JoinHandle::is_finished))
+        self.worker.lock().map_or(true, |w| {
+            w.as_ref().is_none_or(std::thread::JoinHandle::is_finished)
+        })
     }
 
     /// Wait for the worker to finish: after [`Queue::stop`], until the fit

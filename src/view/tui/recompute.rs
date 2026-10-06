@@ -11,6 +11,9 @@ pub(super) struct Recomputing {
     what: String,
     /// The run being rewritten, reloaded when it is done.
     from: std::path::PathBuf,
+    /// The layout asked for, shown once the run reloads: the map on screen
+    /// is otherwise kept, which would hide a new method behind the old.
+    show: Option<(String, crate::view::SpaceKind)>,
     progress: std::sync::Arc<std::sync::Mutex<String>>,
     stopper: std::sync::Arc<crate::tui::child::Stopper>,
     done: Pending<()>,
@@ -118,6 +121,7 @@ impl App {
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let show = chosen.iter().find_map(|(s, m)| s.shows(m));
         let progress: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
         let stopper = std::sync::Arc::new(crate::tui::child::Stopper::default());
         let (shared, stops) = (progress.clone(), stopper.clone());
@@ -126,6 +130,7 @@ impl App {
             started: std::time::Instant::now(),
             what,
             from: self.from.clone(),
+            show,
             progress,
             stopper,
             done,
@@ -144,6 +149,9 @@ impl App {
         };
         let r = self.recomputing.take().expect("checked above");
         self.open_round(&r.from.clone(), "reloaded");
+        if let Some((method, kind)) = &r.show {
+            self.show_layout(method, *kind);
+        }
         match result {
             Ok(()) => self.pop(format!("recomputed {}", r.what)),
             Err(e) if e == "stopped" => {
@@ -155,6 +163,25 @@ impl App {
             Err(e) => self.message = Some(e),
         }
         true
+    }
+
+    /// Put the map of `method` on screen, of `kind` when the run has it.
+    /// Returns whether the run has that method at all.
+    pub(super) fn show_layout(&mut self, method: &str, kind: crate::view::SpaceKind) -> bool {
+        let spaces = &self.scene.data.spaces;
+        let same = spaces
+            .iter()
+            .position(|s| s.method == method && s.kind == kind);
+        let any = spaces.iter().position(|s| s.method == method);
+        match same.or(any) {
+            Some(i) => {
+                if i != self.scene.space {
+                    self.switch_space(i);
+                }
+                true
+            }
+            None => false,
+        }
     }
 
     /// While senna rewrites the run: esc stops it, and nothing that changes
@@ -251,6 +278,7 @@ mod tests {
             started: std::time::Instant::now(),
             what: "cell layout (umap)".into(),
             from: "r.senna.json".into(),
+            show: None,
             progress: Default::default(),
             stopper: stopper.clone(),
             done: Pending(rx),
@@ -287,6 +315,32 @@ mod tests {
         // It tried the recomputed run (not the one now on screen).
         let said = app.message.clone().unwrap_or_default();
         assert!(said.contains("r.senna.json"), "{said}");
+    }
+
+    #[test]
+    fn a_recomputed_layout_is_put_on_screen() {
+        let (mut app, _stopper, _tx) = busy();
+        assert_eq!(app.scene.current().method, "umap");
+        assert!(app.show_layout("phate", crate::view::SpaceKind::Cells));
+        assert_eq!(app.scene.current().method, "phate");
+        assert_eq!(app.scene.current().kind, crate::view::SpaceKind::Cells);
+        // A method the run lacks leaves the map as it is.
+        assert!(!app.show_layout("tsne", crate::view::SpaceKind::Cells));
+        assert_eq!(app.scene.current().method, "phate");
+    }
+
+    #[test]
+    fn a_layout_step_shows_its_method_and_a_clustering_nothing() {
+        use crate::view::SpaceKind;
+        assert_eq!(
+            Step::CellLayout.shows("tsne"),
+            Some(("tsne".into(), SpaceKind::Cells))
+        );
+        assert_eq!(
+            Step::FeatureLayout.shows("phate"),
+            Some(("phate".into(), SpaceKind::Features))
+        );
+        assert_eq!(Step::CellClusters.shows("1"), None);
     }
 
     #[test]
