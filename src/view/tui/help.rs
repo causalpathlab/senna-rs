@@ -68,10 +68,14 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
 
             (
+                "↑ ↓  PgUp PgDn",
+                "with a feature list in the sidebar (suggestions, features near a click): step through it, each shown on the map; a click on one shows it",
+            ),
+            (
                 "g  G",
                 "step through the suggestions (else the focused group's markers)",
             ),
-            ("/", "search a feature by name"),
+            ("/", "search a feature by name: matches list in the sidebar, ↑ ↓ choose, enter shows"),
             ("a", "activity of the focused group's whole marker set"),
             ("o", "expected (model) or observed (counts)"),
             ("p", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
@@ -291,7 +295,7 @@ impl App {
                 "R relabel clusters   A annotate with lupin   r recompute   , . rounds   z lay out a group   d copy view   w all views   s save PDF   ? all keys   q quit",
             ],
             Context::Feature => [
-                "g / G next or previous feature   o switch between counts and model   a the group's whole marker set   x back to group colours",
+                "↑ ↓ next or previous feature in the list   o switch between counts and model   a the group's whole marker set   x back to group colours",
                 "/ search a feature   n new suggestions   p pin its name   [ ] focus a group   ? all keys",
             ],
             Context::Merge => [
@@ -313,8 +317,8 @@ impl App {
             // The popup says what the keys do.
             Context::Submit | Context::Recompute | Context::File => ["", ""],
             Context::Search => [
-                "type part of a feature name   enter shows the first match   esc cancels",
-                "",
+                "type part of a feature name   ↑ ↓ choose a match in the sidebar   enter or click shows it",
+                "esc cancels",
             ],
             Context::StyleMenu => [
                 "↑ ↓ choose a group   ← → change the value   tab next property",

@@ -73,19 +73,37 @@ impl App {
             };
             if let Some(menu) = &self.menu {
                 self.draw_menu(f, side, menu, page);
-            } else if let Some(lines) = self.side_lines().filter(|_| side.height > 0) {
+            } else if let Some(rows) = self.side_rows().filter(|_| side.height > 0) {
                 // A list longer than the panel scrolls to keep its cursor
                 // (the last `▸` line) in sight, counted in wrapped rows.
-                let rows = usize::from(side.height);
+                let height = usize::from(side.height);
                 let width = usize::from(side.width.saturating_sub(1)).max(1);
-                let tall = |l: &String| (l.chars().count() + 1).div_ceil(width).max(1);
-                let at = lines.iter().rposition(|l| l.starts_with('▸')).unwrap_or(0);
-                let above: usize = lines[..at].iter().map(tall).sum();
-                let total: usize = lines.iter().map(tall).sum();
-                let skip = (above + rows / 2)
-                    .saturating_sub(rows)
-                    .min(total.saturating_sub(rows));
-                let text: Vec<Line> = lines.iter().map(|l| Line::from(format!(" {l}"))).collect();
+                let tall = |l: &str| (l.chars().count() + 1).div_ceil(width).max(1);
+                let at = rows
+                    .iter()
+                    .rposition(|(l, _)| l.starts_with('▸'))
+                    .unwrap_or(0);
+                let above: usize = rows[..at].iter().map(|(l, _)| tall(l)).sum();
+                let total: usize = rows.iter().map(|(l, _)| tall(l)).sum();
+                let skip = (above + height / 2)
+                    .saturating_sub(height)
+                    .min(total.saturating_sub(height));
+                // Where each feature's row lands, for a click on it.
+                let mut hits = Vec::new();
+                let mut y = 0;
+                for (l, f) in &rows {
+                    let h = tall(l);
+                    if let (Some(f), true) = (f, y >= skip && y + h <= skip + height) {
+                        let top = side.y + u16::try_from(y - skip).unwrap_or(u16::MAX);
+                        hits.push((Rect::new(side.x, top, side.width, h as u16), f.clone()));
+                    }
+                    y += h;
+                }
+                *self.pane_hits.borrow_mut() = hits;
+                let text: Vec<Line> = rows
+                    .iter()
+                    .map(|(l, _)| Line::from(format!(" {l}")))
+                    .collect();
                 f.render_widget(
                     Paragraph::new(text)
                         .wrap(ratatui::widgets::Wrap { trim: false })
@@ -94,6 +112,8 @@ impl App {
                         .style(page),
                     side,
                 );
+            } else {
+                self.pane_hits.borrow_mut().clear();
             }
         }
 

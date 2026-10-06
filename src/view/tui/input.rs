@@ -73,7 +73,7 @@ impl App {
                     self.names = None;
                     self.message = Some("no feature names to search in this run".into());
                 } else {
-                    self.modal = Some(Modal::Search(String::new(), Vec::new()));
+                    self.modal = Some(Modal::Search(String::new(), Vec::new(), 0));
                 }
             }
             KeyCode::Char('?') => self.help = true,
@@ -128,6 +128,18 @@ impl App {
                     self.message = Some("already at the top-level layout".into());
                 }
             }
+            // With a feature list in the sidebar, the arrows go through it.
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+                if !self.pane_features().is_empty() =>
+            {
+                let delta = match k.code {
+                    KeyCode::Up => -1,
+                    KeyCode::Down => 1,
+                    KeyCode::PageUp => -10,
+                    _ => 10,
+                };
+                self.step_pane(delta);
+            }
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
                 let (sx, sy) = match k.code {
                     KeyCode::Left => (1.0, 0.0),
@@ -154,9 +166,10 @@ impl App {
 
     /// A key while searching. Returns whether anything changed.
     pub(super) fn search_key(&mut self, k: KeyEvent) -> bool {
-        let Some(Modal::Search(query, _)) = self.modal.as_mut() else {
+        let Some(Modal::Search(query, hits, at)) = self.modal.as_mut() else {
             return false;
         };
+        let last = hits.len().saturating_sub(1);
         match k.code {
             KeyCode::Esc => {
                 self.modal = None;
@@ -164,7 +177,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let pick = match self.modal.take() {
-                    Some(Modal::Search(_, hits)) => hits.into_iter().next(),
+                    Some(Modal::Search(_, hits, at)) => hits.into_iter().nth(at),
                     _ => None,
                 };
                 match pick {
@@ -173,19 +186,34 @@ impl App {
                 }
                 return true;
             }
+            // The cursor moves through the matches listed in the sidebar.
+            KeyCode::Up => *at = at.saturating_sub(1),
+            KeyCode::Down => *at = (*at + 1).min(last),
+            KeyCode::PageUp => *at = at.saturating_sub(10),
+            KeyCode::PageDown => *at = (*at + 10).min(last),
             KeyCode::Backspace => {
                 query.pop();
+                self.research();
             }
-            KeyCode::Char(c) => query.push(c),
+            KeyCode::Char(c) => {
+                query.push(c);
+                self.research();
+            }
             _ => return false,
         }
-        let query = std::mem::take(query);
-        let hits = self
+        true
+    }
+
+    /// The matches of the query typed so far, the cursor on the first.
+    fn research(&mut self) {
+        let Some(Modal::Search(query, hits, at)) = self.modal.as_mut() else {
+            return;
+        };
+        *hits = self
             .names
             .as_ref()
-            .map_or_else(Vec::new, |n| search(&n.names, &n.lower, &query));
-        self.modal = Some(Modal::Search(query, hits));
-        true
+            .map_or_else(Vec::new, |n| search(&n.names, &n.lower, query));
+        *at = 0;
     }
 
     /// A key in the style menu. Returns whether anything changed.
@@ -247,7 +275,7 @@ impl App {
     /// A mouse event. Returns whether anything changed.
     pub(super) fn mouse(&mut self, m: MouseEvent) -> bool {
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-            if self.panel_click(m.column, m.row) {
+            if self.panel_click(m.column, m.row) || self.pane_click(m.column, m.row) {
                 return true;
             }
         }
@@ -502,10 +530,34 @@ fn adjust(
     }
 }
 
+/// The sidebar while searching: what was typed, then the matches, the one
+/// under the cursor marked.
+pub(super) fn search_rows(query: &str, hits: &[Box<str>], at: usize) -> Vec<PaneRow> {
+    let mut out: Vec<PaneRow> = vec![
+        (format!("search “{query}”"), None),
+        ("↑ ↓ choose · enter or click shows · esc back".into(), None),
+    ];
+    if hits.is_empty() {
+        out.push((
+            if query.is_empty() {
+                "  type part of a feature name".into()
+            } else {
+                "  no match".into()
+            },
+            None,
+        ));
+    }
+    out.extend(hits.iter().enumerate().map(|(k, f)| {
+        let mark = if k == at { "▸" } else { " " };
+        (format!("{mark} {f}"), Some(f.clone()))
+    }));
+    out
+}
+
 /// Features matching `query`: exact name first, then symbol (the part after
 /// an `ID_` prefix), then prefix, then substring; case-insensitive.
 fn search(names: &[Box<str>], lower: &[String], query: &str) -> Vec<Box<str>> {
-    const MAX: usize = 8;
+    const MAX: usize = 200;
     let q = query.to_lowercase();
     if q.is_empty() {
         return Vec::new();

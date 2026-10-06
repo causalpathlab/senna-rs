@@ -6,6 +6,10 @@ use super::*;
 /// How many neighbours a click lists, in turn; the second by default.
 pub(crate) const NEAR_COUNTS: [usize; 5] = [6, 12, 20, 30, 50];
 
+/// A sidebar row: its text, and the feature it names, if it names one
+/// (arrows step through those rows, a click shows its feature).
+pub(crate) type PaneRow = (String, Option<Box<str>>);
+
 /// Names ranked best first with their scores, or why there are none.
 type Ranked = Result<Vec<(Box<str>, f32)>, String>;
 
@@ -199,22 +203,33 @@ impl Scene {
         self.suggestions.take().is_some()
     }
 
-    /// Panel text for the suggestions of the view on screen, marking the
-    /// feature being shown.
-    pub fn suggestion_lines(&self) -> Option<Vec<String>> {
-        let Suggestions { title, list, .. } = self.current_suggestions()?;
-        let shown = match &self.pick {
+    /// The feature shown on the map, when it is one feature.
+    fn shown_feature(&self) -> Option<&str> {
+        match &self.pick {
             Some(Pick::One(f)) => Some(f.as_ref()),
             _ => None,
-        };
-        let mut out = vec![title.clone(), "g / G step · o observed · x close".into()];
+        }
+    }
+
+    /// Panel rows for the suggestions of the view on screen, the feature
+    /// being shown marked; each feature's row carries its name.
+    pub fn suggestion_rows(&self) -> Option<Vec<PaneRow>> {
+        let Suggestions { title, list, .. } = self.current_suggestions()?;
+        let shown = self.shown_feature();
+        let mut out: Vec<PaneRow> = vec![
+            (title.clone(), None),
+            ("↑ ↓ step · o observed · x close".into(), None),
+        ];
         out.extend(list.iter().enumerate().map(|(k, (f, v))| {
             let mark = if shown == Some(f.as_ref()) {
                 "▸"
             } else {
                 " "
             };
-            format!("{mark} {:>2}  {f:<16} {v:>6.2}", k + 1)
+            (
+                format!("{mark} {:>2}  {f:<16} {v:>6.2}", k + 1),
+                Some(f.clone()),
+            )
         }));
         Some(out)
     }
@@ -651,10 +666,12 @@ impl Scene {
         index.get(name).copied()
     }
 
-    /// Sidebar text for the features near the clicked cell or feature.
-    pub fn near_lines(&self) -> Option<Vec<String>> {
+    /// Panel rows for the features near the clicked cell or feature, the
+    /// feature being shown marked; each feature's row carries its name.
+    pub fn near_rows(&self) -> Option<Vec<PaneRow>> {
         let near = self.near.as_ref()?;
-        let mut out = Vec::new();
+        let shown = self.shown_feature();
+        let mut out: Vec<PaneRow> = Vec::new();
         let say = match near.metric {
             Metric::Distance => "nearest (distance)",
             Metric::Cosine => "nearest (cosine)",
@@ -669,14 +686,23 @@ impl Scene {
                 ("cells", Metric::Cosine) => "most up in it",
                 _ => say,
             };
-            out.push(format!("{what} {say}: {}", near.name));
-            out.extend(list.iter().map(|(f, v)| match near.metric {
-                Metric::Distance => format!("  {f:<14} {:.2}", -v),
-                _ => format!("  {f:<14} {v:+.2}"),
+            let features = what == "features";
+            out.push((format!("{what} {say}: {}", near.name), None));
+            out.extend(list.iter().map(|(f, v)| {
+                let mark = if features && shown == Some(f.as_ref()) {
+                    "▸"
+                } else {
+                    " "
+                };
+                let text = match near.metric {
+                    Metric::Distance => format!("{mark} {f:<14} {:.2}", -v),
+                    _ => format!("{mark} {f:<14} {v:+.2}"),
+                };
+                (text, features.then(|| f.clone()))
             }));
-            out.push(String::new());
+            out.push((String::new(), None));
         }
-        out.push("p pins their names on the map".into());
+        out.push(("↑ ↓ step · p pins their names on the map".into(), None));
         Some(out)
     }
 }

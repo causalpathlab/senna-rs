@@ -24,6 +24,7 @@ use modal::Modal;
 
 use super::color;
 use super::decide::{Action, Decision, Mode, Rescore, Watcher};
+use super::features::PaneRow;
 use super::files::{self, modified, same_file};
 use super::render::{Frame, Job, Viewport};
 use super::style::{swatches, Shape};
@@ -213,6 +214,8 @@ struct App {
     side: Rect,
     /// The settings panel at the top of the sidebar; empty when not shown.
     panel: Rect,
+    /// Where each feature row of the sidebar was last drawn, for clicks.
+    pane_hits: std::cell::RefCell<Vec<(Rect, Box<str>)>>,
     /// The cluster overview on the left of the map (relabel mode only).
     left: Rect,
     /// Whether the sidebar may open (space or `b` toggles).
@@ -261,6 +264,7 @@ impl App {
             info: None,
             side: Rect::default(),
             panel: Rect::default(),
+            pane_hits: std::cell::RefCell::default(),
             left: Rect::default(),
             sidebar: true,
             scene,
@@ -330,25 +334,87 @@ impl App {
 
     /// The sidebar's text, when it shows text rather than the style menu.
     fn side_lines(&self) -> Option<Vec<String>> {
+        self.side_rows()
+            .map(|rows| rows.into_iter().map(|(text, _)| text).collect())
+    }
+
+    /// The sidebar's rows, each with the feature it names, if any.
+    fn side_rows(&self) -> Option<Vec<PaneRow>> {
+        let plain =
+            |lines: Vec<String>| -> Vec<PaneRow> { lines.into_iter().map(|l| (l, None)).collect() };
+        if let Some(Modal::Search(query, hits, at)) = &self.modal {
+            return Some(input::search_rows(query, hits, *at));
+        }
         self.scene
             .merge_lines()
             .or_else(|| self.scene.review_lines())
+            .map(plain)
             .or_else(|| {
                 // A clicked cell's cluster summary above the features near
                 // it: the summary never hides the list.
                 let features = self
                     .scene
-                    .suggestion_lines()
-                    .or_else(|| self.scene.near_lines());
-                match (self.info.clone(), features) {
+                    .suggestion_rows()
+                    .or_else(|| self.scene.near_rows());
+                match (self.info.clone().map(plain), features) {
                     (Some(mut info), Some(features)) => {
-                        info.push(String::new());
+                        info.push((String::new(), None));
                         info.extend(features);
                         Some(info)
                     }
                     (info, features) => info.or(features),
                 }
             })
+    }
+
+    /// The features the sidebar lists, in order, while it is on screen:
+    /// what the arrows step through.
+    fn pane_features(&self) -> Vec<Box<str>> {
+        if !self.sidebar || self.scene.review.is_some() {
+            return Vec::new();
+        }
+        self.side_rows()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, f)| f)
+            .collect()
+    }
+
+    /// Show the feature `delta` rows from the one shown in the sidebar's
+    /// list (the first or last when none is), stopping at its ends.
+    pub(super) fn step_pane(&mut self, delta: i64) {
+        let list = self.pane_features();
+        let Some(last) = list.len().checked_sub(1) else {
+            return;
+        };
+        let at = match &self.scene.pick {
+            Some(Pick::One(f)) => list.iter().position(|x| x == f),
+            _ => None,
+        };
+        let next = match at {
+            Some(i) => (i as i64 + delta).clamp(0, last as i64) as usize,
+            None if delta > 0 => 0,
+            None => last,
+        };
+        let name = list[next].clone();
+        self.change(|s| s.set_pick(Pick::One(name)));
+    }
+
+    /// A click at terminal cell (`col`, `row`) on a feature in the sidebar:
+    /// show it (a search takes it and closes). Returns whether it was one.
+    pub(super) fn pane_click(&mut self, col: u16, row: u16) -> bool {
+        let hit = self.pane_hits.borrow().iter().find_map(|(r, f)| {
+            (col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height)
+                .then(|| f.clone())
+        });
+        let Some(name) = hit else {
+            return false;
+        };
+        if matches!(self.modal, Some(Modal::Search(..))) {
+            self.modal = None;
+        }
+        self.change(|s| s.set_pick(Pick::One(name)));
+        true
     }
 
     /// Map and sidebar areas and the viewport for the current terminal size.
@@ -676,5 +742,103 @@ mod tests {
         app.info = None;
         let lines = app.side_lines().unwrap();
         assert!(lines[0].contains("features nearest"), "{lines:?}");
+    }
+}
+
+#[cfg(test)]
+mod pane_tests {
+    use super::*;
+
+    fn app() -> App {
+        App::new(
+            crate::view::tests::scene(),
+            Picker::halfblocks(),
+            "r.senna.json".into(),
+            "lupin".into(),
+        )
+    }
+
+    fn press(app: &mut App, c: KeyCode) {
+        app.key(KeyEvent::new(c, KeyModifiers::NONE));
+    }
+
+    fn shown(app: &App) -> Option<&str> {
+        match &app.scene.pick {
+            Some(Pick::One(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    fn near(app: &mut App) {
+        app.scene.near = Some(crate::view::features::Near {
+            name: "c1".into(),
+            centre: crate::view::features::Centre::Cell,
+            metric: crate::view::features::Metric::Distance,
+            features: vec![
+                ("g1".into(), -0.1),
+                ("g2".into(), -0.2),
+                ("g3".into(), -0.3),
+            ],
+            cells: Vec::new(),
+        });
+    }
+
+    #[test]
+    fn the_arrows_step_through_the_feature_list_in_the_sidebar() {
+        let mut a = app();
+        near(&mut a);
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), Some("g1"));
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), Some("g2"));
+        press(&mut a, KeyCode::PageDown);
+        assert_eq!(shown(&a), Some("g3"), "stops at the end");
+        press(&mut a, KeyCode::Up);
+        assert_eq!(shown(&a), Some("g2"));
+        // The feature shown is marked in the list.
+        let lines = a.side_lines().unwrap();
+        assert!(lines.iter().any(|l| l.starts_with("▸ g2")), "{lines:?}");
+    }
+
+    #[test]
+    fn without_a_list_or_with_the_sidebar_hidden_the_arrows_do_not_pick() {
+        let mut a = app();
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), None);
+        near(&mut a);
+        a.sidebar = false;
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), None);
+    }
+
+    #[test]
+    fn a_search_lists_its_matches_and_enter_shows_the_one_chosen() {
+        let mut a = app();
+        let names: Vec<Box<str>> = ["GENE1", "GENE2", "OTHER"].map(Into::into).to_vec();
+        let lower = names.iter().map(|n| n.to_lowercase()).collect();
+        a.names = Some(SearchNames { names, lower });
+        a.modal = Some(Modal::Search(String::new(), Vec::new(), 0));
+        for c in "gene".chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        let lines = a.side_lines().unwrap();
+        assert!(lines.iter().any(|l| l == "▸ GENE1"), "{lines:?}");
+        assert_eq!(a.pane_features(), ["GENE1", "GENE2"].map(Into::into));
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Enter);
+        assert!(a.modal.is_none());
+        assert_eq!(shown(&a), Some("GENE2"));
+    }
+
+    #[test]
+    fn a_click_on_a_feature_row_shows_it() {
+        let mut a = app();
+        near(&mut a);
+        a.pane_hits
+            .borrow_mut()
+            .push((Rect::new(80, 5, 30, 1), "g3".into()));
+        assert!(!a.pane_click(10, 5));
+        assert!(a.pane_click(90, 5));
+        assert_eq!(shown(&a), Some("g3"));
     }
 }
