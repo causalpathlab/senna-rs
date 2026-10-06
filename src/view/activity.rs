@@ -422,7 +422,10 @@ impl Activity {
                     beta.mat.ncols()
                 );
                 if m.kind.expression_model() == E::TopicOfLogits {
-                    log_softmax_rows(&mut theta.mat);
+                    // The decoder reads the raw latent through a softmax.
+                    use legume_numeric::candle::vae::masked_topic::LatentHead;
+                    theta.mat = senna::embed_common::latent_to_theta(&theta.mat, LatentHead::Gaussian)
+                        .map(f32::ln);
                 }
                 Ok(Expected::new(
                     Axis::new(beta.rows),
@@ -590,19 +593,30 @@ impl Activity {
     }
 
     /// `feature` on each of the points `names` (the view `key`).
-    /// Whether `feature` has a value to draw on some point of view `key`
-    /// from `source` (for observed counts, a count above zero): a feature
-    /// without one would show as nothing but missing values.
-    pub fn shows(&mut self, feature: &str, source: Source, key: usize, names: &[Box<str>]) -> bool {
-        let Ok(rows) = self.rows(source, key, names) else {
-            return false;
+    /// Which of `features` `source` can draw on view `key`: those on its
+    /// feature axis, when any of the view's points is among its cells. The
+    /// rest would show as missing values everywhere.
+    pub fn drawable(
+        &mut self,
+        features: &[(Box<str>, f32)],
+        source: Source,
+        key: usize,
+        names: &[Box<str>],
+    ) -> Vec<bool> {
+        let covers = self
+            .rows(source, key, names)
+            .is_ok_and(|rows| rows.iter().any(|&r| r != NO_ROW));
+        let axis = match source {
+            Source::Expected => self.expected().map(|e| &e.features),
+            Source::Observed => self.observed().map(|o| &o.features),
         };
-        let Ok((raw, _)) = self.raw(feature, source) else {
-            return false;
-        };
-        Self::on_points(&raw, &rows)
-            .iter()
-            .any(|v| v.is_finite() && (source == Source::Expected || *v > 0.0))
+        match axis {
+            Ok(axis) if covers => features
+                .iter()
+                .map(|(f, _)| axis.index.match_gene(f).is_some())
+                .collect(),
+            _ => vec![false; features.len()],
+        }
     }
 
     pub fn levels(
@@ -998,19 +1012,12 @@ impl Activity {
         cells: impl IntoIterator<Item = &'a str>,
         top: usize,
     ) -> Result<Vec<(Box<str>, f32)>, String> {
+        let at = self.cells_z(cells)?;
         let e = self.expected()?;
         let Model::Embedding { z, rho, .. } = &e.model else {
             return Err("neighbouring features need an embedding run".into());
         };
-        let index = e.cell_index();
-        let rows: Vec<usize> = cells
-            .into_iter()
-            .filter_map(|c| index.get(c).map(|&n| n as usize))
-            .collect();
-        if rows.is_empty() {
-            return Err("none of these cells is in the model".into());
-        }
-        let d = row_mean(z, &rows) - e.z_mean(z);
+        let d = at - e.z_mean(z);
         let mut scores: Vec<f32> = (rho * d).iter().copied().collect();
         drop_below_median(&mut scores, e.baseline());
         Ok(best(&scores, &e.features.names, top))
@@ -1044,11 +1051,8 @@ impl Activity {
         let Model::Embedding { z, .. } = &e.model else {
             return Err("placing cells needs an embedding run".into());
         };
-        if z.ncols() != at.len() {
-            return Err("the co-embedding and the cell embedding differ in width".into());
-        }
-        let scores: Vec<f32> = z.row_iter().map(|r| -(r.transpose() - at).norm()).collect();
-        Ok(best(&scores, &e.cells, top))
+        nearest_rows(z, at, &e.cells, None, top)
+            .ok_or_else(|| "the co-embedding and the cell embedding differ in width".into())
     }
 
     /// Cells whose expected level of `feature` is highest relative to the
@@ -1202,13 +1206,30 @@ fn embedding(
     ))
 }
 
-/// Each row of `m` through `log_softmax`.
-fn log_softmax_rows(m: &mut Mat) {
-    for mut row in m.row_iter_mut() {
-        let top = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let lse = top + row.iter().map(|v| (v - top).exp()).sum::<f32>().ln();
-        row.apply(|v| *v -= lse);
+/// The `top` rows of `m` nearest `at` (Euclidean), with their `names`,
+/// scored by minus the distance; `skip` left out. None when `at` is not of
+/// `m`'s width.
+pub(super) fn nearest_rows(
+    m: &Mat,
+    at: &Vector,
+    names: &[Box<str>],
+    skip: Option<usize>,
+    top: usize,
+) -> Option<Vec<(Box<str>, f32)>> {
+    if m.ncols() != at.len() {
+        return None;
     }
+    let mut scores: Vec<f32> = (0..m.nrows())
+        .into_par_iter()
+        .map(|i| {
+            let d2: f32 = (0..m.ncols()).map(|j| (m[(i, j)] - at[j]).powi(2)).sum();
+            -d2.sqrt()
+        })
+        .collect();
+    if let Some(i) = skip {
+        scores[i] = f32::NAN;
+    }
+    Some(best(&scores, names, top))
 }
 
 /// Mean of the given rows of `m`, as a column vector.
@@ -1464,12 +1485,18 @@ mod tests {
     #[test]
     fn a_feature_shows_only_where_its_source_has_values_for_the_view() {
         let mut a = tiny(false);
+        let listed: Vec<(Box<str>, f32)> = vec![("GENE0".into(), 1.0), ("NOPE".into(), 0.5)];
         let view: Vec<Box<str>> = ["c0", "c3"].map(Into::into).to_vec();
-        assert!(a.shows("GENE0", Source::Expected, 0, &view));
         // Not in the model: nothing to draw.
-        assert!(!a.shows("NOPE", Source::Expected, 0, &view));
+        assert_eq!(
+            a.drawable(&listed, Source::Expected, 0, &view),
+            [true, false]
+        );
         // None of the view's cells is in the model: missing everywhere.
         let elsewhere: Vec<Box<str>> = ["x0", "x1"].map(Into::into).to_vec();
-        assert!(!a.shows("GENE0", Source::Expected, 1, &elsewhere));
+        assert_eq!(
+            a.drawable(&listed, Source::Expected, 1, &elsewhere),
+            [false, false]
+        );
     }
 }
