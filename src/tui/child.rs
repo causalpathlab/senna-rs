@@ -245,15 +245,12 @@ pub(crate) fn follow_log(log: Option<impl std::io::Read>, mut each: impl FnMut(&
     })
 }
 
-/// Frames of the spinners the workspace draws.
-const SPINNER: &str = "⠁⠂⠄⡀⢀⠠⠐⠈";
-
 /// A progress bar's frame, its elapsed time already gone: the bar of `#`
 /// and `-`, `pos/len`, the time left in brackets, then what it counts. A
 /// spinner's frame starts with one of its ticks.
 pub(crate) fn progress_of(line: &str) -> Option<Progress> {
     let (head, rest) = line.split_once(char::is_whitespace)?;
-    if head.chars().all(|c| SPINNER.contains(c)) {
+    if head.chars().all(|c| super::SPINNER.contains(&c)) {
         return Some(Progress {
             what: rest.trim().to_string(),
             ..Progress::default()

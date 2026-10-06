@@ -9,6 +9,20 @@ pub(crate) mod style;
 
 use std::path::Path;
 
+/// Frames of the spinners the workspace draws.
+pub(crate) const SPINNER: [char; 8] = ['⠁', '⠂', '⠄', '⡀', '⢀', '⠠', '⠐', '⠈'];
+
+/// The key that runs what a screen set up, in both front ends: ctrl+r,
+/// which every terminal passes on as it is.
+pub(crate) const RUN_KEY: &str = "ctrl+r";
+
+/// Whether `k` is [`RUN_KEY`].
+#[must_use]
+pub(crate) fn is_run_key(k: &ratatui::crossterm::event::KeyEvent) -> bool {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 /// The last component of `path`, or an empty string.
 #[must_use]
 pub fn name(path: &Path) -> String {

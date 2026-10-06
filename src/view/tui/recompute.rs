@@ -73,10 +73,7 @@ impl App {
             KeyCode::Char(' ') => menu.toggle(),
             KeyCode::Left | KeyCode::Char('h') => menu.step_setting(-1),
             KeyCode::Right | KeyCode::Char('l') => menu.step_setting(1),
-            KeyCode::Enter => self.start_recompute(),
-            KeyCode::Char('r') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.start_recompute();
-            }
+            _ if k.code == KeyCode::Enter || crate::tui::is_run_key(&k) => self.start_recompute(),
             KeyCode::Esc => self.modal = None,
             _ => return false,
         }

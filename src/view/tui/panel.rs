@@ -113,23 +113,19 @@ impl App {
     /// `offer`, then those the run lacks, which open the recompute menu set
     /// to make one.
     pub(super) fn step_method(&mut self, d: isize, offer: bool) {
-        let spaces = &self.scene.data.spaces;
         let cur = self.scene.current();
-        let mut methods: Vec<String> = Vec::new();
-        for s in spaces.iter().filter(|s| s.parent.is_none()) {
-            if !methods.contains(&s.method) {
-                methods.push(s.method.clone());
+        let (kind, now) = (cur.kind, cur.method.clone());
+        // Each method, and whether the run has it.
+        let mut methods: Vec<(String, bool)> = Vec::new();
+        for s in self.scene.data.spaces.iter().filter(|s| s.parent.is_none()) {
+            if !methods.iter().any(|(m, _)| *m == s.method) {
+                methods.push((s.method.clone(), true));
             }
         }
-        let have = methods.len();
         if offer {
-            let step = match cur.kind {
-                crate::view::SpaceKind::Features => Step::FeatureLayout,
-                _ => Step::CellLayout,
-            };
-            for m in step.settings() {
-                if !methods.iter().any(|x| x == m) {
-                    methods.push((*m).to_string());
+            for m in Step::on_screen(kind, &now).settings() {
+                if !methods.iter().any(|(x, _)| x == m) {
+                    methods.push(((*m).to_string(), false));
                 }
             }
         }
@@ -137,25 +133,18 @@ impl App {
             self.message = Some("only one layout method in this run".into());
             return;
         }
-        let at = methods.iter().position(|m| *m == cur.method).unwrap_or(0) as isize;
-        let next = (at + d).rem_euclid(methods.len() as isize) as usize;
-        if next >= have {
-            let method = methods[next].clone();
-            self.open_recompute_with(Some(&method));
-            if self.modal.is_some() {
-                self.message = Some(format!(
-                    "this run has no {method} layout yet · ctrl+r computes it"
-                ));
-            }
+        let at = methods.iter().position(|(m, _)| *m == now).unwrap_or(0) as isize;
+        let (method, have) = methods[(at + d).rem_euclid(methods.len() as isize) as usize].clone();
+        if have {
+            self.show_layout(&method, kind);
             return;
         }
-        let m = &methods[next];
-        let same = spaces
-            .iter()
-            .position(|s| s.method == *m && s.kind == cur.kind);
-        let any = spaces.iter().position(|s| s.method == *m);
-        if let Some(i) = same.or(any) {
-            self.switch_space(i);
+        self.open_recompute_with(Some(&method));
+        if self.modal.is_some() {
+            self.message = Some(format!(
+                "this run has no {method} layout yet · {} computes it",
+                crate::tui::RUN_KEY
+            ));
         }
     }
 
@@ -184,8 +173,7 @@ impl App {
     /// a setting: left of its value steps back, on or right of it forward.
     pub(super) fn panel_click(&mut self, col: u16, row: u16) -> bool {
         let p = self.panel;
-        let inside = col >= p.x && col < p.x + p.width && row >= p.y && row < p.y + p.height;
-        if !inside {
+        if !p.contains(ratatui::layout::Position::new(col, row)) {
             return false;
         }
         let Some(&s) = (row - p.y)

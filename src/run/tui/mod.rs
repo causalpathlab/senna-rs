@@ -414,17 +414,6 @@ impl App {
         self.field_row = self.field_row.min(self.visible().len().saturating_sub(1));
     }
 
-    /// Whether `k` reviews and runs the queue: ctrl-r, which every
-    /// terminal passes on as it is (shift-enter often reaches us as enter).
-    fn is_go(&self, k: KeyEvent) -> bool {
-        k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL)
-    }
-
-    /// The key [`Self::is_go`] takes, as the screens name it.
-    fn go_key(&self) -> &'static str {
-        "ctrl+r"
-    }
-
     /// Switch to screen `s`. Arriving at the parameters with two fits or
     /// more queued opens the page of what they share.
     fn go_to(&mut self, s: Screen) {
@@ -447,7 +436,7 @@ impl App {
                     self.go_to(*s);
                 }
             }
-            _ if self.is_go(k) => self.open_confirm(),
+            _ if crate::tui::is_run_key(&k) => self.open_confirm(),
             KeyCode::Char('q') => {
                 if self.running() {
                     self.message =
@@ -1323,7 +1312,7 @@ impl App {
                 });
             }
             // Enter runs it, as does the key that opened it.
-            _ if k.code == KeyCode::Enter || self.is_go(k) => {
+            _ if k.code == KeyCode::Enter || crate::tui::is_run_key(&k) => {
                 let Some(planned) = self.confirm.take() else {
                     return;
                 };

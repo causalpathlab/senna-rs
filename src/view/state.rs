@@ -383,14 +383,7 @@ impl Scene {
     /// wrapping.
     pub fn step_labels(&mut self, step: isize) {
         let n = TEXT_SCALES.len() as isize + 1;
-        let at = if self.show_labels {
-            TEXT_SCALES
-                .iter()
-                .position(|&t| t >= self.text_scale)
-                .unwrap_or(0) as isize
-        } else {
-            n - 1
-        };
+        let at = self.label_size().map_or(n - 1, |k| k as isize);
         let next = (at + step).rem_euclid(n) as usize;
         self.show_labels = next < TEXT_SCALES.len();
         if self.show_labels {
@@ -405,14 +398,18 @@ impl Scene {
     /// The label size as said: small, medium, large, largest, or off.
     pub fn labels_said(&self) -> &'static str {
         const SIZES: [&str; 4] = ["small", "medium", "large", "largest"];
-        if !self.show_labels {
-            return "off";
-        }
-        let at = TEXT_SCALES
-            .iter()
-            .position(|&t| t >= self.text_scale)
-            .unwrap_or(0);
-        SIZES[at.min(SIZES.len() - 1)]
+        self.label_size()
+            .map_or("off", |k| SIZES[k.min(SIZES.len() - 1)])
+    }
+
+    /// Which of [`TEXT_SCALES`] the labels are drawn at; none when off.
+    fn label_size(&self) -> Option<usize> {
+        self.show_labels.then(|| {
+            TEXT_SCALES
+                .iter()
+                .position(|&t| t >= self.text_scale)
+                .unwrap_or(0)
+        })
     }
 
     /// Colour by the grouping of `kind`, when the run has one.

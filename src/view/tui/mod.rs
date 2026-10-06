@@ -382,11 +382,12 @@ impl App {
     }
 
     /// Show the feature `delta` rows from the one shown in the sidebar's
-    /// list (the first or last when none is), stopping at its ends.
-    pub(super) fn step_pane(&mut self, delta: i64) {
+    /// list (the first or last when none is), stopping at its ends. Returns
+    /// whether there was a list to step through.
+    pub(super) fn step_pane(&mut self, delta: i64) -> bool {
         let list = self.pane_features();
         let Some(last) = list.len().checked_sub(1) else {
-            return;
+            return false;
         };
         let at = match &self.scene.pick {
             Some(Pick::One(f)) => list.iter().position(|x| x == f),
@@ -399,13 +400,14 @@ impl App {
         };
         let name = list[next].clone();
         self.change(|s| s.set_pick(Pick::One(name)));
+        true
     }
 
     /// A click at terminal cell (`col`, `row`) on a feature in the sidebar:
     /// show it (a search takes it and closes). Returns whether it was one.
     pub(super) fn pane_click(&mut self, col: u16, row: u16) -> bool {
         let hit = self.pane_hits.borrow().iter().find_map(|(r, f)| {
-            (col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height)
+            r.contains(ratatui::layout::Position::new(col, row))
                 .then(|| f.clone())
         });
         let Some(name) = hit else {

@@ -40,6 +40,10 @@ impl App {
                 return true;
             }
         }
+        // With a feature list in the sidebar, the arrows go through it.
+        if list_step(k.code).is_some_and(|d| self.step_pane(d)) {
+            return true;
+        }
         let step = |app: &App| app.vp.map_or(0.0, |v| 0.1 * v.w.min(v.h) as f32);
         match k.code {
             KeyCode::Char('q') => self.quit = true,
@@ -128,18 +132,6 @@ impl App {
                     self.message = Some("already at the top-level layout".into());
                 }
             }
-            // With a feature list in the sidebar, the arrows go through it.
-            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
-                if !self.pane_features().is_empty() =>
-            {
-                let delta = match k.code {
-                    KeyCode::Up => -1,
-                    KeyCode::Down => 1,
-                    KeyCode::PageUp => -10,
-                    _ => 10,
-                };
-                self.step_pane(delta);
-            }
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => {
                 let (sx, sy) = match k.code {
                     KeyCode::Left => (1.0, 0.0),
@@ -187,10 +179,10 @@ impl App {
                 return true;
             }
             // The cursor moves through the matches listed in the sidebar.
-            KeyCode::Up => *at = at.saturating_sub(1),
-            KeyCode::Down => *at = (*at + 1).min(last),
-            KeyCode::PageUp => *at = at.saturating_sub(10),
-            KeyCode::PageDown => *at = (*at + 10).min(last),
+            code if list_step(code).is_some() => {
+                let d = list_step(code).unwrap_or_default();
+                *at = (*at as i64 + d).clamp(0, last as i64) as usize;
+            }
             KeyCode::Backspace => {
                 query.pop();
                 self.research();
@@ -527,6 +519,17 @@ fn adjust(
         2 => st.alpha = (st.alpha + 0.1 * step as f32).clamp(0.1, 1.0),
         3 => st.size = (st.size + 0.25 * step as f32).clamp(0.25, 4.0),
         _ => st.hidden = !st.hidden,
+    }
+}
+
+/// How far a key moves through a list: ±1 for the arrows, ±10 a page.
+pub(super) fn list_step(code: KeyCode) -> Option<i64> {
+    match code {
+        KeyCode::Up => Some(-1),
+        KeyCode::Down => Some(1),
+        KeyCode::PageUp => Some(-10),
+        KeyCode::PageDown => Some(10),
+        _ => None,
     }
 }
 

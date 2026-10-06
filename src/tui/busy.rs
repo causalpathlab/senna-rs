@@ -9,9 +9,6 @@ use std::time::{Duration, Instant};
 /// never flickers the screen.
 const GRACE: Duration = Duration::from_millis(150);
 
-/// Frames of the spinner.
-const FRAMES: [char; 8] = ['⠁', '⠂', '⠄', '⡀', '⢀', '⠠', '⠐', '⠈'];
-
 /// Run `work`; when it takes longer than a moment, show a spinner, `what`
 /// it does and the seconds on the terminal's bottom line until it is done.
 /// Returns its result and whether the spinner showed: it is written past
@@ -69,7 +66,8 @@ fn waiting<T: Send>(work: impl FnOnce() -> T + Send, mut tick: impl FnMut(Durati
 
 /// The bottom line, across the terminal: ` ⠂ loading… 3s`.
 fn line(what: &str, elapsed: Duration, width: usize) -> String {
-    let spin = FRAMES[(elapsed.as_millis() / 100) as usize % FRAMES.len()];
+    let frames = super::SPINNER;
+    let spin = frames[(elapsed.as_millis() / 100) as usize % frames.len()];
     let text = format!(" {spin} {what}… {}s", elapsed.as_secs());
     let pad = width.saturating_sub(text.chars().count());
     let mut out: String = text.chars().take(width).collect();
