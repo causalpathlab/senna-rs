@@ -837,10 +837,9 @@ mod pane_tests {
         // The matches stay listed, the chosen one marked, and the arrows go
         // on through them.
         let lines = a.side_lines().unwrap();
-        assert!(
-            lines.iter().any(|l| l.starts_with("▸  2  GENE2")),
-            "{lines:?}"
-        );
+        assert!(lines.iter().any(|l| l == "▸  2  GENE2"), "{lines:?}");
+        // A search's matches have no score: none is printed.
+        assert!(!lines.iter().any(|l| l.contains("NaN")), "{lines:?}");
         press(&mut a, KeyCode::Up);
         assert_eq!(shown(&a), Some("GENE1"));
         // A click on a cell lists its own neighbours instead.

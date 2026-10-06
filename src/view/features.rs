@@ -237,10 +237,13 @@ impl Scene {
             } else {
                 " "
             };
-            (
-                format!("{mark} {:>2}  {f:<16} {v:>6.2}", k + 1),
-                Some(f.clone()),
-            )
+            // A search's matches have no score to show.
+            let text = if v.is_nan() {
+                format!("{mark} {:>2}  {f}", k + 1)
+            } else {
+                format!("{mark} {:>2}  {f:<16} {v:>6.2}", k + 1)
+            };
+            (text, Some(f.clone()))
         }));
         Some(out)
     }
