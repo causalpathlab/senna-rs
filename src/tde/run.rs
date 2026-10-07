@@ -56,12 +56,8 @@ pub fn run_tde(args: &TdeArgs) -> anyhow::Result<()> {
         }
         None => (None, None),
     };
-    let embedding_dim = crate::feature_preset::resolve_dim(
-        args.embedding_dim,
-        &mut preset_features,
-        &mut carried,
-        &mut [],
-    )?;
+    let embedding_dim =
+        crate::feature_preset::resolve_dim(args.embedding_dim, &mut preset_features, &mut carried)?;
     anyhow::ensure!(embedding_dim > 0, "--embedding-dim must be > 0");
 
     let data_files = inputs.files.clone();
@@ -101,7 +97,9 @@ fn split_unspliced(
         plan.tracks.iter().any(|t| t.channel.as_ref() == UNSPLICED),
         "tde needs `{{gene}}/count/unspliced` rows beside the spliced ones; the input has none"
     );
-    let axis = ge::split_displaced(unified, &plan.to_ge(), 1)?;
+    let (base_rows, unspliced_rows) = plan.pair_rows(1)?;
+    let track = format!("{COUNT}/{UNSPLICED}");
+    let axis = ge::split_displaced(unified, &base_rows, &unspliced_rows, &track)?;
     for name in &mut unified.feature_names {
         let gene = parse_feature_row(name)
             .map(|row| Box::<str>::from(row.gene))

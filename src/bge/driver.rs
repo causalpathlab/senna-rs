@@ -177,12 +177,8 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             hier_modules_per_unit: knobs.modules_per_unit,
             module_only_min_rows: knobs.module_only_min_rows,
             feature_modules,
-            tracks: None,
             displaced,
-            offset_l2: 0.0,
-            offset_rank: ge::LoraSpec::default().rank,
             preset_features,
-            preset_offsets: Vec::new(),
             strata,
             cis_gates: None,
             flat_module_only: false,
@@ -265,15 +261,13 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
 
     // The map phase 2 placed the cells with, so `predict` places a query by the
     // same one: the trunk plus its per-gene mean, in one self-contained file.
-    // The fit has one track (tde split its second off the axis), so one map.
-    let cell_encoder_suffix = match out.cell_encoder.as_ref().map(ge::CellEncoders::iter) {
-        Some([te]) => {
+    let cell_encoder_suffix = match out.cell_encoder.as_ref() {
+        Some(encoder) => {
             let path = format!("{}.cell_encoder.safetensors", knobs.out);
-            te.encoder.save(&path)?;
+            encoder.save(&path)?;
             info!("Wrote the cell encoder to {path}");
             Some("cell_encoder.safetensors")
         }
-        Some(encs) => anyhow::bail!("expected one cell encoder, the fit returned {}", encs.len()),
         None => None,
     };
 

@@ -45,13 +45,10 @@ pub(crate) fn model_gene_axis(kind: RunKind, model: &str) -> anyhow::Result<Vec<
 /// for every query, bulk or not.
 pub(crate) fn model_gene_names(kind: RunKind, model: &str) -> anyhow::Result<Vec<Box<str>>> {
     match kind {
-        // bge, simba and gem write no dictionary; their gene axis is the row
-        // axis of the gene table (gem's rows are the track grammar,
-        // `{gene}/{modality}/{channel}` — this is exactly the axis a query
-        // must align against, `--bulk` included; `predict_bge` itself is what
-        // refuses `--bulk` on a gem run, with a message this axis alone
-        // could not give). They and svd project each column against a
-        // frozen table and do not care what depth it came at.
+        // bge, simba and tde write no dictionary; their gene axis is the row
+        // axis of the gene table. They and svd project each column against a
+        // frozen table and do not care what depth it came at. A retired gem
+        // run is refused by the reader.
         RunKind::Bge | RunKind::Tde | RunKind::Simba | RunKind::Gem => {
             Ok(crate::bge::score::BgeEmbedding::open(model)?.gene_names)
         }

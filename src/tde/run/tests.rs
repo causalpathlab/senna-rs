@@ -102,7 +102,6 @@ fn tde_writes_bges_outputs_on_genes_plus_the_divergence_tables() {
     let slots = manifest.outputs.divergence.expect("divergence slots");
     assert_eq!(slots.track, "count/unspliced");
     assert!(slots.cell.ends_with("run.cell_divergence.parquet"));
-    assert!(manifest.outputs.track_encoders.is_empty());
 
     // The gene table is on gene names, the spliced rows only.
     let rho = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();

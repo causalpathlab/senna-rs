@@ -393,19 +393,12 @@ pub enum RunKind {
     Bge,
     Fne,
     ResolveEmbeddingSpace,
-    /// The retired joint `senna gem` (replaced by [`RunKind::Tde`]); its
-    /// manifests still load and read as below. A joint cell/gene embedding over gene counts and any
-    /// co-measured modality tracks, run through the same driver as
-    /// [`RunKind::Bge`]. Every feature row belongs to one TRACK (the base
-    /// gene count plus, per `--modality`, two channel tracks); track 0's
-    /// loading is the gene's own, every other track adds a ridge-shrunk
-    /// offset to it. Downstream it reads exactly like a `bge` run: a frozen
-    /// `(ρ, b_feat)` gene table in `feature_embedding` / `feature_bias`,
-    /// Euclidean `Z` in `cell_embedding`, a co-embedded gene table in
-    /// `feature_coembedding`. `feature_contrast(.bias).parquet` additionally
-    /// holds each modality's channel contrast, and `track_encoders` (plus
-    /// `cell_encoder` for track 0) names the per-track encoders
-    /// `senna predict` places a query cell with.
+    /// The retired joint `senna gem` (replaced by [`RunKind::Tde`]). Its
+    /// manifests still load, and its gene tables (`feature_embedding` rows in
+    /// the `{gene}/{modality}/{channel}` grammar, `feature_coembedding`) and
+    /// cell embedding still read; its per-track query placement is gone, so
+    /// `predict`, `probe` and `impute` refuse it. The slots only it wrote stay
+    /// in [`RunOutputs::unknown`].
     Gem,
     /// `senna tde` — track divergence embedding. The cell state and the
     /// gene table are fitted on the base (spliced) counts alone, so
@@ -988,26 +981,6 @@ pub struct RunOutputs {
     /// by the topic-family fits whose collapse rewrote the high bits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_tree: Option<String>,
-    /// `{out}.feature_contrast.parquet` — written by the retired joint
-    /// `senna gem` only: one row per gene-and-modality, the H-space
-    /// RAW-loading delta between that modality's two channel tracks. Read
-    /// back from old manifests; no current command writes it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub feature_contrast: Option<String>,
-    /// `{out}.feature_contrast_bias.parquet` — the scalar `b_feat` delta
-    /// paired with [`Self::feature_contrast`], same rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub feature_contrast_bias: Option<String>,
-    /// Per-track cell encoders BEYOND track 0, which stays in
-    /// [`Self::cell_encoder`] so every existing reader keeps working
-    /// unchanged. Written by the retired joint `senna gem` only (read back from
-    /// old manifests), one entry per count track past the
-    /// base; empty for every other kind and for a gem run with a single
-    /// count track. `senna predict` resolves each entry's numeric track id
-    /// at load time by matching [`TrackEncoderSlot::track`] against the
-    /// run's own axis, rather than trusting a stored id.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub track_encoders: Vec<TrackEncoderSlot>,
     /// `senna tde` only: the second count track's displacement tables
     /// ([`DivergenceSlots`]). `None` for every other kind, and for an
     /// interrupted tde run, which never fitted it.
@@ -1017,21 +990,6 @@ pub struct RunOutputs {
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]
     pub unknown: Unknown,
-}
-
-/// One non-base-track cell encoder a `senna gem` run saved:
-/// [`RunOutputs::track_encoders`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrackEncoderSlot {
-    /// The track's name, `{modality}/{channel}` (e.g. `"count/unspliced"`),
-    /// exactly as `gem::tracks::assign_tracks` names it. The
-    /// numeric track id is deliberately NOT stored here: it depends on
-    /// which tracks a particular axis carries and in what order, which only
-    /// the loader's own re-derived axis knows.
-    pub track: String,
-    /// The resolved file, `{basename}.{suffix}` — the same convention every
-    /// other `RunOutputs` path slot uses.
-    pub path: String,
 }
 
 /// The files a `senna tde` run wrote for its displaced track: in

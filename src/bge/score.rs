@@ -25,8 +25,7 @@ use anyhow::Context;
 use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::{
-    CellEncoder, CellEncoders, FrozenProjection, FrozenProjectionArgs, FrozenProjector,
-    PROJECTION_RIDGE_SGD,
+    CellEncoder, FrozenProjection, FrozenProjectionArgs, FrozenProjector, PROJECTION_RIDGE_SGD,
 };
 use graph_embedding_util::loss::{multinomial_ll, FrozenSide, NodeTerm};
 use legume_numeric::candle::candle_core::Device;
@@ -60,19 +59,7 @@ pub struct BgeEmbedding {
     pub modules: Option<(DMatrix<f32>, DMatrix<f32>)>,
     /// Path of the run's cell encoder, when phase 2 placed the cells through one;
     /// `predict` then places a query by the same map instead of the block SGD.
-    /// For a gem run this is track 0's file; every other track's file lives in
-    /// [`Self::track_encoders`].
     pub cell_encoder: Option<String>,
-    /// gem's row-grammar track assignment, built once from the gene axis at
-    /// [`Self::open`] time. `None` for bge / simba, whose whole axis is
-    /// implicitly one track.
-    pub tracks: Option<crate::tde::tracks::TrackPlan>,
-    /// `(track id, resolved path)` for every count track BEYOND track 0 whose
-    /// encoder the manifest recorded, the id resolved by matching
-    /// [`senna::run_manifest::TrackEncoderSlot::track`]'s name against
-    /// [`Self::tracks`]. Empty for bge / simba, and for a gem run with a
-    /// single count track.
-    pub track_encoders: Vec<(u32, String)>,
 }
 
 /// How `predict` treats the new data's genes the model never saw.
@@ -153,7 +140,14 @@ impl BgeEmbedding {
         anyhow::ensure!(
             kind.has_frozen_gene_table(),
             "{from} is a '{kind}' run; this reader is for `senna bge` / `senna simba` / \
-             `senna gem` output"
+             `senna tde` output"
+        );
+        // The retired joint gem placed cells with one encoder per count track,
+        // which the engine no longer has.
+        anyhow::ensure!(
+            kind != run_manifest::RunKind::Gem,
+            "{from} is a run of the retired `senna gem`, whose query placement is no longer \
+             available; refit the data with `senna tde`"
         );
 
         let (rho_path, bias_path) = run_manifest::resolve_feature_embedding_for(&manifest, &dir)?;
@@ -221,42 +215,6 @@ impl BgeEmbedding {
             path
         });
 
-        // gem's row-grammar track assignment, re-derived from the gene axis
-        // rather than trusted from the manifest: the axis itself is the
-        // single source of truth for which tracks exist and what rows are on
-        // them, exactly as training re-derived it.
-        let tracks = if kind == run_manifest::RunKind::Gem {
-            Some(crate::tde::tracks::assign_tracks(&rho.rows)?)
-        } else {
-            None
-        };
-        let track_encoders: Vec<(u32, String)> = match &tracks {
-            Some(plan) => manifest
-                .outputs
-                .track_encoders
-                .iter()
-                .map(|slot| {
-                    let id = plan
-                        .tracks
-                        .iter()
-                        .find(|t| format!("{}/{}", t.modality, t.channel) == slot.track)
-                        .map(|t| t.id)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "{from}: manifest names track encoder '{}', which this run's \
-                                 axis does not have",
-                                slot.track
-                            )
-                        })?;
-                    let path = run_manifest::resolve(&dir, &slot.path)
-                        .to_string_lossy()
-                        .to_string();
-                    Ok::<(u32, String), anyhow::Error>((id, path))
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?,
-            None => Vec::new(),
-        };
-
         Ok(Self {
             rho: rho_rm,
             b_feat,
@@ -264,8 +222,6 @@ impl BgeEmbedding {
             h,
             modules,
             cell_encoder,
-            tracks,
-            track_encoders,
         })
     }
 
@@ -369,38 +325,11 @@ impl BgeEmbedding {
         // The run's own estimator when it has one: the distilled encoder places
         // the query exactly as the run's cells were placed. Without one the SGD
         // solves from the null model.
-        //
-        // gem's axis carries tracks, so its encoder set is loaded through
-        // `CellEncoders` instead of the single-dictionary `CellEncoder`:
-        // `encode_edges` means over whichever count tracks a cell has counts
-        // on. `self.cell_encoder` (track 0's file) gates both arms the same
-        // way it always has — no file, no encoder, straight to the SGD.
         let cell_encoder = self
             .cell_encoder
             .as_deref()
-            .filter(|_| self.tracks.is_none())
             .map(|path| CellEncoder::load(&self.rho, &self.b_feat, self.h, path, dev))
             .transpose()?;
-        // `CellEncoders::load` builds the encoder set against the run's track spec.
-        let track_spec = self
-            .tracks
-            .as_ref()
-            .map(crate::tde::tracks::TrackPlan::to_ge);
-        let track_encoders = match (&track_spec, self.cell_encoder.as_deref()) {
-            (Some(spec), Some(track0_path)) => {
-                let mut paths: Vec<(u32, String)> = vec![(0, track0_path.to_string())];
-                paths.extend(self.track_encoders.iter().cloned());
-                Some(CellEncoders::load(
-                    &self.rho,
-                    &self.b_feat,
-                    self.h,
-                    spec,
-                    &paths,
-                    dev,
-                )?)
-            }
-            _ => None,
-        };
         let projector = FrozenProjector::new(&FrozenProjectionArgs {
             feat: &self.rho,
             b_feat: &self.b_feat,
@@ -413,10 +342,9 @@ impl BgeEmbedding {
         let mut pass = project_all(ProjectAll {
             data_vec: &data_vec,
             remap: &remap.new_to_train,
-            projector: match (&track_encoders, cell_encoder.as_ref()) {
-                (Some(encs), _) => QueryProjector::Tracks(encs),
-                (None, Some(enc)) => QueryProjector::Encoder(enc),
-                _ => QueryProjector::Sgd(&projector),
+            projector: match cell_encoder.as_ref() {
+                Some(enc) => QueryProjector::Encoder(enc),
+                None => QueryProjector::Sgd(&projector),
             },
             side: &side,
             n_model,
@@ -581,10 +509,6 @@ impl BgeEmbedding {
 enum QueryProjector<'a> {
     Sgd(&'a FrozenProjector<'a>),
     Encoder(&'a CellEncoder),
-    /// gem's per-track encoder set: `θ` is the mean over whichever count
-    /// tracks a cell has counts on (`CellEncoders::encode_edges`) instead of
-    /// reading one dictionary.
-    Tracks(&'a CellEncoders),
 }
 
 impl QueryProjector<'_> {
@@ -592,7 +516,6 @@ impl QueryProjector<'_> {
         match self {
             Self::Sgd(p) => p.group_nodes(),
             Self::Encoder(e) => e.group_nodes(),
-            Self::Tracks(e) => e.group_nodes(),
         }
     }
 
@@ -611,7 +534,6 @@ impl QueryProjector<'_> {
         let placed = match self {
             Self::Sgd(p) => return p.project(&nodes, group.len(), bar),
             Self::Encoder(e) => e.encode_edges(&nodes)?,
-            Self::Tracks(e) => e.encode_edges(&nodes)?,
         };
         bar.inc(group.len() as u64);
         Ok(placed)

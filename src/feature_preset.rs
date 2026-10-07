@@ -132,15 +132,14 @@ pub(crate) fn load_preset_rows(
 /// The width H of a run given `preset`: the larger of `--embedding-dim`
 /// (`auto` is the table's own width) and the table's width, so a table
 /// narrower than the command's default never refuses the run. A table
-/// narrower than H has its rows — given, carried and per-track offsets —
-/// widened with zero columns: under `--init-` and `--lora-` those columns
+/// narrower than H has its rows — given and carried — widened with zero
+/// columns: under `--init-` and `--lora-` those columns
 /// train like the rest; under `--freeze-` a pinned gene keeps zeros there,
 /// and the extra dimensions are the cells' and the free genes'.
 pub(crate) fn resolve_dim(
     cli_embedding_dim: ge::EmbeddingDim,
     preset: &mut Option<ge::PresetRows>,
     carried: &mut Option<CarriedRows>,
-    offsets: &mut [ge::PresetOffsets],
 ) -> anyhow::Result<usize> {
     let Some(h) = preset.as_ref().map(ge::PresetRows::width) else {
         return cli_embedding_dim.resolve(None)?.ok_or_else(|| {
@@ -179,9 +178,6 @@ pub(crate) fn resolve_dim(
     }
     if let Some(p) = preset.as_mut() {
         p.rows = zero_pad_rows(&p.rows, h, width);
-    }
-    for o in offsets.iter_mut() {
-        o.rows = zero_pad_rows(&o.rows, h, width);
     }
     if let Some(c) = carried.as_mut() {
         let rows = std::mem::replace(&mut c.rows, nalgebra::DMatrix::zeros(0, 0));

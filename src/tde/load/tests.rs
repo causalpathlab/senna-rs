@@ -143,15 +143,11 @@ fn end_to_end_union_axis_and_track_plan() {
     assert_eq!(barcodes, expected, "cells merge as `{{barcode}}@S1`");
 
     // 4 tracks: count/spliced (0), count/unspliced (1), and one track per
-    // m6a channel (2 = methylated, 3 = unmethylated) — NOT 3, because
-    // `ge::fit::TrackSpec::validate` hard-rejects a gene repeated within one
-    // track ("a track holds at most one row per gene"), and GENE1 has a row
-    // on both m6a channels; they cannot share a track id.
+    // m6a channel (2 = methylated, 3 = unmethylated): a track holds at most
+    // one row per gene, and GENE1 has a row on both m6a channels.
     assert_eq!(plan.tracks.len(), 4);
-    assert_eq!(plan.to_ge().count_tracks(), vec![0, 1]);
-    plan.to_ge()
-        .validate(unified.n_features())
-        .expect("TrackSpec::validate");
+    let (base, unspliced) = plan.pair_rows(1).expect("pair_rows");
+    assert_eq!(base.len(), unspliced.len());
 }
 
 /// `per_file_barcode_suffix` (the `@sample` tagging) must not be skipped just

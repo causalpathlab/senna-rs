@@ -1,7 +1,6 @@
-//! Row-grammar track assignment for `senna tde` (and the axis of a run of
-//! the retired joint `senna gem`).
+//! Row-grammar track assignment for `senna tde`.
 //!
-//! A gem feature axis is one gene axis carrying several **tracks**: the base
+//! A feature axis is one gene axis carrying several **tracks**: the base
 //! gene count (`{gene}/count/spliced`, optionally `{gene}/count/unspliced`)
 //! plus, for every co-measured modality passed with `--modality`, that
 //! modality's two channel rows (`{gene}/m6a/{methylated,unmethylated}`,
@@ -12,13 +11,12 @@
 //! order.
 //!
 //! [`assign_tracks`] is the single place this grammar is enforced: it turns
-//! a feature-name axis into a [`TrackPlan`], which is both gem's own view of
-//! the axis (per-row track/gene, per-gene HVG pooling — see
-//! [`super::hvg::gem_hvg_row_weights`]) and, via [`TrackPlan::to_ge`], the
-//! `graph_embedding_util::fit::TrackSpec` the hierarchical trainer consumes.
+//! a feature-name axis into a [`TrackPlan`]: per-row track and gene, read
+//! for per-gene HVG pooling ([`super::hvg::gem_hvg_row_weights`]) and, via
+//! [`TrackPlan::pair_rows`], for cutting the axis to its base rows.
 //!
 //! No heuristics: a row that does not fit the grammar, carries a subunit
-//! (gem tracks are gene-level only), names a modality outside
+//! (tracks are gene-level only), names a modality outside
 //! `{count, m6a, atoi, apa}`, or is a `count` row with a channel other than
 //! `spliced`/`unspliced` (so the pooled `{gene}/count/total` track some
 //! producers also write is an ERROR here, not a silent third gene) is
@@ -27,25 +25,17 @@
 use std::collections::BTreeSet;
 
 use data_beans::aux::feature_rows::{parse_feature_row, APA, ATOI, COUNT, M6A, SPLICED, UNSPLICED};
-use graph_embedding_util as ge;
 use rustc_hash::FxHashMap;
 
-/// One track: a `(modality, channel)` pair on the gem feature axis. Every row
-/// of a gene on this track shares the gene's loading; a track other than 0
-/// adds a per-track offset to it (`--offset-l2`).
+/// One track: a `(modality, channel)` pair on the feature axis.
 #[derive(Clone, Debug)]
 pub(crate) struct Track {
     pub id: u32,
     pub modality: Box<str>,
     pub channel: Box<str>,
-    /// Read by [`TrackPlan::to_ge`] (`ge::fit::TrackInfo::is_count`).
-    pub is_count: bool,
 }
 
-/// The row-grammar-derived plan for one gem feature axis. `Clone` so
-/// `senna gem`'s driver call can pass one copy into [`crate::bge::driver::EmbedPlan::tracks`]
-/// and keep the original to build [`super::contrast::write_contrast`]'s
-/// `after_fit` closure from.
+/// The row-grammar-derived plan for one feature axis.
 #[derive(Clone, Debug)]
 pub(crate) struct TrackPlan {
     /// `tracks[0]` is always `(count, spliced)` — the base track every gene
@@ -63,7 +53,7 @@ pub(crate) struct TrackPlan {
     pub base_rows: Vec<bool>,
 }
 
-/// Assign every row of a gem feature axis to a track and a gene, from the row
+/// Assign every row of a feature axis to a track and a gene, from the row
 /// grammar alone. See the module docs for the rejected shapes.
 pub(crate) fn assign_tracks(feature_names: &[Box<str>]) -> anyhow::Result<TrackPlan> {
     let mut bad_parse: Vec<usize> = Vec::new();
@@ -106,7 +96,7 @@ pub(crate) fn assign_tracks(feature_names: &[Box<str>]) -> anyhow::Result<TrackP
     }
     if !bad_subunit.is_empty() {
         return Err(rows_error(
-            "carry a subunit; gem tracks are gene-level only",
+            "carry a subunit; tracks are gene-level only",
             &bad_subunit,
             feature_names,
         ));
@@ -148,7 +138,6 @@ pub(crate) fn assign_tracks(feature_names: &[Box<str>]) -> anyhow::Result<TrackP
         id: 0,
         modality: COUNT.into(),
         channel: SPLICED.into(),
-        is_count: true,
     }];
     let mut track_id_of: FxHashMap<(Box<str>, Box<str>), u32> = FxHashMap::default();
     track_id_of.insert(base_key.clone(), 0);
@@ -159,7 +148,6 @@ pub(crate) fn assign_tracks(feature_names: &[Box<str>]) -> anyhow::Result<TrackP
             id,
             modality: COUNT.into(),
             channel: UNSPLICED.into(),
-            is_count: true,
         });
         track_id_of.insert(unspliced_key.clone(), id);
     }
@@ -173,10 +161,6 @@ pub(crate) fn assign_tracks(feature_names: &[Box<str>]) -> anyhow::Result<TrackP
             id,
             modality: modality.clone(),
             channel: channel.clone(),
-            // The count modality only ever contributes (count, spliced) /
-            // (count, unspliced) — both already claimed above — so every
-            // track reached here is a non-count modality track.
-            is_count: false,
         });
         track_id_of.insert((modality.clone(), channel.clone()), id);
     }
@@ -229,22 +213,26 @@ fn rows_error(what: &str, rows: &[usize], feature_names: &[Box<str>]) -> anyhow:
 }
 
 impl TrackPlan {
-    /// The `graph_embedding_util::fit::TrackSpec` this plan describes: track
-    /// names are `{modality}/{channel}`, `is_count` iff the modality is
-    /// `count`. What `senna gem`'s driver call passes as `FitConfig.tracks`.
-    pub(crate) fn to_ge(&self) -> ge::fit::TrackSpec {
-        ge::fit::TrackSpec {
-            track_of_row: self.row_track.clone(),
-            gene_of_row: self.row_gene.clone(),
-            tracks: self
-                .tracks
-                .iter()
-                .map(|t| ge::fit::TrackInfo {
-                    name: format!("{}/{}", t.modality, t.channel).into(),
-                    is_count: t.is_count,
-                })
-                .collect(),
+    /// For every gene with a base (`count/spliced`) row, ascending by that
+    /// row: the base row, and the gene's row on `track`, if it has one. What
+    /// `graph_embedding_util::split_displaced` cuts the axis by.
+    pub(crate) fn pair_rows(&self, track: u32) -> anyhow::Result<(Vec<usize>, Vec<Option<usize>>)> {
+        let mut on_track: FxHashMap<u32, usize> = FxHashMap::default();
+        for (r, (&t, &g)) in self.row_track.iter().zip(&self.row_gene).enumerate() {
+            if t == track {
+                anyhow::ensure!(
+                    on_track.insert(g, r).is_none(),
+                    "gene {} has more than one row on track {track}",
+                    self.gene_names[g as usize]
+                );
+            }
         }
+        let base = self.rows_of(0);
+        let paired = base
+            .iter()
+            .map(|&r| on_track.get(&self.row_gene[r]).copied())
+            .collect();
+        Ok((base, paired))
     }
 
     /// Row indices on `track`, ascending.

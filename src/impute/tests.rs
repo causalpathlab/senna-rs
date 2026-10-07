@@ -113,9 +113,7 @@ fn kinds_without_a_projection_are_refused_up_front() {
     }
 }
 
-/// gem now has the same frozen-table query-side projection bge/simba use, so
-/// it must NOT be refused with the "no query-side projection" message
-/// anymore; impute's own matching machinery just is not wired for it yet.
+/// A run of the retired joint gem is refused, pointing at `senna tde`.
 #[test]
 fn a_gem_run_is_refused_with_its_own_message() {
     let dir = tempfile::tempdir().unwrap();
@@ -123,11 +121,8 @@ fn a_gem_run_is_refused_with_its_own_message() {
     let args = base_args(prefix, "out".into());
     let err = impute_model(&args).unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("not wired for gem runs"), "{msg}");
-    assert!(
-        !msg.contains("no query-side projection"),
-        "gem does have a query-side projection now: {msg}"
-    );
+    assert!(msg.contains("retired `senna gem`"), "{msg}");
+    assert!(msg.contains("senna tde"), "{msg}");
 }
 
 #[test]

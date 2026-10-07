@@ -25,32 +25,26 @@ fn ids_and_flags_on_a_mixed_axis() {
         (&*plan.tracks[0].modality, &*plan.tracks[0].channel),
         ("count", "spliced")
     );
-    assert!(plan.tracks[0].is_count);
     assert_eq!(
         (&*plan.tracks[1].modality, &*plan.tracks[1].channel),
         ("count", "unspliced")
     );
-    assert!(plan.tracks[1].is_count);
     assert_eq!(
         (&*plan.tracks[2].modality, &*plan.tracks[2].channel),
         ("apa", "distal")
     );
-    assert!(!plan.tracks[2].is_count);
     assert_eq!(
         (&*plan.tracks[3].modality, &*plan.tracks[3].channel),
         ("apa", "proximal")
     );
-    assert!(!plan.tracks[3].is_count);
     assert_eq!(
         (&*plan.tracks[4].modality, &*plan.tracks[4].channel),
         ("m6a", "methylated")
     );
-    assert!(!plan.tracks[4].is_count);
     assert_eq!(
         (&*plan.tracks[5].modality, &*plan.tracks[5].channel),
         ("m6a", "unmethylated")
     );
-    assert!(!plan.tracks[5].is_count);
 
     // Row -> track / gene / base.
     assert_eq!(plan.row_track, vec![0, 1, 0, 4, 5, 3, 2]);
@@ -128,17 +122,18 @@ fn more_than_ten_offending_rows_are_capped_in_the_message() {
 }
 
 #[test]
-fn to_ge_validates() {
+fn pair_rows_gives_each_base_genes_row_on_a_track() {
     let axis = names(&[
         "GENE1/count/spliced",
         "GENE1/count/unspliced",
         "GENE2/count/spliced",
+        "GENE3/count/unspliced",
         "GENE1/m6a/methylated",
         "GENE1/m6a/unmethylated",
     ]);
     let plan = assign_tracks(&axis).expect("assign_tracks");
-    let spec = plan.to_ge();
-    spec.validate(axis.len()).expect("TrackSpec::validate");
-    assert_eq!(spec.tracks.len(), plan.tracks.len());
-    assert!(spec.tracks[0].is_count);
+    // GENE3 has no spliced row, so it is not on the base axis.
+    let (base, unspliced) = plan.pair_rows(1).expect("pair_rows");
+    assert_eq!(base, vec![0, 2]);
+    assert_eq!(unspliced, vec![Some(1), None]);
 }
