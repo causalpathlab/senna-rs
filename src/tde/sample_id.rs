@@ -1,7 +1,7 @@
-//! Per-file `@sample` barcode-tagging convention for `senna gem`.
+//! Per-file `@sample` barcode-tagging convention for `senna tde`.
 //!
 //! Multiple input files of one experiment reuse the same 10x barcode
-//! whitelist, so a bare barcode is ambiguous across samples. `senna gem` tags
+//! whitelist, so a bare barcode is ambiguous across samples. `senna tde` tags
 //! each file's barcodes with `{COLUMN_SEP}{sample_id}` (COLUMN_SEP = `@`)
 //! under `ColumnAlignment::Union`, where the sample id is the file's basename
 //! with a suffix stripped so every file of one sample collapses to the same id

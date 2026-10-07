@@ -11,17 +11,17 @@
 //! move `θ` or `ρ`.
 //!
 //! [`crate::tde::load::resolve_inputs`] sample-id-matches the input files,
-//! [`crate::tde::load::load_gem_data`] loads them and reads the
+//! [`crate::tde::load::load_tde_data`] loads them and reads the
 //! [`crate::tde::tracks::TrackPlan`] off the row grammar, and
-//! [`crate::tde::hvg::gem_hvg_row_weights`] pools its rows per gene for HVG
-//! weighting. `graph_embedding_util::split_displaced` then cuts the axis to
+//! [`crate::tde::hvg::hvg_row_weights`] ranks genes on their spliced rows
+//! for HVG weighting. `graph_embedding_util::split_displaced` then cuts the axis to
 //! the spliced rows, named by their genes, so the fit, the preset and every
 //! output read like a `bge` run's.
 
 use crate::bge::driver::{fit_embed_family, EmbedPlan};
 use crate::tde::args::TdeArgs;
-use crate::tde::hvg::gem_hvg_row_weights;
-use crate::tde::load::{load_gem_data, resolve_inputs};
+use crate::tde::hvg::hvg_row_weights;
+use crate::tde::load::{load_tde_data, resolve_inputs};
 use crate::tde::tracks::TrackPlan;
 use data_beans::aux::feature_rows::{parse_feature_row, COUNT, SPLICED, UNSPLICED};
 use graph_embedding_util as ge;
@@ -38,8 +38,8 @@ pub fn run_tde(args: &TdeArgs) -> anyhow::Result<()> {
     );
 
     let inputs = resolve_inputs(&args.genes, &[], &args.genes_sample_strip)?;
-    let (mut unified, plan) = load_gem_data(&inputs, batch_files, args.preload_data)?;
-    let hvg_weights = gem_hvg_row_weights(&unified, &plan, &args.hvg, args.block_size)?;
+    let (mut unified, plan) = load_tde_data(&inputs, batch_files, args.preload_data)?;
+    let hvg_weights = hvg_row_weights(&unified, &plan, &args.hvg, args.block_size)?;
 
     let axis = split_unspliced(&mut unified, &plan)?;
 

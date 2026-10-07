@@ -12,7 +12,7 @@
 //!
 //! [`assign_tracks`] is the single place this grammar is enforced: it turns
 //! a feature-name axis into a [`TrackPlan`]: per-row track and gene, read
-//! for per-gene HVG pooling ([`super::hvg::gem_hvg_row_weights`]) and, via
+//! for per-gene HVG weights ([`super::hvg::hvg_row_weights`]) and, via
 //! [`TrackPlan::pair_rows`], for cutting the axis to its base rows.
 //!
 //! No heuristics: a row that does not fit the grammar, carries a subunit

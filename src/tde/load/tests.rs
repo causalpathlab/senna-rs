@@ -1,4 +1,4 @@
-use super::{load_gem_data, resolve_inputs};
+use super::{load_tde_data, resolve_inputs};
 use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
 use nalgebra::DMatrix;
 
@@ -128,7 +128,7 @@ fn end_to_end_union_axis_and_track_plan() {
     );
 
     let inputs = resolve_inputs(&[genes], &[m6a], "").expect("resolve_inputs");
-    let (unified, plan) = load_gem_data(&inputs, None, false).expect("load_gem_data");
+    let (unified, plan) = load_tde_data(&inputs, None, false).expect("load_tde_data");
 
     assert_eq!(
         unified.n_features(),
@@ -184,8 +184,8 @@ fn sample_tagging_still_applies_with_explicit_batch_files() {
     let batch_files = [batch_path];
 
     let inputs = resolve_inputs(&[genes], &[m6a], "").expect("resolve_inputs");
-    let (unified, _plan) = load_gem_data(&inputs, Some(&batch_files), false)
-        .expect("load_gem_data with --batch-files");
+    let (unified, _plan) = load_tde_data(&inputs, Some(&batch_files), false)
+        .expect("load_tde_data with --batch-files");
 
     assert_eq!(unified.n_cells(), 6);
     let mut barcodes: Vec<String> = unified.barcodes.iter().map(ToString::to_string).collect();

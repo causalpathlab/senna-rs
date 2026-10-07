@@ -1,16 +1,15 @@
-//! Multi-file input resolution and loading for `senna gem`.
+//! Multi-file input resolution and loading for `senna tde`.
 //!
-//! `senna gem` takes gene-count files (positional `GENES`) and, optionally,
-//! one file per co-measured modality (`--modality`, repeatable). Every file
+//! The loader takes gene-count files and, optionally, one file per
+//! co-measured modality (today `senna tde` passes gene files only). Every file
 //! is read once, cheaply (row/column NAMES only, via [`ge::read_file_axes`])
 //! to classify it as a gene file (`count` rows only) or a modality file
 //! (exactly one non-`count` modality) and to derive its sample id — the
-//! matching key that lets `senna gem a_count.zarr.zip --modality
-//! a_m6a.zarr.zip` merge `a`'s two files under one set of barcodes, while
-//! keeping `a` and `b` apart.
+//! matching key that lets sample `a`'s gene and modality files merge under
+//! one set of barcodes, while keeping `a` and `b` apart.
 //!
 //! [`resolve_inputs`] does the classification and sample-id matching;
-//! [`load_gem_data`] does the actual load (`Union` column alignment, exact
+//! [`load_tde_data`] does the actual load (`Union` column alignment, exact
 //! row-name matching — the row itself is the join key) and hands the result
 //! to [`crate::tde::tracks::assign_tracks`].
 
@@ -24,13 +23,13 @@ use log::info;
 use crate::tde::sample_id::{strip_any_suffix, COUNT_SUFFIX};
 use crate::tde::tracks::{assign_tracks, TrackPlan};
 
-/// One resolved gem input: every file to load, and its matched sample id.
+/// One resolved input set: every file to load, and its matched sample id.
 /// The load itself doesn't need to know which file carries which modality —
 /// `Union` alignment merges them all the same way, and once loaded, the
 /// modality of a ROW comes from [`crate::tde::tracks::assign_tracks`] reading
 /// the row grammar, not from which file it arrived in.
 #[derive(Debug)]
-pub(crate) struct GemInputs {
+pub(crate) struct TdeInputs {
     pub files: Vec<Box<str>>,
     pub sample_ids: Vec<Box<str>>,
 }
@@ -53,11 +52,11 @@ pub(crate) fn resolve_inputs(
     genes: &[Box<str>],
     modality_files: &[Box<str>],
     strip: &str,
-) -> anyhow::Result<GemInputs> {
+) -> anyhow::Result<TdeInputs> {
     anyhow::ensure!(
         !genes.is_empty(),
         "no gene matrices given: pass them positionally \
-         (`senna gem out/*_count.zarr.zip -o out/gem`)"
+         (`senna tde out/*_count.zarr.zip -o out/tde`)"
     );
 
     let all_files: Vec<Box<str>> = genes.iter().chain(modality_files.iter()).cloned().collect();
@@ -119,7 +118,7 @@ pub(crate) fn resolve_inputs(
         gene_sample_ids
     );
 
-    Ok(GemInputs { files, sample_ids })
+    Ok(TdeInputs { files, sample_ids })
 }
 
 /// Distinct modalities among a file's rows (unparseable rows are skipped
@@ -175,8 +174,8 @@ fn recorded_sample(file: &str) -> Option<String> {
 /// barcode. Row names are matched EXACTLY across files: the row itself
 /// (`{gene}/{modality}/{channel}`) is the join key, so no per-file feature
 /// suffix is applied.
-pub(crate) fn load_gem_data(
-    inputs: &GemInputs,
+pub(crate) fn load_tde_data(
+    inputs: &TdeInputs,
     batch_files: Option<&[Box<str>]>,
     preload: bool,
 ) -> anyhow::Result<(ge::UnifiedData, TrackPlan)> {
@@ -194,7 +193,7 @@ pub(crate) fn load_gem_data(
         ..Default::default()
     })?;
     info!(
-        "gem: loaded {} feature row(s) x {} cell(s) from {} file(s), {} batch(es)",
+        "tde: loaded {} feature row(s) x {} cell(s) from {} file(s), {} batch(es)",
         unified.n_features(),
         unified.n_cells(),
         inputs.files.len(),
@@ -216,7 +215,7 @@ fn log_cells_per_track(unified: &ge::UnifiedData, plan: &TrackPlan) {
             Ok(csc) => {
                 let n_cells = (0..csc.ncols()).filter(|&j| csc.col(j).nnz() > 0).count();
                 info!(
-                    "gem track {} ({}/{}): {} row(s), {n_cells} cell(s) with mass",
+                    "tde track {} ({}/{}): {} row(s), {n_cells} cell(s) with mass",
                     t.id,
                     t.modality,
                     t.channel,
@@ -225,7 +224,7 @@ fn log_cells_per_track(unified: &ge::UnifiedData, plan: &TrackPlan) {
             }
             Err(e) => {
                 log::warn!(
-                    "gem track {} ({}/{}): could not count cells with mass: {e}",
+                    "tde track {} ({}/{}): could not count cells with mass: {e}",
                     t.id,
                     t.modality,
                     t.channel
