@@ -1,7 +1,7 @@
 //! The `--freeze-feature-embedding` / `--init-feature-embedding` /
 //! `--lora-feature-embedding` triple, shared by every model whose feature
 //! side can start from an earlier run's table: `senna bge`, `senna simba`,
-//! `senna fne`, `senna gem` and the `masked-*` family. One clap struct, so
+//! `senna fne`, `senna tde` and the `masked-*` family. One clap struct, so
 //! the flags, their help and the "one of the three" rule read the same
 //! everywhere.
 
@@ -35,18 +35,15 @@ pub struct FeatureEmbeddingArgs {
                      A gene with no row: `bge` keeps it as a free, trained row;\n\
                      the masked models drop it from the feature axis.\n\
                      \n\
-                     `senna gem` reads the table onto its row grammar: a bare gene name\n\
-                     is the gene's count/spliced row, a `{gene}/{modality}/{channel}` name\n\
-                     is that row. Base rows are pinned as above; a given row on another\n\
-                     track pins that track's offset for its gene, and the offsets of\n\
-                     every other gene train (see --offset-rank).\n\
+                     `senna tde` matches by gene: a bare gene name, or an earlier joint\n\
+                     run's `{gene}/count/spliced` row.\n\
                      \n\
                      The table's rows that match no feature of this run — genes the\n\
                      data lacks and every non-gene row — are carried through unchanged\n\
                      into the output ρ table, after the trained rows, so the result is\n\
                      the full table; `{out}.feature_types.parquet` names each row's type.\n\
                      \n\
-                     bge, simba, fne and gem: H is the larger of `--embedding-dim`\n\
+                     bge, simba, fne and tde: H is the larger of `--embedding-dim`\n\
                      and the table's width (`auto` takes the table's). A table\n\
                      narrower than H gets zero columns: they train under\n\
                      `--init-`/`--lora-`; a pinned gene keeps zeros there under\n\

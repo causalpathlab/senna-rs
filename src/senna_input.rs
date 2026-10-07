@@ -21,7 +21,7 @@ pub fn collapse_to_single_batch(membership: &mut [Box<str>]) {
 /// supplied keeps a bare `--ignore-batch` quiet.
 ///
 /// This is the file-list counterpart of [`collapse_to_single_batch`], which does
-/// the same thing to per-cell labels already in memory. `bge` and `gem` both
+/// the same thing to per-cell labels already in memory. `bge` and `tde` both
 /// reach the same decision from their own args, and must reach it identically.
 pub fn effective_batch_files(
     ignore_batch: bool,

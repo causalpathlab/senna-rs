@@ -96,7 +96,7 @@ pub struct LayoutCommonArgs {
         long_help = "Which table of the run's features --target features lays out.\n\
                      \n\
                      - auto (default): the co-embedding when the run wrote one\n\
-                     \x20 (bge, simba, gem, resolve-embedding-space), else ρ.\n\
+                     \x20 (bge, simba, tde, resolve-embedding-space), else ρ.\n\
                      - coembedding: each feature where the cells it is active in are,\n\
                      \x20 so neighbouring features are active in the same cells.\n\
                      - rho: the feature embedding ρ as trained."

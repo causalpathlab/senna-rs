@@ -57,7 +57,7 @@ pub struct CritiqueArgs {
         help = "Run manifests to compare ({run}.senna.json or a run prefix); two or more",
         long_help = "The fits whose pseudobulk views are compared.\n\
                      Any kind that writes a per-cell latent or cell embedding:\n\
-                     topic, masked-*, vae, svd, bge, simba, gem."
+                     topic, masked-*, vae, svd, bge, simba, tde."
     )]
     runs: Vec<Box<str>>,
 

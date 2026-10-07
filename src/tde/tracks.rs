@@ -1,4 +1,5 @@
-//! Row-grammar track assignment for `senna gem`.
+//! Row-grammar track assignment for `senna tde` (and the axis of a run of
+//! the retired joint `senna gem`).
 //!
 //! A gem feature axis is one gene axis carrying several **tracks**: the base
 //! gene count (`{gene}/count/spliced`, optionally `{gene}/count/unspliced`)
@@ -25,10 +26,7 @@
 
 use std::collections::BTreeSet;
 
-use data_beans::aux::feature_rows::{
-    parse_feature_row, APA, ATOI, COUNT, DISTAL, EDITED, M6A, METHYLATED, PROXIMAL, SPLICED,
-    UNEDITED, UNMETHYLATED, UNSPLICED,
-};
+use data_beans::aux::feature_rows::{parse_feature_row, APA, ATOI, COUNT, M6A, SPLICED, UNSPLICED};
 use graph_embedding_util as ge;
 use rustc_hash::FxHashMap;
 
@@ -230,34 +228,6 @@ fn rows_error(what: &str, rows: &[usize], feature_names: &[Box<str>]) -> anyhow:
     }
 }
 
-/// The cell-encoder safetensors suffix `senna bge`'s driver writes for one
-/// track: the bare name for track 0 (what `predict` reads by default), else
-/// namespaced by the ge track `name` (`{modality}/{channel}`) with `/`
-/// replaced by `.`. Takes the raw `(track id, name)` a
-/// `graph_embedding_util::TrackEncoder` carries, rather than gem's own
-/// [`Track`], since the driver saves whatever the engine handed back.
-pub(crate) fn encoder_suffix_for(track: u32, name: &str) -> String {
-    if track == 0 {
-        "cell_encoder.safetensors".to_string()
-    } else {
-        format!("cell_encoder.{}.safetensors", name.replace('/', "."))
-    }
-}
-
-/// The two channels a modality contrasts, `(numerator, denominator)`, for
-/// `{out}.feature_contrast.parquet`. `None` for a modality this axis does not
-/// recognize. Fixed by the row grammar's own channel vocabulary
-/// (`data_beans::aux::feature_rows`), never guessed from what is on the axis.
-pub(crate) fn contrast_channels(modality: &str) -> Option<(&'static str, &'static str)> {
-    match modality {
-        COUNT => Some((UNSPLICED, SPLICED)),
-        M6A => Some((METHYLATED, UNMETHYLATED)),
-        ATOI => Some((EDITED, UNEDITED)),
-        APA => Some((PROXIMAL, DISTAL)),
-        _ => None,
-    }
-}
-
 impl TrackPlan {
     /// The `graph_embedding_util::fit::TrackSpec` this plan describes: track
     /// names are `{modality}/{channel}`, `is_count` iff the modality is
@@ -275,16 +245,6 @@ impl TrackPlan {
                 })
                 .collect(),
         }
-    }
-
-    /// The track id of `(modality, channel)`, when this plan has one. Used
-    /// by [`super::contrast::contrast_rows`] to locate a modality's two
-    /// contrast channels.
-    pub(crate) fn track_of(&self, modality: &str, channel: &str) -> Option<u32> {
-        self.tracks
-            .iter()
-            .find(|t| t.modality.as_ref() == modality && t.channel.as_ref() == channel)
-            .map(|t| t.id)
     }
 
     /// Row indices on `track`, ascending.

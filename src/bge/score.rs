@@ -66,7 +66,7 @@ pub struct BgeEmbedding {
     /// gem's row-grammar track assignment, built once from the gene axis at
     /// [`Self::open`] time. `None` for bge / simba, whose whole axis is
     /// implicitly one track.
-    pub tracks: Option<crate::gem::tracks::TrackPlan>,
+    pub tracks: Option<crate::tde::tracks::TrackPlan>,
     /// `(track id, resolved path)` for every count track BEYOND track 0 whose
     /// encoder the manifest recorded, the id resolved by matching
     /// [`senna::run_manifest::TrackEncoderSlot::track`]'s name against
@@ -226,7 +226,7 @@ impl BgeEmbedding {
         // single source of truth for which tracks exist and what rows are on
         // them, exactly as training re-derived it.
         let tracks = if kind == run_manifest::RunKind::Gem {
-            Some(crate::gem::tracks::assign_tracks(&rho.rows)?)
+            Some(crate::tde::tracks::assign_tracks(&rho.rows)?)
         } else {
             None
         };
@@ -385,7 +385,7 @@ impl BgeEmbedding {
         let track_spec = self
             .tracks
             .as_ref()
-            .map(crate::gem::tracks::TrackPlan::to_ge);
+            .map(crate::tde::tracks::TrackPlan::to_ge);
         let track_encoders = match (&track_spec, self.cell_encoder.as_deref()) {
             (Some(spec), Some(track0_path)) => {
                 let mut paths: Vec<(u32, String)> = vec![(0, track0_path.to_string())];
@@ -785,7 +785,3 @@ impl EdgeGroup {
         self.count.clear();
     }
 }
-
-#[cfg(test)]
-#[path = "score/tests.rs"]
-mod tests;

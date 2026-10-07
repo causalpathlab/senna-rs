@@ -96,7 +96,11 @@ pub fn load_marker_feature_embedding_from(
 ) -> Result<MatWithNames<DMatrix<f32>>> {
     let coembeds = matches!(
         manifest.kind,
-        RunKind::Bge | RunKind::Gem | RunKind::Simba | RunKind::ResolveEmbeddingSpace
+        RunKind::Bge
+            | RunKind::Gem
+            | RunKind::Tde
+            | RunKind::Simba
+            | RunKind::ResolveEmbeddingSpace
     );
     let (slot, rel) = match (
         manifest.outputs.feature_coembedding.as_deref(),
@@ -112,7 +116,7 @@ pub fn load_marker_feature_embedding_from(
         (None, Some(rel)) => ("feature_embedding", rel),
         (None, None) => anyhow::bail!(
             "{prefix}: manifest has neither `outputs.feature_coembedding` nor \
-             `outputs.feature_embedding` — this needs a gene embedding (a `senna gem` / `bge` / \
+             `outputs.feature_embedding` — this needs a gene embedding (a `senna tde` / `bge` / \
              `fne` / `resolve-embedding-space` run)"
         ),
     };

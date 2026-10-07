@@ -24,7 +24,7 @@ use legume_numeric::matrix::traits::RunningStatOps;
 use log::info;
 use rustc_hash::FxHashSet;
 
-use crate::gem::tracks::TrackPlan;
+use crate::tde::tracks::TrackPlan;
 
 /// Per-row HVG projection weights over a gem feature axis, pooled per gene
 /// across every track. `None` when selection is off and the axis has only

@@ -190,9 +190,10 @@ fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
         RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::Vae => {
             Ok(MatchingPlan::SoftmaxSimplex)
         }
-        // simba projects a query through bge's path (frozen gene table, zero
-        // bias), so it matches in its cell embedding exactly as bge does.
-        RunKind::Bge | RunKind::Simba => Ok(MatchingPlan::CosineEmbedding),
+        // simba and tde project a query through bge's path (frozen gene table;
+        // simba's bias is zero), so they match in their cell embedding exactly
+        // as bge does.
+        RunKind::Bge | RunKind::Tde | RunKind::Simba => Ok(MatchingPlan::CosineEmbedding),
         RunKind::Svd => Ok(MatchingPlan::DictionaryProjection),
         // The joint families write no encoder checkpoint (`has_model: false`),
         // so `predict` cannot load one and the simplex arm would fail deep

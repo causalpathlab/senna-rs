@@ -55,9 +55,9 @@ fn train_args_survives_an_unrelated_mutation() {
     assert_eq!(back, fake());
 }
 
-/// Task 5c's three new manifest slots (the gem contrast tables and
-/// per-track cell encoders): write with real values, save, reload, and get
-/// the same values back.
+/// The retired joint gem's manifest slots (its contrast tables and
+/// per-track cell encoders): a manifest written with them still saves,
+/// reloads, and gives the same values back.
 #[test]
 fn track_encoder_and_contrast_slots_round_trip() {
     let (_dir, path) = scratch();
@@ -241,4 +241,32 @@ fn a_field_added_later_replays_with_its_clap_default() {
     assert_eq!(replayed.out, "run-d");
     assert_eq!(replayed.epochs, 1000, "must not train for zero epochs");
     assert!((replayed.learning_rate - 0.01).abs() < 1e-9);
+}
+
+/// A tde run's divergence slots round-trip, and a manifest without them
+/// (every other kind) reloads with none.
+#[test]
+fn divergence_slots_round_trip() {
+    use senna::run_manifest::DivergenceSlots;
+    let (_dir, path) = scratch();
+    let mut m = RunManifest::new(RunKind::Tde, "run-t");
+    let slots = DivergenceSlots {
+        track: "count/unspliced".into(),
+        pb: "run-t.pb_divergence.parquet".into(),
+        cell: "run-t.cell_divergence.parquet".into(),
+        feature: "run-t.feature_divergence.parquet".into(),
+        encoder: "run-t.divergence_encoder.safetensors".into(),
+    };
+    m.outputs.divergence = Some(slots.clone());
+    m.save(&path).expect("save");
+    let (back, _) = RunManifest::load(&path).expect("load");
+    assert_eq!(back.kind, RunKind::Tde);
+    assert_eq!(back.outputs.divergence, Some(slots));
+
+    let (_dir2, path2) = scratch();
+    RunManifest::new(RunKind::Bge, "run-b")
+        .save(&path2)
+        .expect("save");
+    let (back, _) = RunManifest::load(&path2).expect("load");
+    assert_eq!(back.outputs.divergence, None);
 }

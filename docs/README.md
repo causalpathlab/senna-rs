@@ -21,9 +21,8 @@ and so do their write-ups: `lupin docs annotation`, `lupin docs grouping`,
 trained feature axis: `n_live / n_markers` in `{out}.panel_null.tsv` (or the "marker liveness" log
 line) should be near 100%. If it is not, the panel's genes were projected rather than fitted, and
 every downstream statistic is uninterpretable — including the ones designed to detect exactly
-that. At gem's default `--n-hvg 0` every gene is trained, so this holds by construction; if you
-run `--n-hvg > 0`, pass `senna gem --markers` pointing at *the same marker file* the annotation
-uses. See `lupin docs annotation`, §1.
+that. With `--n-hvg 0` every gene is trained, so this holds by construction; with HVG selection,
+make sure the panel's genes are among those selected. See `lupin docs annotation`, §1.
 
 The per-cell feature matrices these commands read are produced by
 [`faba`](https://github.com/causalpathlab/faba); see its docs for how they are built.

@@ -1,15 +1,14 @@
-//! `senna gem`'s command-line surface: the [`GemArgs`] clap struct.
+//! `senna tde`'s command-line surface: the [`TdeArgs`] clap struct.
 //!
 //! Mirrors `senna/src/bge/args.rs` field for field: the same shared groups
 //! (`HvgCliArgs`, `refine_weighting::CollapseArgs`, `QcArgs`,
 //! `ge::FeatureModuleArgs`), the same top-level knobs, and the same help text
-//! for every flag they share, so `senna bge` and `senna gem` read as one
-//! flag surface, including the `--{freeze,init,lora}-feature-embedding`
-//! triple. gem adds its own modality inputs (`GENES...`, `--modality`,
-//! `--genes-sample-strip`) and its own knobs on the per-track feature
-//! offsets: their rank (`--offset-rank`) and ridge (`--offset-l2`). Unlike
-//! `BgeArgs`, `GemArgs` does not implement `Updatable`; `senna update` does
-//! not (yet) continue a gem run.
+//! for every flag they share, including the
+//! `--{freeze,init,lora}-feature-embedding` triple. tde adds its inputs
+//! (`GENES...`, `--genes-sample-strip`) and the knobs of the unspliced
+//! track's displacement (`--divergence-l2`,
+//! `--cell-divergence-l2`, `--divergence-epochs`). `TdeArgs` does not
+//! implement `Updatable`; `senna update` does not (yet) continue a tde run.
 
 use data_beans::alg::hvg::HvgCliArgs;
 use graph_embedding_util as ge;
@@ -17,37 +16,24 @@ use senna::embed_common::*;
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]
-pub(crate) struct GemArgs {
+pub(crate) struct TdeArgs {
     #[arg(
         value_name = "GENES",
         value_delimiter = ',',
         required = true,
-        help = "Gene-count matrices (zarr/h5), comma- or space-separated",
+        help = "Gene-count matrices (zarr/h5) with spliced and unspliced rows",
         long_help = "Gene-count matrices to embed. Pass them all, in any order;\n\
-                     space-separated so shell globs work (`senna gem out/*_count.zarr.zip`),\n\
+                     space-separated so shell globs work (`senna tde out/*_count.zarr.zip`),\n\
                      commas also accepted.\n\
                      \x20\n\
                      Rows must follow `{gene}/count/{spliced|unspliced}`. The gene key is the first field,\n\
-                     and the row itself is the join key across files.\n\
+                     and the row itself is the join key across files. Every gene needs a\n\
+                     spliced row; a gene without an unspliced row has no divergence.\n\
                      \x20\n\
                      Cells are matched across files by barcode within a sample;\n\
-                     see --genes-sample-strip and --modality for co-measured tracks."
-    )]
-    pub(crate) genes: Vec<Box<str>>,
-
-    #[arg(
-        long = "modality",
-        value_name = "FILE[,FILE...]",
-        value_delimiter = ',',
-        action = clap::ArgAction::Append,
-        help = "Modality count matrices, comma separated; the flag may repeat.",
-        long_help = "Modality count matrices, comma separated; the flag may repeat.\n\
-                     Each file holds one modality (m6a, atoi or apa)\n\
-                     with its two channels as rows; the modality is read from the rows.\n\
-                     Cells are matched to the gene files by barcode within a sample;\n\
                      see --genes-sample-strip."
     )]
-    pub(crate) modality_files: Vec<Box<str>>,
+    pub(crate) genes: Vec<Box<str>>,
 
     #[arg(
         short = 'b',
@@ -63,8 +49,7 @@ pub(crate) struct GemArgs {
         help = "Suffix stripped from every input basename to form its sample id.",
         long_help = "Suffix stripped from every input basename to form its sample id.\n\
                      Empty (the default) takes each file's sample from its metadata (faba\n\
-                     writes it); a file without one has _count (gene files) or _{modality}\n\
-                     (modality files) stripped from its name.\n\
+                     writes it); a file without one has _count stripped from its name.\n\
                      Files of one sample must land on the same id."
     )]
     pub(crate) genes_sample_strip: Box<str>,
@@ -136,7 +121,7 @@ pub(crate) struct GemArgs {
                      Only the raw bge embeddings are then emitted: cell_embedding = Z,\n\
                      dictionary = ρ, and no latent.\n\
                      \n\
-                     By default gem resolves ETM topics from the cell embedding,\n\
+                     By default tde resolves ETM topics from the cell embedding,\n\
                      by anchor analysis. It then ALSO writes the topic-model tables:\n\
                      latent = log θ, dictionary = β, topic_embedding = α.\n\
                      \n\
@@ -202,37 +187,56 @@ pub(crate) struct GemArgs {
     pub(crate) preload_data: bool,
 
     #[arg(
-        long = "offset-l2",
+        long = "divergence-l2",
         default_value_t = 1.0,
-        help = "Ridge on the per-track offsets of the feature loading; 0 = off",
-        long_help = "Ridge penalty on the per-track offsets.\n\
-                     Every row of a gene shares the gene's loading;\n\
-                     each track other than count/spliced adds an offset to it,\n\
-                     and this ridge shrinks that offset toward zero.\n\
-                     Larger values pull the tracks of a gene together,\n\
-                     so a modality's contrast in {out}.feature_contrast.parquet\n\
-                     keeps only what its counts insist on.\n\
-                     Default 1.0, the ridge the previous gem applied to its splice offset.\n\
-                     0 disables it."
+        value_name = "L2",
+        help = "Ridge on each pseudobulk's displacement; 0 = off",
+        long_help = "Ridge precision on each pseudobulk's displacement d_p, pulling it\n\
+                     toward 0 (unspliced at the same place as spliced)."
     )]
-    pub(crate) offset_l2: f32,
+    pub(crate) divergence_l2: f32,
 
     #[arg(
-        long = "offset-rank",
-        default_value_t = graph_embedding_util::LoraSpec::default().rank,
-        value_name = "R",
-        help = "Rank of each track's per-gene offset (1..=H); not the embedding dimension",
-        long_help = "Rank of every non-base track's per-gene offset.\n\
-                     Every row of a gene shares the gene's loading; each track other than\n\
-                     count/spliced adds an offset to it, and that offset is low-rank:\n\
-                     δ_g = u_g · V, with u_g per gene (R numbers) and V shared by every gene\n\
-                     of the track, so a track moves its genes inside one R-dimensional subspace.\n\
-                     \n\
-                     R is its own number. It must lie in 1..=H, where H is --embedding-dim,\n\
-                     and it is never taken from H; R = H leaves the offset unrestricted.\n\
-                     --offset-l2 is the ridge on the offset."
+        long = "cell-divergence-l2",
+        default_value_t = 1.0,
+        value_name = "L2",
+        help = "Ridge pulling each cell's displacement toward its pseudobulk's",
+        long_help = "Ridge precision on a cell's displacement d_c around its finest\n\
+                     pseudobulk's d_p. Larger values keep sparse cells near their\n\
+                     pseudobulk."
     )]
-    pub(crate) offset_rank: usize,
+    pub(crate) cell_divergence_l2: f32,
+
+    #[arg(
+        long = "divergence-epochs",
+        default_value_t = 50,
+        help = "Passes over the pseudobulks fitting their displacements"
+    )]
+    pub(crate) divergence_epochs: usize,
+
+    #[arg(
+        long = "divergence-distill-epochs",
+        default_value_t = 20,
+        help = "Passes over the cells distilling the displacement encoder",
+        hide = true
+    )]
+    pub(crate) divergence_distill_epochs: usize,
+
+    #[arg(
+        long = "divergence-refine-epochs",
+        default_value_t = 10,
+        help = "Passes over the cells refining the displacement encoder on their counts",
+        hide = true
+    )]
+    pub(crate) divergence_refine_epochs: usize,
+
+    #[arg(
+        long = "divergence-learning-rate",
+        default_value_t = 0.01,
+        help = "Adam step of the displacement fits",
+        hide = true
+    )]
+    pub(crate) divergence_learning_rate: f64,
 
     #[arg(
         long,
@@ -267,12 +271,30 @@ pub(crate) struct GemArgs {
         long_help = "Output prefix. It produces {out}.cell_embedding.parquet, which is Z,\n\
                      {out}.feature_embedding.parquet, which is the raw gene table,\n\
                      {out}.feature_coembedding.parquet, the genes on the cell manifold,\n\
-                     {out}.feature_bias.parquet, {out}.cell_bias.parquet, and {out}.senna.json.\n\
+                     {out}.feature_bias.parquet, {out}.cell_bias.parquet, and {out}.senna.json,\n\
+                     all from the spliced counts. The unspliced displacement adds\n\
+                     {out}.pb_divergence.parquet and {out}.cell_divergence.parquet (d per unit),\n\
+                     {out}.feature_divergence.parquet (per gene) and\n\
+                     {out}.divergence_encoder.safetensors.\n\
                      Unless --skip-etm, it adds three more:\n\
-                     {out}.latent.parquet, {out}.dictionary.parquet and {out}.topic_embedding.parquet.\n\
-                     With --modality tracks it adds {out}.feature_contrast.parquet."
+                     {out}.latent.parquet, {out}.dictionary.parquet and {out}.topic_embedding.parquet."
     )]
     pub(crate) out: Box<str>,
+}
+
+impl TdeArgs {
+    /// The displaced-track knobs on `axis`.
+    pub(crate) fn displaced(&self, axis: ge::DisplacedAxis) -> ge::DisplacedTrackConfig {
+        ge::DisplacedTrackConfig {
+            l2_pb: self.divergence_l2,
+            l2_cell: self.cell_divergence_l2,
+            pb_epochs: self.divergence_epochs,
+            distill_epochs: self.divergence_distill_epochs,
+            refine_epochs: self.divergence_refine_epochs,
+            learning_rate: self.divergence_learning_rate,
+            ..ge::DisplacedTrackConfig::new(axis)
+        }
+    }
 }
 
 #[cfg(test)]

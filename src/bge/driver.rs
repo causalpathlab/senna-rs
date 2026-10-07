@@ -1,37 +1,28 @@
-//! The shared driver behind `senna bge` and `senna gem`: everything from the
+//! The shared driver behind `senna bge` and `senna tde`: everything from the
 //! multilevel pseudobulk fit through the output writers and the run
 //! manifest. `senna bge`'s own `fit_bge` (`bge/mod.rs`) resolves the
 //! multiome layout, loads the data, and computes its HVG weights, then hands
-//! off to [`fit_embed_family`] here; `senna gem` (`gem/run.rs`) does its own
-//! (simpler) load and HVG pooling and hands off the same way. bge always
-//! passes `EmbedPlan::tracks = None` (one track, every row its own gene);
-//! gem passes its own row-grammar [`crate::gem::tracks::TrackPlan`], and
-//! hooks its `{out}.feature_contrast.parquet` writer in through
-//! [`EmbedPlan::after_fit`].
+//! off to [`fit_embed_family`] here; `senna tde` (`tde/run.rs`) does its own
+//! load, splits its second count track off the axis, and hands off the same
+//! way with [`EmbedPlan::displaced`] set, so the fit also returns that
+//! track's displacements, which [`write_divergence`] writes.
 //!
-//! [`EmbedKnobs`] is the flag surface both commands drive the fit with.
-//! `GemArgs` now flattens the exact same `refine_weighting::CollapseArgs`
-//! and `ge::FeatureModuleArgs` groups `BgeArgs` does (Task 5a), so both
-//! `collapse` and `modules` are shared-by-reference fields here, as the
-//! original sketch had them, and `build_config` reads the raw collapse
-//! numbers (`num_levels`, `sort_dim`, `knn_cells`, `iter_opt`, `proj_dim`)
-//! straight off whichever command's `collapse` this is — no more per-field
-//! renaming. `bulk_batches` / `emit_pb_reference` / `refine` stay separate,
-//! resolved fields: gem does not (yet) apply the carried-pb-reference /
-//! mixture-batch policy those three encode (`GemArgs` has no
-//! `pb_reference` / `init_from` surface and does not implement
-//! `Updatable`), even though the shared struct's own flags now parse on
-//! gem's surface too — so `GemArgs::knobs` still hardcodes them off, exactly
-//! as before this task.
+//! [`EmbedKnobs`] is the flag surface both commands drive the fit with. Both
+//! flatten the same `refine_weighting::CollapseArgs` and
+//! `ge::FeatureModuleArgs` groups. `bulk_batches` / `emit_pb_reference` /
+//! `refine` stay separate, resolved fields: tde does not (yet) apply the
+//! carried-pb-reference / mixture-batch policy those encode, so
+//! `TdeArgs::knobs` hardcodes them off.
 
 use graph_embedding_util as ge;
+use legume_numeric::matrix::parquet::{write_named_table, Column};
 use senna::embed_common::*;
 use senna::pb_reference::ReferenceInput;
 use senna::run_manifest::RunKind;
 
 /// Every driver flag both commands drive the fit with, borrowed from
 /// whichever command's own `*Args` built this. Constructed by
-/// `BgeArgs::knobs` / `GemArgs::knobs`.
+/// `BgeArgs::knobs` / `TdeArgs::knobs`.
 pub(crate) struct EmbedKnobs<'a> {
     pub embedding_dim: usize,
 
@@ -42,12 +33,12 @@ pub(crate) struct EmbedKnobs<'a> {
     /// flatten the identical struct now, so `build_config` reads its raw
     /// numbers straight off this reference either way.
     pub collapse: &'a crate::refine_weighting::CollapseArgs,
-    /// Resolved separately from `collapse` (see the module doc): gem always
+    /// Resolved separately from `collapse` (see the module doc): tde always
     /// passes `None` / `false` here regardless of what `--mixture-batch` /
     /// `--emit-pb-reference` parse to on its own surface.
     pub bulk_batches: Option<&'a [Box<str>]>,
     /// Carry the finest collapse level forward as `{out}.pb_reference.zarr.zip`
-    /// (bge: `!--no-emit-pb-reference`; gem has no such flag yet, always
+    /// (bge: `!--no-emit-pb-reference`; tde has no such flag yet, always
     /// `false`).
     pub emit_pb_reference: bool,
     /// BBKNN + DC-Poisson refinement params, already resolved by the
@@ -100,60 +91,26 @@ pub(crate) struct EmbedPlan<'a> {
     pub multiome: Option<senna::multiome_layout::RunMultiome>,
     /// Full-axis (current feature-axis-indexed) HVG projection weights.
     pub hvg_weights: Option<Vec<f32>>,
-    /// Row structure of the feature axis, from [`crate::gem::tracks::assign_tracks`]:
-    /// `senna gem`'s base count track plus any co-measured modality tracks.
-    /// `None` (bge, always) = one track, every row its own gene.
-    pub tracks: Option<crate::gem::tracks::TrackPlan>,
-    /// Ridge on the per-track offsets (`FitConfig.offset_l2`); inert at one
-    /// track. bge always passes `0.0`.
-    pub offset_l2: f32,
-    /// Rank of the per-track gene offsets (`FitConfig.offset_rank`); inert at
-    /// one track. gem's `--offset-rank`; bge passes the LoRA default.
-    pub offset_rank: usize,
     /// Gene rows given up front (`--{freeze,init,lora}-feature-embedding`),
-    /// pinned or only started from; `None` = every row trains. On gem's
-    /// tracked axis these are the base rows, ids on the gene axis.
+    /// pinned or only started from; `None` = every row trains.
     pub preset_features: Option<ge::PresetRows>,
-    /// Given offsets on non-base tracks (gem only); empty for none.
-    pub preset_offsets: Vec<ge::PresetOffsets>,
     /// The given table's rows that matched no feature, appended to the
     /// written ρ so the output is the full table.
     pub carried: Option<senna::carried_rows::CarriedRows>,
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
     pub train_args: senna::run_manifest::TrainArgsRecord,
-    /// Called after the module tables are written and before the manifest.
-    /// `senna gem` hooks its `{out}.feature_contrast.parquet` writer in
-    /// here; bge always passes `None`.
-    #[allow(clippy::type_complexity)]
-    pub after_fit: Option<&'a dyn Fn(&FitArtifacts<'_>) -> anyhow::Result<()>>,
-}
-
-/// What [`EmbedPlan::after_fit`] sees.
-pub(crate) struct FitArtifacts<'a> {
-    pub out: &'a ge::FitOutput,
-    pub unified: &'a ge::UnifiedData,
-    /// Cell rows kept after QC, when QC ran. Feature-axis writers (the only
-    /// kind `after_fit` has today) don't need it; kept for a future per-cell
-    /// consumer, and to match every other writer in this module's own QC
-    /// contract.
-    #[allow(dead_code)]
-    pub qc_keep: Option<&'a [usize]>,
-    pub prefix: &'a str,
-    /// `(track name, cell-encoder safetensors suffix)` for every track the
-    /// encoder save just wrote, in [`ge::CellEncoders::iter`] order — empty
-    /// when phase 2 placed cells by block SGD rather than a distilled
-    /// encoder (`out.cell_encoder` was `None`). Not yet read by any
-    /// `after_fit` hook; carried so a later manifest writer can record it.
-    #[allow(dead_code)]
-    pub track_encoders: Vec<(Box<str>, String)>,
+    /// A second count track fitted as a displacement of the cells within
+    /// the base track's space (`senna tde`); the axis was already split to
+    /// the base rows. `None` for bge.
+    pub displaced: Option<ge::DisplacedTrackConfig>,
 }
 
 /// Run the shared fit: multilevel pseudobulk collapse, phase-1/phase-2
 /// training, post-training co-embed + (optional) ETM resolution, gene-module
 /// tables, and the run manifest. Moved out of `senna bge`'s own `fit_bge`
 /// (formerly `senna/src/bge/mod.rs` ~131-571) essentially unchanged, so
-/// `senna bge` and `senna gem` run the exact same code from here down.
+/// `senna bge` and `senna tde` run the exact same code from here down.
 pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     let knobs = &plan.knobs;
 
@@ -162,7 +119,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // task's callers run it once, matching `fit_bge`'s own shape from before
     // the extraction.
     let preset_features = plan.preset_features.take();
-    let preset_offsets = std::mem::take(&mut plan.preset_offsets);
+    let displaced = plan.displaced.take();
     let carried = plan.carried.take();
     let build_config = move |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = plan.hvg_weights.as_ref().map(|w| {
@@ -220,14 +177,12 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             hier_modules_per_unit: knobs.modules_per_unit,
             module_only_min_rows: knobs.module_only_min_rows,
             feature_modules,
-            tracks: plan
-                .tracks
-                .as_ref()
-                .map(crate::gem::tracks::TrackPlan::to_ge),
-            offset_l2: plan.offset_l2,
-            offset_rank: plan.offset_rank,
+            tracks: None,
+            displaced,
+            offset_l2: 0.0,
+            offset_rank: ge::LoraSpec::default().rank,
             preset_features,
-            preset_offsets,
+            preset_offsets: Vec::new(),
             strata,
             cis_gates: None,
             flat_module_only: false,
@@ -309,38 +264,18 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     let resolve_etm = !knobs.skip_etm && !interrupted;
 
     // The map phase 2 placed the cells with, so `predict` places a query by the
-    // same one. One self-contained file per map: the trunk plus its per-gene
-    // mean. A one-track fit has exactly one, under the name `predict` reads;
-    // further tracks get a file each, named by `encoder_suffix_for`. Written
-    // here (before the interrupted/complete branch below) so `after_fit`
-    // (complete runs only) can see which files were written.
-    let mut track_encoders: Vec<(Box<str>, String)> = Vec::new();
-    let cell_encoder_suffix = match out.cell_encoder.as_ref() {
-        Some(encs) => {
-            for te in encs.iter() {
-                let suffix = crate::gem::tracks::encoder_suffix_for(te.track, &te.name);
-                let path = format!("{}.{suffix}", knobs.out);
-                te.encoder.save(&path)?;
-                info!("Wrote the `{}` cell encoder to {path}", te.name);
-                track_encoders.push((te.name.clone(), suffix));
-            }
+    // same one: the trunk plus its per-gene mean, in one self-contained file.
+    // The fit has one track (tde split its second off the axis), so one map.
+    let cell_encoder_suffix = match out.cell_encoder.as_ref().map(ge::CellEncoders::iter) {
+        Some([te]) => {
+            let path = format!("{}.cell_encoder.safetensors", knobs.out);
+            te.encoder.save(&path)?;
+            info!("Wrote the cell encoder to {path}");
             Some("cell_encoder.safetensors")
         }
+        Some(encs) => anyhow::bail!("expected one cell encoder, the fit returned {}", encs.len()),
         None => None,
     };
-    // Track 0's file keeps the `cell_encoder_suffix` slot above, so the
-    // manifest's own `track_encoders` list is every track BEYOND it. Track 0
-    // is always `encs.iter()`'s first entry (`TrackSpec::validate` requires
-    // it to be present and a count track, and `CellEncoders::iter` is
-    // ascending by track), so `skip(1)` is exact regardless of what track 0
-    // happens to be named (`"base"` on bge's one-track axis, a real
-    // modality/channel pair on gem's). Read off before `track_encoders` is
-    // (maybe) moved into `FitArtifacts` below.
-    let track_encoder_suffixes: Vec<(String, String)> = track_encoders
-        .iter()
-        .skip(1)
-        .map(|(name, suf)| (name.to_string(), suf.clone()))
-        .collect();
 
     // Raw ρ → {out}.feature_embedding.parquet, on EVERY path (complete or
     // interrupted). This is the model-axis embedding that pairs with the cell
@@ -440,16 +375,17 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 ge::EmbeddingFileNames::SENNA_EMBEDDING,
             )?;
         }
-        if let Some(f) = plan.after_fit {
-            f(&FitArtifacts {
-                out: &out,
-                unified: &plan.unified,
-                qc_keep: qc_keep_idx.as_deref(),
-                prefix: knobs.out,
-                track_encoders,
-            })?;
-        }
     }
+    let divergence = match out.displacement.as_ref() {
+        Some(disp) => Some(write_divergence(
+            knobs.out,
+            disp,
+            &e_feat_cpu,
+            &plan.unified,
+            qc_keep_idx.as_deref(),
+        )?),
+        None => None,
+    };
 
     let input: Vec<String> = plan
         .data_files
@@ -461,10 +397,6 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     let has_modules = out.model.modules.is_some();
-    // `after_fit` (gem's contrast-table writer) only ran in the non-interrupted
-    // branch above; an interrupted run wrote no contrast tables, so the
-    // manifest must not claim it did.
-    let contrast_written = plan.after_fit.is_some() && !interrupted;
     senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
         train_args: Some(plan.train_args),
         kind: plan.kind,
@@ -501,9 +433,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // embedding at one fixed name.
         cell_embedding_suffix: Some("cell_embedding.parquet"),
         cell_encoder_suffix,
-        feature_contrast_suffix: contrast_written.then_some("feature_contrast.parquet"),
-        feature_contrast_bias_suffix: contrast_written.then_some("feature_contrast_bias.parquet"),
-        track_encoder_suffixes,
+        divergence,
         default_colour_by: if resolve_etm { "topic" } else { "cluster" },
         // `latent` is log θ, so it exists only when the ETM actually resolved.
         has_latent: resolve_etm,
@@ -608,7 +538,6 @@ fn write_pb_embeddings(
     batch_names: &[Box<str>],
 ) -> anyhow::Result<()> {
     use legume_numeric::matrix::dmatrix_util::concatenate_vertical;
-    use legume_numeric::matrix::parquet::{write_named_table, Column};
     if levels.is_empty() {
         return Ok(());
     }
@@ -649,8 +578,150 @@ fn write_pb_embeddings(
     Ok(())
 }
 
+/// A displaced track's tables, beside the base fit's (see
+/// [`senna::run_manifest::DivergenceSlots`]): `{out}.pb_divergence.parquet`,
+/// `{out}.cell_divergence.parquet` (QC-kept cells), `{out}.feature_divergence.parquet`
+/// and `{out}.divergence_encoder.safetensors`. Returns their suffixes.
+fn write_divergence(
+    out: &str,
+    disp: &ge::DisplacementOutput,
+    rho: &candle_core::Tensor,
+    unified: &ge::UnifiedData,
+    keep: Option<&[usize]>,
+) -> anyhow::Result<senna::run_manifest::DivergenceSlots> {
+    let slots = senna::run_manifest::DivergenceSlots {
+        track: disp.track_name.to_string(),
+        pb: "pb_divergence.parquet".into(),
+        cell: "cell_divergence.parquet".into(),
+        feature: "feature_divergence.parquet".into(),
+        encoder: "divergence_encoder.safetensors".into(),
+    };
+
+    // Pseudobulks, every level stacked, named as in `pb_embedding`.
+    let mut pb_rows: Vec<Box<str>> = Vec::new();
+    for (level, d) in disp.d_pb.iter().enumerate() {
+        pb_rows.extend((0..d.nrows()).map(|i| format!("l{level}:pb{i}").into_boxed_str()));
+    }
+    let stack = legume_numeric::matrix::dmatrix_util::concatenate_vertical;
+    UnitDivergence {
+        rows: &pb_rows,
+        d: &stack(&disp.d_pb)?,
+        kappa: &disp.kappa_pb.concat(),
+        pb: None,
+    }
+    .write(&format!("{out}.{}", slots.pb), "pb")?;
+
+    // Cells, the QC-kept ones, each with its finest pseudobulk.
+    let cells: Vec<usize> =
+        keep.map_or_else(|| (0..disp.d_cell.nrows()).collect(), <[usize]>::to_vec);
+    let finest = disp.d_pb.len().saturating_sub(1);
+    let cell_rows: Vec<Box<str>> = cells.iter().map(|&c| unified.barcodes[c].clone()).collect();
+    let cell_pb: Vec<Box<str>> = cells
+        .iter()
+        .map(|&c| match disp.cell_pb[c] {
+            u32::MAX => Box::from(""),
+            p => format!("l{finest}:pb{p}").into_boxed_str(),
+        })
+        .collect();
+    let select = |m: &Mat| -> Mat { Mat::from_fn(cells.len(), m.ncols(), |i, k| m[(cells[i], k)]) };
+    let d_cell = select(&disp.d_cell);
+    UnitDivergence {
+        rows: &cell_rows,
+        d: &d_cell,
+        kappa: &cells
+            .iter()
+            .map(|&c| disp.kappa_cell[c])
+            .collect::<Vec<_>>(),
+        pb: Some(&cell_pb),
+    }
+    .write(&format!("{out}.{}", slots.cell), "cell")?;
+
+    // Per gene: its average log ratio δ_g = b'_g − b_g, the steady-state
+    // anchor ā_g and so log γ_g = δ_g + ā_g, and each cell's log velocity
+    // ratio ⟨d_c, ρ_g⟩ − ā_g summarised over the written cells: mean
+    // ⟨d̄, ρ_g⟩ − ā_g, sd √(ρ_gᵀ Σ_d ρ_g).
+    let n = cells.len().max(1) as f32;
+    let h = d_cell.ncols();
+    let mean: Vec<f32> = d_cell.column_iter().map(|c| c.sum() / n).collect();
+    let mut cov = Mat::zeros(h, h);
+    for row in d_cell.row_iter() {
+        let c = nalgebra::DVector::from_iterator(h, row.iter().zip(&mean).map(|(x, m)| x - m));
+        cov += &c * c.transpose() / n;
+    }
+    let rho = rho.to_vec2::<f32>()?;
+    let genes: Vec<Box<str>> = disp
+        .genes
+        .iter()
+        .map(|&g| unified.feature_names[g as usize].clone())
+        .collect();
+    let len = genes.len();
+    let (mut shift, mut log_gamma) = (Vec::with_capacity(len), Vec::with_capacity(len));
+    let (mut v_mean, mut v_sd) = (Vec::with_capacity(len), Vec::with_capacity(len));
+    for (i, &g) in disp.genes.iter().enumerate() {
+        let r = nalgebra::DVector::from_column_slice(&rho[g as usize]);
+        let delta = disp.b_displaced[i] - disp.b_base[i];
+        shift.push(delta);
+        log_gamma.push(delta + disp.steady_anchor[i]);
+        v_mean.push(r.iter().zip(&mean).map(|(a, b)| a * b).sum::<f32>() - disp.steady_anchor[i]);
+        v_sd.push((r.transpose() * &cov * &r)[(0, 0)].max(0.0).sqrt());
+    }
+    let columns: Vec<(Box<str>, Column)> = vec![
+        (Box::from("bias_base"), Column::F32(&disp.b_base)),
+        (Box::from("bias_displaced"), Column::F32(&disp.b_displaced)),
+        (Box::from("bias_shift"), Column::F32(&shift)),
+        (Box::from("steady_anchor"), Column::F32(&disp.steady_anchor)),
+        (Box::from("log_gamma"), Column::F32(&log_gamma)),
+        (Box::from("velocity_mean"), Column::F32(&v_mean)),
+        (Box::from("velocity_sd"), Column::F32(&v_sd)),
+    ];
+    write_named_table(
+        &format!("{out}.{}", slots.feature),
+        "feature",
+        &genes,
+        &columns,
+    )?;
+
+    disp.encoder.save(&format!("{out}.{}", slots.encoder))?;
+    info!(
+        "Wrote the `{}` divergence tables to {out}.{{pb,cell,feature}}_divergence.parquet",
+        disp.track_name
+    );
+    Ok(slots)
+}
+
+/// One row per unit of a divergence table.
+struct UnitDivergence<'a> {
+    rows: &'a [Box<str>],
+    /// `[n × H]` displacements, written as `h0..`.
+    d: &'a Mat,
+    /// The units' intercepts `κ`.
+    kappa: &'a [f32],
+    /// For cells, the finest pseudobulk each belongs to.
+    pb: Option<&'a [Box<str>]>,
+}
+
+impl UnitDivergence<'_> {
+    fn write(&self, path: &str, row_col: &str) -> anyhow::Result<()> {
+        let d: Vec<Vec<f32>> = self
+            .d
+            .column_iter()
+            .map(|c| c.iter().copied().collect())
+            .collect();
+        let mut table: Vec<(Box<str>, Column)> = axis_id_names("h", d.len())
+            .into_iter()
+            .zip(&d)
+            .map(|(name, c)| (name, Column::F32(c)))
+            .collect();
+        table.push((Box::from("kappa"), Column::F32(self.kappa)));
+        if let Some(pb) = self.pb {
+            table.push((Box::from("pb"), Column::Str(pb)));
+        }
+        write_named_table(path, row_col, self.rows, &table)
+    }
+}
+
 /// Default module count for the hierarchical phase 1's hard gene partition,
-/// used by both `senna bge` and `senna gem` unless `--feature-modules` overrides
+/// used by both `senna bge` and `senna tde` unless `--feature-modules` overrides
 /// it — the engine has no module-free mode, so this is a shared policy
 /// constant rather than an opt-in default.
 const DEFAULT_FEATURE_MODULES: usize = 1024;
@@ -687,29 +758,25 @@ impl super::BgeArgs {
     }
 }
 
-impl crate::gem::args::GemArgs {
+impl crate::tde::args::TdeArgs {
     /// `embedding_dim` is the width resolved against a given feature table.
     pub(crate) fn knobs(&self, embedding_dim: usize) -> EmbedKnobs<'_> {
         EmbedKnobs {
             embedding_dim,
             collapse: &self.collapse,
-            // gem has no `senna update` / carried-pb-reference surface yet
-            // (no `pb_reference` / `init_from` fields, no `Updatable` impl),
-            // so these two stay off even though `--mixture-batch` /
-            // `--emit-pb-reference` now parse on gem's shared `collapse`.
+            // tde has no `senna update` / carried-pb-reference surface yet.
             bulk_batches: None,
             emit_pb_reference: false,
             refine: self.collapse.pb_refine.to_params(),
             qc: &self.qc,
             phase1_cells_per_pb: self.phase1_cells_per_pb,
             modules_per_unit: self.modules_per_unit,
-            // gem's axis is tracks of genes, not modalities: module-only needs
-            // a modality-tagged one-track axis, so it stays off.
+            // Module-only needs a modality-tagged axis; tde's is genes.
             module_only_min_rows: 0,
             skip_etm: self.skip_etm,
             num_topics: self.num_topics,
             epochs: self.epochs,
-            // gem dropped `--batches-per-epoch` (Task 5a); always auto.
+            // tde has no `--batches-per-epoch`; always auto.
             batches_per_epoch: None,
             batch_size: self.batch_size,
             learning_rate: self.learning_rate,

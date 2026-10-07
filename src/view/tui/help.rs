@@ -95,7 +95,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "T",
-                "make topics for a run with none (simba, gem, bge --skip-etm): one per cell cluster",
+                "make topics for a run with none (simba, tde, bge --skip-etm): one per cell cluster",
             ),
         ],
     ),

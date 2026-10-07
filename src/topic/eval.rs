@@ -99,7 +99,7 @@ impl GeneRemap {
 /// Defaults (`kind = Exact`, no delimiter, no filter) reproduce the legacy
 /// exact-then-flexible behavior — `FeatureNameKind`'s own derived default is
 /// `Exact`, so the whole struct derives `Default`.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct QueryNameOpts {
     /// The rule the LOADER aligns the query's own files under, handed to
     /// `ReadSharedRowsArgs::feature_kind`. `None` = auto-detect, which is what

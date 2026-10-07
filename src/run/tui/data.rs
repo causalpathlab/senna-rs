@@ -119,7 +119,7 @@ pub struct Pair {
     /// The `@batch` tag of each cell, when its barcodes carry one: senna's
     /// own batches for the file then.
     pub tags: Option<Vec<String>>,
-    /// Whether its rows read as gene counts for `gem`
+    /// Whether its rows read as gene counts for `tde`
     /// (`{gene}/count/{spliced|unspliced}`); `None` when unknown.
     pub gene_counts: Option<bool>,
 }
@@ -156,7 +156,7 @@ pub struct Described {
     pub gene_counts: Option<bool>,
 }
 
-/// Its size, its barcodes' `@batch` tags, and whether the rows are gem's
+/// Its size, its barcodes' `@batch` tags, and whether the rows are tde's
 /// gene counts; or why the file does not open.
 pub fn describe(path: &Path) -> Described {
     use data_beans::sparse_io::open_sparse_matrix_by_path;
@@ -185,11 +185,11 @@ pub fn describe(path: &Path) -> Described {
             .map(|n| n.rsplit('@').next().unwrap_or(n).to_string())
             .collect()
     });
-    // gem's own reading of its row grammar decides.
+    // tde's own reading of its row grammar decides.
     let gene_counts = m
         .row_names()
         .ok()
-        .map(|names| crate::gem::tracks::assign_tracks(&names).is_ok());
+        .map(|names| crate::tde::tracks::assign_tracks(&names).is_ok());
     Described {
         info,
         cells,

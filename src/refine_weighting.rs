@@ -453,7 +453,7 @@ pub(crate) struct CollapseArgs {
                      Stratum 0 is the mixable bucket; missing cells default to 0.\n\
                      \n\
                      Honoured by topic, masked-topic, masked-sbp, masked-vae, vae,\n\
-                     svd, bge, gem, joint-topic, and joint-svd. Requires PB\n\
+                     svd, bge, tde, joint-topic, and joint-svd. Requires PB\n\
                      refinement. Incompatible with an inherited `--from` cell→pb\n\
                      partition. On a stratified run `{out}.pb_tree.json` leaves may\n\
                      not equal the finest groups (tree is grown then crossed)."

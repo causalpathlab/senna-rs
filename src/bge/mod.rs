@@ -10,7 +10,7 @@
 //! All algorithmic work lives in `graph_embedding_util`. This file resolves
 //! the multiome layout, loads the data, and weights the HVG selection — the
 //! parts of a fit that are bge's own — then hands off to [`driver`], which
-//! trains and writes every output. `senna gem` (`gem::run`) shares that same
+//! trains and writes every output. `senna tde` (`tde::run`) shares that same
 //! driver over its own (simpler) load.
 //!
 //! `--feature-network` (SGC smoothing of `E_feat` through a feature-feature
@@ -34,7 +34,7 @@ pub use args::BgeArgs;
 /// Resolve the multiome layout, load the data, and weight the HVG selection —
 /// everything about this fit that is bge's own — then hand off to the shared
 /// [`driver::fit_embed_family`], which trains and writes every output
-/// (`senna gem` hands off to the very same function).
+/// (`senna tde` hands off to the very same function).
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     anyhow::ensure!(
@@ -69,7 +69,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // The rule is fixed rather than exposed: `--feature-name-delim` /
     // `--feature-name-exact` were CLI knobs whose defaults ('_', fuzzy) were the
     // only settings anyone used, and `_` is the separator every loader in this
-    // workspace already writes (`ENSG…_TSPAN6`). `senna gem` and `senna predict`
+    // workspace already writes (`ENSG…_GENE1`). `senna tde` and `senna predict`
     // still expose their own overrides where query-vs-reference name bridging is
     // an actual concern.
     let feature_kind = if is_multiome {
@@ -199,15 +199,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         data_files,
         multiome: run_multiome,
         hvg_weights: hvg_full,
-        tracks: None,
-        offset_l2: 0.0,
-        offset_rank: ge::LoraSpec::default().rank,
         preset_features,
-        preset_offsets: Vec::new(),
         carried,
         pb_reference: args.pb_reference.as_ref(),
         init_from: args.init_from.as_deref(),
         train_args: senna::run_manifest::record_train_args(args)?,
-        after_fit: None,
+        displaced: None,
     })
 }

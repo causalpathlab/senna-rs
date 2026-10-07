@@ -1,4 +1,4 @@
-use super::{assign_tracks, contrast_channels, encoder_suffix_for};
+use super::assign_tracks;
 
 fn names(rows: &[&str]) -> Vec<Box<str>> {
     rows.iter().map(|&s| s.into()).collect()
@@ -62,14 +62,7 @@ fn ids_and_flags_on_a_mixed_axis() {
     assert_eq!(plan.gene_names, names(&["GENE1", "GENE2"]));
     assert_eq!(plan.row_gene, vec![0, 0, 1, 0, 0, 1, 1]);
 
-    // track_of / rows_of round-trip.
-    assert_eq!(plan.track_of("count", "spliced"), Some(0));
-    assert_eq!(plan.track_of("count", "unspliced"), Some(1));
-    assert_eq!(plan.track_of("apa", "distal"), Some(2));
-    assert_eq!(plan.track_of("apa", "proximal"), Some(3));
-    assert_eq!(plan.track_of("m6a", "methylated"), Some(4));
-    assert_eq!(plan.track_of("m6a", "unmethylated"), Some(5));
-    assert_eq!(plan.track_of("atoi", "edited"), None);
+    // rows_of.
     assert_eq!(plan.rows_of(0), vec![0, 2]);
     assert_eq!(plan.rows_of(1), vec![1]);
     assert_eq!(plan.rows_of(2), vec![6]);
@@ -132,30 +125,6 @@ fn more_than_ten_offending_rows_are_capped_in_the_message() {
     let err = assign_tracks(&axis).unwrap_err().to_string();
     assert!(err.contains("15"), "{err}");
     assert!(err.contains("+5 more"), "{err}");
-}
-
-#[test]
-fn encoder_suffix_names_track_zero_bare_and_others_namespaced() {
-    assert_eq!(
-        encoder_suffix_for(0, "count/spliced"),
-        "cell_encoder.safetensors"
-    );
-    assert_eq!(
-        encoder_suffix_for(1, "m6a/methylated"),
-        "cell_encoder.m6a.methylated.safetensors"
-    );
-}
-
-#[test]
-fn contrast_channels_are_fixed_per_modality() {
-    assert_eq!(contrast_channels("count"), Some(("unspliced", "spliced")));
-    assert_eq!(
-        contrast_channels("m6a"),
-        Some(("methylated", "unmethylated"))
-    );
-    assert_eq!(contrast_channels("atoi"), Some(("edited", "unedited")));
-    assert_eq!(contrast_channels("apa"), Some(("proximal", "distal")));
-    assert_eq!(contrast_channels("snp"), None);
 }
 
 #[test]

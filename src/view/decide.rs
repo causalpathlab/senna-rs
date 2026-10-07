@@ -237,7 +237,7 @@ impl Drop for Rescore {
 /// with `--go` to test GO terms on each cluster as well: the run's first
 /// annotation round, written as `{out}.senna.json`.
 /// Enrichment, not lupin's default of projection for co-embedded runs (bge,
-/// fne, gem), because only enrichment writes the per-cluster gene evidence
+/// fne, tde), because only enrichment writes the per-cluster gene evidence
 /// relabel mode reads. Each line lupin logs is
 /// put in `progress` as it comes. A failure lupin explains comes back as
 /// `Refused`; `Err` means lupin could not be run at all.

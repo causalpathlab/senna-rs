@@ -122,6 +122,7 @@ fn every_kind_declares_its_cell_space() {
         RunKind::Fne,
         RunKind::ResolveEmbeddingSpace,
         RunKind::Gem,
+        RunKind::Tde,
     ] {
         assert_eq!(
             k.cell_space(),
@@ -146,8 +147,8 @@ fn every_kind_declares_its_cell_space() {
     }
 }
 
-/// `gem`'s own classification on both axes, whose absence from these
-/// predicates was the original defect.
+/// `gem`'s (and its successor `tde`'s) classification on both axes, whose
+/// absence from these predicates was the original defect.
 ///
 /// `gem` writes a Euclidean `cell_embedding` and no latent at all, so `exp()`-ing
 /// it is meaningless, and it has no topic axis. A kind can be Euclidean on its
@@ -161,6 +162,8 @@ fn gem_kinds_are_classified_on_both_axes() {
         "gem writes no latent; exp() of its cell embedding is meaningless"
     );
     assert!(!RunKind::Gem.is_topic_family(), "gem has no topic axis");
+    assert!(!RunKind::Tde.latent_is_log_simplex());
+    assert!(!RunKind::Tde.is_topic_family());
 }
 
 /// `senna gem` reads exactly like `senna bge` for the frozen-table
@@ -177,19 +180,22 @@ fn gem_scores_like_bge() {
         RunKind::Gem.has_gene_bias(),
         "gem fits a per-gene bias exactly as bge does"
     );
+    assert!(RunKind::Tde.has_frozen_gene_table());
+    assert!(RunKind::Tde.has_gene_bias());
 }
 
 /// The wire strings are a compatibility surface: renaming a variant without
 /// changing them orphans every manifest already on disk.
 #[test]
 fn gem_kinds_round_trip_through_json() {
-    let (k, wire) = (RunKind::Gem, "gem");
-    assert_eq!(k.as_str(), wire);
-    let json = serde_json::to_string(&k).unwrap();
-    assert!(
-        json.contains(wire),
-        "{k} serializes as {json}, expected {wire}"
-    );
-    let back: RunKind = serde_json::from_str(&json).unwrap();
-    assert_eq!(back, k);
+    for (k, wire) in [(RunKind::Gem, "gem"), (RunKind::Tde, "tde")] {
+        assert_eq!(k.as_str(), wire);
+        let json = serde_json::to_string(&k).unwrap();
+        assert!(
+            json.contains(wire),
+            "{k} serializes as {json}, expected {wire}"
+        );
+        let back: RunKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, k);
+    }
 }

@@ -1,5 +1,5 @@
 //! `senna resolve-topics`: topics for a finished embedding run that has none
-//! (`simba`, `gem`, `bge --skip-etm`), made the way `senna bge` resolves its
+//! (`simba`, `tde`, `bge --skip-etm`), made the way `senna bge` resolves its
 //! own: one topic per cell cluster, from the run's cell embedding `Z`, gene
 //! embedding `ρ` and clusters. No training; a few matrix products.
 //!

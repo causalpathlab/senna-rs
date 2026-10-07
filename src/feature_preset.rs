@@ -57,8 +57,9 @@ pub(crate) fn load_preset_genes(
 /// [`load_preset_genes`] with `rename_source`: when given, every gene row of
 /// the source (a row its types table calls a gene, or every row when it wrote
 /// none) is renamed by it before the match, and comes out so named among the
-/// carried rows — how `senna gem` reads a plain gene table onto its row
-/// grammar. The result's ids index `feature_names`.
+/// carried rows — how `senna tde` reads an earlier joint run's
+/// `{gene}/count/spliced` rows by their gene. The result's ids index
+/// `feature_names`.
 pub(crate) fn load_preset_rows(
     prefix: &str,
     mode: PresetMode,

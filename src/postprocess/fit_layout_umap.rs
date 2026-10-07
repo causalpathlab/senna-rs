@@ -50,7 +50,7 @@ pub struct LayoutUmapArgs {
         help = "Lay out cells and features together, as the `joint` method",
         long_help = "Lay out cells and features in one map, recorded as the `joint` method.\n\
                      For runs whose cells and features share one embedding (bge, simba,\n\
-                     gem, resolve-embedding-space) and that wrote a feature co-embedding.\n\
+                     tde, resolve-embedding-space) and that wrote a feature co-embedding.\n\
                      One t-UMAP runs over cells and features together: a kNN over all of\n\
                      them, plus each feature's nearest cells, so features sit among the\n\
                      cells they belong to and pull on them, rather than being placed on a\n\
@@ -98,7 +98,7 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
         anyhow::ensure!(
             kind.cell_space() == senna::run_manifest::CellSpace::Embedding,
             "--joint needs a run whose cells and features share one embedding \
-             (bge, simba, gem, resolve-embedding-space), not a `{kind}` run"
+             (bge, simba, tde, resolve-embedding-space), not a `{kind}` run"
         );
     }
     let prep = cell_table(&args.common, &resolved)?;

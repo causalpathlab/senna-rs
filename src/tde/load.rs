@@ -12,7 +12,7 @@
 //! [`resolve_inputs`] does the classification and sample-id matching;
 //! [`load_gem_data`] does the actual load (`Union` column alignment, exact
 //! row-name matching — the row itself is the join key) and hands the result
-//! to [`crate::gem::tracks::assign_tracks`].
+//! to [`crate::tde::tracks::assign_tracks`].
 
 use std::collections::BTreeSet;
 
@@ -21,13 +21,13 @@ use graph_embedding_util as ge;
 use legume_numeric::matrix::common_io::basename;
 use log::info;
 
-use crate::gem::sample_id::{strip_any_suffix, COUNT_SUFFIX};
-use crate::gem::tracks::{assign_tracks, TrackPlan};
+use crate::tde::sample_id::{strip_any_suffix, COUNT_SUFFIX};
+use crate::tde::tracks::{assign_tracks, TrackPlan};
 
 /// One resolved gem input: every file to load, and its matched sample id.
 /// The load itself doesn't need to know which file carries which modality —
 /// `Union` alignment merges them all the same way, and once loaded, the
-/// modality of a ROW comes from [`crate::gem::tracks::assign_tracks`] reading
+/// modality of a ROW comes from [`crate::tde::tracks::assign_tracks`] reading
 /// the row grammar, not from which file it arrived in.
 #[derive(Debug)]
 pub(crate) struct GemInputs {

@@ -52,7 +52,7 @@ pub(crate) fn model_gene_names(kind: RunKind, model: &str) -> anyhow::Result<Vec
         // refuses `--bulk` on a gem run, with a message this axis alone
         // could not give). They and svd project each column against a
         // frozen table and do not care what depth it came at.
-        RunKind::Bge | RunKind::Simba | RunKind::Gem => {
+        RunKind::Bge | RunKind::Tde | RunKind::Simba | RunKind::Gem => {
             Ok(crate::bge::score::BgeEmbedding::open(model)?.gene_names)
         }
         RunKind::Svd

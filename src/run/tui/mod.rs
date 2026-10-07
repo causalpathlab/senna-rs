@@ -37,7 +37,7 @@ pub const METHODS: [&str; 9] = [
     "svd",
     "bge",
     "simba",
-    "gem",
+    "tde",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1262,7 +1262,7 @@ impl App {
         planned
     }
 
-    /// Whether the data look like what `method` reads: gem wants
+    /// Whether the data look like what `method` reads: tde wants
     /// `{gene}/count/…` rows, the others plain features.
     fn shape_warning(&self, r: &Row) -> Option<String> {
         if r.tool != Tool::Senna {
@@ -1274,10 +1274,10 @@ impl App {
             return None;
         }
         let gene = known.iter().filter(|g| **g).count();
-        if method == "gem" && gene < known.len() {
-            Some("gem reads {gene}/count/{spliced|unspliced} rows; some files have none".into())
-        } else if method != "gem" && gene == known.len() {
-            Some("these files hold gem's gene-count rows".into())
+        if method == "tde" && gene < known.len() {
+            Some("tde reads {gene}/count/{spliced|unspliced} rows; some files have none".into())
+        } else if method != "tde" && gene == known.len() {
+            Some("these files hold tde's spliced/unspliced rows".into())
         } else {
             None
         }

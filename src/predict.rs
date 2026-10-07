@@ -564,6 +564,34 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
 /// see [`crate::bge::score::BgeEmbedding::score`] for the measurement. `--eval-mask-fraction`
 /// on the training run, or `senna probe`, answer "has the model seen this biology" better
 /// than a per-cell fit with H free parameters can.
+/// A tde run's gene table is fitted on spliced counts and named by gene. A
+/// query in the row grammar (`{gene}/count/{spliced|unspliced}`, what tde
+/// trains on) is read by its spliced rows, each matched by its gene, unless
+/// the suffix flags already say how to read it.
+fn read_spliced_rows_of_a_track_query(
+    qopts: &mut QueryNameOpts,
+    files: &[Box<str>],
+) -> anyhow::Result<()> {
+    use data_beans::aux::feature_rows::{parse_feature_row, COUNT, SPLICED};
+    if qopts.suffix_delim.is_some() || qopts.keep_suffix.is_some() {
+        return Ok(());
+    }
+    let axes = graph_embedding_util::read_file_axes(files)?;
+    let tracked = axes.iter().all(|ax| {
+        !ax.rows.is_empty()
+            && ax
+                .rows
+                .iter()
+                .all(|r| parse_feature_row(r).is_some_and(|row| row.modality == COUNT))
+    });
+    if tracked {
+        log::info!("the query's rows are `{{gene}}/count/{{channel}}`; reading its spliced rows");
+        qopts.suffix_delim = Some('/');
+        qopts.keep_suffix = Some(format!("{COUNT}/{SPLICED}").into());
+    }
+    Ok(())
+}
+
 fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow::Result<()> {
     anyhow::ensure!(
         !args.decoder_only && args.refine_steps == 0,
@@ -605,7 +633,10 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
     }
 
     let model = crate::bge::score::BgeEmbedding::open(&args.model)?;
-    let qopts = args.query_name_opts()?;
+    let mut qopts = args.query_name_opts()?;
+    if kind == senna::run_manifest::RunKind::Tde {
+        read_spliced_rows_of_a_track_query(&mut qopts, &args.data_files)?;
+    }
     let fit = model.score_with_init(
         &args.data_files,
         args.preload_data,
@@ -627,6 +658,7 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
     let agreement = evaluate_agreement(AgreementInputs {
         args,
         training_genes: &model.gene_names,
+        name_opts: qopts.clone(),
         data_vec: &fit.data_vec,
         recon: Reconstruction::Embedding {
             rho_dh,
@@ -1897,6 +1929,7 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
         Some((rho_dh, b_feat)) => evaluate_agreement(AgreementInputs {
             args,
             training_genes: &training_genes,
+            name_opts: args.query_name_opts()?,
             data_vec: &s.data_vec,
             recon: Reconstruction::Embedding {
                 rho_dh: rho_dh.clone(),
@@ -2325,6 +2358,9 @@ struct AgreementInputs<'a> {
     args: &'a PredictArgs,
     /// The model's feature axis — what `recon` and the eval indices live on.
     training_genes: &'a [Box<str>],
+    /// How the query's rows were read onto that axis; its ablation is dropped
+    /// for scoring.
+    name_opts: QueryNameOpts,
     data_vec: &'a SparseIoVec,
     recon: Reconstruction<'a>,
 }
@@ -2352,8 +2388,10 @@ fn evaluate_agreement(a: AgreementInputs<'_>) -> anyhow::Result<Option<EvalOutco
     // counts through it would read the scored genes as zero and grade every model
     // against a blank. Rebuilding costs one name-matching pass and removes the
     // chance of a caller handing over the encoder's view by mistake.
-    let mut scoring_opts = a.args.query_name_opts()?;
-    scoring_opts.hide = None;
+    let scoring_opts = QueryNameOpts {
+        hide: None,
+        ..a.name_opts
+    };
     let score_remap = build_remap(a.training_genes, &a.data_vec.row_names()?, &scoring_opts)?;
 
     let mut out = evaluate_predictions(EvalArgs {
@@ -2444,6 +2482,7 @@ fn topic_agreement(f: &FinalizePredict<'_>) -> anyhow::Result<Option<EvalOutcome
     evaluate_agreement(AgreementInputs {
         args: f.args,
         training_genes: f.training_genes,
+        name_opts: f.args.query_name_opts()?,
         data_vec: f.data_vec,
         recon: Reconstruction::Topic {
             exp_beta_dk: f.beta_dk.map(f32::exp),
