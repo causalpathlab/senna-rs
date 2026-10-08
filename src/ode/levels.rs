@@ -83,5 +83,5 @@ pub fn parents(fine: &[Option<usize>], coarse: &[Option<usize>]) -> Vec<usize> {
 }
 
 #[cfg(test)]
-#[path = "levels/tests.rs"]
+#[path = "tests/levels.rs"]
 mod tests;

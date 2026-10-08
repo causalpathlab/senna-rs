@@ -14,7 +14,7 @@ fn ranks(x: &[f32]) -> Vec<f64> {
     r
 }
 
-pub fn pearson(a: &[f64], b: &[f64]) -> f64 {
+fn pearson(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len() as f64;
     let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
     let cov: f64 = a.iter().zip(b).map(|(x, y)| (x - ma) * (y - mb)).sum();

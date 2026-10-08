@@ -1,18 +1,20 @@
 //! The gene modules the kinetics are shared within: the fitted genes grouped
 //! by their pseudobulk totals with `data-beans`' feature coarsening (the
 //! grouping the base fit's partition uses), at a count of our own. Genes whose
-//! totals carry no grouping evidence (its background group) are left out of
-//! the kinetics.
+//! totals carry no grouping evidence (its background group), and genes of a
+//! group too small to pin its own kinetics, are left out of the kinetics.
 
 use data_beans::alg::feature_coarsening::{coarsen_features, informative_features};
 use nalgebra::DMatrix;
 
 /// Per gene of `totals` `[G × P]` (pseudobulk sizes `sizes`), its module below
-/// the returned count, or `None` for a gene with no grouping evidence.
+/// the returned count, or `None` for a gene with no grouping evidence or in a
+/// group of fewer than `min_genes`.
 pub fn gene_modules(
     totals: &DMatrix<f32>,
     sizes: &[f32],
     n_modules: usize,
+    min_genes: usize,
     seed: u64,
 ) -> anyhow::Result<(Vec<Option<u32>>, usize)> {
     let informative = informative_features(totals, sizes);
@@ -27,7 +29,7 @@ pub fn gene_modules(
     let mut id = vec![None; level.num_coarse];
     let mut next = 0u32;
     for (c, slot) in id.iter_mut().enumerate() {
-        if Some(c) != background && !level.coarse_to_fine[c].is_empty() {
+        if Some(c) != background && level.coarse_to_fine[c].len() >= min_genes.max(1) {
             *slot = Some(next);
             next += 1;
         }
@@ -37,5 +39,5 @@ pub fn gene_modules(
 }
 
 #[cfg(test)]
-#[path = "modules/tests.rs"]
+#[path = "tests/modules.rs"]
 mod tests;

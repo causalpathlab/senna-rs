@@ -58,6 +58,7 @@ mod impute;
 mod joint_topic;
 mod logging;
 mod masked_topic;
+mod ode;
 mod pbg_train_args;
 #[cfg(test)]
 #[path = "tests/planted.rs"]
@@ -77,7 +78,6 @@ mod seed_replay_tests;
 mod simba;
 mod svd;
 #[cfg(feature = "view")]
-mod tde;
 mod topic;
 mod tui;
 mod update;
@@ -486,7 +486,7 @@ enum Commands {
     Fne(FneArgs),
 
     #[command(
-        name = "tde-pb",
+        name = "ode",
         about = "Splicing kinetics of gene modules on multilevel pseudobulks of a base fit",
         long_about = "Group the cells of a finished `senna bge` run into multilevel\n\
                       pseudobulks by their states, then fit one splicing ODE per gene module\n\
@@ -496,7 +496,7 @@ enum Commands {
                       pseudobulk), {out}.cell_pb.parquet, {out}.module_kinetics.parquet\n\
                       and {out}.gene_ode.parquet."
     )]
-    TdePb(crate::tde::pb::args::TdePbArgs),
+    Ode(crate::ode::args::OdeArgs),
 
     #[command(
         name = "resolve-embedding-space",
@@ -933,8 +933,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Fne(args) => {
             fit_fne(args)?;
         }
-        Commands::TdePb(args) => {
-            crate::tde::pb::run::run_tde_pb(args)?;
+        Commands::Ode(args) => {
+            crate::ode::run::run_ode(args)?;
         }
         Commands::ResolveEmbeddingSpace(args) => {
             resolve_embedding_space(args)?;

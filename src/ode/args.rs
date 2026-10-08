@@ -1,9 +1,9 @@
-//! `senna tde-pb`'s command-line surface.
+//! `senna ode`'s command-line surface.
 
 use senna::embed_common::*;
 
 #[derive(Args, Debug, Clone)]
-pub struct TdePbArgs {
+pub struct OdeArgs {
     #[arg(
         help = "Count backend with {gene}/count/spliced and {gene}/count/unspliced rows",
         long_help = "Count backend whose rows are `{gene}/count/spliced` and\n\
@@ -15,23 +15,14 @@ pub struct TdePbArgs {
     #[arg(
         long,
         help = "Prefix of a finished `senna bge` run (the base fit)",
-        long_help = "Prefix of a finished `senna bge` run. Read: cell_embedding (the\n\
-                     cells' states, which group them into pseudobulks), feature_embedding,\n\
-                     feature_bias."
+        long_help = "Prefix of a finished `senna bge` run. Read: cell_embedding, the\n\
+                     cells' states, which group them into pseudobulks and give the\n\
+                     starting order."
     )]
     pub base: Box<str>,
 
     #[arg(short, long, help = "Output prefix")]
     pub out: Box<str>,
-
-    #[arg(
-        long,
-        help = "Stage 1 only: times and module kinetics, no embedding",
-        long_help = "Fit the times and the module kinetics alone (stage 1, the base\n\
-                     embedding frozen) and write their tables; skip the dynamic\n\
-                     embedding."
-    )]
-    pub no_embedding: bool,
 
     #[arg(
         long,
@@ -66,6 +57,13 @@ pub struct TdePbArgs {
     )]
     pub modules: usize,
 
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Fewest genes a module keeps; genes of smaller ones are left out"
+    )]
+    pub min_module_genes: usize,
+
     #[arg(long, default_value_t = 2000, help = "Most variable genes fitted")]
     pub max_genes: usize,
 
@@ -86,7 +84,7 @@ pub struct TdePbArgs {
     #[arg(long, default_value_t = 50, help = "Adam steps per round")]
     pub adam_steps: usize,
 
-    #[arg(long, default_value_t = 0.05)]
+    #[arg(long, default_value_t = 0.01)]
     pub learning_rate: f64,
 
     #[arg(long, default_value_t = 64, help = "Grid points over τ")]

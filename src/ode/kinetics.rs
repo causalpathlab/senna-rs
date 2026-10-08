@@ -24,6 +24,9 @@
 //! where `g[a,b] = (e^{−aΔ} − e^{−bΔ})/(b − a)` and `g[a,b,c]` are the
 //! (sign-adjusted) divided differences of `x ↦ e^{−xΔ}`. Both are evaluated
 //! stably when rates coincide, so gradients stay finite at `β = γ = λ`.
+//!
+//! The switch-and-relax transcription of a module is cell2fate's (Aivazidis
+//! et al., *Nature Methods*, 2025).
 
 use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor};
 
@@ -191,15 +194,6 @@ pub fn curves(k: &Kinetics, tau: &Tensor) -> Result<(Tensor, Tensor)> {
     piece(&r, &(a_end - &r)?, &u1, &s1, &lambda, &beta, &gamma, &dt2)
 }
 
-/// `d log s / dt = β u/s − γ` of every module at `tau`, `[T × M]`: the rate
-/// at which each module's spliced RNA changes, the velocity readout's input.
-pub fn spliced_log_rate(k: &Kinetics, tau: &Tensor) -> Result<Tensor> {
-    let (u, s) = curves(k, tau)?;
-    (u / s)?
-        .broadcast_mul(&k.beta.unsqueeze(0)?)?
-        .broadcast_sub(&k.gamma.unsqueeze(0)?)
-}
-
 /// `log u − log s` of every module at `tau`, `[T × M]`.
 pub fn log_ratio(k: &Kinetics, tau: &Tensor) -> Result<Tensor> {
     let (u, s) = curves(k, tau)?;
@@ -207,5 +201,5 @@ pub fn log_ratio(k: &Kinetics, tau: &Tensor) -> Result<Tensor> {
 }
 
 #[cfg(test)]
-#[path = "kinetics/tests.rs"]
+#[path = "tests/kinetics.rs"]
 mod tests;

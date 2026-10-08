@@ -86,5 +86,5 @@ pub fn diffusion_order(theta: &DMatrix<f32>, k: usize) -> Vec<f32> {
 }
 
 #[cfg(test)]
-#[path = "init/tests.rs"]
+#[path = "tests/init.rs"]
 mod tests;

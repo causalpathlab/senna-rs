@@ -137,5 +137,5 @@ pub fn select_genes(t: &PbTracks, min_reads: f32, max_genes: usize) -> Vec<usize
 }
 
 #[cfg(test)]
-#[path = "counts/tests.rs"]
+#[path = "tests/counts.rs"]
 mod tests;

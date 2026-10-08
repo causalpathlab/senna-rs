@@ -286,28 +286,3 @@ fn gradients_are_finite_and_match_differences() {
         }
     }
 }
-
-#[test]
-fn spliced_log_rate_is_the_derivative_of_log_s() {
-    let dev = Device::Cpu;
-    let mods = modules();
-    let k = kinetics(&mods, &dev);
-    let h = 1e-6;
-    let at = |shift: f64| {
-        let taus: Vec<f64> = grid(17).iter().map(|t| 0.03 + 0.94 * t + shift).collect();
-        Tensor::from_vec(taus, 17, &dev).unwrap()
-    };
-    let rate = spliced_log_rate(&k, &at(0.0))
-        .unwrap()
-        .to_vec2::<f64>()
-        .unwrap();
-    let (_, hi) = curves(&k, &at(h)).unwrap();
-    let (_, lo) = curves(&k, &at(-h)).unwrap();
-    let fd = ((hi.log().unwrap() - lo.log().unwrap()).unwrap() / (2.0 * h))
-        .unwrap()
-        .to_vec2::<f64>()
-        .unwrap();
-    for (r, f) in rate.iter().flatten().zip(fd.iter().flatten()) {
-        assert!((r - f).abs() < 1e-5 * (1.0 + f.abs()), "{r} vs {f}");
-    }
-}
