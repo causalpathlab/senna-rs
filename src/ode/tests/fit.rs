@@ -534,3 +534,41 @@ fn the_direction_does_not_hang_on_the_optimizer() {
         );
     }
 }
+
+/// Gene levels noisier than Poisson, the high-count genes most (variance
+/// `μ + μ²/r`, as on real pseudobulks), must not decide the direction: two
+/// optimizer settings turn a reversed start around alike.
+#[test]
+fn overdispersed_levels_do_not_decide_the_direction() {
+    let sim = simulate(
+        &truth(),
+        &SimConfig {
+            n_pb: 300,
+            genes_per_module: 25,
+            depth_sd: 1.5,
+            level_size: Some(3.0),
+            seed: 97,
+            ..SimConfig::default()
+        },
+    )
+    .unwrap();
+    let pc = counts(&sim, &Device::Cpu);
+    let start: Vec<f32> = noisy(&sim.tau, 0.15, 101).iter().map(|t| 1.0 - t).collect();
+    for cfg in [
+        quick(),
+        FitConfig {
+            learning_rate: 0.03,
+            adam_steps: 25,
+            ..quick()
+        },
+    ] {
+        let out = fit(&pc, &start, &TauPrior::default(), &cfg).unwrap();
+        assert!(
+            out.reversed,
+            "{cfg:?}: orientation losses {:?}",
+            out.orientation_loss
+        );
+        let rho = spearman(&out.tau, &sim.tau);
+        assert!(rho > 0.85, "{cfg:?}: Spearman {rho}");
+    }
+}

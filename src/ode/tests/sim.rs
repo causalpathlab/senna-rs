@@ -14,7 +14,7 @@ use super::kinetics::{curves, Kinetics, ModuleKinetics};
 use legume_numeric::candle::candle_core::{DType, Device, Tensor};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use rand_distr::{Binomial, Distribution, Normal, Poisson, Uniform};
+use rand_distr::{Binomial, Distribution, Gamma, Normal, Poisson, Uniform};
 
 #[derive(Clone, Debug)]
 pub struct SimConfig {
@@ -29,6 +29,9 @@ pub struct SimConfig {
     pub offset_sd: f64,
     /// Spread of a gene's log rates around its module's.
     pub rate_sd: f64,
+    /// Size `r` of a negative-binomial noise on every gene's level in every
+    /// pseudobulk (variance `μ + μ²/r`); `None` keeps it Poisson.
+    pub level_size: Option<f64>,
     pub seed: u64,
 }
 
@@ -42,6 +45,7 @@ impl Default for SimConfig {
             offset_mean: 0.0,
             offset_sd: 0.5,
             rate_sd: 0.3,
+            level_size: None,
             seed: 1,
         }
     }
@@ -115,7 +119,11 @@ pub fn simulate(modules: &[ModuleKinetics], cfg: &SimConfig) -> anyhow::Result<S
     for i in 0..p {
         for j in 0..g {
             let logit = f64::from(offset[j]) + ratio[i][j];
-            let n = Poisson::new(depth[j] * level[i][j])?.sample(&mut rng) as u64;
+            let mut mean = depth[j] * level[i][j];
+            if let Some(r) = cfg.level_size {
+                mean *= Gamma::new(r, 1.0 / r)?.sample(&mut rng);
+            }
+            let n = Poisson::new(mean.max(1e-12))?.sample(&mut rng) as u64;
             let share = 1.0 / (1.0 + (-logit).exp());
             let xu = Binomial::new(n, share)?.sample(&mut rng);
             unspliced[i * g + j] = xu as f32;
