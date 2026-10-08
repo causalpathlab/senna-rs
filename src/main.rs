@@ -76,8 +76,9 @@ mod run;
 mod seed_replay_tests;
 mod simba;
 mod svd;
-mod topic;
 #[cfg(feature = "view")]
+mod tde;
+mod topic;
 mod tui;
 mod update;
 mod vae;
@@ -483,6 +484,19 @@ enum Commands {
                       other types are ignored there."
     )]
     Fne(FneArgs),
+
+    #[command(
+        name = "tde-pb",
+        about = "Splicing kinetics of gene modules on multilevel pseudobulks of a base fit",
+        long_about = "Group the cells of a finished `senna bge` run into multilevel\n\
+                      pseudobulks by their states, then fit one splicing ODE per gene module\n\
+                      and one time per pseudobulk, coarse to fine, from which track\n\
+                      (unspliced or spliced) each read of a two-track count backend is on.\n\
+                      Writes {out}.pb_ode.parquet (level, τ, κ, state and velocity per\n\
+                      pseudobulk), {out}.cell_pb.parquet, {out}.module_kinetics.parquet\n\
+                      and {out}.gene_ode.parquet."
+    )]
+    TdePb(crate::tde::pb::args::TdePbArgs),
 
     #[command(
         name = "resolve-embedding-space",
@@ -918,6 +932,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Fne(args) => {
             fit_fne(args)?;
+        }
+        Commands::TdePb(args) => {
+            crate::tde::pb::run::run_tde_pb(args)?;
         }
         Commands::ResolveEmbeddingSpace(args) => {
             resolve_embedding_space(args)?;
