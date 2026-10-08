@@ -2,14 +2,13 @@
 //! how well the fit recovers each pseudobulk's time and each module's kinetics.
 //!
 //! Each pseudobulk `p` gets a time `τ_p ~ U(0, 1)`; each gene `g` a module,
-//! its own rates around its module's, a steady offset
+//! a steady offset
 //! `b_g ~ N(b̄, σ_b²)` and a read depth `μ_g = μ̄ e^{N(0, σ_μ²)}`. A pseudobulk
 //! reads `n_pg ~ Poisson(μ_g ℓ_g(τ_p))` of the gene, `ℓ_g` its level
 //! `u_g + s_g` over its mean across the pseudobulks, of which
 //! `x^u_pg ~ Binom(n_pg, σ(b_g + log u_g(τ_p) − log s_g(τ_p)))` are
 //! unspliced.
 
-use super::fit::GeneRates;
 use super::kinetics::{curves, Kinetics, ModuleKinetics};
 use legume_numeric::candle::candle_core::{DType, Device, Tensor};
 use rand::rngs::StdRng;
@@ -27,8 +26,6 @@ pub struct SimConfig {
     /// `b̄`, `σ_b`: the genes' steady offsets.
     pub offset_mean: f64,
     pub offset_sd: f64,
-    /// Spread of a gene's log rates around its module's.
-    pub rate_sd: f64,
     /// Size `r` of a negative-binomial noise on every gene's level in every
     /// pseudobulk (variance `μ + μ²/r`); `None` keeps it Poisson.
     pub level_size: Option<f64>,
@@ -44,7 +41,6 @@ impl Default for SimConfig {
             depth_sd: 1.0,
             offset_mean: 0.0,
             offset_sd: 0.5,
-            rate_sd: 0.3,
             level_size: None,
             seed: 1,
         }
@@ -62,8 +58,6 @@ pub struct Simulated {
     pub tau: Vec<f32>,
     pub offset: Vec<f32>,
     pub modules: Vec<ModuleKinetics>,
-    /// Every gene's own rates: its module's, scattered log-normally.
-    pub rates: Vec<GeneRates>,
 }
 
 pub fn simulate(modules: &[ModuleKinetics], cfg: &SimConfig) -> anyhow::Result<Simulated> {
@@ -81,30 +75,12 @@ pub fn simulate(modules: &[ModuleKinetics], cfg: &SimConfig) -> anyhow::Result<S
         .map(|_| cfg.mean_reads * (cfg.depth_sd * unit.sample(&mut rng)).exp())
         .collect();
 
-    let rates: Vec<GeneRates> = module_of_gene
-        .iter()
-        .map(|&mo| {
-            let m = &modules[mo as usize];
-            let jitter = |x: f32, rng: &mut StdRng| {
-                (f64::from(x) * (cfg.rate_sd * unit.sample(rng)).exp()) as f32
-            };
-            GeneRates {
-                beta: jitter(m.beta, &mut rng),
-                gamma: jitter(m.gamma, &mut rng),
-            }
-        })
-        .collect();
-    // Every gene's curve: its module's transcription through its own rates.
+    let dev = Device::Cpu;
+    // Every gene's curve is its module's.
     let per_gene: Vec<ModuleKinetics> = module_of_gene
         .iter()
-        .zip(&rates)
-        .map(|(&mo, r)| ModuleKinetics {
-            beta: r.beta,
-            gamma: r.gamma,
-            ..modules[mo as usize]
-        })
+        .map(|&mo| modules[mo as usize])
         .collect();
-    let dev = Device::Cpu;
     let k = Kinetics::from_modules(&per_gene, DType::F64, &dev)?;
     let t = Tensor::from_vec(tau.clone(), p, &dev)?.to_dtype(DType::F64)?;
     let (u, s) = curves(&k, &t)?;
@@ -139,6 +115,5 @@ pub fn simulate(modules: &[ModuleKinetics], cfg: &SimConfig) -> anyhow::Result<S
         tau,
         offset,
         modules: modules.to_vec(),
-        rates,
     })
 }

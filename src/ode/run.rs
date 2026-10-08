@@ -150,14 +150,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
                     anchor: (args.parent_pull > 0.0).then(|| (args.parent_pull, start.clone())),
                     graph,
                 };
-                let out = refine(
-                    &counts,
-                    &start,
-                    &coarse.out.modules,
-                    &coarse.out.rates,
-                    &prior,
-                    &cfg,
-                )?;
+                let out = refine(&counts, &start, &coarse.out.modules, &prior, &cfg)?;
                 info!(
                     "ode level {l}: loss per read {:.5} after {} rounds",
                     out.loss.last().copied().unwrap_or(f64::NAN),
@@ -205,7 +198,7 @@ fn level_counts(
 /// `{out}.pb_ode.parquet` (every level's pseudobulks: level, τ, starting τ,
 /// cells), `{out}.cell_pb.parquet` (each cell's pseudobulk per level), and
 /// the finest level's `{out}.module_kinetics.parquet` and
-/// `{out}.gene_ode.parquet` (module, rates, offset, loading).
+/// `{out}.gene_ode.parquet` (module, offset).
 fn write_outputs(
     prefix: &str,
     cells: &[Box<str>],
@@ -258,35 +251,36 @@ fn write_outputs(
     )?;
 
     let finest = fitted.last().expect("a level");
-    write_kinetics(prefix, &finest.out.modules, module_of_gene)?;
+    write_kinetics(
+        prefix,
+        &finest.out.modules,
+        &finest.out.loading,
+        module_of_gene,
+    )?;
     let gene_names: Vec<Box<str>> = genes
         .iter()
         .map(|&j| finest.tracks.genes[j].clone())
         .collect();
     let module: Vec<i32> = module_of_gene.iter().map(|&m| m as i32).collect();
-    let beta: Vec<f32> = finest.out.rates.iter().map(|r| r.beta).collect();
-    let gamma: Vec<f32> = finest.out.rates.iter().map(|r| r.gamma).collect();
     write_named_table(
         &format!("{prefix}.gene_ode.parquet"),
         "gene",
         &gene_names,
         &[
             ("module".into(), Column::I32(&module)),
-            ("beta".into(), Column::F32(&beta)),
-            ("gamma".into(), Column::F32(&gamma)),
             ("offset".into(), Column::F32(&finest.out.offset)),
-            ("log_load".into(), Column::F32(&finest.out.loading)),
         ],
     )?;
     info!("Wrote {prefix}.{{pb_ode,cell_pb,module_kinetics,gene_ode}}.parquet");
     Ok(())
 }
 
-/// `{prefix}.module_kinetics.parquet`: every module's transcription, its
-/// genes' geometric-mean rates and its number of genes.
+/// `{prefix}.module_kinetics.parquet`: every module's kinetics, its
+/// which-module log loading and its number of genes.
 fn write_kinetics(
     prefix: &str,
     modules: &[ModuleKinetics],
+    loading: &[f32],
     module_of_gene: &[u32],
 ) -> anyhow::Result<()> {
     let mut n_genes = vec![0i32; modules.len()];
@@ -307,6 +301,7 @@ fn write_kinetics(
             ("basal".into(), Column::F32(&col(|k| k.basal))),
             ("beta".into(), Column::F32(&col(|k| k.beta))),
             ("gamma".into(), Column::F32(&col(|k| k.gamma))),
+            ("log_load".into(), Column::F32(loading)),
             ("genes".into(), Column::I32(&n_genes)),
         ],
     )

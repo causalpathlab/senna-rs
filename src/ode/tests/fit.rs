@@ -61,13 +61,7 @@ fn grid_step_recovers_tau_at_the_true_kinetics() {
     let pc = counts(&sim, &Device::Cpu);
     let cfg = quick();
     let mut run = Run::new(&pc, &vec![0.5; sim.n_pb], None, &TauPrior::default(), &cfg).unwrap();
-    let truth = FreeKinetics::new(
-        &sim.modules,
-        Some(&sim.rates),
-        &sim.module_of_gene,
-        &Device::Cpu,
-    )
-    .unwrap();
+    let truth = FreeKinetics::new(&sim.modules, &Device::Cpu).unwrap();
     for (old, new) in run.free.vars().iter().zip(truth.vars()) {
         old.set(new.as_tensor()).unwrap();
     }
@@ -223,8 +217,7 @@ fn recovery_report() {
 /// profiled.
 fn loss_at(run: &mut Run, sim: &Simulated, tau: &[f32]) -> f64 {
     let dev = run.xu.device().clone();
-    let fixed =
-        FreeKinetics::new(&sim.modules, Some(&sim.rates), &sim.module_of_gene, &dev).unwrap();
+    let fixed = FreeKinetics::new(&sim.modules, &dev).unwrap();
     for (old, new) in run.free.vars().iter().zip(fixed.vars()) {
         old.set(new.as_tensor()).unwrap();
     }
@@ -339,7 +332,7 @@ fn refine_keeps_the_order_it_starts_from() {
         anchor: Some((50.0, start.clone())),
         graph: None,
     };
-    let out = refine(&pc, &start, &sim.modules, &sim.rates, &prior, &quick()).unwrap();
+    let out = refine(&pc, &start, &sim.modules, &prior, &quick()).unwrap();
     assert!(!out.reversed);
     let rho = spearman(&out.tau, &sim.tau);
     assert!(rho > 0.95, "Spearman {rho}");
@@ -373,52 +366,15 @@ fn the_timing_step_finds_a_switch_off_the_gradient_cannot() {
     // Module 1 really switches off at ≈ 0.4.
     start[1].duration = 1.0 - start[1].t_on;
     let cfg = quick();
-    let mut run = Run::new(
-        &pc,
-        &sim.tau,
-        Some((&start, &sim.rates)),
-        &TauPrior::default(),
-        &cfg,
-    )
-    .unwrap();
+    let mut run = Run::new(&pc, &sim.tau, Some(&start), &TauPrior::default(), &cfg).unwrap();
     run.timing_step().unwrap();
-    let k = run.free.transcription().unwrap().to_modules().unwrap();
+    let k = run.free.kinetics().unwrap().to_modules().unwrap();
     let t_off = k[1].t_on + k[1].duration;
     let truth = sim.modules[1].t_on + sim.modules[1].duration;
     assert!(
         (t_off - truth).abs() < 0.15,
         "switch-off {t_off}, truth {truth}"
     );
-}
-
-/// With genes' rates spread around their modules', each gene's fitted decay
-/// follows its true one.
-#[test]
-fn each_genes_decay_comes_back() {
-    let sim = simulate(
-        &truth(),
-        &SimConfig {
-            n_pb: 300,
-            genes_per_module: 25,
-            mean_reads: 40.0,
-            rate_sd: 0.8,
-            seed: 43,
-            ..SimConfig::default()
-        },
-    )
-    .unwrap();
-    let pc = counts(&sim, &Device::Cpu);
-    let out = fit(
-        &pc,
-        &noisy(&sim.tau, 0.1, 47),
-        &TauPrior::default(),
-        &quick(),
-    )
-    .unwrap();
-    let fitted: Vec<f32> = out.rates.iter().map(|r| r.gamma.ln()).collect();
-    let true_: Vec<f32> = sim.rates.iter().map(|r| r.gamma.ln()).collect();
-    let rho = spearman(&fitted, &true_);
-    assert!(rho > 0.5, "Spearman of log γ_g {rho}");
 }
 
 /// From a reversed rough order the fit turns time around, by a margin far
@@ -437,78 +393,6 @@ fn the_direction_is_decisive() {
     let reads: f32 = sim.unspliced.iter().chain(&sim.spliced).sum();
     let gap = (out.orientation_loss[0] - out.orientation_loss[1]) * f64::from(reads);
     assert!(gap > 100.0, "the orientations differ by {gap:.1} nats");
-}
-
-/// Genes with almost no unspliced reads give their rates almost no evidence:
-/// they keep rates inside the bounds instead of drifting to them.
-#[test]
-fn genes_with_few_unspliced_reads_keep_their_rates_inside() {
-    let sim = simulate(
-        &truth(),
-        &SimConfig {
-            n_pb: 300,
-            genes_per_module: 25,
-            // ≈ 3% of a gene's reads unspliced.
-            offset_mean: -3.5,
-            seed: 61,
-            ..SimConfig::default()
-        },
-    )
-    .unwrap();
-    let pc = counts(&sim, &Device::Cpu);
-    let out = fit(
-        &pc,
-        &noisy(&sim.tau, 0.1, 67),
-        &TauPrior::default(),
-        &FitConfig::default(),
-    )
-    .unwrap();
-    // Half a log unit inside the rate bounds.
-    let inside =
-        |x: f32| (f64::from(x).ln() - LOG_RATE.0) > 0.5 && (LOG_RATE.1 - f64::from(x).ln()) > 0.5;
-    let at_bound = out
-        .rates
-        .iter()
-        .filter(|r| !(inside(r.beta) && inside(r.gamma)))
-        .count();
-    assert!(
-        at_bound * 50 <= out.rates.len(),
-        "{at_bound} of {} genes at a rate bound",
-        out.rates.len()
-    );
-}
-
-/// Genes started with a decay past its bound are pulled back by the data: the
-/// bound never cuts their gradient off.
-#[test]
-fn rates_started_past_their_bound_come_back() {
-    let sim = small_sim(71);
-    let pc = counts(&sim, &Device::Cpu);
-    let mut rates = sim.rates.clone();
-    for (r, &m) in rates.iter_mut().zip(&sim.module_of_gene) {
-        if m == 0 {
-            r.gamma = 5000.0;
-        }
-    }
-    let out = refine(
-        &pc,
-        &sim.tau,
-        &sim.modules,
-        &rates,
-        &TauPrior::default(),
-        &quick(),
-    )
-    .unwrap();
-    let mut back: Vec<f32> = out
-        .rates
-        .iter()
-        .zip(&sim.module_of_gene)
-        .filter(|&(_, &m)| m == 0)
-        .map(|(r, _)| r.gamma)
-        .collect();
-    back.sort_by(f32::total_cmp);
-    let median = back[back.len() / 2];
-    assert!(median < 100.0, "module 0's median γ {median} (true ≈ 3)");
 }
 
 /// The direction is the data's call, not the optimizer's: two settings of
