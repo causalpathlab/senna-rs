@@ -37,37 +37,34 @@ fn defaults() {
     assert_eq!(a.collapse.iter_opt, 30);
     assert_eq!(a.seed, 1);
     assert_eq!(a.hvg.n_hvg, 5000);
-    assert_eq!(a.divergence_l2, 1.0);
-    assert_eq!(a.cell_divergence_l2, 1.0);
+    assert_eq!(a.divergence_l2, 30.0);
+    assert_eq!(a.divergence_epochs, 50);
 }
 
 /// The divergence flags reach the engine's knobs.
 #[test]
-fn the_divergence_flags_set_the_displaced_track_config() {
+fn the_divergence_flags_set_the_divergence_config() {
     let a = parse(&[
         "a.zarr.zip",
         "-o",
         "out",
         "--divergence-l2",
         "2",
-        "--cell-divergence-l2",
-        "3",
         "--divergence-epochs",
         "7",
     ]);
-    let axis = graph_embedding_util::DisplacedAxis {
+    let axis = graph_embedding_util::DivergenceAxis {
         base_backend_row: vec![],
-        displaced_backend_row: vec![],
+        divergent_backend_row: vec![],
         track_name: "count/unspliced".into(),
     };
-    let k = a.displaced(axis);
-    assert_eq!(k.l2_pb, 2.0);
-    assert_eq!(k.l2_cell, 3.0);
-    assert_eq!(k.pb_epochs, 7);
+    let k = a.divergence(axis);
+    assert_eq!(k.l2, 2.0);
+    assert_eq!(k.epochs, 7);
 }
 
 /// The joint gem's track flags, and the composite engine's before it, fail
-/// to parse: tde has one gene axis and a displaced track, no modality tracks
+/// to parse: tde has one gene axis and a divergent track, no modality tracks
 /// and no per-track offsets.
 #[test]
 fn dropped_flags_fail_to_parse() {
@@ -75,6 +72,9 @@ fn dropped_flags_fail_to_parse() {
         "--modality",
         "--rule-a-prob",
         "--nuisance-rank",
+        "--cell-divergence-l2",
+        "--divergence-distill-epochs",
+        "--divergence-refine-epochs",
         "--offset-l2",
         "--offset-rank",
         "--genes",
@@ -106,7 +106,7 @@ fn serde_round_trip_is_stable() {
 /// Every flag `tde/args.rs` declares directly (excludes the flattened shared
 /// groups `hvg` / `collapse` / `qc` / `modules`, whose help text belongs to
 /// their own source files and is governed there, not here).
-const TDE_OWN_ARG_IDS: [&str; 24] = [
+const TDE_OWN_ARG_IDS: [&str; 21] = [
     "genes",
     "batch_files",
     "genes_sample_strip",
@@ -122,10 +122,7 @@ const TDE_OWN_ARG_IDS: [&str; 24] = [
     "block_size",
     "preload_data",
     "divergence_l2",
-    "cell_divergence_l2",
     "divergence_epochs",
-    "divergence_distill_epochs",
-    "divergence_refine_epochs",
     "divergence_learning_rate",
     "seed",
     "device",

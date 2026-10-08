@@ -36,16 +36,18 @@ fn fixture(
 }
 
 /// GENE1's spliced row is flat and all its variance sits on its unspliced
-/// row; GENE2's spliced row varies a little; GENE3 is flat.
-const ROWS: [&str; 4] = [
+/// row; GENE2's spliced row varies a little; GENE3 is flat; GENE4 has only
+/// an unspliced row, varying most of all.
+const ROWS: [&str; 5] = [
     "GENE1/count/spliced",
     "GENE1/count/unspliced",
     "GENE2/count/spliced",
     "GENE3/count/spliced",
+    "GENE4/count/unspliced",
 ];
 const CELLS: [&str; 6] = ["C1", "C2", "C3", "C4", "C5", "C6"];
 #[rustfmt::skip]
-const VALUES: [f32; 24] = [
+const VALUES: [f32; 30] = [
     // GENE1/count/spliced: flat.
     5.0, 5.0, 5.0, 5.0, 5.0, 5.0,
     // GENE1/count/unspliced: strongly alternating.
@@ -54,6 +56,8 @@ const VALUES: [f32; 24] = [
     3.0, 7.0, 3.0, 7.0, 3.0, 7.0,
     // GENE3/count/spliced: flat.
     5.0, 5.0, 5.0, 5.0, 5.0, 5.0,
+    // GENE4/count/unspliced: wildly alternating.
+    1.0, 90.0, 1.0, 90.0, 1.0, 90.0,
 ];
 
 fn axis(dir: &std::path::Path) -> ge::UnifiedData {
@@ -68,10 +72,10 @@ fn selection(n_hvg: usize) -> HvgCliArgs {
     }
 }
 
-/// Genes rank on their spliced rows only: the unspliced row's variance does
-/// not earn its gene a place.
+/// Genes rank on their totals, so the unspliced row's variance earns its
+/// gene a place; a gene with no spliced row is not ranked.
 #[test]
-fn genes_rank_on_their_spliced_rows_alone() {
+fn genes_rank_on_their_totals() {
     let dir = tempfile::tempdir().expect("tempdir");
     let unified = axis(dir.path());
     let plan = assign_tracks(&unified.feature_names).expect("assign_tracks");
@@ -82,8 +86,8 @@ fn genes_rank_on_their_spliced_rows_alone() {
 
     assert_eq!(
         w,
-        vec![0.0, 0.0, 1.0, 0.0],
-        "GENE2's spliced row, not GENE1"
+        vec![1.0, 0.0, 0.0, 0.0, 0.0],
+        "GENE1's spliced row: neither GENE2 nor GENE4"
     );
 }
 
@@ -99,8 +103,8 @@ fn only_base_rows_carry_weight() {
 
     assert_eq!(
         w,
-        vec![1.0, 0.0, 1.0, 1.0],
-        "the unspliced row never weighs"
+        vec![1.0, 0.0, 1.0, 1.0, 0.0],
+        "the unspliced rows never weigh"
     );
 }
 

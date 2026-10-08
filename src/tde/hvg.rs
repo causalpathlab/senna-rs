@@ -1,16 +1,15 @@
 //! Gene-level HVG projection weights for `senna tde`.
 //!
-//! A tde gene carries a spliced (base) row and usually an unspliced row. The
-//! spliced counts alone define the cell state, so genes are ranked on their
-//! spliced rows only: a gene whose variance shows up only in its unspliced
-//! counts earns no projection weight. [`hvg_row_weights`] hands back a per-ROW
-//! weight vector, 1.0 only on the base row (`count/spliced`) of a selected
-//! gene and 0 on every other row.
+//! A tde gene carries a spliced (base) row and usually an unspliced row.
+//! Genes are ranked on their total counts, spliced plus unspliced in each
+//! cell, among the genes with a spliced row. The spliced counts alone define
+//! the cell state, so [`hvg_row_weights`] hands back a per-ROW weight vector,
+//! 1.0 only on the spliced row of a selected gene and 0 on every other row.
 
 use data_beans::alg::hvg::{
     load_must_train, select_hvg_by_stats, union_indices, HvgCliArgs, MustTrainFeatures,
 };
-use data_beans::alg::sparse_streaming::streaming_sparse_running_stats;
+use data_beans::alg::sparse_streaming::streaming_sparse_running_stats_folded;
 use data_beans::utilities::name_matching::GeneIndex;
 use graph_embedding_util as ge;
 use legume_numeric::matrix::traits::RunningStatOps;
@@ -26,13 +25,13 @@ use crate::tde::tracks::TrackPlan;
 /// - `--feature-list-file` REPLACES the ranking with exactly the named
 ///   genes, resolved against `plan.gene_names` (lenient matching, see
 ///   [`MustTrainFeatures::resolve_with`]).
-/// - Otherwise, when `hvg.n_hvg > 0`, genes are ranked by NB dispersion-trend
-///   excess over the `(mean, variance)` of their base (spliced) row; a gene's
-///   other rows do not enter its rank.
+/// - Otherwise, when `hvg.n_hvg > 0`, the genes with a spliced row are ranked
+///   by NB dispersion-trend excess over the `(mean, variance)` of their total,
+///   spliced plus unspliced per cell.
 /// - `--must-train-features` UNIONS a curated panel into the selection,
 ///   resolved the same way, regardless of which of the two rules produced
 ///   the base selection.
-/// - Weights: `w[r] = 1.0` iff `plan.base_rows[r]` and `row_gene[r]` was
+/// - Weights: `w[r] = 1.0` iff `!plan.row_unspliced[r]` and `row_gene[r]` was
 ///   selected, else `0.0` — computed over ALL selected genes, `Some` even
 ///   when nothing was selected (an all-zero vector), so the caller never has
 ///   to re-derive "selection ran but kept nothing" from a `None`.
@@ -53,17 +52,25 @@ pub(crate) fn hvg_row_weights(
     let mut selected: Vec<usize> = if let Some(path) = hvg.feature_list_file.as_deref() {
         MustTrainFeatures::load(path)?.resolve_with(&gene_index)
     } else {
-        let stat = streaming_sparse_running_stats(unified.count_backend(), block_size, "tde HVG")?;
-        let (means, vars) = (stat.mean(), stat.variance());
-        let mut gmean = vec![0f32; n_genes];
-        let mut gvar = vec![0f32; n_genes];
-        for (r, (&m, &v)) in means.iter().zip(vars.iter()).enumerate() {
-            if plan.base_rows[r] {
-                gmean[plan.row_gene[r] as usize] = m;
-                gvar[plan.row_gene[r] as usize] = v;
-            }
-        }
+        let (_, total) = streaming_sparse_running_stats_folded(
+            unified.count_backend(),
+            block_size,
+            "tde HVG",
+            &plan.row_gene,
+            n_genes,
+        )?;
+        let (means, vars) = (total.mean(), total.variance());
+        let ranked: Vec<usize> = plan
+            .rows(false)
+            .iter()
+            .map(|&r| plan.row_gene[r] as usize)
+            .collect();
+        let gmean: Vec<f32> = ranked.iter().map(|&g| means[g]).collect();
+        let gvar: Vec<f32> = ranked.iter().map(|&g| vars[g]).collect();
         select_hvg_by_stats(&gmean, &gvar, hvg.n_hvg)
+            .into_iter()
+            .map(|i| ranked[i])
+            .collect()
     };
 
     if let Some(must_train) = load_must_train(hvg.must_train_features.as_deref(), selection_on)? {
@@ -80,13 +87,13 @@ pub(crate) fn hvg_row_weights(
     let keep: FxHashSet<usize> = selected.into_iter().collect();
     let mut w = vec![0.0f32; unified.n_features()];
     for (r, slot) in w.iter_mut().enumerate() {
-        if plan.base_rows[r] && keep.contains(&(plan.row_gene[r] as usize)) {
+        if !plan.row_unspliced[r] && keep.contains(&(plan.row_gene[r] as usize)) {
             *slot = 1.0;
         }
     }
     let n_weighted = w.iter().filter(|&&x| x > 0.0).count();
     info!(
-        "tde HVG (--n-hvg {}): {} of {n_genes} genes selected, ranked on their spliced rows; \
+        "tde HVG (--n-hvg {}): {} of {n_genes} genes selected, ranked on their totals; \
          {n_weighted} of {} feature row(s) carry the projection weight",
         hvg.n_hvg,
         keep.len(),

@@ -86,3 +86,7 @@ serde_json = "1.0"
 # `senna run` starts its fits on a pseudo-terminal so their progress bars draw.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["pty", "termios", "fs", "process"] }
+
+# Until legume-graph-embedding 0.10.0 is released: build against its branch.
+[patch.crates-io]
+legume-graph-embedding = { git = "https://github.com/causalpathlab/legume-graph-embedding", branch = "displaced-tracks" }

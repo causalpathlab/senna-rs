@@ -200,6 +200,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         pb_reference: args.pb_reference.as_ref(),
         init_from: args.init_from.as_deref(),
         train_args: senna::run_manifest::record_train_args(args)?,
-        displaced: None,
+        divergence: None,
     })
 }

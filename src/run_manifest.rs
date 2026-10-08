@@ -405,9 +405,9 @@ pub enum RunKind {
     /// downstream it reads exactly like a `bge` run: a frozen `(ρ, b_feat)`
     /// gene table, Euclidean `Z` in `cell_embedding`, a co-embedded gene table
     /// in `feature_coembedding`. The second (unspliced) track is read against
-    /// the first, gene by gene, as a displacement of each pseudobulk and cell
-    /// within that space and a per-gene steady state; those tables sit in the
-    /// `divergence` slots.
+    /// the first, gene by gene: each gene's ratio, its direction in the cell
+    /// space and its steady state, and each cell's velocity in that space;
+    /// those tables sit in the `divergence` slots.
     Tde,
     /// `senna simba` — SIMBA's cell × gene node embeddings from the binned
     /// bipartite expression graph. Euclidean `Z` in `cell_embedding`, the raw
@@ -981,7 +981,7 @@ pub struct RunOutputs {
     /// by the topic-family fits whose collapse rewrote the high bits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_tree: Option<String>,
-    /// `senna tde` only: the second count track's displacement tables
+    /// `senna tde` only: the second count track's tables
     /// ([`DivergenceSlots`]). `None` for every other kind, and for an
     /// interrupted tde run, which never fitted it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -992,24 +992,21 @@ pub struct RunOutputs {
     pub unknown: Unknown,
 }
 
-/// The files a `senna tde` run wrote for its displaced track: in
+/// The files a `senna tde` run wrote for its divergent track: in
 /// [`RunOutputs::divergence`] each is a resolved `{basename}.{suffix}` path,
 /// in [`RunDescription::divergence`] the bare suffix.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DivergenceSlots {
-    /// The displaced track, `{modality}/{channel}` (e.g. `"count/unspliced"`).
+    /// The divergent track, `{modality}/{channel}` (e.g. `"count/unspliced"`).
     pub track: String,
-    /// Per pseudobulk (rows `l{level}:pb{i}`, as `pb_embedding`): its
-    /// displacement `d` (`h0..`) and its overall unspliced share `kappa`.
-    pub pb: String,
-    /// Per cell, the same columns.
+    /// Per cell: its velocity `θ̇` in the cell space (`h0..`, the columns of
+    /// `cell_embedding`) and its overall unspliced share `kappa`.
     pub cell: String,
-    /// Per gene of the displaced track: both tracks' biases, their average log
-    /// ratio, the steady-state anchor and `log γ`, and the mean and spread of
-    /// the cells' log velocity ratio `⟨d_c, ρ_g⟩ − ā_g`.
+    /// Per gene: the base bias, the ratio for a typical cell, the steady-state
+    /// anchor, `log γ`, and the mean and sd of the cells' log velocity ratio.
     pub feature: String,
-    /// The encoder that places a cell's displacement from its counts.
-    pub encoder: String,
+    /// Per gene: its direction `η_g` in the cell space (`h0..`).
+    pub loading: String,
 }
 
 impl DivergenceSlots {
@@ -1017,10 +1014,9 @@ impl DivergenceSlots {
         let at = |suf: &str| format!("{basename}.{suf}");
         Self {
             track: self.track.clone(),
-            pb: at(&self.pb),
             cell: at(&self.cell),
             feature: at(&self.feature),
-            encoder: at(&self.encoder),
+            loading: at(&self.loading),
         }
     }
 }
@@ -1961,7 +1957,7 @@ pub struct RunDescription<'a> {
     /// Suffix after `{basename}.` for the cell encoder, e.g.
     /// `"cell_encoder.safetensors"`. `None` to omit.
     pub cell_encoder_suffix: Option<&'a str>,
-    /// Suffixes of a `senna tde` run's displaced-track tables; `None` for
+    /// Suffixes of a `senna tde` run's divergent-track tables; `None` for
     /// every other writer and for an interrupted tde run.
     pub divergence: Option<DivergenceSlots>,
     /// Default `--colour-by` for downstream plot / layout.

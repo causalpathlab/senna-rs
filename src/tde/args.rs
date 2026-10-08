@@ -6,8 +6,7 @@
 //! for every flag they share, including the
 //! `--{freeze,init,lora}-feature-embedding` triple. tde adds its inputs
 //! (`GENES...`, `--genes-sample-strip`) and the knobs of the unspliced
-//! track's displacement (`--divergence-l2`,
-//! `--cell-divergence-l2`, `--divergence-epochs`). `TdeArgs` does not
+//! track's fit (`--divergence-l2`, `--divergence-epochs`). `TdeArgs` does not
 //! implement `Updatable`; `senna update` does not (yet) continue a tde run.
 
 use data_beans::alg::hvg::HvgCliArgs;
@@ -188,52 +187,28 @@ pub(crate) struct TdeArgs {
 
     #[arg(
         long = "divergence-l2",
-        default_value_t = 1.0,
+        default_value_t = 30.0,
         value_name = "L2",
-        help = "Ridge on each pseudobulk's displacement; 0 = off",
-        long_help = "Ridge precision on each pseudobulk's displacement d_p, pulling it\n\
-                     toward 0 (unspliced at the same place as spliced)."
+        help = "Ridge on each gene's unspliced direction; 0 = off",
+        long_help = "Each gene's unspliced share in a cell is read as\n\
+                     κ_c + δ_g + ⟨θ_c, η_g⟩, with θ_c the cell's spliced state and η_g the\n\
+                     gene's direction in that space. This is the ridge λ/2 Σ_g ‖η_g‖²\n\
+                     against the summed binomial log-likelihood of every cell's reads.\n\
+                     Larger values pull every gene toward one ratio across cells."
     )]
     pub(crate) divergence_l2: f32,
 
     #[arg(
-        long = "cell-divergence-l2",
-        default_value_t = 1.0,
-        value_name = "L2",
-        help = "Ridge pulling each cell's displacement toward its pseudobulk's",
-        long_help = "Ridge precision on a cell's displacement d_c around its finest\n\
-                     pseudobulk's d_p. Larger values keep sparse cells near their\n\
-                     pseudobulk."
-    )]
-    pub(crate) cell_divergence_l2: f32,
-
-    #[arg(
         long = "divergence-epochs",
         default_value_t = 50,
-        help = "Passes over the pseudobulks fitting their displacements"
+        help = "Passes over the cells fitting the unspliced ratios"
     )]
     pub(crate) divergence_epochs: usize,
 
     #[arg(
-        long = "divergence-distill-epochs",
-        default_value_t = 20,
-        help = "Passes over the cells distilling the displacement encoder",
-        hide = true
-    )]
-    pub(crate) divergence_distill_epochs: usize,
-
-    #[arg(
-        long = "divergence-refine-epochs",
-        default_value_t = 10,
-        help = "Passes over the cells refining the displacement encoder on their counts",
-        hide = true
-    )]
-    pub(crate) divergence_refine_epochs: usize,
-
-    #[arg(
         long = "divergence-learning-rate",
         default_value_t = 0.01,
-        help = "Adam step of the displacement fits",
+        help = "Adam step of the unspliced fit",
         hide = true
     )]
     pub(crate) divergence_learning_rate: f64,
@@ -272,10 +247,10 @@ pub(crate) struct TdeArgs {
                      {out}.feature_embedding.parquet, which is the raw gene table,\n\
                      {out}.feature_coembedding.parquet, the genes on the cell manifold,\n\
                      {out}.feature_bias.parquet, {out}.cell_bias.parquet, and {out}.senna.json,\n\
-                     all from the spliced counts. The unspliced displacement adds\n\
-                     {out}.pb_divergence.parquet and {out}.cell_divergence.parquet (d per unit),\n\
-                     {out}.feature_divergence.parquet (per gene) and\n\
-                     {out}.divergence_encoder.safetensors.\n\
+                     all from the spliced counts. The unspliced track adds\n\
+                     {out}.cell_velocity.parquet (each cell's velocity θ̇ and κ),\n\
+                     {out}.feature_divergence.parquet (each gene's ratio, steady state, log γ)\n\
+                     and {out}.divergence_loading.parquet (each gene's direction η).\n\
                      Unless --skip-etm, it adds three more:\n\
                      {out}.latent.parquet, {out}.dictionary.parquet and {out}.topic_embedding.parquet."
     )]
@@ -283,16 +258,13 @@ pub(crate) struct TdeArgs {
 }
 
 impl TdeArgs {
-    /// The displaced-track knobs on `axis`.
-    pub(crate) fn displaced(&self, axis: ge::DisplacedAxis) -> ge::DisplacedTrackConfig {
-        ge::DisplacedTrackConfig {
-            l2_pb: self.divergence_l2,
-            l2_cell: self.cell_divergence_l2,
-            pb_epochs: self.divergence_epochs,
-            distill_epochs: self.divergence_distill_epochs,
-            refine_epochs: self.divergence_refine_epochs,
+    /// The divergent-track knobs on `axis`.
+    pub(crate) fn divergence(&self, axis: ge::DivergenceAxis) -> ge::DivergenceConfig {
+        ge::DivergenceConfig {
+            axis,
+            l2: self.divergence_l2,
+            epochs: self.divergence_epochs,
             learning_rate: self.divergence_learning_rate,
-            ..ge::DisplacedTrackConfig::new(axis)
         }
     }
 }

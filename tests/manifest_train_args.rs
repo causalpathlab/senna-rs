@@ -215,10 +215,9 @@ fn divergence_slots_round_trip() {
     let mut m = RunManifest::new(RunKind::Tde, "run-t");
     let slots = DivergenceSlots {
         track: "count/unspliced".into(),
-        pb: "run-t.pb_divergence.parquet".into(),
-        cell: "run-t.cell_divergence.parquet".into(),
+        cell: "run-t.cell_velocity.parquet".into(),
         feature: "run-t.feature_divergence.parquet".into(),
-        encoder: "run-t.divergence_encoder.safetensors".into(),
+        loading: "run-t.divergence_loading.parquet".into(),
     };
     m.outputs.divergence = Some(slots.clone());
     m.save(&path).expect("save");

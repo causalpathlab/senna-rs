@@ -4,8 +4,9 @@
 //! multiome layout, loads the data, and computes its HVG weights, then hands
 //! off to [`fit_embed_family`] here; `senna tde` (`tde/run.rs`) does its own
 //! load, splits its second count track off the axis, and hands off the same
-//! way with [`EmbedPlan::displaced`] set, so the fit also returns that
-//! track's displacements, which [`write_divergence`] writes.
+//! way with [`EmbedPlan::divergence`] set, so the fit also reads that track
+//! against the base one, gene by gene; `tde::run::write_divergence` writes the
+//! result.
 //!
 //! [`EmbedKnobs`] is the flag surface both commands drive the fit with. Both
 //! flatten the same `refine_weighting::CollapseArgs` and
@@ -100,10 +101,10 @@ pub(crate) struct EmbedPlan<'a> {
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
     pub train_args: senna::run_manifest::TrainArgsRecord,
-    /// A second count track fitted as a displacement of the cells within
-    /// the base track's space (`senna tde`); the axis was already split to
-    /// the base rows. `None` for bge.
-    pub displaced: Option<ge::DisplacedTrackConfig>,
+    /// A second count track read against the base one, gene by gene, on the
+    /// base fit's cell states (`senna tde`); the axis was already split to the
+    /// base rows. `None` for bge.
+    pub divergence: Option<ge::DivergenceConfig>,
 }
 
 /// Run the shared fit: multilevel pseudobulk collapse, phase-1/phase-2
@@ -119,7 +120,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // task's callers run it once, matching `fit_bge`'s own shape from before
     // the extraction.
     let preset_features = plan.preset_features.take();
-    let displaced = plan.displaced.take();
+    let divergence = plan.divergence.take();
     let carried = plan.carried.take();
     let build_config = move |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = plan.hvg_weights.as_ref().map(|w| {
@@ -177,7 +178,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             hier_modules_per_unit: knobs.modules_per_unit,
             module_only_min_rows: knobs.module_only_min_rows,
             feature_modules,
-            displaced,
+            divergence,
             preset_features,
             strata,
             cis_gates: None,
@@ -370,11 +371,10 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             )?;
         }
     }
-    let divergence = match out.displacement.as_ref() {
-        Some(disp) => Some(write_divergence(
+    let divergence = match out.divergence.as_ref() {
+        Some(div) => Some(crate::tde::run::write_divergence(
             knobs.out,
-            disp,
-            &e_feat_cpu,
+            div,
             &plan.unified,
             qc_keep_idx.as_deref(),
         )?),
@@ -570,148 +570,6 @@ fn write_pb_embeddings(
         levels.len()
     );
     Ok(())
-}
-
-/// A displaced track's tables, beside the base fit's (see
-/// [`senna::run_manifest::DivergenceSlots`]): `{out}.pb_divergence.parquet`,
-/// `{out}.cell_divergence.parquet` (QC-kept cells), `{out}.feature_divergence.parquet`
-/// and `{out}.divergence_encoder.safetensors`. Returns their suffixes.
-fn write_divergence(
-    out: &str,
-    disp: &ge::DisplacementOutput,
-    rho: &candle_core::Tensor,
-    unified: &ge::UnifiedData,
-    keep: Option<&[usize]>,
-) -> anyhow::Result<senna::run_manifest::DivergenceSlots> {
-    let slots = senna::run_manifest::DivergenceSlots {
-        track: disp.track_name.to_string(),
-        pb: "pb_divergence.parquet".into(),
-        cell: "cell_divergence.parquet".into(),
-        feature: "feature_divergence.parquet".into(),
-        encoder: "divergence_encoder.safetensors".into(),
-    };
-
-    // Pseudobulks, every level stacked, named as in `pb_embedding`.
-    let mut pb_rows: Vec<Box<str>> = Vec::new();
-    for (level, d) in disp.d_pb.iter().enumerate() {
-        pb_rows.extend((0..d.nrows()).map(|i| format!("l{level}:pb{i}").into_boxed_str()));
-    }
-    let stack = legume_numeric::matrix::dmatrix_util::concatenate_vertical;
-    UnitDivergence {
-        rows: &pb_rows,
-        d: &stack(&disp.d_pb)?,
-        kappa: &disp.kappa_pb.concat(),
-        pb: None,
-    }
-    .write(&format!("{out}.{}", slots.pb), "pb")?;
-
-    // Cells, the QC-kept ones, each with its finest pseudobulk.
-    let cells: Vec<usize> =
-        keep.map_or_else(|| (0..disp.d_cell.nrows()).collect(), <[usize]>::to_vec);
-    let finest = disp.d_pb.len().saturating_sub(1);
-    let cell_rows: Vec<Box<str>> = cells.iter().map(|&c| unified.barcodes[c].clone()).collect();
-    let cell_pb: Vec<Box<str>> = cells
-        .iter()
-        .map(|&c| match disp.cell_pb[c] {
-            u32::MAX => Box::from(""),
-            p => format!("l{finest}:pb{p}").into_boxed_str(),
-        })
-        .collect();
-    let select = |m: &Mat| -> Mat { Mat::from_fn(cells.len(), m.ncols(), |i, k| m[(cells[i], k)]) };
-    let d_cell = select(&disp.d_cell);
-    UnitDivergence {
-        rows: &cell_rows,
-        d: &d_cell,
-        kappa: &cells
-            .iter()
-            .map(|&c| disp.kappa_cell[c])
-            .collect::<Vec<_>>(),
-        pb: Some(&cell_pb),
-    }
-    .write(&format!("{out}.{}", slots.cell), "cell")?;
-
-    // Per gene: its average log ratio δ_g = b'_g − b_g, the steady-state
-    // anchor ā_g and so log γ_g = δ_g + ā_g, and each cell's log velocity
-    // ratio ⟨d_c, ρ_g⟩ − ā_g summarised over the written cells: mean
-    // ⟨d̄, ρ_g⟩ − ā_g, sd √(ρ_gᵀ Σ_d ρ_g).
-    let n = cells.len().max(1) as f32;
-    let h = d_cell.ncols();
-    let mean: Vec<f32> = d_cell.column_iter().map(|c| c.sum() / n).collect();
-    let mut cov = Mat::zeros(h, h);
-    for row in d_cell.row_iter() {
-        let c = nalgebra::DVector::from_iterator(h, row.iter().zip(&mean).map(|(x, m)| x - m));
-        cov += &c * c.transpose() / n;
-    }
-    let rho = rho.to_vec2::<f32>()?;
-    let genes: Vec<Box<str>> = disp
-        .genes
-        .iter()
-        .map(|&g| unified.feature_names[g as usize].clone())
-        .collect();
-    let len = genes.len();
-    let (mut shift, mut log_gamma) = (Vec::with_capacity(len), Vec::with_capacity(len));
-    let (mut v_mean, mut v_sd) = (Vec::with_capacity(len), Vec::with_capacity(len));
-    for (i, &g) in disp.genes.iter().enumerate() {
-        let r = nalgebra::DVector::from_column_slice(&rho[g as usize]);
-        let delta = disp.b_displaced[i] - disp.b_base[i];
-        shift.push(delta);
-        log_gamma.push(delta + disp.steady_anchor[i]);
-        v_mean.push(r.iter().zip(&mean).map(|(a, b)| a * b).sum::<f32>() - disp.steady_anchor[i]);
-        v_sd.push((r.transpose() * &cov * &r)[(0, 0)].max(0.0).sqrt());
-    }
-    let columns: Vec<(Box<str>, Column)> = vec![
-        (Box::from("bias_base"), Column::F32(&disp.b_base)),
-        (Box::from("bias_displaced"), Column::F32(&disp.b_displaced)),
-        (Box::from("bias_shift"), Column::F32(&shift)),
-        (Box::from("steady_anchor"), Column::F32(&disp.steady_anchor)),
-        (Box::from("log_gamma"), Column::F32(&log_gamma)),
-        (Box::from("velocity_mean"), Column::F32(&v_mean)),
-        (Box::from("velocity_sd"), Column::F32(&v_sd)),
-    ];
-    write_named_table(
-        &format!("{out}.{}", slots.feature),
-        "feature",
-        &genes,
-        &columns,
-    )?;
-
-    disp.encoder.save(&format!("{out}.{}", slots.encoder))?;
-    info!(
-        "Wrote the `{}` divergence tables to {out}.{{pb,cell,feature}}_divergence.parquet",
-        disp.track_name
-    );
-    Ok(slots)
-}
-
-/// One row per unit of a divergence table.
-struct UnitDivergence<'a> {
-    rows: &'a [Box<str>],
-    /// `[n × H]` displacements, written as `h0..`.
-    d: &'a Mat,
-    /// The units' intercepts `κ`.
-    kappa: &'a [f32],
-    /// For cells, the finest pseudobulk each belongs to.
-    pb: Option<&'a [Box<str>]>,
-}
-
-impl UnitDivergence<'_> {
-    fn write(&self, path: &str, row_col: &str) -> anyhow::Result<()> {
-        let d: Vec<Vec<f32>> = self
-            .d
-            .column_iter()
-            .map(|c| c.iter().copied().collect())
-            .collect();
-        let mut table: Vec<(Box<str>, Column)> = axis_id_names("h", d.len())
-            .into_iter()
-            .zip(&d)
-            .map(|(name, c)| (name, Column::F32(c)))
-            .collect();
-        table.push((Box::from("kappa"), Column::F32(self.kappa)));
-        if let Some(pb) = self.pb {
-            table.push((Box::from("pb"), Column::Str(pb)));
-        }
-        write_named_table(path, row_col, self.rows, &table)
-    }
 }
 
 /// Default module count for the hierarchical phase 1's hard gene partition,

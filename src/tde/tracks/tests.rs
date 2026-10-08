@@ -5,106 +5,37 @@ fn names(rows: &[&str]) -> Vec<Box<str>> {
 }
 
 #[test]
-fn ids_and_flags_on_a_mixed_axis() {
+fn rows_get_their_track_and_gene() {
     let axis = names(&[
         "GENE1/count/spliced",
         "GENE1/count/unspliced",
         "GENE2/count/spliced",
-        "GENE1/m6a/methylated",
-        "GENE1/m6a/unmethylated",
-        "GENE2/apa/proximal",
-        "GENE2/apa/distal",
     ]);
     let plan = assign_tracks(&axis).expect("assign_tracks");
-
-    // 6 tracks: count/spliced, count/unspliced, then every other
-    // (modality, channel) pair sorted ascending — "apa" < "m6a", and within
-    // apa "distal" < "proximal".
-    assert_eq!(plan.tracks.len(), 6);
-    assert_eq!(
-        (&*plan.tracks[0].modality, &*plan.tracks[0].channel),
-        ("count", "spliced")
-    );
-    assert_eq!(
-        (&*plan.tracks[1].modality, &*plan.tracks[1].channel),
-        ("count", "unspliced")
-    );
-    assert_eq!(
-        (&*plan.tracks[2].modality, &*plan.tracks[2].channel),
-        ("apa", "distal")
-    );
-    assert_eq!(
-        (&*plan.tracks[3].modality, &*plan.tracks[3].channel),
-        ("apa", "proximal")
-    );
-    assert_eq!(
-        (&*plan.tracks[4].modality, &*plan.tracks[4].channel),
-        ("m6a", "methylated")
-    );
-    assert_eq!(
-        (&*plan.tracks[5].modality, &*plan.tracks[5].channel),
-        ("m6a", "unmethylated")
-    );
-
-    // Row -> track / gene / base.
-    assert_eq!(plan.row_track, vec![0, 1, 0, 4, 5, 3, 2]);
-    // Only track 0 (count/spliced) is base; count/unspliced (track 1) is not.
-    assert_eq!(
-        plan.base_rows,
-        vec![true, false, true, false, false, false, false]
-    );
+    assert_eq!(plan.row_unspliced, vec![false, true, false]);
     assert_eq!(plan.gene_names, names(&["GENE1", "GENE2"]));
-    assert_eq!(plan.row_gene, vec![0, 0, 1, 0, 0, 1, 1]);
-
-    // rows_of.
-    assert_eq!(plan.rows_of(0), vec![0, 2]);
-    assert_eq!(plan.rows_of(1), vec![1]);
-    assert_eq!(plan.rows_of(2), vec![6]);
-    assert_eq!(plan.rows_of(3), vec![5]);
-    assert_eq!(plan.rows_of(4), vec![3]);
-    assert_eq!(plan.rows_of(5), vec![4]);
+    assert_eq!(plan.row_gene, vec![0, 0, 1]);
+    assert_eq!(plan.rows(false), vec![0, 2]);
+    assert_eq!(plan.rows(true), vec![1]);
 }
 
 #[test]
-fn count_total_is_an_error_naming_the_row() {
-    let axis = names(&["GENE1/count/spliced", "GENE1/count/total"]);
-    let err = assign_tracks(&axis).unwrap_err().to_string();
-    assert!(err.contains("count"), "{err}");
-    assert!(err.contains("GENE1/count/total"), "{err}");
-    assert!(err.contains('1'), "{err}"); // total count = 1
-}
-
-#[test]
-fn a_subunit_row_errors() {
-    let axis = names(&["GENE1/count/spliced", "GENE1/m6a/site1/methylated"]);
-    let err = assign_tracks(&axis).unwrap_err().to_string();
-    assert!(err.contains("subunit"), "{err}");
-    assert!(err.contains("GENE1/m6a/site1/methylated"), "{err}");
-}
-
-#[test]
-fn a_snp_row_errors() {
-    let axis = names(&["GENE1/count/spliced", "GENE1/snp/something"]);
-    let err = assign_tracks(&axis).unwrap_err().to_string();
-    assert!(err.contains("modality"), "{err}");
-    assert!(err.contains("GENE1/snp/something"), "{err}");
-}
-
-#[test]
-fn a_row_that_does_not_parse_errors() {
-    let axis = names(&["GENE1/count/spliced", "not_a_feature_row"]);
-    let err = assign_tracks(&axis).unwrap_err().to_string();
-    assert!(err.contains("parse"), "{err}");
-    assert!(err.contains("not_a_feature_row"), "{err}");
+fn any_other_row_is_an_error_naming_it() {
+    for row in [
+        "GENE1/count/total",
+        "GENE1/m6a/methylated",
+        "GENE1/m6a/site1/methylated",
+        "not_a_feature_row",
+    ] {
+        let axis = names(&["GENE1/count/spliced", row]);
+        let err = assign_tracks(&axis).unwrap_err().to_string();
+        assert!(err.contains(row), "{row}: {err}");
+    }
 }
 
 #[test]
 fn missing_base_track_errors() {
-    let axis = names(&[
-        "GENE1/count/unspliced",
-        "GENE1/m6a/methylated",
-        "GENE1/m6a/unmethylated",
-    ]);
+    let axis = names(&["GENE1/count/unspliced"]);
     let err = assign_tracks(&axis).unwrap_err().to_string();
     assert!(err.contains("base"), "{err}");
 }
@@ -122,18 +53,17 @@ fn more_than_ten_offending_rows_are_capped_in_the_message() {
 }
 
 #[test]
-fn pair_rows_gives_each_base_genes_row_on_a_track() {
+fn pair_rows_gives_each_spliced_genes_unspliced_row_and_name() {
     let axis = names(&[
         "GENE1/count/spliced",
         "GENE1/count/unspliced",
         "GENE2/count/spliced",
         "GENE3/count/unspliced",
-        "GENE1/m6a/methylated",
-        "GENE1/m6a/unmethylated",
     ]);
     let plan = assign_tracks(&axis).expect("assign_tracks");
     // GENE3 has no spliced row, so it is not on the base axis.
-    let (base, unspliced) = plan.pair_rows(1).expect("pair_rows");
-    assert_eq!(base, vec![0, 2]);
-    assert_eq!(unspliced, vec![Some(1), None]);
+    let pairs = plan.pair_rows().expect("pair_rows");
+    assert_eq!(pairs.spliced, vec![0, 2]);
+    assert_eq!(pairs.unspliced, vec![Some(1), None]);
+    assert_eq!(pairs.genes, names(&["GENE1", "GENE2"]));
 }

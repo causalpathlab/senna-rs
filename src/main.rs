@@ -525,7 +525,7 @@ enum Commands {
 
     #[command(
         name = "tde",
-        about = "TDE: spliced embedding with the unspliced track as a displacement in it",
+        about = "TDE: spliced embedding with the unspliced track read against it, gene by gene",
         long_about = "Track divergence embedding, over the same graph_embedding_util engine\n\
                       and driver `senna bge` runs.\n\
                       \n\
@@ -533,12 +533,12 @@ enum Commands {
                       the bilinear score ρ_g·θ_c + b_g, phase-1 multilevel-pseudobulk training,\n\
                       a phase-2 cell encoder. The unspliced counts never move them.\n\
                       The unspliced counts are read as a phase portrait: of each gene's\n\
-                      reads in a unit, the unspliced share, logit κ_u + δ_g + ⟨d_u, ρ_g⟩.\n\
-                      δ_g is the gene's average ratio; ⟨d_u, ρ_g⟩ − ā_g, with ā_g its steady\n\
-                      state from the units at both ends of its spliced expression, is the\n\
-                      unit's log velocity ratio: above 0 induced, below repressed.\n\
-                      Pseudobulks get a free d each; cells get theirs from an encoder\n\
-                      of their unspliced counts.\n\
+                      reads in a cell, the unspliced share, logit κ_c + δ_g + ⟨θ_c, η_g⟩,\n\
+                      with η_g the gene's direction in the spliced space (--divergence-l2).\n\
+                      ⟨θ_c, η_g⟩ − ā_g, with ā_g the gene's steady state from the cells at both\n\
+                      ends of its spliced expression, is the cell's log velocity ratio:\n\
+                      above 0 induced, below repressed. Each cell's velocity in the spliced\n\
+                      space follows from those ratios.\n\
                       \n\
                       GENES files hold `{gene}/count/{spliced|unspliced}` rows.\n\
                       Rows match across files by exact name;\n\
@@ -548,8 +548,8 @@ enum Commands {
                       {out}.senna.json, {out}.{cell_embedding,feature_embedding,feature_coembedding,\n\
                       feature_bias,cell_bias,pb_embedding,pb_batch}.parquet,\n\
                       plus {out}.{latent,dictionary,topic_embedding}.parquet from the resolved ETM,\n\
-                      and the displacement: {out}.{pb,cell,feature}_divergence.parquet and\n\
-                      {out}.divergence_encoder.safetensors.",
+                      and the unspliced track: {out}.cell_velocity.parquet,\n\
+                      {out}.feature_divergence.parquet and {out}.divergence_loading.parquet.",
         after_long_help = "\
 	Example:\n\
   senna tde out/rep1_count.zarr.zip -o out/tde\n\n\
