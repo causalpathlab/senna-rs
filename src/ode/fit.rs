@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! x^u_pg ~ Binom(x^u_pg + x^s_pg, σ(ℓ_pg)),
-//! ℓ_pg = b_g + log u_m(g)(τ_p) − log s_m(g)(τ_p)
+//! ℓ_pg = κ_p + b_g + log u_m(g)(τ_p) − log s_m(g)(τ_p)
 //! ```
 //!
 //! Which module, for the `n_pm` reads of module `m` (both tracks):
@@ -17,19 +17,21 @@
 //! ```
 //!
 //! with `u_m, s_m` the module's closed-form splicing curves
-//! ([`super::kinetics`]), `b_g` the gene's capture of unspliced reads (its
-//! intron structure) and `c_m` the module's log loading. Splicing `β` and
-//! degradation `γ` are each module's: per-gene rates let the fit drift to a
-//! reversed-time solution on real data. There is no capture offset per
-//! pseudobulk: within one library capture does not vary between them, and a
-//! free one would absorb the unspliced shares' common rise and fall, the
-//! arrow of time itself. Which gene within a module carries no time
+//! ([`super::kinetics`]), `κ_p` the pseudobulk's and `b_g` the gene's capture
+//! of unspliced reads (`κ_p` profiled by Newton steps, never a free
+//! parameter; `b_g` the gene's intron structure) and `c_m` the module's log
+//! loading. Splicing `β` and
+//! degradation `γ` are each module's. Without `κ_p`, a rise of every gene's
+//! unspliced share together over time (seen on real data) can only be the
+//! relaxation after a common switch-on, which puts the high-unspliced end
+//! first and turns time around; `κ_p` takes up that common trend, so the
+//! genes' own lags set the direction. Which gene within a module carries no time
 //! and is left out. The ratio alone barely tells time's direction; the
 //! modules' levels rising after their unspliced share is what does. The loss
 //! is the negative log-likelihood per read.
 //!
 //! The fit:
-//! 1. `b_g` of the flat model (no curve);
+//! 1. `b_g` and `κ_p` of the flat model (no curve);
 //! 2. each module's switch times by a grid over candidate (on, duration,
 //!    rate) settings at the starting times;
 //! 3. rounds of a per-pseudobulk grid search over `τ` (so a pseudobulk can
@@ -70,6 +72,8 @@ const MIN_LR_SCALE: f64 = 0.02;
 const MAX_NEWTON: f64 = 2.0;
 /// Newton steps per offset profile.
 const NEWTON_STEPS: usize = 4;
+/// Flat-model alternations of `κ` and `b` at the start.
+const FLAT_ROUNDS: usize = 10;
 /// Elements per chunk of a `[chunk × K × G]` grid tensor.
 const GRID_ELEMS: usize = 1 << 24;
 
@@ -199,6 +203,8 @@ impl PreparedPrior {
 
 pub struct FitResult {
     pub tau: Vec<f32>,
+    /// Per pseudobulk, its capture offset `κ_p`.
+    pub kappa: Vec<f32>,
     pub offset: Vec<f32>,
     /// Per module, its log loading `c_m` in the magnitude term.
     pub loading: Vec<f32>,
@@ -342,6 +348,8 @@ struct Run<'a> {
     offset: Var,
     /// `[P]`, `τ = σ(z)`.
     z: Var,
+    /// `[P × 1]`, profiled.
+    kappa: Var,
     /// `[P × M]` reads of every module, both tracks.
     module_totals: Tensor,
     /// `[1 × M]` the modules' log loadings `c_m`.
@@ -388,8 +396,15 @@ impl<'a> Run<'a> {
         let module_idx = Tensor::from_vec(counts.module_of_gene.clone(), g, &dev)?;
         let z: Vec<f32> = tau0.iter().map(|&t| logit(f64::from(t)) as f32).collect();
         let z = Var::from_tensor(&Tensor::from_vec(z, p, &dev)?)?;
-        // The flat model's offsets: every gene's pooled log ratio.
-        let offset = ((xu.sum_keepdim(0)? + 0.5)?.log()? - (xs.sum_keepdim(0)? + 0.5)?.log()?)?;
+        // The flat model's offsets: pooled log ratios, then κ and b in turn.
+        let mut offset =
+            ((xu.sum_keepdim(0)? + 0.5)?.log()? - (xs.sum_keepdim(0)? + 0.5)?.log()?)?;
+        let mut kappa = Tensor::zeros((p, 1), DType::F32, &dev)?;
+        let zero = Tensor::zeros((p, g), DType::F32, &dev)?;
+        for _ in 0..FLAT_ROUNDS {
+            kappa = profile_offset(&zero.broadcast_add(&offset)?, &xu, &n, &kappa, 1)?;
+            offset = profile_offset(&zero.broadcast_add(&kappa)?, &xu, &n, &offset, 0)?;
+        }
         let free = match start {
             Some(m) => {
                 anyhow::ensure!(
@@ -411,6 +426,7 @@ impl<'a> Run<'a> {
         let module_totals = n.matmul(&Tensor::from_vec(onehot, (g, m), &dev)?)?;
         let load = Var::zeros((1, m), DType::F32, &dev)?;
         let offset = Var::from_tensor(&offset)?;
+        let kappa = Var::from_tensor(&kappa)?;
         let mut vars = free.vars();
         vars.push(offset.clone());
         vars.push(z.clone());
@@ -434,6 +450,7 @@ impl<'a> Run<'a> {
             free,
             offset,
             z,
+            kappa,
             module_totals,
             load,
             prior,
@@ -486,9 +503,13 @@ impl<'a> Run<'a> {
     }
 
     /// The reads' negative log-likelihood, which track plus which module, at
-    /// logits `(track, magnitude)`.
+    /// logits `(track, magnitude)` with `κ` as it is.
     fn reads_nll(&self, track: &Tensor, magnitude: &Tensor) -> CResult<Tensor> {
-        let nll = binomial_nll(track, &self.xu, &self.xs)?;
+        let nll = binomial_nll(
+            &track.broadcast_add(self.kappa.as_tensor())?,
+            &self.xu,
+            &self.xs,
+        )?;
         nll.sum_all()? + self.module_nll(magnitude)?.sum_all()?
     }
 
@@ -501,8 +522,9 @@ impl<'a> Run<'a> {
         let (p, g) = self.xu.dims2()?;
         let dev = self.xu.device().clone();
         let k = Kinetics::from_modules(&cands, DType::F32, &dev)?;
-        // `[C × P × 1]` candidate curves.
+        // `[C × P × 1]` candidate curves plus κ.
         let curves = log_ratio(&k, &self.tau()?.detach())?
+            .broadcast_add(&self.kappa.as_tensor().detach())?
             .t()?
             .unsqueeze(2)?
             .contiguous()?;
@@ -594,7 +616,11 @@ impl<'a> Run<'a> {
         for start in (0..g).step_by(chunk) {
             let w = chunk.min(g - start);
             let idx = self.module_idx.narrow(0, start, w)?;
-            let a = ratio.index_select(&idx, 2)?.transpose(0, 1)?.contiguous()?; // [C × P × w]
+            let a = ratio
+                .index_select(&idx, 2)?
+                .transpose(0, 1)?
+                .broadcast_add(&self.kappa.as_tensor().detach().unsqueeze(0)?)?
+                .contiguous()?; // [C × P × w]
             let xu = self.xu.narrow(1, start, w)?.unsqueeze(0)?;
             let xs = self.xs.narrow(1, start, w)?.unsqueeze(0)?;
             let n = self.n.narrow(1, start, w)?.unsqueeze(0)?;
@@ -664,10 +690,22 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
+    /// `κ` at its optimum for the logits `a` (without `κ`), from its current
+    /// value.
+    fn profiled_kappa(&self, a: &Tensor) -> CResult<Tensor> {
+        profile_offset(a, &self.xu, &self.n, self.kappa.as_tensor(), 1)
+    }
+
+    /// Move `κ` to its optimum for `a`.
+    fn refresh_kappa(&mut self, a: &Tensor) -> CResult<()> {
+        self.kappa.set(&self.profiled_kappa(a)?)
+    }
+
     /// Loss per read at the current parameters, the prior included.
     fn evaluate(&mut self) -> CResult<f64> {
         let (a, mag) = self.logits()?;
         let (a, mag) = (a.detach(), mag.detach());
+        self.refresh_kappa(&a)?;
         let total = (self.reads_nll(&a, &mag)? + self.prior.nats(&self.tau()?)?)?;
         Ok(f64::from(total.to_scalar::<f32>()?) / self.reads)
     }
@@ -675,6 +713,7 @@ impl<'a> Run<'a> {
     fn adam_steps(&mut self) -> CResult<()> {
         for _ in 0..self.cfg.adam_steps {
             let (a, mag) = self.logits()?;
+            self.refresh_kappa(&a.detach())?;
             let loss =
                 ((self.reads_nll(&a, &mag)? + self.prior.nats(&self.tau()?)?)? / self.reads)?;
             clipped_backward_step(&mut self.adam, &loss, GRAD_CLIP)?;
@@ -684,7 +723,8 @@ impl<'a> Run<'a> {
 
     /// Move every pseudobulk to the grid time that fits its reads and the
     /// prior best (its neighbours where they are), when that beats its current
-    /// time.
+    /// time; `κ` is profiled at every candidate and at the current time, and a
+    /// pseudobulk that moves takes its candidate's.
     fn grid_step(&mut self) -> CResult<()> {
         let kg = self.cfg.grid;
         let (p, g) = self.xu.dims2()?;
@@ -703,9 +743,11 @@ impl<'a> Run<'a> {
             .neg()?
             .to_vec2::<f32>()?;
         let mag_now = self.module_nll(&mag_now)?.to_vec1::<f32>()?;
-        let now = binomial_nll(&a_now, &self.xu, &self.xs)?
+        let kappa_now = self.profiled_kappa(&a_now)?;
+        let now = binomial_nll(&a_now.broadcast_add(&kappa_now)?, &self.xu, &self.xs)?
             .sum(1)?
             .to_vec1::<f32>()?;
+        let mut kappa = kappa_now.flatten_all()?.to_vec1::<f32>()?;
         let mut tau = self.tau()?.to_vec1::<f32>()?;
         let current = tau.clone();
         let chunk = (GRID_ELEMS / (kg * g)).max(1);
@@ -713,7 +755,18 @@ impl<'a> Run<'a> {
             let w = chunk.min(p - start);
             let xu = self.xu.narrow(0, start, w)?.unsqueeze(1)?;
             let xs = self.xs.narrow(0, start, w)?.unsqueeze(1)?;
-            let nll = binomial_nll(&a_grid, &xu, &xs)?.sum(2)?.to_vec2::<f32>()?; // [w × K]
+            let n = self.n.narrow(0, start, w)?.unsqueeze(1)?;
+            let a = a_grid.broadcast_as((w, kg, g))?.contiguous()?;
+            let k0 = kappa_now
+                .narrow(0, start, w)?
+                .unsqueeze(2)?
+                .broadcast_as((w, kg, 1))?
+                .contiguous()?;
+            let off = profile_offset(&a, &xu, &n, &k0, 2)?;
+            let nll = binomial_nll(&a.broadcast_add(&off)?, &xu, &xs)?
+                .sum(2)?
+                .to_vec2::<f32>()?; // [w × K]
+            let off = off.squeeze(2)?.to_vec2::<f32>()?;
             for (i, row) in nll.iter().enumerate() {
                 let pb = start + i;
                 let score =
@@ -724,11 +777,13 @@ impl<'a> Run<'a> {
                 let stay = now[pb] + mag_now[pb] + self.prior.at(pb, current[pb], &current);
                 if score(best) < stay - 1e-4 {
                     tau[pb] = grid[best];
+                    kappa[pb] = off[i][best];
                 }
             }
         }
         let z: Vec<f32> = tau.iter().map(|&t| logit(f64::from(t)) as f32).collect();
-        self.z.set(&Tensor::from_vec(z, p, &dev)?)
+        self.z.set(&Tensor::from_vec(z, p, &dev)?)?;
+        self.kappa.set(&Tensor::from_vec(kappa, (p, 1), &dev)?)
     }
 
     fn round(&mut self) -> CResult<()> {
@@ -751,6 +806,7 @@ impl<'a> Run<'a> {
         self.evaluate()?;
         Ok(FitResult {
             tau: self.tau()?.to_vec1()?,
+            kappa: self.kappa.as_tensor().flatten_all()?.to_vec1()?,
             offset: self.offset.as_tensor().flatten_all()?.to_vec1()?,
             loading: self.load.as_tensor().flatten_all()?.to_vec1()?,
             modules: self.free.kinetics()?.to_modules()?,

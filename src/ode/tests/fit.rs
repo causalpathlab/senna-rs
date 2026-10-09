@@ -456,3 +456,39 @@ fn overdispersed_levels_do_not_decide_the_direction() {
         assert!(rho > 0.85, "{cfg:?}: Spearman {rho}");
     }
 }
+
+/// A capture common to every gene that drifts over time (every unspliced
+/// share rising together, as on real data) must not decide the direction:
+/// two optimizer settings keep a correct start and turn a reversed one around.
+#[test]
+fn a_common_capture_trend_does_not_decide_the_direction() {
+    let sim = simulate(
+        &truth(),
+        &SimConfig {
+            n_pb: 300,
+            genes_per_module: 25,
+            capture_trend: -2.0,
+            seed: 103,
+            ..SimConfig::default()
+        },
+    )
+    .unwrap();
+    let pc = counts(&sim, &Device::Cpu);
+    let start = noisy(&sim.tau, 0.15, 107);
+    for cfg in [
+        quick(),
+        FitConfig {
+            learning_rate: 0.03,
+            adam_steps: 25,
+            ..quick()
+        },
+    ] {
+        let out = fit(&pc, &start, &TauPrior::default(), &cfg).unwrap();
+        let rho = spearman(&out.tau, &sim.tau);
+        assert!(
+            rho > 0.85,
+            "{cfg:?}: Spearman {rho}, orientation losses {:?}",
+            out.orientation_loss
+        );
+    }
+}

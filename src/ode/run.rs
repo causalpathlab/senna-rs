@@ -196,7 +196,7 @@ fn level_counts(
 }
 
 /// `{out}.pb_ode.parquet` (every level's pseudobulks: level, τ, starting τ,
-/// cells), `{out}.cell_pb.parquet` (each cell's pseudobulk per level), and
+/// cells, κ), `{out}.cell_pb.parquet` (each cell's pseudobulk per level), and
 /// the finest level's `{out}.module_kinetics.parquet` and
 /// `{out}.gene_ode.parquet` (module, offset).
 fn write_outputs(
@@ -209,15 +209,16 @@ fn write_outputs(
 ) -> anyhow::Result<()> {
     let mut rows: Vec<Box<str>> = Vec::new();
     let mut level_col: Vec<i32> = Vec::new();
-    let mut cols: Vec<Vec<f32>> = vec![Vec::new(); 3];
+    let mut cols: Vec<Vec<f32>> = vec![Vec::new(); 4];
     for (l, lv) in fitted.iter().enumerate() {
         rows.extend(lv.pbs.iter().cloned());
         level_col.extend(std::iter::repeat_n(l as i32, lv.pbs.len()));
         cols[0].extend(&lv.out.tau);
         cols[1].extend(&lv.start);
         cols[2].extend(&lv.tracks.cells);
+        cols[3].extend(&lv.out.kappa);
     }
-    let names = ["tau", "tau_start", "cells"];
+    let names = ["tau", "tau_start", "cells", "kappa"];
     let mut table: Vec<(Box<str>, Column)> = vec![("level".into(), Column::I32(&level_col))];
     table.extend(
         names

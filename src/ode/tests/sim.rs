@@ -6,8 +6,8 @@
 //! `b_g ~ N(b̄, σ_b²)` and a read depth `μ_g = μ̄ e^{N(0, σ_μ²)}`. A pseudobulk
 //! reads `n_pg ~ Poisson(μ_g ℓ_g(τ_p))` of the gene, `ℓ_g` its level
 //! `u_g + s_g` over its mean across the pseudobulks, of which
-//! `x^u_pg ~ Binom(n_pg, σ(b_g + log u_g(τ_p) − log s_g(τ_p)))` are
-//! unspliced.
+//! `x^u_pg ~ Binom(n_pg, σ(κ_p + b_g + log u_g(τ_p) − log s_g(τ_p)))` are
+//! unspliced, `κ_p` a capture common to every gene of the pseudobulk.
 
 use super::kinetics::{curves, Kinetics, ModuleKinetics};
 use legume_numeric::candle::candle_core::{DType, Device, Tensor};
@@ -29,6 +29,9 @@ pub struct SimConfig {
     /// Size `r` of a negative-binomial noise on every gene's level in every
     /// pseudobulk (variance `μ + μ²/r`); `None` keeps it Poisson.
     pub level_size: Option<f64>,
+    /// `κ_p = trend · τ_p`: every gene's unspliced share rising (or falling)
+    /// together over time, beside its kinetics.
+    pub capture_trend: f64,
     pub seed: u64,
 }
 
@@ -42,6 +45,7 @@ impl Default for SimConfig {
             offset_mean: 0.0,
             offset_sd: 0.5,
             level_size: None,
+            capture_trend: 0.0,
             seed: 1,
         }
     }
@@ -94,7 +98,7 @@ pub fn simulate(modules: &[ModuleKinetics], cfg: &SimConfig) -> anyhow::Result<S
     let mut spliced = vec![0f32; p * g];
     for i in 0..p {
         for j in 0..g {
-            let logit = f64::from(offset[j]) + ratio[i][j];
+            let logit = cfg.capture_trend * f64::from(tau[i]) + f64::from(offset[j]) + ratio[i][j];
             let mut mean = depth[j] * level[i][j];
             if let Some(r) = cfg.level_size {
                 mean *= Gamma::new(r, 1.0 / r)?.sample(&mut rng);
