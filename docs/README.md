@@ -9,6 +9,12 @@ it were a description of the code is how people end up debugging things that wer
 |---|---|
 | [`deconvolve.md`](deconvolve.md) | The `senna deconvolve` model and its inputs. |
 
+## Plans — nothing built yet
+
+| doc | what it is |
+|---|---|
+| [`tde-plan.md`](tde-plan.md) | `senna tde`: a temporal divergence embedding from `senna ode`'s τ, as one factorised likelihood. |
+
 ## Moved to lupin
 
 Cell-type annotation and lineage live in [`lupin`](https://github.com/causalpathlab/lupin-rs),

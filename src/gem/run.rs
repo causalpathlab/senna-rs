@@ -74,6 +74,8 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         init_from: None,
         train_args: senna::run_manifest::record_train_args(args)?,
         after_fit: Some(&|a| write_contrast(a, &plan)),
+        unit_context: None,
+        strata: None,
     })
 }
 

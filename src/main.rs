@@ -77,6 +77,7 @@ mod run;
 mod seed_replay_tests;
 mod simba;
 mod svd;
+mod tde;
 #[cfg(feature = "view")]
 mod topic;
 mod tui;
@@ -106,6 +107,7 @@ use resolve_topics::{resolve_topics, ResolveTopicsArgs};
 use senna::embed_common::*;
 use simba::{fit_simba, SimbaArgs};
 use svd::*;
+use tde::{fit_tde, TdeArgs};
 use topic::cmd::*;
 use update::{run_update, UpdateArgs};
 use vae::*;
@@ -416,6 +418,9 @@ enum Commands {
         alias = "gbe"
     )]
     Bge(BgeArgs),
+
+    /// Temporal divergence embedding: bge whose units also observe which pseudobulks share their time
+    Tde(TdeArgs),
 
     #[command(
         about = "SIMBA baseline: cell and gene node embeddings on the binned expression graph.",
@@ -926,6 +931,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Bge(args) => {
             fit_bge(args)?;
+        }
+        Commands::Tde(args) => {
+            fit_tde(args)?;
         }
         Commands::Simba(args) => {
             fit_simba(args)?;

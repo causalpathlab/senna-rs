@@ -127,6 +127,12 @@ pub(crate) struct EmbedPlan<'a> {
     /// here; bge always passes `None`.
     #[allow(clippy::type_complexity)]
     pub after_fit: Option<&'a dyn Fn(&FitArtifacts<'_>) -> anyhow::Result<()>>,
+    /// Phase-1 per-unit context (`senna tde`'s time context); `None` for bge
+    /// and gem.
+    pub unit_context: Option<super::UnitContextArc>,
+    /// Per-cell collapse strata given by the caller (`senna tde
+    /// --collapse-by-time`); `None` falls back to `--cnv-clones`.
+    pub strata: Option<Vec<usize>>,
 }
 
 /// What [`EmbedPlan::after_fit`] sees.
@@ -182,12 +188,14 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             },
             None => None,
         };
-        let strata = match knobs.collapse.cnv_clones.as_deref() {
-            Some(path) => Some(crate::topic::common::load_cnv_cell_strata(
+        let strata = match (plan.strata.clone(), knobs.collapse.cnv_clones.as_deref()) {
+            (Some(given), None) => Some(given),
+            (Some(_), Some(_)) => anyhow::bail!("time strata and --cnv-clones do not compose"),
+            (None, Some(path)) => Some(crate::topic::common::load_cnv_cell_strata(
                 path,
                 unified.count_backend(),
             )?),
-            None => None,
+            (None, None) => None,
         };
         Ok(ge::FitConfig {
             embedding_dim: knobs.embedding_dim,
@@ -230,6 +238,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             preset_offsets,
             strata,
             cis_gates: None,
+            unit_context: plan.unit_context.clone(),
             flat_module_only: false,
             multiome: None,
         })

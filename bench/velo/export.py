@@ -4,7 +4,8 @@ For dataset NAME, writes into mtx/NAME_{set}/ (genes x cells, raw counts):
   tracks   rows {gene}/count/spliced then {gene}/count/unspliced (the ODE input)
   total    rows {gene}, spliced + unspliced (the base fit's input)
   spliced  rows {gene}, spliced only (the base-fit variant)
-and NAME.cells.tsv.gz: barcode, clusters, UMAP x/y, and latent time if present.
+and NAME.cells.tsv.gz: barcode, clusters (celltype where there are none), UMAP
+x/y, and latent time and embryonic stage if present.
 
 Genes with no reads on either track are dropped; names are made unique.
 
@@ -61,10 +62,11 @@ def export(name):
     write_set(os.path.join(mtx, f"{name}_total"), st + ut, genes, barcodes)
     write_set(os.path.join(mtx, f"{name}_spliced"), st, genes, barcodes)
 
-    cells = pd.DataFrame({"barcode": barcodes, "clusters": a.obs["clusters"].astype(str).values})
+    cluster = "clusters" if "clusters" in a.obs else "celltype"
+    cells = pd.DataFrame({"barcode": barcodes, "clusters": a.obs[cluster].astype(str).values})
     umap = a.obsm["X_umap"]
     cells["umap_x"], cells["umap_y"] = umap[:, 0], umap[:, 1]
-    for col in ("latent_time", "velocity_pseudotime"):
+    for col in ("latent_time", "velocity_pseudotime", "stage"):
         if col in a.obs:
             cells[col] = a.obs[col].values
     cells.to_csv(os.path.join(ROOT, f"{name}.cells.tsv.gz"), sep="\t", index=False)

@@ -10,6 +10,10 @@ Per pseudobulk: majority cluster and mean UMAP position of its cells. Reports
     to its UMAP neighbours of cluster B (UniTVelo's cross-boundary direction).
 Optionally writes an arrow plot of the finest level.
 
+Cell-type names stay out of the source: the trunk order is
+$VELO_BENCH/DATASET.trunk.tsv (one `cluster` per line, in time order) and the
+transition edges DATASET.edges.tsv (`from`, `to`).
+
 usage: score_pb.py DATASET RUN_PREFIX [--plot out.png]
 """
 
@@ -23,26 +27,23 @@ from sklearn.neighbors import NearestNeighbors
 
 ROOT = os.environ.get("VELO_BENCH", os.path.expanduser("~/work/velo-bench"))
 
-TRUNK = {
-    "pancreas": ["Ductal", "Ngn3 low EP", "Ngn3 high EP", "Pre-endocrine"],
-    "dentategyrus": ["nIPC", "Neuroblast", "Granule immature", "Granule mature"],
-}
-EDGES = {
-    "pancreas": [
-        ("Ngn3 low EP", "Ngn3 high EP"),
-        ("Ngn3 high EP", "Pre-endocrine"),
-        ("Pre-endocrine", "Alpha"),
-        ("Pre-endocrine", "Beta"),
-        ("Pre-endocrine", "Delta"),
-        ("Pre-endocrine", "Epsilon"),
-    ],
-    "dentategyrus": [
-        ("OPC", "OL"),
-        ("Radial Glia-like", "Astrocytes"),
-        ("Neuroblast", "Granule immature"),
-        ("Granule immature", "Granule mature"),
-    ],
-}
+def trunk(dataset):
+    """The dataset's trunk clusters in time order, from $VELO_BENCH/DATASET.trunk.tsv."""
+    return pd.read_csv(os.path.join(ROOT, f"{dataset}.trunk.tsv"), sep="\t").cluster.tolist()
+
+
+def edges(dataset):
+    """Its transition edges for CBDir, from $VELO_BENCH/DATASET.edges.tsv (from, to)."""
+    e = pd.read_csv(os.path.join(ROOT, f"{dataset}.edges.tsv"), sep="\t")
+    return list(zip(e["from"], e["to"]))
+
+
+def reference(cells, dataset):
+    """Each cell's reference time, NaN off the trunk: the embryonic stage
+    (E7.25 -> 7.25) where the export has one, else its cluster's trunk rank."""
+    if "stage" in cells:
+        return cells.stage.astype(str).str.lstrip("E").astype(float)
+    return cells.clusters.map({c: i for i, c in enumerate(trunk(dataset))}).astype(float)
 
 
 def unit(x):
@@ -92,7 +93,7 @@ def main():
     m = cell_pb.merge(cells, left_on="cell", right_on="barcode")
     hcols = [c for c in pb.columns if c.startswith("h") and c[1:].isdigit()]
     vcols = [c for c in pb.columns if c.startswith("v") and c[1:].isdigit()]
-    trunk = TRUNK[a.dataset]
+    order = trunk(a.dataset)
     for level in sorted(pb.level.unique()):
         lv = f"l{level}"
         g = m[m[lv] != ""].groupby(lv)
@@ -105,8 +106,8 @@ def main():
         )
         p = pb[pb.level == level].set_index("pb").join(info, how="inner")
         med = p.groupby("cluster").tau.median()
-        on = p[p.cluster.isin(trunk)]
-        rank = on.cluster.map({c: i for i, c in enumerate(trunk)})
+        on = p[p.cluster.isin(order)]
+        rank = on.cluster.map({c: i for i, c in enumerate(order)})
         rho = spearmanr(on.tau, rank)[0]
         rho0 = spearmanr(on.tau_start, rank)[0]
         umap = p[["ux", "uy"]].to_numpy()
@@ -116,7 +117,7 @@ def main():
         if not vcols:
             continue
         vu = project(p[hcols].to_numpy(), p[vcols].to_numpy(), umap)
-        cb = cbdir(p.cluster.to_numpy(), umap, vu, EDGES[a.dataset])
+        cb = cbdir(p.cluster.to_numpy(), umap, vu, edges(a.dataset))
         mean_cb = np.nanmean([s for s, _ in cb.values()])
         print(f"   CBDir mean {mean_cb:+.3f}: " + "; ".join(f"{e} {s:+.2f} (n={n})" for e, (s, n) in cb.items()))
         if a.plot and level == pb.level.max():

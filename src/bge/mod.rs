@@ -31,11 +31,33 @@ pub(crate) mod transfer;
 
 pub use args::BgeArgs;
 
+/// A shared phase-1 unit-context builder (see [`ge::UnitContextBuilder`]).
+pub(crate) type UnitContextArc = std::sync::Arc<dyn ge::UnitContextBuilder>;
+
 /// Resolve the multiome layout, load the data, and weight the HVG selection —
 /// everything about this fit that is bge's own — then hand off to the shared
 /// [`driver::fit_embed_family`], which trains and writes every output
 /// (`senna gem` hands off to the very same function).
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
+    fit_bge_with(args, &|_| Ok(FitHooks::default()))
+}
+
+/// What a caller adds to a bge fit once the data are loaded (`senna tde`).
+#[derive(Default)]
+pub(crate) struct FitHooks {
+    /// Phase-1 per-unit context.
+    pub unit_context: Option<UnitContextArc>,
+    /// Per-cell collapse strata (count-backend column order; `0` mixes
+    /// freely), replacing `--cnv-clones`.
+    pub strata: Option<Vec<usize>>,
+}
+
+/// [`fit_bge`] with hooks built from the loaded data once its cells are
+/// known (`senna tde`'s time context and time strata).
+pub(crate) fn fit_bge_with(
+    args: &BgeArgs,
+    hooks: &dyn Fn(&ge::UnifiedData) -> anyhow::Result<FitHooks>,
+) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     anyhow::ensure!(
         args.pb_reference.is_none() || args.multiome.is_empty(),
@@ -192,6 +214,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         &mut [],
     )?;
 
+    let FitHooks {
+        unit_context,
+        strata,
+    } = hooks(&unified)?;
     driver::fit_embed_family(driver::EmbedPlan {
         kind: senna::run_manifest::RunKind::Bge,
         knobs: args.knobs(embedding_dim),
@@ -209,5 +235,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         init_from: args.init_from.as_deref(),
         train_args: senna::run_manifest::record_train_args(args)?,
         after_fit: None,
+        unit_context,
+        strata,
     })
 }
