@@ -20,6 +20,7 @@
 
 mod direction;
 mod exact;
+mod gamma;
 mod roots;
 mod states;
 

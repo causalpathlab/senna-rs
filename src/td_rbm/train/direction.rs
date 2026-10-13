@@ -7,8 +7,9 @@
 //! velocity forward or reversed (`d x_kg`, `x` the curve's `d log s/dt`), the
 //! unspliced share is `μ_kg = σ(log m⁺(γ_g + d x_kg) − log β_g)`, and
 //! `U_kg ~ BetaBinomial(U + S, μ κ_g, (1 − μ) κ_g)`. Every gene's evidence
-//! for each `d` integrates its `(log γ/β, log γ, log κ)` exactly on a grid,
-//! in f64 on the host, less the same on the reads with no dynamics (every
+//! for each `d` integrates its `(log γ/β, log γ, log κ)` on a grid, on the
+//! host with a fast approximate `ln Γ` ([`super::gamma`]), visiting only the
+//! grid times with reads; less the same on the reads with no dynamics (every
 //! grid time at the gene's overall unspliced share): the prior and the floor
 //! alone favour one way on a skewed curve, and that bias, summed over
 //! thousands of genes, would decide. Given `d` the genes are independent, so
@@ -20,6 +21,7 @@
 //! a quasi-binomial logistic slope on `x` is the direction; its sign Bayes
 //! factor under a normal prior is `Φ(z′)/Φ(−z′)`.
 
+use super::gamma::ln_gamma_in_place;
 use super::TrainConfig;
 use crate::td_rbm::curve::Spline;
 use crate::td_rbm::model::{Energy, Tables, FLOOR_SOFTNESS};
@@ -325,38 +327,71 @@ fn evidence_host(
     rest: &[f32],
     reach: &[f32],
 ) -> (Vec<Evidence>, Vec<Evidence>) {
-    let lgam = |z: f64| special::Gamma::ln_gamma(z).0;
     let k = x.len();
     let g = rest.len();
     let n_tab = tables.len();
     let (r_off, g_off, k_log) = grid();
     let n_grid = r_off.len() * g_off.len() * k_log.len();
+    let kappas: Vec<f32> = k_log.iter().map(|lk| lk.exp() as f32).collect();
+    let nk = kappas.len();
     // Every gene: per sign, per table, (log evidence, mean log β, mean log γ).
     let per_gene: Vec<[Vec<(f64, f64, f64)>; 2]> = (0..g)
         .into_par_iter()
         .map(|j| {
-            let uj: Vec<Vec<f64>> = tables
+            let uj: Vec<Vec<f32>> = tables
                 .iter()
-                .map(|(u, _)| (0..k).map(|kk| f64::from(u[kk][j])).collect())
+                .map(|(u, _)| (0..k).map(|kk| u[kk][j]).collect())
                 .collect();
-            let sj: Vec<Vec<f64>> = tables
+            let sj: Vec<Vec<f32>> = tables
                 .iter()
-                .map(|(_, s)| (0..k).map(|kk| f64::from(s[kk][j])).collect())
+                .map(|(_, s)| (0..k).map(|kk| s[kk][j]).collect())
+                .collect();
+            // A grid time with no read of the gene adds exactly nothing, so
+            // only those with reads are visited: per table, and in any table
+            // (`slot`, each table's times' places among those).
+            let read: Vec<Vec<usize>> = (0..n_tab)
+                .map(|t| (0..k).filter(|&kk| uj[t][kk] + sj[t][kk] > 0.0).collect())
+                .collect();
+            let mut any: Vec<usize> = read.iter().flatten().copied().collect();
+            any.sort_unstable();
+            any.dedup();
+            let na = any.len();
+            let slot: Vec<Vec<usize>> = read
+                .iter()
+                .map(|r| {
+                    r.iter()
+                        .map(|kk| any.binary_search(kk).unwrap_or(0))
+                        .collect()
+                })
                 .collect();
             // ln Γ(κ) − ln Γ(n + κ) for every table and κ: no rate in it.
+            let mut lg_kappa = kappas.clone();
+            ln_gamma_in_place(&mut lg_kappa);
             let by_kappa: Vec<Vec<f64>> = (0..n_tab)
                 .map(|t| {
-                    k_log
+                    let mut n: Vec<f32> = kappas
                         .iter()
-                        .map(|&lk| {
-                            let kappa = lk.exp();
-                            (0..k)
-                                .map(|kk| lgam(kappa) - lgam(uj[t][kk] + sj[t][kk] + kappa))
-                                .sum()
+                        .flat_map(|&kappa| read[t].iter().map(move |&kk| (kk, kappa)))
+                        .map(|(kk, kappa)| uj[t][kk] + sj[t][kk] + kappa)
+                        .collect();
+                    ln_gamma_in_place(&mut n);
+                    let nr = read[t].len();
+                    (0..nk)
+                        .map(|ik| {
+                            f64::from(
+                                nr as f32 * lg_kappa[ik]
+                                    - n[ik * nr..(ik + 1) * nr].iter().sum::<f32>(),
+                            )
                         })
                         .collect()
                 })
                 .collect();
+            // Every κ's beta parameters at the times with reads (`a` then
+            // `b`, κ major), and the ln Γ terms of one table, each filled
+            // and taken in one slice.
+            let mut ab = vec![0f32; 2 * nk * na];
+            let mut base = vec![0f32; 2 * nk * na];
+            let mut terms = Vec::with_capacity(2 * nk * k);
             [1.0, -1.0].map(|sign| {
                 let xj: Vec<f64> = (0..k).map(|kk| sign * f64::from(x[kk][j])).collect();
                 let mut ll = vec![Vec::with_capacity(n_grid); n_tab];
@@ -365,26 +400,41 @@ fn evidence_host(
                     let lr = f64::from(rest[j]) + ro;
                     for &go in &g_off {
                         let lg = f64::from(reach[j]) + go;
-                        let mu: Vec<f64> =
-                            xj.iter().map(|&xv| unspliced_share(xv, lg, lr)).collect();
-                        for (ik, &lk) in k_log.iter().enumerate() {
-                            let kappa = lk.exp();
-                            let ab: Vec<(f64, f64, f64)> = mu
-                                .iter()
-                                .map(|&m| {
-                                    let (a, b) = (m * kappa, (1.0 - m) * kappa);
-                                    (a, b, lgam(a) + lgam(b))
-                                })
-                                .collect();
-                            for t in 0..n_tab {
-                                let mut v = by_kappa[t][ik];
-                                for (kk, &(a, b, base)) in ab.iter().enumerate() {
-                                    v += lgam(uj[t][kk] + a) + lgam(sj[t][kk] + b) - base;
-                                }
-                                ll[t].push(v);
+                        let mu: Vec<f32> = any
+                            .iter()
+                            .map(|&kk| unspliced_share(xj[kk], lg, lr) as f32)
+                            .collect();
+                        let (a, b) = ab.split_at_mut(nk * na);
+                        for (ik, &kappa) in kappas.iter().enumerate() {
+                            for (i, &m) in mu.iter().enumerate() {
+                                a[ik * na + i] = m * kappa;
+                                b[ik * na + i] = (1.0 - m) * kappa;
                             }
-                            at.push((lg, lg - lr));
                         }
+                        base.copy_from_slice(&ab);
+                        ln_gamma_in_place(&mut base);
+                        for t in 0..n_tab {
+                            let nr = read[t].len();
+                            terms.clear();
+                            for (off, side) in [(0, &uj[t]), (nk * na, &sj[t])] {
+                                for ik in 0..nk {
+                                    for (&kk, &i) in read[t].iter().zip(&slot[t]) {
+                                        terms.push(side[kk] + ab[off + ik * na + i]);
+                                    }
+                                }
+                            }
+                            ln_gamma_in_place(&mut terms);
+                            for ik in 0..nk {
+                                let mut v = 0f32;
+                                for (q, &i) in slot[t].iter().enumerate() {
+                                    v += terms[ik * nr + q] + terms[(nk + ik) * nr + q]
+                                        - base[ik * na + i]
+                                        - base[(nk + ik) * na + i];
+                                }
+                                ll[t].push(by_kappa[t][ik] + f64::from(v));
+                            }
+                        }
+                        at.extend(std::iter::repeat_n((lg, lg - lr), nk));
                     }
                 }
                 ll.iter()
