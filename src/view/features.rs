@@ -326,7 +326,7 @@ impl Scene {
         self.set_pick(Pick::Markers(name));
     }
 
-    pub fn toggle_source(&mut self) {
+    pub fn cycle_source(&mut self) {
         self.source = self.source.next(self.data.loads.extra.is_some());
         // A click's list holds the features with values in the source shown;
         // suggestions on screen stay as they are.
@@ -357,18 +357,24 @@ impl Scene {
             return;
         };
         if self.source == Source::Expected {
-            self.source = if self.data.loads.extra.is_some() {
-                Source::Extra
-            } else {
-                Source::Observed
-            };
+            self.source = self.count_source();
         }
         self.set_pick(Pick::Stat(stat));
     }
 
+    /// The counts to summarise when the model's expectation is shown: the
+    /// extra file's when one is open, else the run's own.
+    pub(super) fn count_source(&self) -> Source {
+        if self.data.loads.extra.is_some() {
+            Source::Extra
+        } else {
+            Source::Observed
+        }
+    }
+
     /// Open `path` as the extra source, a data file the run was not fitted
     /// on, read on the side; its cells are matched to the run's. Shows it at
-    /// once: the feature on screen, else each cell's total.
+    /// once: the feature or time on screen, else each cell's total.
     pub fn open_extra(&mut self, path: &std::path::Path) {
         let cells = self.cell_names().map(<[_]>::to_vec).unwrap_or_default();
         let path = path.to_path_buf();
@@ -380,12 +386,12 @@ impl Scene {
         if let Some(a) = self.activity.as_mut() {
             a.set_extra(extra);
         }
-        self.extra_noted = false;
+        self.extra_pending = true;
         self.source = Source::Extra;
         self.shown = None;
         if !matches!(
             self.pick,
-            Some(Pick::One(_) | Pick::Markers(_) | Pick::Stat(_))
+            Some(Pick::One(_) | Pick::Markers(_) | Pick::Stat(_) | Pick::Time)
         ) {
             self.pick = Some(Pick::Stat(Stat::Total));
         }
@@ -394,25 +400,32 @@ impl Scene {
         self.note_extra();
     }
 
-    /// How the extra file's cells matched the run's, once, when it is read.
-    fn note_extra(&mut self) {
-        let Some(read) = self.data.loads.extra.as_ref().and_then(|x| x.try_get()) else {
-            return;
-        };
-        if std::mem::replace(&mut self.extra_noted, true) {
-            return;
+    /// How the extra file's cells matched the run's, once it is read.
+    /// Returns whether it was said now.
+    fn note_extra(&mut self) -> bool {
+        if !self.extra_pending {
+            return false;
         }
+        let Some(read) = self.data.loads.extra.as_ref().and_then(|x| x.try_get()) else {
+            return false;
+        };
+        self.extra_pending = false;
         self.note = Some(match read {
-            Ok(x) if x.matched * 10 < x.of * 9 => format!(
+            Ok(x) if x.matched() * 10 < x.of * 9 => format!(
                 "extra: only {} of the run's {} cells are in {}: is it the same cells?",
-                x.matched, x.of, x.name
+                x.matched(),
+                x.of,
+                x.name
             ),
             Ok(x) => format!(
                 "extra: {} · {} of the run's {} cells matched",
-                x.name, x.matched, x.of
+                x.name,
+                x.matched(),
+                x.of
             ),
             Err(e) => format!("extra data file: {e}"),
         });
+        true
     }
 
     /// Drop the activity view. Returns whether there was one.
@@ -636,11 +649,13 @@ impl Scene {
     pub fn poll_loads(&mut self) -> bool {
         let batches = self.take_batches();
         let answered = self.data.loads.answered();
-        if answered == self.answered {
+        // An extra file read is news even when the count of answers is as
+        // it was (one file in place of another).
+        let extra = self.note_extra();
+        if answered == self.answered && !extra {
             return batches;
         }
         self.answered = answered;
-        self.note_extra();
         match self.redo.take() {
             Some(Ask::Near { name, centre }) => match centre {
                 Centre::Cell => self.show_near(&name),

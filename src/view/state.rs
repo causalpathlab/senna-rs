@@ -212,6 +212,11 @@ impl Scene {
             self.batches_taken = false;
             self.answered = 0;
             self.redo = None;
+            // An extra data file was matched to the other run's cells.
+            self.extra_pending = false;
+            if self.source == Source::Extra {
+                self.source = Source::Observed;
+            }
         }
         self.near = None;
         self.locked.clear();

@@ -62,11 +62,7 @@ impl App {
             KeyCode::Char('g') => self.change(|s| s.step_feature(1)),
             KeyCode::Char('G') => self.change(|s| s.step_feature(-1)),
             KeyCode::Char('a') => self.change(Scene::pick_marker_set),
-            KeyCode::Char('o') => {
-                // The other source has its own feature axis to search.
-                self.names = None;
-                self.change(Scene::toggle_source);
-            }
+            KeyCode::Char('o') => self.change_source(Scene::cycle_source),
             KeyCode::Char('/') => {
                 if self.names.is_none() {
                     let names = self.scene.searchable();
@@ -89,7 +85,7 @@ impl App {
             KeyCode::Char('m') => self.step_method(1, false),
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
             KeyCode::Char('y') => self.change(Scene::toggle_time),
-            KeyCode::Char('u') => self.change(Scene::cycle_stat),
+            KeyCode::Char('u') => self.change_source(Scene::cycle_stat),
             KeyCode::Char('O') => self.ask_extra(),
             KeyCode::Char('{' | '}') => {
                 self.scene
@@ -442,6 +438,13 @@ impl App {
                 (f32::from(row - m.y) + 0.5) * self.cell.1,
             )
         })
+    }
+
+    /// A scene change that may show another source: its feature axis is
+    /// the one `/` searches from now on.
+    pub(super) fn change_source(&mut self, f: impl FnOnce(&mut Scene)) {
+        self.names = None;
+        self.change(f);
     }
 
     /// Run a scene change, surface its note, and redraw.

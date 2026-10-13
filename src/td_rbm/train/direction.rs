@@ -317,10 +317,11 @@ struct Evidence {
 
 /// The grid evidence (module docs) for every table of `tables` (`u`, `s`, each
 /// `[K][G]`) at once, the velocity `x` (`[K][G]`) read forward and reversed:
-/// every gene on its own thread, in f64 with exact log-gammas. The share,
-/// `a`, `b` and `ln Γ(a) + ln Γ(b)` at every grid point are the tables'
-/// common part, and `ln Γ(κ) − ln Γ(n + κ)` the signs', so each is worked
-/// out once. Returns every table's evidence forward, then reversed.
+/// every gene on its own thread, its `ln Γ` terms fast and approximate in
+/// f32 ([`super::gamma`]). The share, `a`, `b` and `ln Γ(a) + ln Γ(b)` at
+/// every grid point are the tables' common part, and `ln Γ(κ) − ln Γ(n + κ)`
+/// the signs', so each is worked out once. Returns every table's evidence
+/// forward, then reversed.
 fn evidence_host(
     tables: &[HostTable],
     x: &[Vec<f32>],
@@ -334,6 +335,8 @@ fn evidence_host(
     let n_grid = r_off.len() * g_off.len() * k_log.len();
     let kappas: Vec<f32> = k_log.iter().map(|lk| lk.exp() as f32).collect();
     let nk = kappas.len();
+    let mut lg_kappa = kappas.clone();
+    ln_gamma_in_place(&mut lg_kappa);
     // Every gene: per sign, per table, (log evidence, mean log β, mean log γ).
     let per_gene: Vec<[Vec<(f64, f64, f64)>; 2]> = (0..g)
         .into_par_iter()
@@ -347,31 +350,28 @@ fn evidence_host(
                 .map(|(_, s)| (0..k).map(|kk| s[kk][j]).collect())
                 .collect();
             // A grid time with no read of the gene adds exactly nothing, so
-            // only those with reads are visited: per table, and in any table
-            // (`slot`, each table's times' places among those).
-            let read: Vec<Vec<usize>> = (0..n_tab)
-                .map(|t| (0..k).filter(|&kk| uj[t][kk] + sj[t][kk] > 0.0).collect())
+            // only those with reads are visited: `any` in any table, and per
+            // table each such time with its place `i` in `any`.
+            let has = |t: usize, kk: usize| uj[t][kk] + sj[t][kk] > 0.0;
+            let any: Vec<usize> = (0..k)
+                .filter(|&kk| (0..n_tab).any(|t| has(t, kk)))
                 .collect();
-            let mut any: Vec<usize> = read.iter().flatten().copied().collect();
-            any.sort_unstable();
-            any.dedup();
             let na = any.len();
-            let slot: Vec<Vec<usize>> = read
-                .iter()
-                .map(|r| {
-                    r.iter()
-                        .map(|kk| any.binary_search(kk).unwrap_or(0))
+            let read: Vec<Vec<(usize, usize)>> = (0..n_tab)
+                .map(|t| {
+                    any.iter()
+                        .enumerate()
+                        .filter(|&(_, &kk)| has(t, kk))
+                        .map(|(i, &kk)| (kk, i))
                         .collect()
                 })
                 .collect();
             // ln Γ(κ) − ln Γ(n + κ) for every table and κ: no rate in it.
-            let mut lg_kappa = kappas.clone();
-            ln_gamma_in_place(&mut lg_kappa);
             let by_kappa: Vec<Vec<f64>> = (0..n_tab)
                 .map(|t| {
                     let mut n: Vec<f32> = kappas
                         .iter()
-                        .flat_map(|&kappa| read[t].iter().map(move |&kk| (kk, kappa)))
+                        .flat_map(|&kappa| read[t].iter().map(move |&(kk, _)| (kk, kappa)))
                         .map(|(kk, kappa)| uj[t][kk] + sj[t][kk] + kappa)
                         .collect();
                     ln_gamma_in_place(&mut n);
@@ -392,18 +392,28 @@ fn evidence_host(
             let mut ab = vec![0f32; 2 * nk * na];
             let mut base = vec![0f32; 2 * nk * na];
             let mut terms = Vec::with_capacity(2 * nk * k);
+            let mut mu = vec![0f32; na];
             [1.0, -1.0].map(|sign| {
-                let xj: Vec<f64> = (0..k).map(|kk| sign * f64::from(x[kk][j])).collect();
+                // log m⁺/γ at every time with reads, per log γ: the share
+                // only adds log γ/β to it.
+                let rise: Vec<Vec<f64>> = g_off
+                    .iter()
+                    .map(|&go| {
+                        let lg = f64::from(reach[j]) + go;
+                        any.iter()
+                            .map(|&kk| log_rise(sign * f64::from(x[kk][j]), lg))
+                            .collect()
+                    })
+                    .collect();
                 let mut ll = vec![Vec::with_capacity(n_grid); n_tab];
                 let mut at = Vec::with_capacity(n_grid);
                 for &ro in &r_off {
                     let lr = f64::from(rest[j]) + ro;
-                    for &go in &g_off {
+                    for (&go, rise) in g_off.iter().zip(&rise) {
                         let lg = f64::from(reach[j]) + go;
-                        let mu: Vec<f32> = any
-                            .iter()
-                            .map(|&kk| unspliced_share(xj[kk], lg, lr) as f32)
-                            .collect();
+                        for (m, &r) in mu.iter_mut().zip(rise) {
+                            *m = share(r + lr) as f32;
+                        }
                         let (a, b) = ab.split_at_mut(nk * na);
                         for (ik, &kappa) in kappas.iter().enumerate() {
                             for (i, &m) in mu.iter().enumerate() {
@@ -418,7 +428,7 @@ fn evidence_host(
                             terms.clear();
                             for (off, side) in [(0, &uj[t]), (nk * na, &sj[t])] {
                                 for ik in 0..nk {
-                                    for (&kk, &i) in read[t].iter().zip(&slot[t]) {
+                                    for &(kk, i) in &read[t] {
                                         terms.push(side[kk] + ab[off + ik * na + i]);
                                     }
                                 }
@@ -426,7 +436,7 @@ fn evidence_host(
                             ln_gamma_in_place(&mut terms);
                             for ik in 0..nk {
                                 let mut v = 0f32;
-                                for (q, &i) in slot[t].iter().enumerate() {
+                                for (q, &(_, i)) in read[t].iter().enumerate() {
                                     v += terms[ik * nr + q] + terms[(nk + ik) * nr + q]
                                         - base[ik * na + i]
                                         - base[(nk + ik) * na + i];
@@ -440,11 +450,14 @@ fn evidence_host(
                 ll.iter()
                     .map(|ll| {
                         let log_e = log_sum_exp(ll) - (n_grid as f64).ln();
-                        let w: Vec<f64> = ll.iter().map(|v| (v - log_e).exp()).collect();
-                        let total: f64 = w.iter().sum();
-                        let mg = w.iter().zip(&at).map(|(w, a)| w * a.0).sum::<f64>() / total;
-                        let mb = w.iter().zip(&at).map(|(w, a)| w * a.1).sum::<f64>() / total;
-                        (log_e, mb, mg)
+                        let (mut total, mut mg, mut mb) = (0.0, 0.0, 0.0);
+                        for (v, &(lg, lb)) in ll.iter().zip(&at) {
+                            let w = (v - log_e).exp();
+                            total += w;
+                            mg += w * lg;
+                            mb += w * lb;
+                        }
+                        (log_e, mb / total, mg / total)
                     })
                     .collect()
             })
@@ -472,15 +485,19 @@ fn grid() -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     )
 }
 
-/// The model's unspliced share at velocity `x` with `log γ = lg` and
-/// `log γ/β = lr`: `σ(log m⁺ − log β)`, `m⁺` the softly floored `γ + x`
-/// ([`FLOOR_SOFTNESS`]), kept inside `(10⁻⁶, 1 − 10⁻⁶)`.
-fn unspliced_share(x: f64, lg: f64, lr: f64) -> f64 {
+/// `log m⁺/γ` at velocity `x` with `log γ = lg`, `m⁺` the softly floored
+/// `γ + x` ([`FLOOR_SOFTNESS`]).
+fn log_rise(x: f64, lg: f64) -> f64 {
     let gamma = lg.exp();
     let floor = FLOOR_SOFTNESS * gamma;
     let z = (gamma + x) / floor;
     let sp = if z > 30.0 { z } else { z.exp().ln_1p() };
-    let eta = (floor * sp).ln() - (lg - lr);
+    (floor * sp).ln() - lg
+}
+
+/// The model's unspliced share `σ(log m⁺ − log β)` from `eta`, that is
+/// [`log_rise`] plus `log γ/β`, kept inside `(10⁻⁶, 1 − 10⁻⁶)`.
+fn share(eta: f64) -> f64 {
     (1.0 / (1.0 + (-eta).exp())).clamp(1e-6, 1.0 - 1e-6)
 }
 

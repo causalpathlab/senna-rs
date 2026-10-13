@@ -335,8 +335,8 @@ pub(crate) struct Scene {
     /// in `data.input` and recorded path), for the front end to ask where
     /// it is.
     pub missing_data: Option<(usize, String)>,
-    /// Whether how the extra data file matched has been said.
-    extra_noted: bool,
+    /// Whether how the extra data file matched is still to be said.
+    extra_pending: bool,
     /// A run's velocity field (read on the first `v`), whether it is drawn,
     /// and every point's displacement on the last map it was drawn on.
     velocity: Option<std::sync::Arc<velocity::Field>>,
@@ -386,7 +386,7 @@ impl Scene {
             medians: std::cell::RefCell::new(None),
             note: None,
             missing_data: None,
-            extra_noted: false,
+            extra_pending: false,
             velocity: None,
             velocity_style: None,
             stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
@@ -415,7 +415,7 @@ impl Scene {
         }
         if let Some(stat) = args.cell_stat {
             if scene.source == Source::Expected {
-                scene.source = Source::Observed;
+                scene.source = scene.count_source();
             }
             scene.set_pick(Pick::Stat(match stat {
                 CellStat::Total => Stat::Total,
@@ -496,7 +496,7 @@ impl Scene {
             locked: self.locked.clone(),
             note: None,
             missing_data: None,
-            extra_noted: self.extra_noted,
+            extra_pending: self.extra_pending,
             velocity: self.velocity.clone(),
             velocity_style: self.velocity_style,
             stream_lanes: self.stream_lanes,

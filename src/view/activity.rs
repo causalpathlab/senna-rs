@@ -15,12 +15,14 @@
 //! mapped onto a colour ramp. Which model row each point is, is worked out
 //! once per view and cached, not per feature.
 
+use data_beans::sparse_io::COLUMN_SEP;
 use data_beans::utilities::name_matching::GeneIndex;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunManifest};
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -303,11 +305,11 @@ impl Observed {
     }
 
     /// `stat` per column.
-    fn stat(&self, stat: &Stat, set: &[Box<str>]) -> Result<Vec<f32>, String> {
+    fn stat(&self, stat: &Stat, set: &[Box<str>]) -> Result<Cow<'_, [f32]>, String> {
         let (total, detected) = self.totals()?;
         Ok(match stat {
-            Stat::Total => total.iter().map(|t| t.ln_1p()).collect(),
-            Stat::Detected => detected.clone(),
+            Stat::Total => Cow::Owned(total.iter().map(|t| t.ln_1p()).collect()),
+            Stat::Detected => Cow::Borrowed(detected),
             Stat::Share(_) => {
                 let rows: std::collections::BTreeSet<usize> = set
                     .iter()
@@ -318,14 +320,19 @@ impl Observed {
                 }
                 let mut sum = vec![0f32; self.n_cells];
                 for g in rows {
-                    for (s, v) in sum.iter_mut().zip(self.row(g, |v| v)?) {
-                        *s += v;
+                    // One row a read: see `observed_group_means`.
+                    let row = self
+                        .data
+                        .read_rows_csr(std::iter::once(g))
+                        .map_err(|e| e.to_string())?;
+                    for (&c, &v) in row.col_indices().iter().zip(row.values()) {
+                        sum[c] += v;
                     }
                 }
-                sum.iter()
-                    .zip(total)
-                    .map(|(&s, &t)| if t > 0.0 { s / t } else { f32::NAN })
-                    .collect()
+                for (s, &t) in sum.iter_mut().zip(total) {
+                    *s = if t > 0.0 { *s / t } else { f32::NAN };
+                }
+                Cow::Owned(sum)
             }
         })
     }
@@ -1274,13 +1281,11 @@ pub(crate) fn read_extra(path: &Path, cells: &[Box<str>]) -> anyhow::Result<Extr
         "none of the run's {} cells are in {name}",
         cells.len()
     );
-    let matched = cell_index.len();
     let observed = Observed::new(data, cell_index)?;
     observed.totals().map_err(anyhow::Error::msg)?;
     Ok(ExtraRead {
         name: name.into(),
         observed,
-        matched,
         of: cells.len(),
     })
 }
@@ -1290,7 +1295,10 @@ pub(crate) fn read_extra(path: &Path, cells: &[Box<str>]) -> anyhow::Result<Extr
 /// in ten, by barcode with any `@` tag left off both sides (a run fitted on
 /// several files tags each cell with its file), whichever finds more. A
 /// barcode is used only where it names one cell on each side.
-pub(crate) fn match_cells(cells: &[Box<str>], columns: &[Box<str>]) -> HashMap<Box<str>, u32> {
+pub(crate) fn match_cells<'a>(
+    cells: &'a [Box<str>],
+    columns: &'a [Box<str>],
+) -> HashMap<Box<str>, u32> {
     let by_name: HashMap<&str, u32> = columns
         .iter()
         .enumerate()
@@ -1303,16 +1311,16 @@ pub(crate) fn match_cells(cells: &[Box<str>], columns: &[Box<str>]) -> HashMap<B
     if exact.len() * 10 >= cells.len() * 9 {
         return exact;
     }
-    let bare = |n: &str| n.split('@').next().unwrap_or_default().to_string();
+    let bare = |n: &'a str| n.split(COLUMN_SEP).next().unwrap_or_default();
     // A barcode's column, `None` once it names a second one.
-    let mut column: HashMap<String, Option<u32>> = HashMap::default();
+    let mut column: HashMap<&str, Option<u32>> = HashMap::default();
     for (i, n) in columns.iter().enumerate() {
         column
             .entry(bare(n))
             .and_modify(|c| *c = None)
             .or_insert(Some(i as u32));
     }
-    let mut seen: HashMap<String, usize> = HashMap::default();
+    let mut seen: HashMap<&str, usize> = HashMap::default();
     for n in cells {
         *seen.entry(bare(n)).or_default() += 1;
     }
@@ -1320,8 +1328,8 @@ pub(crate) fn match_cells(cells: &[Box<str>], columns: &[Box<str>]) -> HashMap<B
         .iter()
         .filter_map(|n| {
             let b = bare(n);
-            (seen[&b] == 1).then_some(())?;
-            Some((n.clone(), (*column.get(&b)?)?))
+            (seen[b] == 1).then_some(())?;
+            Some((n.clone(), (*column.get(b)?)?))
         })
         .collect();
     if by_barcode.len() > exact.len() {
@@ -1336,8 +1344,14 @@ pub(crate) fn match_cells(cells: &[Box<str>], columns: &[Box<str>]) -> HashMap<B
 pub(crate) struct ExtraRead {
     pub name: Box<str>,
     observed: Observed,
-    pub matched: usize,
     pub of: usize,
+}
+
+impl ExtraRead {
+    /// How many of the run's cells the file has.
+    pub fn matched(&self) -> usize {
+        self.observed.cell_index.len()
+    }
 }
 
 /// An extra data file, read once on a worker thread.
@@ -1881,7 +1895,7 @@ mod tests {
         counts_file(&path, &["c2", "c0", "zz", "c1"]);
         let run = boxed(&["c0@lib", "c1@lib", "c2@lib", "c3@lib"]);
         let read = read_extra(&path, &run).unwrap();
-        assert_eq!((read.matched, read.of, &*read.name), (3, 4, "other.zarr"));
+        assert_eq!((read.matched(), read.of, &*read.name), (3, 4, "other.zarr"));
 
         let mut a = Activity::new(
             RunManifest::new(senna::run_manifest::RunKind::Svd, "r"),
@@ -1954,10 +1968,10 @@ mod tests {
         assert_eq!(s.pick, None);
         // `o` goes through the extra source, then back to the model.
         s.source = Source::Expected;
-        s.toggle_source();
-        s.toggle_source();
+        s.cycle_source();
+        s.cycle_source();
         assert_eq!(s.source, Source::Extra);
-        s.toggle_source();
+        s.cycle_source();
         assert_eq!(s.source, Source::Expected);
     }
 }

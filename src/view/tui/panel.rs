@@ -102,11 +102,7 @@ impl App {
             Setting::Layout => self.step_method(d, true),
             Setting::Map => self.step_view(d),
             Setting::Colour => self.change(|sc| sc.step_colour(d)),
-            Setting::Values => {
-                // Each source has its own feature axis to search.
-                self.names = None;
-                self.change(Scene::toggle_source);
-            }
+            Setting::Values => self.change_source(Scene::cycle_source),
             Setting::Labels => {
                 self.change_text(|sc| sc.step_labels(d));
                 self.redecorate();

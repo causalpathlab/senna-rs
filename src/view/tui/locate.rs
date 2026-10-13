@@ -84,7 +84,9 @@ impl App {
         };
         let name = files::name(chosen);
         // The data files were just chosen: wait for them to be checked.
-        let loads = crate::view::activity::RunLoads::new(&m, &dir);
+        let mut loads = crate::view::activity::RunLoads::new(&m, &dir);
+        // An extra data file open stays open.
+        loads.extra = self.scene.data.loads.extra.clone();
         let mut activity = Activity::new(m.clone(), dir, loads.clone(), true);
         if let Some((next, recorded)) = activity.missing_inputs().into_iter().next() {
             self.message = Some(format!(
@@ -112,10 +114,13 @@ impl App {
             return self.refuse(format!("could not save the manifest: {e}"));
         }
         let from = self.from.clone();
+        // An extra file still being read is still to be noted once it is.
+        let extra_pending = self.scene.extra_pending;
         self.open_round(&from, "reloaded");
         // The data is open already: the scene keeps it rather than reading
         // it again.
         self.scene.data.loads = loads;
+        self.scene.extra_pending = extra_pending;
         self.scene.activity = Some(activity);
         self.change(|s| {
             s.source = crate::view::activity::Source::Observed;
@@ -161,11 +166,9 @@ impl App {
             Outcome::Cancelled => self.modal = None,
             Outcome::Chosen(c) => {
                 self.modal = None;
-                // The extra source has its own feature axis to search.
-                self.names = None;
                 let path = c.file();
                 self.message = Some(format!("opening {}…", files::name(&path)));
-                self.change(|s| s.open_extra(&path));
+                self.change_source(|s| s.open_extra(&path));
             }
         }
         true
