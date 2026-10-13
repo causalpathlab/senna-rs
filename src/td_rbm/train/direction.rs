@@ -1,0 +1,573 @@
+//! Step 3: every lineage's direction from the splicing alone, as the
+//! posterior of one binary `d` (forward, reversed) shared by every gene.
+//!
+//! Given the lineage's steady fit (blind to direction), every pseudobulk's
+//! grid time is drawn from its posterior and every gene's unspliced and
+//! spliced reads are pooled per grid time, `U_kg`, `S_kg`. Read with the
+//! velocity forward or reversed (`d x_kg`, `x` the curve's `d log s/dt`), the
+//! unspliced share is `μ_kg = σ(log m⁺(γ_g + d x_kg) − log β_g)`, and
+//! `U_kg ~ BetaBinomial(U + S, μ κ_g, (1 − μ) κ_g)`. Every gene's evidence
+//! for each `d` integrates its `(log γ/β, log γ, log κ)` exactly on a grid
+//! ([`super::evidence`]), less the same on the reads with no dynamics (every
+//! grid time at the gene's overall unspliced share): the prior and the floor
+//! alone favour one way on a skewed curve, and that bias, summed over
+//! thousands of genes, would decide. Given `d` the genes are independent, so
+//! `log BF = Σ_g log BF_g` and `p(forward) = σ(log BF)`, averaged over the
+//! time draws.
+//!
+//! Wakefield's approximate Bayes factor (*Am J Hum Genet* (2007)) checks it:
+//! linearised, the unspliced log-odds is `log γ/β + (d/γ) x`, so the sign of
+//! a quasi-binomial logistic slope on `x` is the direction; its sign Bayes
+//! factor under a normal prior is `Φ(z′)/Φ(−z′)`.
+
+use super::evidence::ln_beta;
+use super::TrainConfig;
+use crate::td_rbm::curve::Spline;
+use crate::td_rbm::model::{softplus, Energy, Tables};
+use crate::td_rbm::rbm::Reads;
+use legume_numeric::candle::candle_core::{Device, Result, Tensor, D};
+use log::info;
+use rand::rngs::StdRng;
+use rand::RngExt;
+use rayon::prelude::*;
+
+/// What a lineage's direction rests on.
+#[derive(Clone, Debug)]
+pub struct Direction {
+    pub lineage: usize,
+    /// Cells the lineage holds (finest pseudobulks' cells).
+    pub cells: f64,
+    /// `log BF`, the lineage as it runs (from its tree's root) over
+    /// reversed, its mean and sd over the time draws; `p(forward)`, the
+    /// draws' mean. A report: the root is chosen per tree.
+    pub log_bf: f64,
+    pub log_bf_sd: f64,
+    pub p_forward: f64,
+    /// Wakefield's sign Bayes factor, `Σ_g log ABF_g`, forward over reversed.
+    pub log_abf: f64,
+    /// Whether the lineage's tree's root (its direction) is decided, by
+    /// the data or given.
+    pub determined: bool,
+    /// `[G]` every gene's `log BF_g`, and its logistic slope's `z`, both
+    /// signed for the kept orientation.
+    pub gene_votes: Vec<f32>,
+    pub gene_z: Vec<f32>,
+}
+
+/// A tree's root is called at this posterior probability.
+pub(crate) const P_CALL: f64 = 0.95;
+/// The grid each gene's evidence integrates over: the log rest ratio
+/// `log γ/β` about the gene's overall `log U/S`, `log γ` against the gene's
+/// largest `|x|`, and `log κ`.
+const R_SPAN: (f64, f64, usize) = (-3.0, 3.0, 17);
+const GAMMA_SPAN: (f64, f64, usize) = (0.25, 64.0, 16);
+const KAPPA_SPAN: (f64, f64, usize) = (2.0, 2000.0, 6);
+/// The floor's softness, as in the model.
+const SOFT: f64 = 0.05;
+/// Wakefield's prior variance on the standardised slope.
+const ABF_W: f64 = 1.0;
+/// Elements per evidence block (grid × times × genes).
+const BLOCK_ELEMS: usize = 1 << 23;
+
+fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|i| lo + (hi - lo) * i as f64 / (n.max(2) - 1) as f64)
+        .collect()
+}
+
+/// Every lineage's direction from the splicing alone ([`orient`]).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn orient_all(
+    energy: &Energy,
+    spline: &Spline,
+    finest: &[f32],
+    f: usize,
+    lineage: &[usize],
+    cfg: &TrainConfig,
+    dev: &Device,
+    rng: &mut StdRng,
+) -> anyhow::Result<Vec<Direction>> {
+    let mut out = Vec::new();
+    let mut rate_sum: Option<(Tensor, Tensor, f64)> = None;
+    for lin in 0..cfg.lineages {
+        let rows: Vec<usize> = (0..lineage.len()).filter(|&r| lineage[r] == lin).collect();
+        if rows.len() < 2 {
+            continue;
+        }
+        let x: Vec<f32> = rows
+            .iter()
+            .flat_map(|&r| finest[r * f..(r + 1) * f].to_vec())
+            .collect();
+        let (d, (lb, lg)) = orient(energy, spline, &x, f, lin, cfg, dev, rng)?;
+        let w = rows.len() as f64;
+        rate_sum = Some(match rate_sum {
+            None => ((&lb * w)?, (&lg * w)?, w),
+            Some((sb, sg, sw)) => ((sb + (&lb * w)?)?, (sg + (&lg * w)?)?, sw + w),
+        });
+        info!(
+            "td-rbm lineage L{} ({} pseudobulks), {}: p(forward) {:.4}, log BF {:+.1} (sd {:.1} over time draws), Wakefield log ABF {:+.1}; genes for {} against {}",
+            lin + 1,
+            rows.len(),
+            "from its tree's root",
+            d.p_forward,
+            d.log_bf,
+            d.log_bf_sd,
+            d.log_abf,
+            d.gene_votes.iter().filter(|&&v| v > 0.0).count(),
+            d.gene_votes.iter().filter(|&&v| v < 0.0).count(),
+        );
+        out.push(d);
+    }
+    // The model carries on with every gene's rates' posterior means under
+    // the kept directions, averaged over the lineages by their pseudobulks.
+    if let Some((sb, sg, sw)) = rate_sum {
+        energy.set_log_rates(&(sb / sw)?, &(sg / sw)?)?;
+    }
+    Ok(out)
+}
+
+/// Lineage `lin`'s splicing evidence (module docs) on the finest
+/// pseudobulks `x` (`[P × F]` counts) it is read on, forward meaning its
+/// curve as it runs now.
+pub(crate) struct Bayes {
+    /// `Σ_g log BF_g` per time draw, and every gene's mean over the draws.
+    pub lbf: Vec<f64>,
+    pub genes: Vec<f64>,
+    /// Every gene's posterior mean `log β`, `log γ`, forward and reversed.
+    pub forward: (Vec<f64>, Vec<f64>),
+    pub reversed: (Vec<f64>, Vec<f64>),
+    /// Wakefield's check: every gene's slope `z`, and `Σ_g log ABF_g`.
+    pub z: Vec<f64>,
+    pub log_abf: f64,
+}
+
+impl Bayes {
+    pub fn log_bf(&self) -> f64 {
+        self.lbf.iter().sum::<f64>() / self.lbf.len().max(1) as f64
+    }
+    pub fn log_bf_sd(&self) -> f64 {
+        let (m, n) = (self.log_bf(), self.lbf.len());
+        (self.lbf.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (n.max(2) - 1) as f64).sqrt()
+    }
+    pub fn p_forward(&self) -> f64 {
+        self.lbf
+            .iter()
+            .map(|&v| 1.0 / (1.0 + (-v).exp()))
+            .sum::<f64>()
+            / self.lbf.len().max(1) as f64
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bayes(
+    energy: &Energy,
+    spline: &Spline,
+    t: &Tables,
+    x: &[f32],
+    f: usize,
+    lin: usize,
+    cfg: &TrainConfig,
+    dev: &Device,
+    rng: &mut StdRng,
+) -> anyhow::Result<Bayes> {
+    let g = f / 2;
+    let p = x.len() / f;
+    let mut fixed = x.to_vec();
+    crate::td_rbm::start::scale_rows(&mut fixed, f, cfg.depth as f32);
+    let rows = Reads::from_features(Tensor::from_vec(fixed, (p, f), dev)?)?;
+    // Time posteriors at steady state (`t`), under this lineage alone.
+    let k = t.grid_len()?;
+    let logits = rows.x.matmul(&t.psi.narrow(0, lin * k, k)?.t()?)?; // [P × K]
+    let q = legume_numeric::candle::candle_nn::ops::softmax(&logits, D::Minus1)?;
+    let readout = energy.velocity_readout(spline, lin)?.detach(); // [K × G]
+
+    // Wakefield's check on the reads pooled by the posterior weights.
+    let soft = q.t()?.matmul(&rows.x)?.to_vec2::<f32>()?; // [K × F]
+    let xv = readout.to_vec2::<f32>()?;
+    let wake: Vec<(f64, f64)> = (0..g)
+        .into_par_iter()
+        .map(|j| {
+            let u: Vec<f64> = (0..k).map(|kk| f64::from(soft[kk][j])).collect();
+            let n: Vec<f64> = (0..k)
+                .map(|kk| f64::from(soft[kk][j] + soft[kk][g + j]))
+                .collect();
+            let xs: Vec<f64> = (0..k).map(|kk| f64::from(xv[kk][j])).collect();
+            wakefield(&u, &n, &xs)
+        })
+        .collect();
+
+    // Every gene's overall log U/S and largest |x| place its grid.
+    let (mut tot_u, mut tot_s) = (vec![0f64; g], vec![0f64; g]);
+    for row in &soft {
+        for j in 0..g {
+            tot_u[j] += f64::from(row[j]);
+            tot_s[j] += f64::from(row[g + j]);
+        }
+    }
+    let rest: Vec<f32> = (0..g)
+        .map(|j| ((tot_u[j] + 0.5) / (tot_s[j] + 0.5)).ln() as f32)
+        .collect();
+    let reach: Vec<f32> = (0..g)
+        .map(|j| {
+            (0..k)
+                .map(|kk| xv[kk][j].abs())
+                .fold(1e-6f32, f32::max)
+                .ln()
+        })
+        .collect();
+
+    let unspliced_share = Tensor::from_vec(
+        (0..g)
+            .map(|j| (tot_u[j] / (tot_u[j] + tot_s[j]).max(1e-12)) as f32)
+            .collect::<Vec<_>>(),
+        (1, g),
+        dev,
+    )?;
+
+    // Time draws: every pseudobulk at one grid time from its posterior.
+    let qv = q.to_vec2::<f32>()?;
+    let draws = cfg.direction_draws.max(1);
+    let share = 1.0 / draws as f64;
+    let mut out = Bayes {
+        lbf: Vec::with_capacity(draws),
+        genes: vec![0.0; g],
+        forward: (vec![0.0; g], vec![0.0; g]),
+        reversed: (vec![0.0; g], vec![0.0; g]),
+        z: wake.iter().map(|w| w.0).collect(),
+        log_abf: wake.iter().map(|w| w.1).sum(),
+    };
+    for _ in 0..draws {
+        let mut hot = vec![0f32; p * k];
+        for (r, row) in qv.iter().enumerate() {
+            let mut u = rng.random::<f32>() * row.iter().sum::<f32>();
+            let mut pick = k - 1;
+            for (kk, &w) in row.iter().enumerate() {
+                if u < w {
+                    pick = kk;
+                    break;
+                }
+                u -= w;
+            }
+            hot[r * k + pick] = 1.0;
+        }
+        let pooled = Tensor::from_vec(hot, (p, k), dev)?.t()?.matmul(&rows.x)?; // [K × F]
+        let (u, s) = (pooled.narrow(1, 0, g)?, pooled.narrow(1, g, g)?);
+        // On the CPU every gene's grid on its own thread in f64; on a GPU the
+        // whole block as f32 tensors.
+        let both = |u: &Tensor, s: &Tensor| -> anyhow::Result<(Evidence, Evidence)> {
+            Ok(if dev.is_cpu() {
+                let (uv, sv) = (u.to_vec2::<f32>()?, s.to_vec2::<f32>()?);
+                (
+                    evidence_host(&uv, &sv, &xv, &rest, &reach, 1.0),
+                    evidence_host(&uv, &sv, &xv, &rest, &reach, -1.0),
+                )
+            } else {
+                (
+                    evidence(u, s, &readout, &rest, &reach, 1.0, dev)?,
+                    evidence(u, s, &readout, &rest, &reach, -1.0, dev)?,
+                )
+            })
+        };
+        let (fwd, bwd) = both(&u, &s)?;
+        // The same reads with no dynamics: every grid time's at the gene's
+        // overall unspliced share. Its `log BF` is the bias of the prior and
+        // the floor on this curve, what the data's is read against.
+        let n = (&u + &s)?;
+        let u0 = n.broadcast_mul(&unspliced_share)?;
+        let s0 = (&n - &u0)?;
+        let (fwd0, bwd0) = both(&u0, &s0)?;
+        let mut total = 0f64;
+        for j in 0..g {
+            let v = (fwd.log_e[j] - bwd.log_e[j]) - (fwd0.log_e[j] - bwd0.log_e[j]);
+            out.genes[j] += v * share;
+            total += v;
+            out.forward.0[j] += fwd.log_beta[j] * share;
+            out.forward.1[j] += fwd.log_gamma[j] * share;
+            out.reversed.0[j] += bwd.log_beta[j] * share;
+            out.reversed.1[j] += bwd.log_gamma[j] * share;
+        }
+        out.lbf.push(total);
+    }
+    Ok(out)
+}
+
+/// Lineage `lin`'s splicing evidence read out ([`bayes`]) on its finest
+/// pseudobulks `x`; its direction is its tree's, so nothing is turned here.
+/// Returns the report and every gene's posterior mean `log β`, `log γ`
+/// (`[1 × G]`) as it runs.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn orient(
+    energy: &Energy,
+    spline: &Spline,
+    x: &[f32],
+    f: usize,
+    lin: usize,
+    cfg: &TrainConfig,
+    dev: &Device,
+    rng: &mut StdRng,
+) -> anyhow::Result<(Direction, (Tensor, Tensor))> {
+    let g = f / 2;
+    let t = energy.steady_tables(spline)?;
+    let b = bayes(energy, spline, &t, x, f, lin, cfg, dev, rng)?;
+    let row =
+        |v: &[f64]| Tensor::from_vec(v.iter().map(|&x| x as f32).collect::<Vec<_>>(), (1, g), dev);
+    let rates = (row(&b.forward.0)?, row(&b.forward.1)?);
+    let d = Direction {
+        lineage: lin,
+        cells: 0.0,
+        log_bf: b.log_bf(),
+        log_bf_sd: b.log_bf_sd(),
+        p_forward: b.p_forward(),
+        log_abf: b.log_abf,
+        determined: false,
+        gene_votes: b.genes.iter().map(|&v| v as f32).collect(),
+        gene_z: b.z.iter().map(|&v| v as f32).collect(),
+    };
+    Ok((d, rates))
+}
+
+/// Every gene's log evidence for one orientation, with its rates' posterior
+/// means.
+struct Evidence {
+    log_e: Vec<f64>,
+    log_beta: Vec<f64>,
+    log_gamma: Vec<f64>,
+}
+
+/// The grid evidence (module docs) of `u`, `s` (`[K × G]` pooled reads) for
+/// the velocity `sign · readout`, every gene's grid placed by `rest` (its
+/// log `U/S`) and `reach` (its log largest `|x|`). Genes go in blocks.
+fn evidence(
+    u: &Tensor,
+    s: &Tensor,
+    readout: &Tensor,
+    rest: &[f32],
+    reach: &[f32],
+    sign: f64,
+    dev: &Device,
+) -> Result<Evidence> {
+    let (k, g) = u.dims2()?;
+    let r_off = linspace(R_SPAN.0, R_SPAN.1, R_SPAN.2);
+    let g_off = linspace(GAMMA_SPAN.0.ln(), GAMMA_SPAN.1.ln(), GAMMA_SPAN.2);
+    let k_log = linspace(KAPPA_SPAN.0.ln(), KAPPA_SPAN.1.ln(), KAPPA_SPAN.2);
+    let n_grid = r_off.len() * g_off.len() * k_log.len();
+    let (mut ro, mut go, mut ko) = (vec![], vec![], vec![]);
+    for &a in &r_off {
+        for &b in &g_off {
+            for &c in &k_log {
+                ro.push(a as f32);
+                go.push(b as f32);
+                ko.push(c as f32);
+            }
+        }
+    }
+    let col = |v: &[f32]| Tensor::from_slice(v, (n_grid, 1, 1), dev);
+    let (ro, go, lk) = (col(&ro)?, col(&go)?, col(&ko)?);
+    let kappa = lk.exp()?;
+    let block = (BLOCK_ELEMS / (n_grid * k)).max(1);
+    let mut out = Evidence {
+        log_e: Vec::with_capacity(g),
+        log_beta: Vec::with_capacity(g),
+        log_gamma: Vec::with_capacity(g),
+    };
+    for start in (0..g).step_by(block) {
+        let w = block.min(g - start);
+        let shape = (n_grid, k, w);
+        let pick = |t: &Tensor| -> Result<Tensor> { t.narrow(1, start, w)?.unsqueeze(0) };
+        let (ub, sb) = (pick(u)?, pick(s)?);
+        let xb = (pick(readout)? * sign)?;
+        let at = |v: &[f32]| Tensor::from_slice(&v[start..start + w], (1, 1, w), dev);
+        let lr = ro.broadcast_add(&at(rest)?)?; // [N × 1 × w] log γ/β
+        let lg = go.broadcast_add(&at(reach)?)?; // [N × 1 × w] log γ
+        let gamma = lg.exp()?;
+        let floor = (&gamma * SOFT)?;
+        let m = xb.broadcast_add(&gamma)?;
+        let m_plus = softplus(&m.broadcast_div(&floor)?)?.broadcast_mul(&floor)?;
+        // η = log m⁺ − log β, log β = log γ − log γ/β.
+        let eta = m_plus.log()?.broadcast_sub(&(&lg - &lr)?)?;
+        let mu =
+            legume_numeric::candle::candle_nn::ops::sigmoid(&eta)?.clamp(1e-6f32, 1.0 - 1e-6)?;
+        let a = mu.broadcast_mul(&kappa)?;
+        let b = (mu.affine(-1.0, 1.0)?).broadcast_mul(&kappa)?;
+        let (uf, sf) = (ub.broadcast_as(shape)?, sb.broadcast_as(shape)?);
+        let ll = (ln_beta(&(&uf + &a)?, &(&sf + &b)?)? - ln_beta(&a, &b)?)?.sum(1)?; // [N × w]
+        let top = ll.max_keepdim(0)?;
+        let z = ll.broadcast_sub(&top)?.exp()?;
+        let total = z.sum_keepdim(0)?;
+        let log_e = ((total.log()? + &top)? - (n_grid as f64).ln())?;
+        let weight = z.broadcast_div(&total)?; // [N × w]
+        let lg2 = lg.squeeze(1)?.broadcast_as((n_grid, w))?;
+        let lb2 = (&lg - &lr)?.squeeze(1)?.broadcast_as((n_grid, w))?;
+        let mean_g = (&weight * &lg2)?.sum(0)?;
+        let mean_b = (&weight * &lb2)?.sum(0)?;
+        out.log_e.extend(
+            log_e
+                .squeeze(0)?
+                .to_vec1::<f32>()?
+                .into_iter()
+                .map(f64::from),
+        );
+        out.log_gamma
+            .extend(mean_g.to_vec1::<f32>()?.into_iter().map(f64::from));
+        out.log_beta
+            .extend(mean_b.to_vec1::<f32>()?.into_iter().map(f64::from));
+    }
+    Ok(out)
+}
+
+/// [`evidence`] on the host: every gene on its own thread, in f64 with exact
+/// log-gammas. `u`, `s`, `x` are `[K][G]`.
+fn evidence_host(
+    u: &[Vec<f32>],
+    s: &[Vec<f32>],
+    x: &[Vec<f32>],
+    rest: &[f32],
+    reach: &[f32],
+    sign: f64,
+) -> Evidence {
+    let lgam = |z: f64| special::Gamma::ln_gamma(z).0;
+    let k = u.len();
+    let g = rest.len();
+    let r_off = linspace(R_SPAN.0, R_SPAN.1, R_SPAN.2);
+    let g_off = linspace(GAMMA_SPAN.0.ln(), GAMMA_SPAN.1.ln(), GAMMA_SPAN.2);
+    let k_log = linspace(KAPPA_SPAN.0.ln(), KAPPA_SPAN.1.ln(), KAPPA_SPAN.2);
+    let n_grid = r_off.len() * g_off.len() * k_log.len();
+    let per_gene: Vec<(f64, f64, f64)> = (0..g)
+        .into_par_iter()
+        .map(|j| {
+            let uj: Vec<f64> = (0..k).map(|kk| f64::from(u[kk][j])).collect();
+            let sj: Vec<f64> = (0..k).map(|kk| f64::from(s[kk][j])).collect();
+            let xj: Vec<f64> = (0..k).map(|kk| sign * f64::from(x[kk][j])).collect();
+            // ln Γ(κ) − ln Γ(n + κ) for every κ and time: no rate in it.
+            let by_kappa: Vec<f64> = k_log
+                .iter()
+                .map(|&lk| {
+                    let kappa = lk.exp();
+                    (0..k)
+                        .map(|kk| lgam(kappa) - lgam(uj[kk] + sj[kk] + kappa))
+                        .sum()
+                })
+                .collect();
+            let mut ll = Vec::with_capacity(n_grid);
+            let mut at = Vec::with_capacity(n_grid);
+            for &ro in &r_off {
+                let lr = f64::from(rest[j]) + ro;
+                for &go in &g_off {
+                    let lg = f64::from(reach[j]) + go;
+                    let gamma = lg.exp();
+                    let floor = SOFT * gamma;
+                    let mu: Vec<f64> = xj
+                        .iter()
+                        .map(|&xv| {
+                            let z = (gamma + xv) / floor;
+                            let sp = if z > 30.0 { z } else { z.exp().ln_1p() };
+                            let eta = (floor * sp).ln() - (lg - lr);
+                            (1.0 / (1.0 + (-eta).exp())).clamp(1e-6, 1.0 - 1e-6)
+                        })
+                        .collect();
+                    for (ik, &lk) in k_log.iter().enumerate() {
+                        let kappa = lk.exp();
+                        let mut v = by_kappa[ik];
+                        for kk in 0..k {
+                            let (a, b) = (mu[kk] * kappa, (1.0 - mu[kk]) * kappa);
+                            v += lgam(uj[kk] + a) + lgam(sj[kk] + b) - lgam(a) - lgam(b);
+                        }
+                        ll.push(v);
+                        at.push((lg, lg - lr));
+                    }
+                }
+            }
+            let top = ll.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let w: Vec<f64> = ll.iter().map(|v| (v - top).exp()).collect();
+            let total: f64 = w.iter().sum();
+            let log_e = top + total.ln() - (n_grid as f64).ln();
+            let mg = w.iter().zip(&at).map(|(w, a)| w * a.0).sum::<f64>() / total;
+            let mb = w.iter().zip(&at).map(|(w, a)| w * a.1).sum::<f64>() / total;
+            (log_e, mb, mg)
+        })
+        .collect();
+    Evidence {
+        log_e: per_gene.iter().map(|v| v.0).collect(),
+        log_beta: per_gene.iter().map(|v| v.1).collect(),
+        log_gamma: per_gene.iter().map(|v| v.2).collect(),
+    }
+}
+
+/// Wakefield's sign check for one gene: a quasi-binomial logistic fit of the
+/// unspliced share `u/n` on the velocity `x` (standardised) over the grid
+/// times; its slope's `z`, and `log Φ(z′) − log Φ(−z′)` with
+/// `z′ = θ̂ √(W / (V (V + W)))`, `V` the slope's variance inflated by the
+/// Pearson dispersion. `(0, 0)` when the gene has too little to fit.
+fn wakefield(u: &[f64], n: &[f64], x: &[f64]) -> (f64, f64) {
+    let k = x.len() as f64;
+    let mx = x.iter().sum::<f64>() / k;
+    let sx = (x.iter().map(|v| (v - mx).powi(2)).sum::<f64>() / k).sqrt();
+    let total: f64 = n.iter().sum();
+    if sx < 1e-9 || total < 1.0 || x.len() < 3 {
+        return (0.0, 0.0);
+    }
+    let xs: Vec<f64> = x.iter().map(|v| (v - mx) / sx).collect();
+    let share = (u.iter().sum::<f64>() + 0.5) / (total + 1.0);
+    let (mut a, mut b) = ((share / (1.0 - share)).ln(), 0.0);
+    let mut info = [0.0; 3];
+    for _ in 0..25 {
+        let (mut g0, mut g1) = (0.0, 0.0);
+        info = [0.0; 3];
+        for i in 0..xs.len() {
+            let mu = 1.0 / (1.0 + (-(a + b * xs[i])).exp());
+            let w = n[i] * mu * (1.0 - mu);
+            let r = u[i] - n[i] * mu;
+            g0 += r;
+            g1 += r * xs[i];
+            info[0] += w;
+            info[1] += w * xs[i];
+            info[2] += w * xs[i] * xs[i];
+        }
+        let det = info[0] * info[2] - info[1] * info[1];
+        if det <= 1e-12 {
+            return (0.0, 0.0);
+        }
+        let (da, db) = (
+            (info[2] * g0 - info[1] * g1) / det,
+            (info[0] * g1 - info[1] * g0) / det,
+        );
+        a += da;
+        b += db;
+        if da.abs() + db.abs() < 1e-8 {
+            break;
+        }
+    }
+    let det = info[0] * info[2] - info[1] * info[1];
+    let mut pearson = 0.0;
+    for i in 0..xs.len() {
+        let mu = 1.0 / (1.0 + (-(a + b * xs[i])).exp());
+        let var = n[i] * mu * (1.0 - mu);
+        if var > 1e-12 {
+            pearson += (u[i] - n[i] * mu).powi(2) / var;
+        }
+    }
+    let dispersion = (pearson / (k - 2.0)).max(1.0);
+    let v = info[0] / det * dispersion;
+    if !(v.is_finite() && v > 0.0) {
+        return (0.0, 0.0);
+    }
+    let z = b / v.sqrt();
+    let zp = b * (ABF_W / (v * (v + ABF_W))).sqrt();
+    (z, ln_phi(zp) - ln_phi(-zp))
+}
+
+/// `log Φ(z)`, the standard normal's log cdf, stable in both tails.
+fn ln_phi(z: f64) -> f64 {
+    if z > -5.0 {
+        (0.5 * special::Error::compl_error(-z / std::f64::consts::SQRT_2)).ln()
+    } else {
+        // Mills' ratio: Φ(z) ≈ φ(z)/|z| (1 − 1/z² + 3/z⁴).
+        let z2 = z * z;
+        -0.5 * z2 - (-z).ln() - 0.5 * (2.0 * std::f64::consts::PI).ln()
+            + (1.0 - 1.0 / z2 + 3.0 / (z2 * z2)).ln()
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/direction.rs"]
+mod tests;

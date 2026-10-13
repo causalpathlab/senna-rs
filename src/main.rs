@@ -76,6 +76,7 @@ mod run;
 mod seed_replay_tests;
 mod simba;
 mod svd;
+mod td_rbm;
 mod topic;
 #[cfg(feature = "view")]
 mod tui;
@@ -105,6 +106,8 @@ use resolve_topics::{resolve_topics, ResolveTopicsArgs};
 use senna::embed_common::*;
 use simba::{fit_simba, SimbaArgs};
 use svd::*;
+use td_rbm::args::TdRbmArgs;
+use td_rbm::run::run_td_rbm;
 use topic::cmd::*;
 use update::{run_update, UpdateArgs};
 use vae::*;
@@ -483,6 +486,23 @@ enum Commands {
                       other types are ignored there."
     )]
     Fne(FneArgs),
+
+    #[command(
+        name = "td-rbm",
+        about = "Every cell's lineage, time, state and velocity: an RBM on two-track counts",
+        long_about = "A restricted Boltzmann machine on a two-track count backend: the\n\
+                      visible units are a cell's reads over (gene, track), the hidden units\n\
+                      a (lineage, time) unit on a grid and Gaussian state units. Every\n\
+                      lineage's trajectory in the genes' embedding sets which gene; its\n\
+                      velocity sets the unspliced share by the splicing half of the ODE.\n\
+                      Lineages are found by a Dirichlet process over the pseudobulks;\n\
+                      every lineage's direction is called from its splicing alone, against\n\
+                      a null with no dynamics, and left as started when the data do not\n\
+                      decide it. Writes {out}.cell_time.parquet, cell_state, cell_velocity,\n\
+                      direction.tsv, gene_direction, gene_rates, feature_embedding,\n\
+                      gene_states and curve tables."
+    )]
+    TdRbm(TdRbmArgs),
 
     #[command(
         name = "resolve-embedding-space",
@@ -918,6 +938,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Fne(args) => {
             fit_fne(args)?;
+        }
+        Commands::TdRbm(args) => {
+            run_td_rbm(args)?;
         }
         Commands::ResolveEmbeddingSpace(args) => {
             resolve_embedding_space(args)?;
