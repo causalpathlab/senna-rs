@@ -228,9 +228,10 @@ pub fn arrows(points: &Points, moved: &[[f32; 2]], vp: &Viewport) -> Vec<Arrow> 
 }
 
 /// Every arrow drawn: a shaft and a two-stroke head, stroked wide enough to
-/// read at the frame's size (a few offset lines).
-pub fn draw(frame: &mut Frame, arrows: &[Arrow], ink: Rgb) {
-    let width = (frame.w.max(frame.h) as f32 / 450.0).max(1.0);
+/// read at the frame's size (a few offset lines), and at least `floor`
+/// pixels (a frame shown in coarser pixels than it is drawn in).
+pub fn draw(frame: &mut Frame, arrows: &[Arrow], ink: Rgb, floor: f32) {
+    let width = (frame.w.max(frame.h) as f32 / 450.0).max(floor);
     let offsets: Vec<f32> = {
         let n = width.ceil() as i32;
         (-n..=n)
@@ -446,9 +447,10 @@ pub fn streamlines(
     lines
 }
 
-/// Every streamline drawn, with an arrowhead halfway along it.
-pub fn draw_lines(frame: &mut Frame, lines: &[Vec<(f32, f32)>], ink: Rgb) {
-    let width = (frame.w.max(frame.h) as f32 / 700.0).max(1.0);
+/// Every streamline drawn, with an arrowhead halfway along it, at least
+/// `floor` pixels wide (see [`draw`]).
+pub fn draw_lines(frame: &mut Frame, lines: &[Vec<(f32, f32)>], ink: Rgb, floor: f32) {
+    let width = (frame.w.max(frame.h) as f32 / 700.0).max(floor);
     for line in lines {
         for pair in line.windows(2) {
             stroke(frame, pair[0], pair[1], width, ink, 0.75);

@@ -79,3 +79,32 @@ fn a_field_along_x_streams_along_x() {
         .fold((f32::MAX, f32::MIN), |(a, b), &y| (a.min(y), b.max(y)));
     assert!(hi - lo > 200.0, "lines span {lo}..{hi}");
 }
+
+/// Half blocks show every ten frame pixels as one: a streamline stroked at
+/// the frame's own width averages away there, one stroked at least a screen
+/// pixel wide still shows.
+#[test]
+fn streamlines_survive_a_screen_coarser_than_the_frame() {
+    let line = vec![(20.0, 200.0), (200.0, 200.0), (380.0, 200.0)];
+    let darkest = |floor: f32| {
+        let mut frame = Frame::blank(400, 400);
+        let bg = frame.to_image().get_pixel(0, 0)[0];
+        draw_lines(
+            &mut frame,
+            std::slice::from_ref(&line),
+            [0.0, 0.0, 0.0],
+            floor,
+        );
+        let small = image::imageops::resize(
+            &frame.to_image(),
+            40,
+            40,
+            image::imageops::FilterType::Triangle,
+        );
+        let low = small.pixels().map(|p| p[0]).min().unwrap_or(bg);
+        i32::from(bg) - i32::from(low)
+    };
+    let (thin, floored) = (darkest(1.0), darkest(10.0));
+    assert!(floored > 3 * thin.max(1), "thin {thin}, floored {floored}");
+    assert!(floored > 60, "floored {floored}");
+}

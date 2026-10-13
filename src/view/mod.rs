@@ -337,6 +337,9 @@ pub(crate) struct Scene {
     pub missing_data: Option<(usize, String)>,
     /// Whether how the extra data file matched is still to be said.
     extra_pending: bool,
+    /// The thinnest line drawn on the map, in frame pixels: one pixel of
+    /// the screen when it shows the frame in coarser pixels (half blocks).
+    pub(crate) stroke_floor: f32,
     /// A run's velocity field (read on the first `v`), whether it is drawn,
     /// and every point's displacement on the last map it was drawn on.
     velocity: Option<std::sync::Arc<velocity::Field>>,
@@ -387,6 +390,7 @@ impl Scene {
             note: None,
             missing_data: None,
             extra_pending: false,
+            stroke_floor: 1.0,
             velocity: None,
             velocity_style: None,
             stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
@@ -497,6 +501,7 @@ impl Scene {
             note: None,
             missing_data: None,
             extra_pending: self.extra_pending,
+            stroke_floor: self.stroke_floor,
             velocity: self.velocity.clone(),
             velocity_style: self.velocity_style,
             stream_lanes: self.stream_lanes,
@@ -862,6 +867,16 @@ mod tests {
         // The suggestion was asked again and got the model's answer.
         assert_eq!(s.note.take().as_deref(), Some("no model here"));
         assert!(s.loading_line().is_none());
+    }
+
+    #[test]
+    fn the_colour_setting_says_time_while_the_map_shows_it() {
+        let mut s = scene();
+        let grouping = s.colour_said();
+        s.pick = Some(Pick::Time);
+        assert_eq!(s.colour_said(), "time");
+        s.pick = None;
+        assert_eq!(s.colour_said(), grouping);
     }
 
     #[test]

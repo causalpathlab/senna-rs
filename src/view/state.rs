@@ -421,6 +421,9 @@ impl Scene {
 
     /// What the map is coloured by, as said.
     pub fn colour_said(&self) -> &'static str {
+        if self.pick == Some(Pick::Time) {
+            return "time";
+        }
         self.colour
             .map_or("groups", |c| self.data.labels[c].kind.title())
     }

@@ -216,8 +216,13 @@ struct App {
 }
 
 impl App {
-    fn new(scene: Scene, picker: Picker, from: std::path::PathBuf, lupin: String) -> Self {
+    fn new(mut scene: Scene, picker: Picker, from: std::path::PathBuf, lupin: String) -> Self {
         let f = picker.font_size();
+        // Half blocks show a cell's frame pixels as one pixel across: a
+        // thinner line averages away.
+        if picker.protocol_type() == ProtocolType::Halfblocks {
+            scene.stroke_floor = f32::from(f.width.max(1));
+        }
         // Opened on an older round: say where the newest work is.
         let newer = scene
             .data

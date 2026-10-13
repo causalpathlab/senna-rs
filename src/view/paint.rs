@@ -436,11 +436,11 @@ impl Scene {
         match style {
             super::VelocityStyle::Stream => {
                 let lines = super::velocity::streamlines(points, &moved, vp, self.stream_lanes);
-                super::velocity::draw_lines(frame, &lines, ink);
+                super::velocity::draw_lines(frame, &lines, ink, self.stroke_floor);
             }
             super::VelocityStyle::Arrows => {
                 let arrows = super::velocity::arrows(points, &moved, vp);
-                super::velocity::draw(frame, &arrows, ink);
+                super::velocity::draw(frame, &arrows, ink, self.stroke_floor);
             }
         }
     }
