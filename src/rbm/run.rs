@@ -36,8 +36,23 @@ pub struct RbmModel {
 pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     anyhow::ensure!(
-        args.n_latent > 0 && args.chains != Some(0) && args.minibatch_size > 0,
-        "--n-latent, --chains and --minibatch-size must be positive"
+        args.n_latent > 0
+            && args.chains != Some(0)
+            && args.minibatch_size > 0
+            && args.block_size > 0,
+        "--n-latent, --chains, --minibatch-size and --block-size must be positive"
+    );
+    anyhow::ensure!(
+        args.trials > 0 && args.max_count > 0,
+        "--trials and --max-count must be positive"
+    );
+    anyhow::ensure!(
+        args.sparsity_cost <= 0.0 || (args.sparsity_target > 0.0 && args.sparsity_target < 1.0),
+        "--sparsity-target must lie strictly between 0 and 1"
+    );
+    anyhow::ensure!(
+        (0.0..0.5).contains(&args.holdout),
+        "--holdout is a share of the finest pseudobulks, in [0, 0.5)"
     );
 
     let inherited = args
@@ -46,10 +61,16 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         .map(senna::run_manifest::inherit_from)
         .transpose()?;
     senna::run_manifest::InheritedFromManifest::ensure_replayable(inherited.as_ref(), "rbm")?;
-    let data_files = senna::run_manifest::InheritedFromManifest::resolve_data(
-        inherited.as_ref(),
-        &args.data_files,
-    )?;
+    // `--multiome` names the files itself; otherwise they come positionally
+    // or from `--from`.
+    let data_files = if args.multiome.is_empty() {
+        senna::run_manifest::InheritedFromManifest::resolve_data(
+            inherited.as_ref(),
+            &args.data_files,
+        )?
+    } else {
+        args.data_files.clone()
+    };
     let batch_files = senna::run_manifest::InheritedFromManifest::resolve_batch(
         inherited.as_ref(),
         args.batch_files.as_deref(),
@@ -116,12 +137,16 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         want_hierarchy: true,
         prebuilt_partition,
         cnv_clones: args.collapse.cnv_clones.as_deref(),
-        per_file_feature_suffix: plan.as_ref().map(|p| p.modality.clone()),
-        per_file_barcode_suffix: plan.as_ref().and_then(ge::MultiomePlan::barcode_suffix),
+        multiome: plan
+            .as_ref()
+            .map(|p| crate::topic::common::MultiomeSuffixes {
+                feature: p.modality.clone(),
+                barcode: p.barcode_suffix(),
+            }),
     })?;
 
     let row_names = data_vec.row_names()?;
-    let blocks = Blocks::from_names(&row_names);
+    let blocks = Blocks::from_names(&row_names, is_multiome);
     anyhow::ensure!(
         !is_multiome || blocks.len() > 1,
         "the inputs load as a multiome layout, but their features do not split into \
@@ -152,7 +177,9 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
             feature_names.clone(),
         )
     };
-    let preset_kind = if is_multiome && !args.tie_symbols {
+    // Multiome rows mix gene and locus names, tied or not: match a given
+    // table by the same rule the load used.
+    let preset_kind = if is_multiome {
         ge::FeatureNameKind::Mixed
     } else {
         args.feature_name_kind.resolve_or_gene()
@@ -209,9 +236,11 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
             d.to_vec()
         }
     };
+    // Whole reads: pseudobulk draws and chains carry round(D) reads, and the
+    // centring's bias compensation is exact only at s = D / N = 1.
     anyhow::ensure!(
-        depth.iter().all(|&d| d >= 1.0),
-        "--depth must be at least 1"
+        depth.iter().all(|&d| d >= 1.0 && d.fract() == 0.0),
+        "--depth must be a whole number of reads, at least 1"
     );
     info!("rbm: training depth per block {depth:?}");
 
@@ -531,7 +560,7 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),
-        has_model: false,
+        has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: None,
         pb_reference_suffix: None,

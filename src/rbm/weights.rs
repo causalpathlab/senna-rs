@@ -253,9 +253,32 @@ impl Weights {
                 }
                 count[ri] += 1.0;
             }
+            // Rows a given table leaves out start at its rows' typical length,
+            // so the table does not set α's scale with the new rows near zero.
+            let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let mean_norm = |rows: &mut dyn Iterator<Item = f32>| {
+                let (s, n) = rows.fold((0f32, 0f32), |(s, n), x| (s + x, n + 1.0));
+                (n > 0.0).then(|| s / n)
+            };
+            for ri in 0..r {
+                if count[ri] > 0.0 {
+                    fresh[ri].iter_mut().for_each(|v| *v /= count[ri]);
+                }
+            }
+            let given_len =
+                mean_norm(&mut (0..r).filter(|&ri| mask[ri] > 0.0).map(|ri| norm(&rho[ri])));
+            let fresh_len = mean_norm(
+                &mut (0..r)
+                    .filter(|&ri| mask[ri] == 0.0 && count[ri] > 0.0)
+                    .map(|ri| norm(&fresh[ri])),
+            );
+            let lift = match (given_len, fresh_len) {
+                (Some(g), Some(f)) if f > 0.0 => g / f,
+                _ => 1.0,
+            };
             for ri in 0..r {
                 if mask[ri] == 0.0 && count[ri] > 0.0 {
-                    rho[ri] = fresh[ri].iter().map(|v| v / count[ri]).collect();
+                    rho[ri] = fresh[ri].iter().map(|v| v * lift).collect();
                 }
             }
             match self.modules.as_ref() {

@@ -22,11 +22,15 @@ pub struct Blocks {
 }
 
 impl Blocks {
-    /// Blocks read off the data's row names. Rows split into blocks only when
-    /// every row has exactly one `/` (the multiome grammar); otherwise the
-    /// whole axis is one block.
-    pub fn from_names(rows: &[Box<str>]) -> Self {
-        let modalities = senna::multiome_layout::trained_modalities(rows);
+    /// Blocks read off the data's row names. Under a multiome layout rows
+    /// split into blocks by their `{name}/{modality}` suffix; otherwise the
+    /// whole axis is one block, whatever its names look like.
+    pub fn from_names(rows: &[Box<str>], multiome: bool) -> Self {
+        let modalities = if multiome {
+            senna::multiome_layout::trained_modalities(rows)
+        } else {
+            Vec::new()
+        };
         let block_of = |r: &str| -> usize {
             r.rsplit_once('/')
                 .and_then(|(_, m)| modalities.iter().position(|x| x.as_ref() == m))
@@ -91,3 +95,7 @@ impl Blocks {
         self.perm.iter().map(|&i| rows[i].clone()).collect()
     }
 }
+
+#[cfg(test)]
+#[path = "tests/blocks.rs"]
+mod tests;

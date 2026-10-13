@@ -337,15 +337,16 @@ pub fn fit(
                 let batch = all.index_select(&Tensor::from_slice(chunk, chunk.len(), dev)?, 0)?;
                 let m = machine(weights.w(&blocks.ranges)?, &lambda);
                 let fantasy = chains.reads().clone();
-                let mut loss = (m.free_energy_per_read(&batch)?.mean_all()?
-                    - m.free_energy_per_read(&fantasy)?.mean_all()?)?;
+                let (free_batch, mean_batch) = m.free_energy_and_mean(&batch)?;
+                let mut loss =
+                    (free_batch.mean_all()? - m.free_energy_per_read(&fantasy)?.mean_all()?)?;
                 gap = (gap + loss.detach())?;
                 loss = (loss
                     + weights.penalty(cfg.embedding_l2, cfg.module_balance, cfg.module_ridge)?)?;
                 if let (Some(scale), true) = (unit_scale, cfg.sparsity_cost > 0.0) {
                     // Cross-entropy of the target against the running estimate,
                     // the current minibatch's share live (Hinton's recipe).
-                    let now = (m.posterior_mean(&batch)?.mean_keepdim(0)? / scale)?;
+                    let now = (mean_batch.mean_keepdim(0)? / scale)?;
                     let est = ((q.detach() * SPARSITY_DECAY)? + (now * (1.0 - SPARSITY_DECAY))?)?
                         .clamp(1e-6, 1.0 - 1e-6)?;
                     let p = cfg.sparsity_target;

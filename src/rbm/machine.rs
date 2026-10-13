@@ -172,14 +172,26 @@ impl Machine {
         (h.broadcast_sub(&self.lambda)?.matmul(&self.w.t()?)? * s)?.broadcast_add(&self.b)
     }
 
-    /// Every row's free energy per read, reconstruction per read and
-    /// `E[h | v]`, from one pass over the reads.
-    pub fn score(&self, x: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+    /// Every row's free energy per read and `E[h | v]` from one pass over
+    /// the reads (differentiable), with the row scales `s`.
+    fn free_and_mean(&self, x: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
         let s = self.scale(x)?;
         let r = self.reach(x, &s)?;
         let h = self.hidden.mean(&r.broadcast_add(&self.c)?)?;
         let reads = x.sum(D::Minus1)?.maximum(1.0)?;
-        let free = (self.free_energy_at(x, &r)? / &reads)?;
+        Ok(((self.free_energy_at(x, &r)? / reads)?, h, s))
+    }
+
+    /// Every row's free energy per read and `E[h | v]`, from one pass.
+    pub fn free_energy_and_mean(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (free, h, _) = self.free_and_mean(x)?;
+        Ok((free, h))
+    }
+
+    /// Every row's free energy per read, reconstruction per read and
+    /// `E[h | v]`, from one pass over the reads.
+    pub fn score(&self, x: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        let (free, h, s) = self.free_and_mean(x)?;
         Ok((free, self.reconstruction_at(x, &s, &h)?, h))
     }
 

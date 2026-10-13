@@ -542,11 +542,17 @@ pub struct LoadProjectArgs<'a> {
     /// `1:1000-2000`, etc. `LocusOverlap` additionally merges overlapping
     /// intervals on the same chromosome into one cluster.
     pub feature_kind: Option<data_beans::aux::feature_names::FeatureNameKind>,
-    /// Per-file feature and barcode suffixes of a multiome load (see
-    /// `ge::MultiomePlan`): features become `{name}/{modality}`; `None` for a
-    /// plain load.
-    pub per_file_feature_suffix: Option<Vec<Box<str>>>,
-    pub per_file_barcode_suffix: Option<Vec<Option<Box<str>>>>,
+    /// The suffixes of a multiome load; `None` for a plain one.
+    pub multiome: Option<MultiomeSuffixes>,
+}
+
+/// Per-file suffixes of a multiome load (see `ge::MultiomePlan`): every
+/// file's features become `{name}/{modality}`, and its barcodes may carry a
+/// sample tag so one cell's modalities line up.
+#[derive(Clone)]
+pub struct MultiomeSuffixes {
+    pub feature: Vec<Box<str>>,
+    pub barcode: Option<Vec<Option<Box<str>>>>,
 }
 
 /// Callback that, given the loaded data's row names, returns a boolean
@@ -597,8 +603,8 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         }),
         qc_block_size: args.qc_block_size,
         qc_report_out: args.qc_report_out.map(Box::<str>::from),
-        per_file_feature_suffix: args.per_file_feature_suffix.clone(),
-        per_file_barcode_suffix: args.per_file_barcode_suffix.clone(),
+        per_file_feature_suffix: args.multiome.as_ref().map(|m| m.feature.clone()),
+        per_file_barcode_suffix: args.multiome.as_ref().and_then(|m| m.barcode.clone()),
         keep_empty_barcodes: false,
     })?;
     if args.ignore_batch {
@@ -769,11 +775,8 @@ pub struct LoadCollapseArgs<'a> {
     /// `MultilevelParams.strata`: same-stratum BBKNN + unmatched-δ guard).
     /// Incompatible with `prebuilt_partition`.
     pub cnv_clones: Option<&'a str>,
-    /// Per-file feature and barcode suffixes of a multiome load (see
-    /// `ge::MultiomePlan`): features become `{name}/{modality}`; `None` for a
-    /// plain load.
-    pub per_file_feature_suffix: Option<Vec<Box<str>>>,
-    pub per_file_barcode_suffix: Option<Vec<Option<Box<str>>>>,
+    /// The suffixes of a multiome load; `None` for a plain one.
+    pub multiome: Option<MultiomeSuffixes>,
 }
 
 /// Read `{out}.clones.parquet` and align to `data_vec` column names.
@@ -825,8 +828,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         row_alignment: args.row_alignment,
         column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
-        per_file_feature_suffix: args.per_file_feature_suffix.clone(),
-        per_file_barcode_suffix: args.per_file_barcode_suffix.clone(),
+        multiome: args.multiome.clone(),
     })?;
 
     info!("Multi-level collapsing with pb-samples ...");

@@ -396,8 +396,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         want_hierarchy: true,
         prebuilt_partition,
         cnv_clones: args.collapse.cnv_clones.as_deref(),
-        per_file_feature_suffix: None,
-        per_file_barcode_suffix: None,
+        multiome: None,
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

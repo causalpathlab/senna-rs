@@ -227,7 +227,7 @@ pub struct RbmArgs {
     #[arg(
         long,
         value_enum,
-        default_value = "cuda",
+        default_value = "cpu",
         help = "Compute device (cpu|cuda|metal)"
     )]
     pub(crate) device: ComputeDevice,

@@ -18,7 +18,7 @@ struct Sim {
 }
 
 fn sim(names: &[Box<str>], cells_per_type: usize, seed: u64) -> Sim {
-    let blocks = Blocks::from_names(names);
+    let blocks = Blocks::from_names(names, names.iter().any(|n| n.contains('/')));
     let f = blocks.features();
     let mut rng = StdRng::seed_from_u64(seed);
     let gamma = Gamma::new(0.3, 1.0).unwrap();
