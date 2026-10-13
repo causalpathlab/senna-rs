@@ -30,12 +30,9 @@ fn draw(w: &[f64], rng: &mut StdRng) -> usize {
 /// The rows' summed log-likelihood under their assigned lineages, `[]`,
 /// with the graph: `ll` `[N × L]`, `assigned` `[N]`.
 fn assigned_log_likelihood(ll: &Tensor, assigned: &[usize]) -> Result<Tensor> {
-    let (n, l) = ll.dims2()?;
-    let mut mask = vec![0f32; n * l];
-    for (r, &a) in assigned.iter().enumerate() {
-        mask[r * l + a] = 1.0;
-    }
-    (ll * Tensor::from_vec(mask, (n, l), ll.device())?)?.sum_all()
+    let ids: Vec<u32> = assigned.iter().map(|&a| a as u32).collect();
+    let ids = Tensor::from_vec(ids, (assigned.len(), 1), ll.device())?;
+    ll.gather(&ids, 1)?.sum_all()
 }
 
 /// The lineage-and-time loop shared by the steady and the moving phases.

@@ -18,7 +18,6 @@ fn tables() -> Tables {
         psi: legume_numeric::candle::candle_nn::ops::log_softmax(&raw, 1).unwrap(),
         bias: m(&[0.0; K], (1, K)),
         w: m(&[1.5, -2.0, -1.0, 0.5], (F, 1)),
-        load: m(&[0.0], (1, 1)),
         curve: m(&[0.0; K], (K, 1)),
         velocity: m(&[0.0; K], (K, 1)),
         size: m(&[0.0; K], (K, 1)),

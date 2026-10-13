@@ -12,8 +12,9 @@
 
 use super::direction::{bayes, P_CALL};
 use super::exact::Phase;
-use crate::td_rbm::start::{row_states, start_along, STATE_DIMS};
+use crate::td_rbm::start::{softmax, start_along, Start};
 use crate::td_rbm::tree::{edge_evidence, root_scores, Forest, Path};
+use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 
 /// A tree's root.
@@ -35,13 +36,6 @@ pub struct RootCall {
     /// summed `log BF` for running parent → child, and the genes for it and
     /// against it.
     pub edges: Vec<(usize, usize, f64, usize, usize)>,
-}
-
-fn softmax(v: &[f64]) -> Vec<f64> {
-    let top = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let w: Vec<f64> = v.iter().map(|x| (x - top).exp()).collect();
-    let z: f64 = w.iter().sum();
-    w.into_iter().map(|x| x / z).collect()
 }
 
 impl Phase<'_> {
@@ -93,7 +87,19 @@ impl Phase<'_> {
                 let l = lineages[0];
                 let x = self.rows_of(forest, l, &forest.trees[t]);
                 let genes = if x.len() >= 2 * f {
-                    bayes(self.energy, self.spline, &steady, &x, f, l, cfg, dev, rng)?.genes
+                    bayes(
+                        self.energy,
+                        self.spline,
+                        &steady,
+                        &x,
+                        f,
+                        l,
+                        false,
+                        cfg,
+                        dev,
+                        rng,
+                    )?
+                    .genes
                 } else {
                     Vec::new()
                 };
@@ -133,8 +139,19 @@ impl Phase<'_> {
                     if x.len() < 2 * f {
                         continue;
                     }
-                    let genes =
-                        bayes(self.energy, self.spline, &steady, &x, f, l, cfg, dev, rng)?.genes;
+                    let genes = bayes(
+                        self.energy,
+                        self.spline,
+                        &steady,
+                        &x,
+                        f,
+                        l,
+                        false,
+                        cfg,
+                        dev,
+                        rng,
+                    )?
+                    .genes;
                     sum.iter_mut().zip(&genes).for_each(|(s, v)| *s += v);
                 }
                 edge_lbf.push(sum);
@@ -176,16 +193,18 @@ impl Phase<'_> {
     }
 
     /// The lineages of the trees `moved` started again along `forest`
-    /// rooted at `roots`: their paths' curves and their finest pseudobulks'
-    /// lineages (every other tree's lineages, already fitted or mirrored,
-    /// are left as they are; a tree's path count does not change with its
-    /// root, so their indices hold); the paths.
+    /// rooted at `roots` (the finest pseudobulks' expression `states`): their
+    /// paths' curves and their finest pseudobulks' lineages (every other
+    /// tree's lineages, already fitted or mirrored, are left as they are; a
+    /// tree's path count does not change with its root, so their indices
+    /// hold); the start along the new roots.
     pub(super) fn rebuild(
         &mut self,
         forest: &Forest,
+        states: &DMatrix<f32>,
         roots: &[usize],
         moved: &[bool],
-    ) -> anyhow::Result<Vec<Path>> {
+    ) -> anyhow::Result<Start> {
         let finest = self.levels.len() - 1;
         let (f, cfg) = (self.f, self.cfg);
         let rho = self.energy.rho().flatten_all()?.to_vec1::<f32>()?;
@@ -195,7 +214,7 @@ impl Phase<'_> {
         let start = start_along(
             x,
             f,
-            &row_states(x, f, STATE_DIMS),
+            states,
             forest,
             roots,
             &rho,
@@ -208,8 +227,11 @@ impl Phase<'_> {
                 self.energy.set_lineage_curve(l, c)?;
             }
         }
+        // Rows of a moved tree, and rows anywhere sitting in one of its
+        // lineages (whose paths and curves are new), start again.
         for (r, &l) in start.lineage.iter().enumerate() {
-            if moved[forest.tree[forest.cluster[r]]] {
+            let now = self.assigned[finest][r];
+            if moved[forest.tree[forest.cluster[r]]] || moved[start.paths[now].tree] {
                 self.assigned[finest][r] = l;
             }
         }
@@ -217,6 +239,6 @@ impl Phase<'_> {
         for (&a, &c) in self.assigned[finest].iter().zip(&self.levels[finest].cells) {
             self.counts[a] += f64::from(c);
         }
-        Ok(start.paths)
+        Ok(start)
     }
 }

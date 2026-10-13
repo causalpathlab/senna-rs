@@ -319,8 +319,7 @@ pub fn edge_evidence(y: &[f64], noise: &[f64]) -> f64 {
             cells.push(ll);
         }
     }
-    let top = cells.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    top + (cells.iter().map(|v| (v - top).exp()).sum::<f64>() / cells.len() as f64).ln()
+    super::start::log_sum_exp(&cells) - (cells.len() as f64).ln()
 }
 
 #[cfg(test)]

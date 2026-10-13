@@ -149,7 +149,11 @@ fn states_never_touch_the_unspliced_share_nor_the_curves_span() {
     for g in 0..G {
         assert_eq!(w[g], w[G + g]);
     }
-    let load = t.load.to_vec2::<f32>().unwrap();
+    let coef = Tensor::from_vec(curve.clone(), (4, H), &Device::Cpu).unwrap();
+    let load = crate::td_rbm::model::without_span(e.load_var().as_tensor(), &coef, &[0.0])
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
     assert!(
         load[0].iter().all(|x| x.abs() < 1e-6),
         "state along the curve: {:?}",

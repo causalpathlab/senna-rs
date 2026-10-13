@@ -350,3 +350,15 @@ pub fn start_along(
         curve,
     }
 }
+
+/// `log Σ e^v`, stable.
+pub fn log_sum_exp(v: &[f64]) -> f64 {
+    let top = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    top + v.iter().map(|x| (x - top).exp()).sum::<f64>().ln()
+}
+
+/// `e^v / Σ e^v`, stable.
+pub fn softmax(v: &[f64]) -> Vec<f64> {
+    let z = log_sum_exp(v);
+    v.iter().map(|x| (x - z).exp()).collect()
+}

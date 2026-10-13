@@ -9,6 +9,7 @@
 //! cell's depth.
 
 use crate::td_rbm::curve::Spline;
+use crate::td_rbm::start::softmax;
 use legume_numeric::candle::candle_core::Device;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -67,13 +68,6 @@ pub struct Sim {
     pub base: Vec<f64>,
     pub beta: Vec<f64>,
     pub gamma: Vec<f64>,
-}
-
-fn softmax(x: &[f64]) -> Vec<f64> {
-    let m = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let e: Vec<f64> = x.iter().map(|v| (v - m).exp()).collect();
-    let s: f64 = e.iter().sum();
-    e.into_iter().map(|v| v / s).collect()
 }
 
 pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {

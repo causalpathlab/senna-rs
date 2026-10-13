@@ -55,10 +55,6 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         "--depth and --assign-depth must be positive"
     );
     anyhow::ensure!(
-        args.grid >= 2 && args.knots >= 4,
-        "--grid needs 2 times or more, --knots 4 or more"
-    );
-    anyhow::ensure!(
         args.states > 0 && args.epochs > args.time_epochs,
         "--states must be positive and --epochs exceed --time-epochs, so the states are fitted"
     );
@@ -134,12 +130,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     // lineage's curve through its pseudobulks in their order from the root.
     let fin = rows.last().expect("a level");
     let states = row_states(fin, f, STATE_DIMS);
-    let forest = Forest::new(
-        &states,
-        args.clusters,
-        args.knn,
-        args.seed,
-    );
+    let forest = Forest::new(&states, args.clusters, args.knn, args.seed);
     let of_cell: Vec<usize> = member
         .iter()
         .map(|p| p.expect("the collapse places every cell"))
@@ -225,18 +216,21 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
             cells: t.cells.clone(),
         })
         .collect();
+    let mut begin = begin;
+    let curve = std::mem::take(&mut begin.curve);
     let model = fit(
         &levels_in,
         f,
         &Init0 {
             rho: &rho,
             base: &base,
-            curve: &begin.curve,
+            curve: &curve,
             beta: BETA0,
             gamma: GAMMA0,
         },
-        &begin.lineage,
+        begin,
         &forest,
+        &states,
         &roots,
         &given,
         &cfg,
@@ -248,14 +242,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
 
     // The start as the chosen roots have it, so its lineages are the
     // fitted ones' paths.
-    let chosen: Vec<usize> = model.roots.iter().map(|c| c.chosen).collect();
-    let begin = if chosen == roots {
-        begin
-    } else {
-        let fin = &levels_in.last().expect("a level").x;
-        start_along(fin, f, &states, &forest, &chosen, &rho, &values, (g, h, k, m), args.knn)
-    };
-    let start: Vec<f32> = of_cell.iter().map(|&p| begin.order[p]).collect();
+    let start: Vec<f32> = of_cell.iter().map(|&p| model.start_order[p]).collect();
     let pb_names: Vec<Box<str>> = of_cell.iter().map(|p| format!("pb{p}").into()).collect();
     let lineage_names: Vec<Box<str>> = out
         .lineage
@@ -264,7 +251,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         .collect();
     let start_names: Vec<Box<str>> = of_cell
         .iter()
-        .map(|&p| format!("L{}", begin.lineage[p] + 1).into())
+        .map(|&p| format!("L{}", model.start_lineage[p] + 1).into())
         .collect();
     let cluster_names: Vec<Box<str>> = of_cell
         .iter()
@@ -304,7 +291,11 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     {
         use std::io::Write;
         let mut file = std::fs::File::create(format!("{}.direction.tsv", args.out))?;
-        let speed = model.energy.speed()?.flatten_all()?.to_vec1::<f32>()?;
+        let speed = model
+            .energy
+            .speed(Some(&model.log_weight))?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         writeln!(file, "lineage\ttree\tclusters\tweight\tspeed\tdetermined\tp_forward\tlog_bf\tlog_bf_sd\tlog_abf\tgenes_for\tgenes_against")?;
         for d in &model.directions {
             let path = &model.paths[d.lineage];
@@ -317,7 +308,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
                 along.join(">"),
                 model.log_weight[d.lineage].exp(),
                 speed[d.lineage],
-                d.determined,
+                model.roots[path.tree].determined,
                 d.p_forward,
                 d.log_bf,
                 d.log_bf_sd,

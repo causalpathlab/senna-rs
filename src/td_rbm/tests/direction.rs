@@ -3,7 +3,8 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, Poisson};
 
 /// The tensor evidence (f32, what a GPU runs) and the host's (f64, exact
-/// log-gammas) agree gene by gene, both orientations, on reads with dynamics.
+/// log-gammas, every table at once) agree gene by gene, both orientations,
+/// on reads with dynamics.
 #[test]
 fn tensor_and_host_evidence_agree() {
     let (k, g) = (12, 9);
@@ -37,7 +38,19 @@ fn tensor_and_host_evidence_agree() {
     let dev = Device::Cpu;
     let t = |m: &[Vec<f32>]| Tensor::from_vec(m.concat(), (k, g), &dev).unwrap();
     for sign in [1.0, -1.0] {
-        let host = evidence_host(&u, &s, &x, &rest, &reach, sign);
+        // Scored with a second table beside it, as the draws are: the shared
+        // per-grid terms must not leak between tables.
+        let other: Vec<Vec<f32>> = s
+            .iter()
+            .map(|r| r.iter().map(|v| v + 3.0).collect())
+            .collect();
+        let (fwd, bwd) = evidence_host(
+            &[(u.clone(), s.clone()), (u.clone(), other)],
+            &x,
+            &rest,
+            &reach,
+        );
+        let host = if sign > 0.0 { &fwd[0] } else { &bwd[0] };
         let tens = evidence(&t(&u), &t(&s), &t(&x), &rest, &reach, sign, &dev).unwrap();
         for j in 0..g {
             let (a, b) = (host.log_e[j], tens.log_e[j]);

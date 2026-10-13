@@ -132,18 +132,21 @@ fn fit_sim_from(
         lineages: begin.paths.len(),
         ..cfg.clone()
     };
+    let mut begin = begin;
+    let curve = std::mem::take(&mut begin.curve);
     let model = fit(
         &levels,
         f,
         &Init0 {
             rho: &rho,
             base: &base,
-            curve: &begin.curve,
+            curve: &curve,
             beta: BETA0,
             gamma: GAMMA0,
         },
-        &begin.lineage,
+        begin,
         &forest,
+        &states,
         &roots,
         &vec![false; forest.trees.len()],
         &cfg,
@@ -385,12 +388,6 @@ fn diagnostic_truth_against_its_mirror() {
                 &dev,
             )
             .unwrap(),
-            load: Tensor::zeros(
-                (sim.rho[0].len(), 1),
-                legume_numeric::candle::candle_core::DType::F32,
-                &dev,
-            )
-            .unwrap(),
             curve,
             velocity,
             size,
@@ -481,7 +478,18 @@ fn direction_called_only_with_splicing() {
     };
     for (name, mirror) in [("truth", false), ("mirrored truth", true)] {
         restore(mirror);
-        let (d, _) = orient(&energy, &spline, &x, f, 0, &cfg, &dev, &mut rng).unwrap();
+        let (d, _) = orient(
+            &energy,
+            &spline,
+            &energy.steady_tables(&spline).unwrap(),
+            &x,
+            f,
+            0,
+            &cfg,
+            &dev,
+            &mut rng,
+        )
+        .unwrap();
         eprintln!(
             "from the {name}: p(as started) {:.4}, log BF {:+.1} (sd {:.1}), log ABF {:+.1}",
             d.p_forward, d.log_bf, d.log_bf_sd, d.log_abf
@@ -519,7 +527,18 @@ fn direction_called_only_with_splicing() {
     }
     let x = features(&steady, &all);
     restore(false);
-    let (d, _) = orient(&energy, &spline, &x, f, 0, &cfg, &dev, &mut rng).unwrap();
+    let (d, _) = orient(
+        &energy,
+        &spline,
+        &energy.steady_tables(&spline).unwrap(),
+        &x,
+        f,
+        0,
+        &cfg,
+        &dev,
+        &mut rng,
+    )
+    .unwrap();
     eprintln!(
         "no dynamics: p(as started) {:.4}, log BF {:+.1} (sd {:.1}), log ABF {:+.1}",
         d.p_forward, d.log_bf, d.log_bf_sd, d.log_abf

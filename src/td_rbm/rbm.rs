@@ -160,7 +160,7 @@ fn unit(rng: &mut StdRng) -> f32 {
 }
 
 /// An index drawn with probabilities `p`.
-fn categorical(p: &[f32], rng: &mut StdRng) -> usize {
+pub(crate) fn categorical(p: &[f32], rng: &mut StdRng) -> usize {
     let mut u = unit(rng) * p.iter().sum::<f32>();
     for (i, &w) in p.iter().enumerate() {
         if u < w {

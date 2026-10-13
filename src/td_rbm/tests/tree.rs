@@ -31,7 +31,9 @@ fn y_and_island() -> (DMatrix<f32>, Vec<usize>) {
     }
     // Centred, as expression states are (the neighbours are by cosine).
     let n = rows.len() as f32;
-    let mean: Vec<f32> = (0..4).map(|j| rows.iter().map(|r| r[j]).sum::<f32>() / n).collect();
+    let mean: Vec<f32> = (0..4)
+        .map(|j| rows.iter().map(|r| r[j]).sum::<f32>() / n)
+        .collect();
     let m = DMatrix::from_fn(rows.len(), 4, |i, j| rows[i][j] - mean[j]);
     (m, part)
 }
@@ -100,11 +102,17 @@ fn the_root_is_where_every_edge_points_away_from() {
 #[test]
 fn evidence_is_weighed_against_its_noise() {
     let p = |y: f64, noise: f64| {
-        let (a, b) = (edge_evidence(&[y], &[noise]), edge_evidence(&[-y], &[noise]));
+        let (a, b) = (
+            edge_evidence(&[y], &[noise]),
+            edge_evidence(&[-y], &[noise]),
+        );
         1.0 / (1.0 + (b - a).exp())
     };
     let quiet = p(-0.001, 2.0);
-    assert!((quiet - 0.5).abs() < 0.05, "noise-level evidence: p {quiet}");
+    assert!(
+        (quiet - 0.5).abs() < 0.05,
+        "noise-level evidence: p {quiet}"
+    );
     let loud = p(200.0, 2.0);
     // One edge cannot measure the spread between edges, so it stops short
     // of certainty; it still passes the call.

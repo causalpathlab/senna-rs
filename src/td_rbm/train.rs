@@ -28,12 +28,14 @@ pub use direction::Direction;
 pub use roots::RootCall;
 
 use crate::td_rbm::curve::{grid_times, Spline};
-use crate::td_rbm::model::{Energy, Init0, Shape, Tables};
+use crate::td_rbm::model::{Energy, Init0, Shape, Tables, EMPTY};
 use crate::td_rbm::rbm::{posterior, Reads};
+use crate::td_rbm::start::Start;
 use crate::td_rbm::tree::{Forest, Path};
 use legume_numeric::candle::candle_core::{Device, Result, Tensor};
 use legume_numeric::candle::candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use log::info;
+use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -120,12 +122,16 @@ pub struct Level {
 pub struct Model {
     pub energy: Energy,
     pub spline: Spline,
-    /// `[L]` every lineage's log weight (`−∞` where empty).
+    /// `[L]` every lineage's log weight ([`EMPTY`] where empty).
     pub log_weight: Vec<f32>,
     pub directions: Vec<Direction>,
     /// The lineages (paths from every tree's chosen root) and the roots.
     pub paths: Vec<Path>,
     pub roots: Vec<RootCall>,
+    /// Every finest pseudobulk's starting lineage and order, along the
+    /// chosen roots.
+    pub start_lineage: Vec<usize>,
+    pub start_order: Vec<f32>,
 }
 
 /// Every row's lineage, time, its spread, state and velocity.
@@ -144,8 +150,6 @@ pub struct Summary {
 
 /// Rows read at a time at the end.
 const BLOCK: usize = 4096;
-/// A lineage's log weight when it is empty.
-const EMPTY: f32 = -1e4;
 
 impl Model {
     /// The tables at the fitted weights.
@@ -241,16 +245,18 @@ fn pass_reads(levels: &[Level], depth: u64) -> f64 {
 
 /// Fit the machine on pseudobulks of every level (`levels`, coarse to fine),
 /// the genes' embedding, baselines and curves starting at `init` and the
-/// finest pseudobulks in lineages `start` (both built along `forest` from
-/// `roots`, [`crate::td_rbm::start::start_along`]); `given[t]` fixes tree
-/// `t`'s root. `cfg.lineages` is the number of paths.
+/// finest pseudobulks where `start` puts them (both built along `forest`
+/// from `roots` on the finest pseudobulks' expression `states`,
+/// [`crate::td_rbm::start::start_along`]); `given[t]` fixes tree `t`'s
+/// root. `cfg.lineages` is the number of paths.
 #[allow(clippy::too_many_arguments)]
 pub fn fit(
     levels: &[Level],
     f: usize,
     init: &Init0,
-    start: &[usize],
+    start: Start,
     forest: &Forest,
+    states: &DMatrix<f32>,
     roots: &[usize],
     given: &[bool],
     cfg: &TrainConfig,
@@ -284,9 +290,9 @@ pub fn fit(
     // Every finest pseudobulk's lineage and the cells every lineage holds;
     // the coarser levels' rows follow them.
     let mut assigned: Vec<Vec<usize>> = levels.iter().map(|lv| vec![0; lv.cells.len()]).collect();
-    assigned[finest] = start.to_vec();
+    assigned[finest] = start.lineage.clone();
     let mut counts = vec![0f64; l];
-    for (&a, &c) in start.iter().zip(&levels[finest].cells) {
+    for (&a, &c) in start.lineage.iter().zip(&levels[finest].cells) {
         counts[a] += f64::from(c);
     }
     let mut phase = exact::Phase {
@@ -324,18 +330,28 @@ pub fn fit(
             }
         );
     }
+    let mut start = start;
+    // A mirrored one-cluster lineage starts the other way round too.
+    for c in calls.iter().filter(|c| c.mirrored) {
+        for (o, &l) in start.order.iter_mut().zip(&start.lineage) {
+            if paths[l].tree == c.tree {
+                *o = 1.0 - *o;
+            }
+        }
+    }
     let chosen: Vec<usize> = calls.iter().map(|c| c.chosen).collect();
     if chosen != roots {
         let moved: Vec<bool> = chosen.iter().zip(&roots).map(|(a, b)| a != b).collect();
         roots = chosen;
+        start = phase.rebuild(forest, states, &roots, &moved)?;
+        paths = start.paths.clone();
         energy.set_motion(false);
-        paths = phase.rebuild(forest, &roots, &moved)?;
         phase.epochs(cfg.steady_epochs, "steady (rerooted)", &mut rng)?;
         energy.set_motion(true);
     }
     // 3. Every lineage's splicing as it runs; the rates carried on. Then
     // lineages and time with the velocity on.
-    let mut directions = direction::orient_all(
+    let directions = direction::orient_all(
         &energy,
         &spline,
         &levels[finest].x,
@@ -346,10 +362,6 @@ pub fn fit(
         &mut rng,
     )?;
     phase.epochs(cfg.time_epochs, "time", &mut rng)?;
-    for d in &mut directions {
-        d.cells = counts[d.lineage];
-        d.determined = calls[paths[d.lineage].tree].determined;
-    }
     let log_weight = log_weights(&counts, cfg.concentration);
 
     // 4. States.
@@ -363,6 +375,8 @@ pub fn fit(
         directions,
         paths,
         roots: calls,
+        start_lineage: start.lineage,
+        start_order: start.order,
     })
 }
 
