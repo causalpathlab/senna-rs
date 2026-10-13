@@ -60,18 +60,12 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
     )?;
 
     // Multiome: detected off the inputs, or declared, as `senna bge` does.
-    let plan: Option<ge::MultiomePlan> = if args.multiome.is_empty() {
-        crate::bge::multiome::auto_plan(
-            &data_files,
-            batch_files.as_ref().map_or(0, Vec::len),
-            false,
-        )?
-    } else {
-        crate::bge::multiome::declared_plan(&args.multiome)?
-    };
-    if let Some(p) = plan.as_ref() {
-        crate::bge::multiome::log_plan(p, !args.multiome.is_empty());
-    }
+    let plan = crate::bge::multiome::resolve_plan(
+        &args.multiome,
+        &data_files,
+        batch_files.as_ref().map_or(0, Vec::len),
+        false,
+    )?;
     let is_multiome = plan.is_some();
     let data_files: Vec<Box<str>> = plan.as_ref().map_or(data_files, |p| p.files.clone());
     let hvg = crate::hvg::resolve_multiome_with_hvg(is_multiome, data_files.len(), &args.hvg);
@@ -328,13 +322,7 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         .delta
         .as_ref()
         .map(|d| -> anyhow::Result<Tensor> {
-            let perm = Tensor::from_iter(blocks.perm.iter().map(|&i| i as u32), &dev)?;
-            Ok(d.posterior_mean()
-                .to_tensor(&dev)?
-                .contiguous()?
-                .index_select(&perm, 0)?
-                .t()?
-                .contiguous()?)
+            Ok(blocks.machine_rows(&d.posterior_mean().to_tensor(&dev)?)?)
         })
         .transpose()?;
     let cells = score_cells(
@@ -386,31 +374,44 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
     senna::output_helpers::save_dictionary(&args.out, &w, &feature_names)?;
     let rho = fitted.weights.rho()?;
     crate::topic::train_masked::write_feature_embedding(&rho, &rho_names, &args.out)?;
-    let has_modules = if let Some(m) = fitted.weights.modules.as_ref() {
-        use graph_embedding_util::transfer::{
-            MODULE_DICTIONARY_SUFFIX, MODULE_MEMBERSHIP_SUFFIX, MODULE_RESIDUAL_SUFFIX,
-        };
-        let pi = Mat::from_tensor(&m.membership()?.to_device(&Device::Cpu)?)?;
-        let module_names: Vec<Box<str>> = (0..pi.ncols()).map(|i| format!("M{i}").into()).collect();
-        pi.to_parquet_with_names(
-            &format!("{}.{MODULE_MEMBERSHIP_SUFFIX}", args.out),
-            (Some(&rho_names), Some("feature")),
-            Some(&module_names),
-        )?;
-        Mat::from_tensor(&m.mu.as_tensor().to_device(&Device::Cpu)?)?.to_parquet_with_names(
-            &format!("{}.{MODULE_DICTIONARY_SUFFIX}", args.out),
-            (Some(&module_names), Some("module")),
-            Some(&axis_id_names("H", h)),
-        )?;
-        Mat::from_tensor(&m.residual.as_tensor().to_device(&Device::Cpu)?)?.to_parquet_with_names(
-            &format!("{}.{MODULE_RESIDUAL_SUFFIX}", args.out),
-            (Some(&rho_names), Some("feature")),
-            Some(&axis_id_names("H", h)),
-        )?;
-        true
-    } else {
-        false
-    };
+    let has_modules = fitted
+        .weights
+        .modules
+        .as_ref()
+        .map(|m| -> anyhow::Result<()> {
+            use crate::topic::train_masked::{write_tensor_parquet, write_tensor_parquet_named};
+            use graph_embedding_util::transfer::{
+                MODULE_DICTIONARY_SUFFIX, MODULE_MEMBERSHIP_SUFFIX, MODULE_RESIDUAL_SUFFIX,
+            };
+            let pi = m.membership()?;
+            let module_names = axis_id_names("M", pi.dim(1)?);
+            write_tensor_parquet_named(
+                &pi,
+                &args.out,
+                MODULE_MEMBERSHIP_SUFFIX,
+                &rho_names,
+                "feature",
+                &module_names,
+            )?;
+            write_tensor_parquet(
+                m.mu.as_tensor(),
+                &args.out,
+                MODULE_DICTIONARY_SUFFIX,
+                &module_names,
+                "module",
+                "H",
+            )?;
+            write_tensor_parquet(
+                m.residual.as_tensor(),
+                &args.out,
+                MODULE_RESIDUAL_SUFFIX,
+                &rho_names,
+                "feature",
+                "H",
+            )
+        })
+        .transpose()?
+        .is_some();
     let alpha = Tensor::cat(
         &fitted
             .weights
@@ -433,10 +434,13 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
             })
         })
         .collect();
-    Mat::from_tensor(&alpha.to_device(&Device::Cpu)?)?.to_parquet_with_names(
-        &format!("{}.hidden_embedding.parquet", args.out),
-        (Some(&alpha_names), Some("unit")),
-        Some(&axis_id_names("H", h)),
+    crate::topic::train_masked::write_tensor_parquet(
+        &alpha,
+        &args.out,
+        "hidden_embedding.parquet",
+        &alpha_names,
+        "unit",
+        "H",
     )?;
     let b: Vec<f32> = fitted.b.as_tensor().flatten_all()?.to_vec1()?;
     write_named_table(
@@ -464,21 +468,19 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
     )?;
 
     // The machine.
-    let mut tensors = std::collections::HashMap::new();
-    tensors.insert("rho".to_string(), rho.to_device(&Device::Cpu)?);
-    // The centres: the latent and the free energy read the reads and the
-    // hidden units against them, so the machine is incomplete without them.
-    tensors.insert("mu".to_string(), fitted.mu.to_device(&Device::Cpu)?);
-    tensors.insert("lambda".to_string(), fitted.lambda.to_device(&Device::Cpu)?);
-    tensors.insert("alpha".to_string(), alpha.to_device(&Device::Cpu)?);
-    tensors.insert(
-        "b".to_string(),
-        fitted.b.as_tensor().to_device(&Device::Cpu)?,
-    );
-    tensors.insert(
-        "c".to_string(),
-        fitted.c.as_tensor().to_device(&Device::Cpu)?,
-    );
+    // The centres `mu` and `lambda` belong to the machine: the latent and the
+    // free energy read the reads and the hidden units against them.
+    let tensors = [
+        ("rho", &rho),
+        ("mu", &fitted.mu),
+        ("lambda", &fitted.lambda),
+        ("alpha", &alpha),
+        ("b", fitted.b.as_tensor()),
+        ("c", fitted.c.as_tensor()),
+    ]
+    .into_iter()
+    .map(|(name, t)| Ok((name.to_string(), t.to_device(&Device::Cpu)?)))
+    .collect::<anyhow::Result<std::collections::HashMap<_, _>>>()?;
     legume_numeric::candle::candle_core::safetensors::save(
         &tensors,
         format!("{}.safetensors", args.out),
@@ -501,18 +503,18 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
 
     // What `senna view` reads.
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &cell_names, keep)?;
-    let has_cell_to_pb = if let Some(ref c2p) = cell_to_pb_per_level {
-        crate::postprocess::viz_prep::write_cell_to_pb(&args.out, c2p, &cell_names, keep)?;
-        true
-    } else {
-        false
-    };
-    let has_pb_tree = if let Some(ref tree) = pb_tree {
-        crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &row_names)?;
-        true
-    } else {
-        false
-    };
+    let has_cell_to_pb = cell_to_pb_per_level
+        .as_ref()
+        .map(|c2p| {
+            crate::postprocess::viz_prep::write_cell_to_pb(&args.out, c2p, &cell_names, keep)
+        })
+        .transpose()?
+        .is_some();
+    let has_pb_tree = pb_tree
+        .as_ref()
+        .map(|tree| crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &row_names))
+        .transpose()?
+        .is_some();
     let input: Vec<String> = data_files.iter().map(ToString::to_string).collect();
     let batch: Vec<String> = batch_files
         .as_deref()

@@ -22,8 +22,7 @@
 //! ([`lineage_log_likelihood`]).
 
 use super::model::Tables;
-pub(crate) use crate::rbm_core::multinomial;
-pub use crate::rbm_core::{cumsum_rows, multinomial_rows};
+use crate::rbm_core::{cumsum_rows, multinomial, multinomial_rows};
 use legume_numeric::candle::candle_core::{Device, Result, Tensor, D};
 use legume_numeric::candle::candle_nn::ops::softmax;
 use rand::rngs::StdRng;

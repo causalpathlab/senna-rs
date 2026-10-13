@@ -116,12 +116,13 @@ fn brute(m: &Machine, v: &[f32]) -> (f64, Vec<f64>) {
     let c: Vec<f32> = m.c.flatten_all().unwrap().to_vec1().unwrap();
     let mu: Vec<f32> = m.mu.flatten_all().unwrap().to_vec1().unwrap();
     let lambda: Vec<f32> = m.lambda.flatten_all().unwrap().to_vec1().unwrap();
+    let depth: Vec<f32> = m.depth_t.flatten_all().unwrap().to_vec1().unwrap();
     let mut s = vec![0f64; v.len()];
     for (bi, r) in m.ranges.iter().enumerate() {
         let n: f64 = v[r.clone()].iter().map(|&x| f64::from(x)).sum();
         for i in r.clone() {
             s[i] = if n > 0.0 {
-                f64::from(m.depth[bi]) / n
+                f64::from(depth[bi]) / n
             } else {
                 0.0
             };

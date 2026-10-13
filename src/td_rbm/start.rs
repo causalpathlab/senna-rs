@@ -142,7 +142,7 @@ pub fn resample(x: &[f32], f: usize, depth: u64, rng: &mut StdRng) -> Vec<f32> {
                 .collect();
             let s: f32 = p.iter().sum::<f32>().max(1e-30);
             p.iter_mut().for_each(|v| *v /= s);
-            super::rbm::multinomial(depth, &p, o, &mut rng);
+            crate::rbm_core::multinomial(depth, &p, o, &mut rng);
         });
     out
 }

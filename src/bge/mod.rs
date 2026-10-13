@@ -48,18 +48,12 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // inputs themselves — the feature axes say which files are the same assay,
     // and the barcode lists say which cells are the same cell. Both routes
     // land on one `MultiomePlan`, so nothing below has two shapes to handle.
-    let multiome_plan: Option<ge::MultiomePlan> = if args.multiome.is_empty() {
-        multiome::auto_plan(
-            &args.data_files,
-            args.batch_files.as_ref().map_or(0, Vec::len),
-            args.pb_reference.is_some(),
-        )?
-    } else {
-        multiome::declared_plan(&args.multiome)?
-    };
-    if let Some(p) = multiome_plan.as_ref() {
-        multiome::log_plan(p, !args.multiome.is_empty());
-    }
+    let multiome_plan = multiome::resolve_plan(
+        &args.multiome,
+        &args.data_files,
+        args.batch_files.as_ref().map_or(0, Vec::len),
+        args.pb_reference.is_some(),
+    )?;
     let is_multiome = multiome_plan.is_some();
 
     // Multiome mixes gene rows (RNA) and locus rows (ATAC peaks) on one axis,

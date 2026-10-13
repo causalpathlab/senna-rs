@@ -27,13 +27,13 @@ mod states;
 pub use direction::Direction;
 pub use roots::RootCall;
 
+use crate::rbm_core::adam;
 use crate::td_rbm::curve::{grid_times, Spline};
 use crate::td_rbm::model::{Energy, Init0, Shape, Tables, EMPTY};
 use crate::td_rbm::rbm::{posterior, Reads};
 use crate::td_rbm::start::Start;
 use crate::td_rbm::tree::{Forest, Path};
 use legume_numeric::candle::candle_core::{Device, Result, Tensor};
-use legume_numeric::candle::candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use log::info;
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
@@ -214,17 +214,6 @@ impl Model {
         }
         Ok(out)
     }
-}
-
-fn adam(vars: Vec<legume_numeric::candle::candle_core::Var>, lr: f64) -> Result<AdamW> {
-    AdamW::new(
-        vars,
-        ParamsAdamW {
-            lr,
-            weight_decay: 0.0,
-            ..Default::default()
-        },
-    )
 }
 
 /// Every lineage's log weight from its cells: the Dirichlet process's

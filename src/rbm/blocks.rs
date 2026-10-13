@@ -5,6 +5,7 @@
 //! The machine keeps every block's features contiguous: [`Blocks::perm`]
 //! takes the machine's feature order to the data's row order.
 
+use legume_numeric::candle::candle_core::{Result, Tensor};
 use std::ops::Range;
 
 #[derive(Clone, Debug)]
@@ -69,6 +70,12 @@ impl Blocks {
             symbol,
             symbols,
         }
+    }
+
+    /// A data-ordered `[F × N]` table as machine-ordered rows `[N × F]`.
+    pub fn machine_rows(&self, t_fn: &Tensor) -> Result<Tensor> {
+        let perm = Tensor::from_iter(self.perm.iter().map(|&i| i as u32), t_fn.device())?;
+        t_fn.contiguous()?.index_select(&perm, 0)?.t()?.contiguous()
     }
 
     pub fn len(&self) -> usize {

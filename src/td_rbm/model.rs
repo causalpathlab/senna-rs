@@ -25,7 +25,7 @@
 //! stand in for time.
 
 use super::curve::Spline;
-pub use crate::rbm_core::softplus;
+use crate::rbm_core::softplus;
 use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var};
 use legume_numeric::candle::candle_nn::ops::{log_softmax, sigmoid};
 use rand::rngs::StdRng;

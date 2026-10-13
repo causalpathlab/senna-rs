@@ -1,11 +1,24 @@
-//! Pieces every restricted Boltzmann machine here shares: multinomial draws
+//! Pieces every restricted Boltzmann machine here shares: Adam, multinomial draws
 //! on the host and on the device, a device cumulative sum that fits at any
 //! feature count, and a stable softplus.
 
-use legume_numeric::candle::candle_core::{Result, Tensor};
+use legume_numeric::candle::candle_core::{Result, Tensor, Var};
+use legume_numeric::candle::candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use rand::rngs::StdRng;
 use rand::RngExt;
 use rand_distr::{Binomial, Distribution};
+
+/// Adam (AdamW with no weight decay) over `vars` at learning rate `lr`.
+pub fn adam(vars: Vec<Var>, lr: f64) -> Result<AdamW> {
+    AdamW::new(
+        vars,
+        ParamsAdamW {
+            lr,
+            weight_decay: 0.0,
+            ..Default::default()
+        },
+    )
+}
 
 /// `log(1 + eˣ)`, stable for any `x`.
 pub fn softplus(x: &Tensor) -> Result<Tensor> {

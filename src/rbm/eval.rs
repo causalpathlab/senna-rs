@@ -14,10 +14,16 @@ use senna::embed_common::*;
 /// Per row: `E[h | v]` (`K` columns), and the free energy and the
 /// reconstruction, both per read.
 pub fn score(m: &Machine, x: &Tensor) -> anyhow::Result<Mat> {
-    let mean = m.posterior_mean(x)?;
-    let fe = m.free_energy_per_read(x)?.unsqueeze(D::Minus1)?;
-    let recon = m.reconstruction(x)?.unsqueeze(D::Minus1)?;
-    let all = Tensor::cat(&[mean, fe, recon], 1)?.to_device(&Device::Cpu)?;
+    let (free, recon, mean) = m.score(x)?;
+    let all = Tensor::cat(
+        &[
+            mean,
+            free.unsqueeze(D::Minus1)?,
+            recon.unsqueeze(D::Minus1)?,
+        ],
+        1,
+    )?
+    .to_device(&Device::Cpu)?;
     Mat::from_tensor(&all)
 }
 
@@ -31,7 +37,6 @@ pub fn score_cells(
     block_size: usize,
 ) -> anyhow::Result<Mat> {
     let dev = m.w.device().clone();
-    let perm = Tensor::from_iter(blocks.perm.iter().map(|&i| i as u32), &dev)?;
     let width = m.units()? + 2;
     process_blocks(
         data_vec.num_columns(),
@@ -39,12 +44,7 @@ pub fn score_cells(
         block_size,
         &dev,
         |(lb, ub)| {
-            let x_dn = data_vec.read_columns_csc(lb..ub)?.to_tensor(&dev)?;
-            let x = x_dn
-                .contiguous()?
-                .index_select(&perm, 0)?
-                .t()?
-                .contiguous()?;
+            let x = blocks.machine_rows(&data_vec.read_columns_csc(lb..ub)?.to_tensor(&dev)?)?;
             let x = match delta {
                 Some(d) => {
                     let d = expand_delta_for_block(data_vec, d, &AdjMethod::Batch, lb, ub, &dev)?;

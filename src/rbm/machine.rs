@@ -24,8 +24,7 @@
 //! is the exact marginal over the missing block.
 
 use super::hidden::Hidden;
-use crate::rbm_core::cumsum_rows;
-pub use crate::rbm_core::multinomial_rows;
+use crate::rbm_core::{cumsum_rows, multinomial_rows};
 use legume_numeric::candle::candle_core::{Device, Result, Tensor, D};
 use legume_numeric::candle::candle_nn::ops::{log_softmax, softmax};
 use rand::rngs::StdRng;
@@ -41,10 +40,11 @@ pub struct Machine {
     pub w: Tensor,
     pub hidden: Hidden,
     pub ranges: Vec<Range<usize>>,
-    /// `D_m` per block.
-    pub depth: Vec<f32>,
-    /// `[F × M]` every feature's block, one-hot.
+    /// `[F × M]` every feature's block, one-hot, and its transpose.
     onehot: Tensor,
+    onehot_t: Tensor,
+    /// `[1 × M]` the depth `D_m` of every block.
+    depth_t: Tensor,
     /// `[1 × F]` the centre of the scaled reads.
     pub mu: Tensor,
     /// `[1 × K]` the centre of the hidden units.
@@ -61,6 +61,8 @@ impl Machine {
         depth: Vec<f32>,
     ) -> Result<Self> {
         let onehot = block_onehot(&ranges, w.device())?;
+        let onehot_t = onehot.t()?.contiguous()?;
+        let depth_t = Tensor::from_slice(&depth, (1, depth.len()), w.device())?;
         let mu = b.zeros_like()?;
         let lambda = c.zeros_like()?;
         Ok(Self {
@@ -69,8 +71,9 @@ impl Machine {
             w,
             hidden,
             ranges,
-            depth,
             onehot,
+            onehot_t,
+            depth_t,
             mu,
             lambda,
         })
@@ -114,41 +117,42 @@ impl Machine {
     /// features (`0` where the row has no reads in the block).
     pub fn scale(&self, x: &Tensor) -> Result<Tensor> {
         let n = x.matmul(&self.onehot)?;
-        let d = Tensor::from_slice(&self.depth, (1, self.depth.len()), x.device())?;
         let empty = n.le(0.0)?;
-        let s = d.broadcast_div(&n.maximum(1.0)?)?;
+        let s = self.depth_t.broadcast_div(&n.maximum(1.0)?)?;
         let s = empty.where_cond(&s.zeros_like()?, &s)?;
-        s.matmul(&self.onehot.t()?)
+        s.matmul(&self.onehot_t)
     }
 
     /// `x` with every block scaled to the depth it has in `like`.
     pub fn keep_depth(&self, x: &Tensor, like: &Tensor) -> Result<Tensor> {
         let want = like.matmul(&self.onehot)?;
         let have = x.matmul(&self.onehot)?.maximum(1e-8)?;
-        x * (want / have)?.matmul(&self.onehot.t()?)?
+        x * (want / have)?.matmul(&self.onehot_t)?
     }
 
-    /// `s ⊙ v − μ` on the blocks a row has reads in, `0` on the rest.
-    fn centred_reads(&self, x: &Tensor) -> Result<Tensor> {
-        let s = self.scale(x)?;
+    /// `(s ⊙ v − μ) W` `[N × K]` at the row scales `s`, with `s ⊙ v − μ`
+    /// taken on the blocks a row has reads in and `0` on the rest.
+    fn reach(&self, x: &Tensor, s: &Tensor) -> Result<Tensor> {
         let present = s.gt(0.0)?.to_dtype(x.dtype())?;
-        (x * &s)? - present.broadcast_mul(&self.mu)?
+        ((x * s)? - present.broadcast_mul(&self.mu)?)?.matmul(&self.w)
     }
 
     /// The hidden units' natural parameters `a(v)` `[N × K]`.
     pub fn input(&self, x: &Tensor) -> Result<Tensor> {
-        self.centred_reads(x)?
-            .matmul(&self.w)?
-            .broadcast_add(&self.c)
+        self.reach(x, &self.scale(x)?)?.broadcast_add(&self.c)
     }
 
-    /// Every row's free energy `[N]`.
-    pub fn free_energy(&self, x: &Tensor) -> Result<Tensor> {
-        let r = self.centred_reads(x)?.matmul(&self.w)?;
+    /// Every row's free energy `[N]`, from `r = (s ⊙ v − μ) W`.
+    fn free_energy_at(&self, x: &Tensor, r: &Tensor) -> Result<Tensor> {
         let a = r.broadcast_add(&self.c)?;
         let vb = x.broadcast_mul(&self.b)?.sum(D::Minus1)?;
         let centre = r.broadcast_mul(&self.lambda)?.sum(D::Minus1)?;
         ((vb - centre)? + self.hidden.log_partition(&a)?.sum(D::Minus1)?)?.neg()
+    }
+
+    /// Every row's free energy `[N]`.
+    pub fn free_energy(&self, x: &Tensor) -> Result<Tensor> {
+        self.free_energy_at(x, &self.reach(x, &self.scale(x)?)?)
     }
 
     /// Every row's free energy divided by its reads `[N]`, comparable across
@@ -168,11 +172,26 @@ impl Machine {
         (h.broadcast_sub(&self.lambda)?.matmul(&self.w.t()?)? * s)?.broadcast_add(&self.b)
     }
 
-    /// Every row's reconstruction: the multinomial log-likelihood of its reads
-    /// (up to the coefficient) at `E[h | v]`, per read `[N]`.
-    pub fn reconstruction(&self, x: &Tensor) -> Result<Tensor> {
+    /// Every row's free energy per read, reconstruction per read and
+    /// `E[h | v]`, from one pass over the reads.
+    pub fn score(&self, x: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
         let s = self.scale(x)?;
-        let logits = self.visible_logits(&self.posterior_mean(x)?, &s)?;
+        let r = self.reach(x, &s)?;
+        let h = self.hidden.mean(&r.broadcast_add(&self.c)?)?;
+        let reads = x.sum(D::Minus1)?.maximum(1.0)?;
+        let free = (self.free_energy_at(x, &r)? / &reads)?;
+        Ok((free, self.reconstruction_at(x, &s, &h)?, h))
+    }
+
+    /// Every row's reconstruction: the multinomial log-likelihood of its reads
+    /// (up to the coefficient) at hidden means `h` already in hand, per read `[N]`.
+    pub fn reconstruction_given(&self, x: &Tensor, h: &Tensor) -> Result<Tensor> {
+        self.reconstruction_at(x, &self.scale(x)?, h)
+    }
+
+    /// The reconstruction per read at the hidden means `h`, scales `s`.
+    fn reconstruction_at(&self, x: &Tensor, s: &Tensor, h: &Tensor) -> Result<Tensor> {
+        let logits = self.visible_logits(h, s)?;
         let mut total = x.zeros_like()?.sum(D::Minus1)?;
         for r in &self.ranges {
             let lp = log_softmax(&logits.narrow(1, r.start, r.len())?, D::Minus1)?;
@@ -239,7 +258,8 @@ impl Chains {
     /// every block's reads given the hidden units, all on the device.
     pub fn sweep(&mut self, m: &Machine) -> Result<()> {
         let s = m.scale(&self.x)?;
-        let h = m.hidden.sample(&m.input(&self.x)?, &mut self.rng)?;
+        let a = m.reach(&self.x, &s)?.broadcast_add(&m.c)?;
+        let h = m.hidden.sample(&a, &mut self.rng)?;
         let logits = m.visible_logits(&h, &s)?;
         let parts = m
             .ranges

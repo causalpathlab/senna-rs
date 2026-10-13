@@ -65,7 +65,7 @@ pub(crate) fn train_masked(
 /// Pull `tensor` to host and write it to `{out_prefix}.{suffix}.parquet`,
 /// labelling its last-dim columns with `{col_prefix}0..H` and rows with
 /// `row_names` under the column name `row_axis`.
-fn write_tensor_parquet(
+pub(crate) fn write_tensor_parquet(
     tensor: &Tensor,
     out_prefix: &str,
     suffix: &str,
@@ -78,7 +78,7 @@ fn write_tensor_parquet(
 }
 
 /// [`write_tensor_parquet`] with the column names given rather than generated.
-fn write_tensor_parquet_named(
+pub(crate) fn write_tensor_parquet_named(
     tensor: &Tensor,
     out_prefix: &str,
     suffix: &str,

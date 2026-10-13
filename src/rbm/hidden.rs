@@ -14,7 +14,7 @@
 //! `a`; the Gaussian's unit variance does the same.
 
 use crate::rbm_core::softplus;
-use legume_numeric::candle::candle_core::{Device, Result, Tensor, D};
+use legume_numeric::candle::candle_core::{Result, Tensor, D};
 use legume_numeric::candle::candle_nn::ops::{sigmoid, softmax};
 use rand::rngs::StdRng;
 use rand::RngExt;
@@ -54,13 +54,7 @@ impl Hidden {
         match *self {
             Self::Bernoulli => softplus(a),
             Self::Binomial { trials } => softplus(a)? * f64::from(trials),
-            Self::Poisson { max } => {
-                let (h, base) = poisson_support(max, a.device())?;
-                a.unsqueeze(D::Minus1)?
-                    .broadcast_mul(&h)?
-                    .broadcast_add(&base)?
-                    .log_sum_exp(D::Minus1)
-            }
+            Self::Poisson { max } => poisson_logits(a, max)?.1.log_sum_exp(D::Minus1),
             Self::Gaussian => a.sqr()? * 0.5,
         }
     }
@@ -71,11 +65,7 @@ impl Hidden {
             Self::Bernoulli => sigmoid(a),
             Self::Binomial { trials } => sigmoid(a)? * f64::from(trials),
             Self::Poisson { max } => {
-                let (h, base) = poisson_support(max, a.device())?;
-                let logits = a
-                    .unsqueeze(D::Minus1)?
-                    .broadcast_mul(&h)?
-                    .broadcast_add(&base)?;
+                let (h, logits) = poisson_logits(a, max)?;
                 softmax(&logits, D::Minus1)?
                     .broadcast_mul(&h)?
                     .sum(D::Minus1)
@@ -121,11 +111,7 @@ impl Hidden {
             Self::Poisson { max } => {
                 // `h` is the number of support points whose cumulative mass
                 // the uniform lies at or above.
-                let (hs, base) = poisson_support(max, dev)?;
-                let logits = a
-                    .unsqueeze(D::Minus1)?
-                    .broadcast_mul(&hs)?
-                    .broadcast_add(&base)?;
+                let logits = poisson_logits(a, max)?.1;
                 let cum = softmax(&logits, D::Minus1)?.cumsum(D::Minus1)?;
                 let cum = cum.narrow(D::Minus1, 0, max as usize)?;
                 let mut ushape = shape.clone();
@@ -142,9 +128,10 @@ impl Hidden {
     }
 }
 
-/// The truncated Poisson's support `0..=max` and its log base measure
-/// `−log h!`, both `[max + 1]`.
-fn poisson_support(max: u32, dev: &Device) -> Result<(Tensor, Tensor)> {
+/// The truncated Poisson's support `h = 0..=max` `[max + 1]` and every
+/// support point's log weight `a h − log h!` `[N × K × (max + 1)]`.
+fn poisson_logits(a: &Tensor, max: u32) -> Result<(Tensor, Tensor)> {
+    let dev = a.device();
     let h: Vec<f32> = (0..=max).map(|h| h as f32).collect();
     let mut lf = 0f32;
     let base: Vec<f32> = (0..=max)
@@ -155,8 +142,11 @@ fn poisson_support(max: u32, dev: &Device) -> Result<(Tensor, Tensor)> {
             -lf
         })
         .collect();
-    Ok((
-        Tensor::from_vec(h, max as usize + 1, dev)?,
-        Tensor::from_vec(base, max as usize + 1, dev)?,
-    ))
+    let h = Tensor::from_vec(h, max as usize + 1, dev)?;
+    let base = Tensor::from_vec(base, max as usize + 1, dev)?;
+    let logits = a
+        .unsqueeze(D::Minus1)?
+        .broadcast_mul(&h)?
+        .broadcast_add(&base)?;
+    Ok((h, logits))
 }

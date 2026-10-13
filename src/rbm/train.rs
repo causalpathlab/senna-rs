@@ -7,9 +7,9 @@ use super::blocks::Blocks;
 use super::hidden::Hidden;
 use super::machine::{Chains, Machine};
 use super::weights::Weights;
-use crate::rbm_core::multinomial;
-use legume_numeric::candle::candle_core::{Device, Result, Tensor, Var};
-use legume_numeric::candle::candle_nn::{AdamW, Optimizer, ParamsAdamW};
+use crate::rbm_core::{adam, multinomial};
+use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var};
+use legume_numeric::candle::candle_nn::Optimizer;
 use log::info;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -70,14 +70,18 @@ impl Level {
 
     /// The rows' expected reads at `depth`, `[P × F]` row-major.
     pub fn expected(&self, blocks: &Blocks, depth: &[f32]) -> Vec<f32> {
-        let f = blocks.features();
         let mut out = self.shares.clone();
-        for row in out.chunks_mut(f) {
-            for (m, r) in blocks.ranges.iter().enumerate() {
-                row[r.clone()].iter_mut().for_each(|x| *x *= depth[m]);
-            }
+        for row in out.chunks_mut(blocks.features()) {
+            at_depth(row, blocks, depth);
         }
         out
+    }
+}
+
+/// One row of shares within every block scaled to `depth[m]` reads in block `m`.
+fn at_depth(row: &mut [f32], blocks: &Blocks, depth: &[f32]) {
+    for (m, r) in blocks.ranges.iter().enumerate() {
+        row[r.clone()].iter_mut().for_each(|x| *x *= depth[m]);
     }
 }
 
@@ -161,17 +165,6 @@ const SPARSITY_DECAY: f64 = 0.9;
 /// pseudobulks (on the unit's own 0..1 scale).
 const LIVE_SD: f32 = 0.01;
 
-fn adam(vars: Vec<Var>, lr: f64) -> Result<AdamW> {
-    AdamW::new(
-        vars,
-        ParamsAdamW {
-            lr,
-            weight_decay: 0.0,
-            ..Default::default()
-        },
-    )
-}
-
 /// Every feature's mean share within its block over the finest level's
 /// training rows (`out` marks the held-out ones).
 fn mean_shares(levels: &[Level], blocks: &Blocks, out: &[bool]) -> Vec<f32> {
@@ -225,12 +218,10 @@ pub fn fit(
     let shares = mean_shares(levels, blocks, &is_out);
     let log_shares: Vec<f32> = shares.iter().map(|&p| p.max(1e-8).ln()).collect();
     let mut mu = shares.clone();
-    for (m, r) in blocks.ranges.iter().enumerate() {
-        mu[r.clone()].iter_mut().for_each(|x| *x *= depth[m]);
-    }
+    at_depth(&mut mu, blocks, &depth);
     let mu = Tensor::from_vec(mu, (1, f), dev)?;
     let b = Var::from_tensor(&Tensor::from_vec(log_shares, (1, f), dev)?)?;
-    let c = Var::zeros((1, k), legume_numeric::candle::candle_core::DType::F32, dev)?;
+    let c = Var::zeros((1, k), DType::F32, dev)?;
     let mut lambda = hidden.mean(&c.as_tensor().detach())?;
     // The centred reads of the finest level's training rows start the weights.
     let finest_rows = finest.expected(blocks, &depth);
@@ -321,7 +312,10 @@ pub fn fit(
 
     'epochs: for epoch in 0..cfg.epochs {
         weights.set_frozen(epoch < cfg.module_warmup);
-        let (mut gap, mut recon, mut steps) = (0f64, 0f64, 0usize);
+        // Summed on the device and read once an epoch.
+        let mut gap = Tensor::zeros((), DType::F32, dev)?;
+        let mut recon = gap.clone();
+        let mut steps = 0usize;
         for (li, lv) in levels.iter().enumerate() {
             let seed = cfg
                 .seed
@@ -345,7 +339,7 @@ pub fn fit(
                 let fantasy = chains.reads().clone();
                 let mut loss = (m.free_energy_per_read(&batch)?.mean_all()?
                     - m.free_energy_per_read(&fantasy)?.mean_all()?)?;
-                gap += f64::from(loss.to_scalar::<f32>()?);
+                gap = (gap + loss.detach())?;
                 loss = (loss
                     + weights.penalty(cfg.embedding_l2, cfg.module_balance, cfg.module_ridge)?)?;
                 if let (Some(scale), true) = (unit_scale, cfg.sparsity_cost > 0.0) {
@@ -375,20 +369,17 @@ pub fn fit(
                 // is unchanged on rows at the training depth: centring is a
                 // reparametrisation, not a step of its own.
                 let w_now = weights.w(&blocks.ranges)?.detach();
-                let seen = machine(w_now.clone(), &lambda)
+                // `E[h | v]` does not depend on `λ` or `b`, so the batch's
+                // posterior serves both the centre and the reconstruction.
+                let h = machine(w_now.clone(), &lambda)
                     .detach()
-                    .posterior_mean(&batch)?
-                    .mean_keepdim(0)?;
+                    .posterior_mean(&batch)?;
+                let seen = h.mean_keepdim(0)?;
                 let moved = ((&lambda * LAMBDA_DECAY)? + (seen * (1.0 - LAMBDA_DECAY))?)?;
                 b.set(&(b.as_tensor() + (&moved - &lambda)?.matmul(&w_now.t()?)?)?)?;
                 lambda = moved;
                 let after = machine(w_now, &lambda).detach();
-                recon += f64::from(
-                    after
-                        .reconstruction(&batch)?
-                        .mean_all()?
-                        .to_scalar::<f32>()?,
-                );
+                recon = (recon + after.reconstruction_given(&batch, &h)?.mean_all()?)?;
                 steps += 1;
                 for _ in 0..cfg.sweeps {
                     chains.sweep(&after)?;
@@ -396,6 +387,8 @@ pub fn fit(
             }
         }
         let steps = steps.max(1) as f64;
+        let gap = f64::from(gap.to_scalar::<f32>()?);
+        let recon = f64::from(recon.to_scalar::<f32>()?);
         trace.gap.push((gap / steps) as f32);
         trace.reconstruction.push((recon / steps) as f32);
         let now = machine(weights.w(&blocks.ranges)?, &lambda).detach();

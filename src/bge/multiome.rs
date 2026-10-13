@@ -141,6 +141,25 @@ pub(crate) fn declared_plan(groups: &[Box<str>]) -> anyhow::Result<Option<ge::Mu
     }))
 }
 
+/// The multiome plan for a run: `declared` groups when given (`--multiome`),
+/// otherwise read off the inputs as [`auto_plan`] does; logged either way.
+pub(crate) fn resolve_plan(
+    declared: &[Box<str>],
+    data_files: &[Box<str>],
+    n_batch_files: usize,
+    has_pb_reference: bool,
+) -> anyhow::Result<Option<ge::MultiomePlan>> {
+    let plan = if declared.is_empty() {
+        auto_plan(data_files, n_batch_files, has_pb_reference)?
+    } else {
+        declared_plan(declared)?
+    };
+    if let Some(p) = plan.as_ref() {
+        log_plan(p, !declared.is_empty());
+    }
+    Ok(plan)
+}
+
 /// Print the layout a run is about to load under. Auditable by design: this
 /// is the only place the derived grouping is visible before training starts.
 pub(crate) fn log_plan(plan: &ge::MultiomePlan, declared: bool) {
