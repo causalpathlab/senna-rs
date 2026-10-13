@@ -66,6 +66,8 @@ mod postprocess;
 mod predict;
 mod predict_tmle;
 mod probe;
+mod rbm;
+mod rbm_core;
 mod refine_weighting;
 mod resolve_embedding_space;
 mod resolve_topics;
@@ -505,6 +507,23 @@ enum Commands {
     TdRbm(TdRbmArgs),
 
     #[command(
+        name = "rbm",
+        about = "A feature-embedded RBM: cells as hidden units over their reads",
+        long_about = "A restricted Boltzmann machine whose weights are factored through a\n\
+                      feature embedding, W = ρ αᵀ: a cell reaches the hidden units only\n\
+                      through where its reads sit in ρ. The visible units are a cell's reads,\n\
+                      a multinomial per modality block at the cell's own depth; multiome\n\
+                      inputs are detected as `senna bge` detects them, and a cell missing a\n\
+                      modality is read from the blocks it has. Hidden units are Bernoulli,\n\
+                      binomial, truncated Poisson or Gaussian. The machine is fitted on\n\
+                      pseudobulks by persistent contrastive divergence (Adam on the\n\
+                      backward of the free-energy gap) and read out on every cell exactly.\n\
+                      Writes {out}.latent, pb_latent, cell_score, feature_embedding,\n\
+                      hidden_embedding, dictionary, feature_bias and log_likelihood tables."
+    )]
+    Rbm(rbm::args::RbmArgs),
+
+    #[command(
         name = "resolve-embedding-space",
         visible_alias = "rest",
         about = "Recast a topic run into a shared cell+gene embedding.",
@@ -941,6 +960,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::TdRbm(args) => {
             run_td_rbm(args)?;
+        }
+        Commands::Rbm(args) => {
+            rbm::run::fit_rbm(args)?;
         }
         Commands::ResolveEmbeddingSpace(args) => {
             resolve_embedding_space(args)?;

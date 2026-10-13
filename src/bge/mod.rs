@@ -24,7 +24,7 @@ use senna::embed_common::*;
 
 pub(crate) mod args;
 pub(crate) mod driver;
-mod multiome;
+pub(crate) mod multiome;
 pub(crate) mod resolve_etm;
 pub(crate) mod score;
 pub(crate) mod transfer;

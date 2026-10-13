@@ -14,6 +14,8 @@ use clap::{Args, ValueEnum};
 pub enum Topic {
     /// Reference-based deconvolution of pseudobulk profiles.
     Deconvolve,
+    /// The feature-embedded restricted Boltzmann machine.
+    Rbm,
     // Moved to lupin; kept so the old names say where to look.
     #[value(hide = true)]
     Annotation,
@@ -30,11 +32,18 @@ pub enum Topic {
 /// The listing `senna docs` prints and the text `senna docs <TOPIC>` prints are both read from
 /// here, so the index can never advertise a topic the command cannot serve — which is exactly
 /// what happens when the two are maintained separately.
-const DOCS: &[(Topic, &str, &str)] = &[(
-    Topic::Deconvolve,
-    "METHOD  reference-based deconvolution of pseudobulk profiles",
-    include_str!("../docs/deconvolve.md"),
-)];
+const DOCS: &[(Topic, &str, &str)] = &[
+    (
+        Topic::Deconvolve,
+        "METHOD  reference-based deconvolution of pseudobulk profiles",
+        include_str!("../docs/deconvolve.md"),
+    ),
+    (
+        Topic::Rbm,
+        "METHOD  feature-embedded restricted Boltzmann machine",
+        include_str!("../docs/rbm.md"),
+    ),
+];
 
 #[derive(Args, Debug)]
 pub struct DocsArgs {

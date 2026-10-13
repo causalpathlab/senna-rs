@@ -28,7 +28,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 /// The embedding methods `senna run` sets up, in the order listed.
-pub const METHODS: [&str; 9] = [
+pub const METHODS: [&str; 10] = [
     "topic",
     "masked-topic",
     "masked-vae",
@@ -38,6 +38,7 @@ pub const METHODS: [&str; 9] = [
     "bge",
     "simba",
     "gem",
+    "rbm",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

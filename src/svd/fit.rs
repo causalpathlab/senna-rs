@@ -134,6 +134,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
+        per_file_feature_suffix: None,
+        per_file_barcode_suffix: None,
     })?;
 
     // 3. Batch-adjusted collapsing (pseudobulk)
