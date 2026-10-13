@@ -7,11 +7,11 @@
 use super::args::TdRbmArgs;
 use super::counts::{for_cell_blocks, pb_tracks, select_genes};
 use super::curve::{grid_times, Spline};
-use super::init::{diffusion_order, expression_states};
 use super::levels::pb_levels;
 use super::model::Init0;
-use super::start::{base_start, curve_start, kmeans, rho_start, STATE_DIMS};
+use super::start::{base_start, rho_start, row_states, start_along, STATE_DIMS};
 use super::train::{fit, Level, TrainConfig, BETA0, GAMMA0};
+use super::tree::Forest;
 use data_beans::sparse_io::open_sparse_matrix_by_path;
 use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::matrix::parquet::{write_named_table, Column};
@@ -51,12 +51,8 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         "--batch and --chains must be positive"
     );
     anyhow::ensure!(
-        args.depth > 0 && args.assign_depth > 0.0,
-        "--depth and --assign-depth must be positive"
-    );
-    anyhow::ensure!(
-        args.grid >= 2 && args.knots >= 4,
-        "--grid needs 2 times or more, --knots 4 or more"
+        args.depth > 0 && args.state_depth > 0 && args.assign_depth > 0.0,
+        "--depth, --state-depth and --assign-depth must be positive"
     );
     anyhow::ensure!(
         args.states > 0 && args.epochs > args.time_epochs,
@@ -127,16 +123,45 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         })
         .collect();
 
-    // Where the fit starts: the finest pseudobulks split into lineages by
-    // k-means on their expression states, each lineage's pseudobulks in their
-    // diffusion order, the genes' embedding and
-    // baselines from every finest pseudobulk, and every lineage's curve
-    // through its pseudobulks in that order.
-    let states = expression_states(finest, &genes, STATE_DIMS);
-    let l = args.max_lineages.max(1);
-    let start_lineage = kmeans(&states, l, args.seed);
-    let mut pb_order = vec![0f32; n_pb];
+    // Where the fit starts: a forest over clusters of the finest
+    // pseudobulks, every tree provisionally rooted at one end of its longest
+    // path (or where `--root` says), the lineages its root-to-leaf paths; the
+    // genes' embedding and baselines from every finest pseudobulk, every
+    // lineage's curve through its pseudobulks in their order from the root.
     let fin = rows.last().expect("a level");
+    let states = row_states(fin, f, STATE_DIMS);
+    let forest = Forest::new(&states, args.clusters, args.knn, args.seed);
+    let of_cell: Vec<usize> = member
+        .iter()
+        .map(|p| p.expect("the collapse places every cell"))
+        .collect();
+    let mut roots: Vec<usize> = (0..forest.trees.len()).map(|t| forest.far_end(t)).collect();
+    let mut given = vec![false; forest.trees.len()];
+    if let Some(path) = &args.root {
+        let wanted: std::collections::HashSet<String> = std::fs::read_to_string(path)?
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let mut votes = vec![0usize; forest.clusters];
+        for (i, c) in cells.iter().enumerate() {
+            if wanted.contains(c.as_ref()) {
+                votes[forest.cluster[of_cell[i]]] += 1;
+            }
+        }
+        let top = (0..forest.clusters)
+            .max_by_key(|&c| votes[c])
+            .expect("a cluster");
+        anyhow::ensure!(votes[top] > 0, "none of the --root cells is in the data");
+        roots[forest.tree[top]] = top;
+        given[forest.tree[top]] = true;
+    }
+    info!(
+        "td-rbm: {} clusters in {} trees ({} with one cluster)",
+        forest.clusters,
+        forest.trees.len(),
+        forest.trees.iter().filter(|t| t.len() == 1).count()
+    );
     let (pu, ps): (Vec<f32>, Vec<f32>) = (
         fin.chunks(f).flat_map(|r| r[..g].to_vec()).collect(),
         fin.chunks(f).flat_map(|r| r[g..].to_vec()).collect(),
@@ -149,29 +174,18 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         .values
         .flatten_all()?
         .to_vec1::<f32>()?;
-    let mut curve = Vec::with_capacity(l * m * h);
-    for lin in 0..l {
-        let members: Vec<usize> = (0..n_pb).filter(|&p| start_lineage[p] == lin).collect();
-        let order: Vec<f32> = if members.len() > 2 {
-            let sub = nalgebra::DMatrix::from_fn(members.len(), states.ncols(), |i, j| {
-                states[(members[i], j)]
-            });
-            diffusion_order(&sub, args.knn.min(members.len() - 1))
-        } else {
-            (0..members.len())
-                .map(|i| (i as f32 + 0.5) / members.len().max(1) as f32)
-                .collect()
-        };
-        for (&p, &o) in members.iter().zip(&order) {
-            pb_order[p] = o;
-        }
-        let (pu, ps) = (&pu, &ps);
-        let tot: Vec<f32> = members
-            .iter()
-            .flat_map(|&p| (0..g).map(move |j| pu[p * g + j] + ps[p * g + j]))
-            .collect();
-        curve.extend(curve_start(&tot, &order, &rho, &values, (g, h, k, m)));
-    }
+    let begin = start_along(
+        fin,
+        f,
+        &states,
+        &forest,
+        &roots,
+        &rho,
+        &values,
+        (g, h, k, m),
+        args.knn,
+    );
+    let l = begin.paths.len();
 
     let cfg = TrainConfig {
         grid: k,
@@ -183,11 +197,12 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         epochs: args.epochs,
         time_epochs: args.time_epochs,
         steady_epochs: args.steady_epochs,
-        orient_epochs: args.orient_epochs,
-        orient_draws: args.orient_draws,
+        direction_draws: args.direction_draws,
         knn: args.knn,
+        smooth: args.smooth,
         assign_depth: args.assign_depth,
         depth: args.depth,
+        state_depth: args.state_depth,
         batch: args.batch,
         chains: args.chains,
         sweeps: args.sweeps,
@@ -202,6 +217,8 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
             cells: t.cells.clone(),
         })
         .collect();
+    let mut begin = begin;
+    let curve = std::mem::take(&mut begin.curve);
     let model = fit(
         &levels_in,
         f,
@@ -212,19 +229,23 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
             beta: BETA0,
             gamma: GAMMA0,
         },
-        &start_lineage,
+        begin,
+        &forest,
+        &states,
+        &roots,
+        &given,
         &cfg,
         &dev,
     )?;
 
     let out = model.summarise(&x, f, args.depth as f32, &dev)?;
+    let rho_rows = model.energy.rho().to_vec2::<f32>()?;
+    let (map, map_velocity) = map_space(&x, f, &rho_rows, &out.velocity)?;
     drop(x);
 
-    let of_cell: Vec<usize> = member
-        .iter()
-        .map(|p| p.expect("the collapse places every cell"))
-        .collect();
-    let start: Vec<f32> = of_cell.iter().map(|&p| pb_order[p]).collect();
+    // The start as the chosen roots have it, so its lineages are the
+    // fitted ones' paths.
+    let start: Vec<f32> = of_cell.iter().map(|&p| model.start_order[p]).collect();
     let pb_names: Vec<Box<str>> = of_cell.iter().map(|p| format!("pb{p}").into()).collect();
     let lineage_names: Vec<Box<str>> = out
         .lineage
@@ -233,7 +254,11 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         .collect();
     let start_names: Vec<Box<str>> = of_cell
         .iter()
-        .map(|&p| format!("L{}", start_lineage[p] + 1).into())
+        .map(|&p| format!("L{}", model.start_lineage[p] + 1).into())
+        .collect();
+    let cluster_names: Vec<Box<str>> = of_cell
+        .iter()
+        .map(|&p| format!("C{}", forest.cluster[p]).into())
         .collect();
     let p_lineage = columns("p_L", &out.p_lineage, l);
     let mut cols: Vec<(Box<str>, Column)> = vec![
@@ -243,6 +268,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         ("tau_start".into(), Column::F32(&start)),
         ("lineage_start".into(), Column::Str(&start_names)),
         ("pb".into(), Column::Str(&pb_names)),
+        ("cluster".into(), Column::Str(&cluster_names)),
     ];
     cols.extend(p_lineage.iter().map(|(n, v)| (n.clone(), Column::F32(v))));
     write_named_table(
@@ -258,45 +284,120 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         &columns("h", &out.state, args.states),
     )?;
     write(
-        &format!("{}.cell_velocity.parquet", args.out),
+        &format!("{}.cell_velocity_rho.parquet", args.out),
         "cell",
         &cells,
         &columns("v", &out.velocity, h),
+    )?;
+    // The map's space: every cell's expression on the leading principal
+    // components (layouts, clusters), and its velocity there.
+    let pcs = map.first().map_or(0, Vec::len);
+    write(
+        &format!("{}.cell_embedding.parquet", args.out),
+        "cell",
+        &cells,
+        &columns("pc", &map, pcs),
+    )?;
+    write(
+        &format!("{}.cell_velocity.parquet", args.out),
+        "cell",
+        &cells,
+        &columns("pc", &map_velocity, pcs),
     )?;
 
     // Every used lineage's direction and what it rests on.
     {
         use std::io::Write;
         let mut file = std::fs::File::create(format!("{}.direction.tsv", args.out))?;
-        let speed = model.energy.speed()?.flatten_all()?.to_vec1::<f32>()?;
-        writeln!(file, "lineage\tweight\tspeed\tdetermined\treversed\tz\tlambda\tlambda_null\tlambda_sd\tlambda_per_read\tgenes_for\tgenes_against")?;
+        let speed = model
+            .energy
+            .speed(Some(&model.log_weight))?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        writeln!(file, "lineage\ttree\tclusters\tweight\tspeed\tdetermined\tp_forward\tlog_bf\tlog_bf_sd\tlog_abf\tgenes_for\tgenes_against")?;
         for d in &model.directions {
+            let path = &model.paths[d.lineage];
+            let along: Vec<String> = path.clusters.iter().map(|c| format!("C{c}")).collect();
             writeln!(
                 file,
-                "L{}\t{:.4}\t{:.4}\t{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.6}\t{}\t{}",
+                "L{}\tT{}\t{}\t{:.4}\t{:.4}\t{}\t{:.6}\t{:.3}\t{:.3}\t{:.3}\t{}\t{}",
                 d.lineage + 1,
+                path.tree + 1,
+                along.join(">"),
                 model.log_weight[d.lineage].exp(),
                 speed[d.lineage],
-                d.determined,
-                d.reversed,
-                d.z,
-                d.lambda,
-                d.lambda_null,
-                d.lambda_sd,
-                d.lambda_per_read,
+                model.roots[path.tree].determined,
+                d.p_forward,
+                d.log_bf,
+                d.log_bf_sd,
+                d.log_abf,
                 d.gene_votes.iter().filter(|&&v| v > 0.0).count(),
                 d.gene_votes.iter().filter(|&&v| v < 0.0).count(),
             )?;
         }
     }
+    // Every tree's root: the candidates' posterior.
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(format!("{}.roots.tsv", args.out))?;
+        writeln!(
+            file,
+            "tree\tcandidate\tp\tchosen\tprovisional\tdetermined\tgiven\tmirrored"
+        )?;
+        for c in &model.roots {
+            for (&a, &p) in c.candidates.iter().zip(&c.p) {
+                writeln!(
+                    file,
+                    "T{}\tC{}\t{:.6}\t{}\tC{}\t{}\t{}\t{}",
+                    c.tree + 1,
+                    a,
+                    p,
+                    a == c.chosen,
+                    c.provisional,
+                    c.determined,
+                    c.given,
+                    c.mirrored
+                )?;
+            }
+        }
+    }
+    // Every tree's edges and the splicing along them.
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(format!("{}.edges.tsv", args.out))?;
+        writeln!(
+            file,
+            "tree\tfrom\tto\tlog_bf\tgenes_for\tgenes_against\tunder_chosen_root"
+        )?;
+        for c in &model.roots {
+            let (parent, _) = forest.rooted(c.chosen);
+            for &(a, b, v, up, down) in &c.edges {
+                let kept = parent[b] == Some(a);
+                writeln!(
+                    file,
+                    "T{}\tC{}\tC{}\t{:.3}\t{}\t{}\t{}",
+                    c.tree + 1,
+                    a,
+                    b,
+                    v,
+                    up,
+                    down,
+                    if kept { "same" } else { "reversed" }
+                )?;
+            }
+        }
+    }
     let vote_cols: Vec<(Box<str>, Vec<f32>)> = model
         .directions
         .iter()
-        .map(|d| {
-            (
-                format!("vote_L{}", d.lineage + 1).into(),
-                d.gene_votes.clone(),
-            )
+        .flat_map(|d| {
+            [
+                (
+                    format!("log_bf_L{}", d.lineage + 1).into(),
+                    d.gene_votes.clone(),
+                ),
+                (format!("z_L{}", d.lineage + 1).into(), d.gene_z.clone()),
+            ]
         })
         .collect();
     if !vote_cols.is_empty() {
@@ -349,9 +450,116 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         &times,
         &curve,
     )?;
+    write_manifest(args)?;
     info!(
-        "Wrote {0}.{{cell_time,cell_state,cell_velocity,gene_direction,gene_rates,feature_embedding,gene_states,curve}}.parquet and {0}.direction.tsv",
+        "Wrote {0}.{{cell_time,cell_state,cell_velocity,cell_velocity_rho,cell_embedding,gene_direction,gene_rates,feature_embedding,gene_states,curve}}.parquet, {0}.{{direction,roots,edges}}.tsv and {0}.senna.json",
         args.out
     );
     Ok(())
+}
+
+/// `{out}.senna.json`: the run as `senna view` and the other readers open
+/// it. The cells' positions on their curves are the cell embedding and the
+/// genes' ρ the feature embedding; the time, velocity and state tables are
+/// recorded beside them. The two-track input is not recorded as data: its
+/// rows are tracks, not the genes the embedding names.
+fn write_manifest(args: &TdRbmArgs) -> anyhow::Result<()> {
+    use senna::run_manifest::{
+        record_train_args, write_run_manifest, RunDescription, RunKind, RunManifest,
+    };
+    let prefix: &str = &args.out;
+    write_run_manifest(&RunDescription {
+        train_args: Some(record_train_args(args)?),
+        kind: RunKind::TdRbm,
+        prefix,
+        data_input: &[],
+        data_multiome: None,
+        data_batch: &[],
+        data_input_null: &[],
+        dictionary_suffix: None,
+        has_model: false,
+        has_cell_proj: false,
+        pb_gene_suffix: None,
+        pb_latent_suffix: None,
+        pb_reference_suffix: None,
+        dictionary_empirical_suffix: None,
+        feature_embedding_suffix: Some("feature_embedding.parquet"),
+        feature_coembedding_suffix: None,
+        carried: None,
+        module_membership_suffix: None,
+        module_dictionary_suffix: None,
+        softmax_dictionary_suffix: None,
+        cell_embedding_suffix: Some("cell_embedding.parquet"),
+        cell_encoder_suffix: None,
+        feature_contrast_suffix: None,
+        feature_contrast_bias_suffix: None,
+        track_encoder_suffixes: vec![],
+        default_colour_by: "cluster",
+        has_latent: false,
+        has_cell_to_pb: false,
+        has_pb_tree: false,
+    })?;
+    let path = std::path::PathBuf::from(format!("{prefix}.senna.json"));
+    let (mut m, _) = RunManifest::load(&path)?;
+    let base = std::path::Path::new(prefix)
+        .file_name()
+        .map_or_else(|| prefix.to_string(), |n| n.to_string_lossy().into_owned());
+    m.outputs.cell_time = Some(format!("{base}.cell_time.parquet"));
+    m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
+    m.outputs.cell_state = Some(format!("{base}.cell_state.parquet"));
+    m.save(&path)
+}
+
+/// Principal components of the map space.
+const MAP_PCS: usize = 30;
+
+/// Every cell's place in the map space, and its velocity there.
+type MapSpace = (Vec<Vec<f32>>, Vec<Vec<f32>>);
+
+/// The cells' map space and their velocity in it, as scVelo has them:
+/// every cell's `log1p` reads per 10⁴ (both tracks summed) on the fitted
+/// genes, centred, on its leading principal components; and every cell's
+/// velocity read out per gene (`ρ_g · v`, a `d log s_g/dt`, centred over
+/// the genes) taken through the same components. `x` is `[C × F]`, `rho`
+/// `[G × H]`, `velocity` `[C × H]`.
+fn map_space(
+    x: &[f32],
+    f: usize,
+    rho: &[Vec<f32>],
+    velocity: &[Vec<f32>],
+) -> anyhow::Result<MapSpace> {
+    use legume_numeric::matrix::traits::RandomizedAlgs;
+    let g = f / 2;
+    let c = x.len() / f;
+    let mut m = nalgebra::DMatrix::<f32>::zeros(c, g);
+    for (i, row) in x.chunks(f).enumerate() {
+        let total: f32 = row.iter().sum::<f32>().max(1.0);
+        for j in 0..g {
+            m[(i, j)] = ((row[j] + row[g + j]) / total * 1e4).ln_1p();
+        }
+    }
+    for j in 0..g {
+        let mean = m.column(j).mean();
+        m.column_mut(j).add_scalar_mut(-mean);
+    }
+    let k = MAP_PCS.min(c.saturating_sub(1)).min(g).max(1);
+    let (u, s, v) = m.rsvd(k)?; // [C × k], [k], [G × k]
+    let k = s.len();
+    let scores: Vec<Vec<f32>> = (0..c)
+        .map(|i| (0..k).map(|j| u[(i, j)] * s[j]).collect())
+        .collect();
+    let moved: Vec<Vec<f32>> = velocity
+        .iter()
+        .map(|vc| {
+            let per_gene: Vec<f32> = rho
+                .iter()
+                .map(|r| r.iter().zip(vc).map(|(a, b)| a * b).sum())
+                .collect();
+            let mean = per_gene.iter().sum::<f32>() / g.max(1) as f32;
+            (0..k)
+                .map(|j| (0..g).map(|q| (per_gene[q] - mean) * v[(q, j)]).sum())
+                .collect()
+        })
+        .collect();
+    Ok((scores, moved))
 }

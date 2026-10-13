@@ -25,6 +25,7 @@
 //! stand in for time.
 
 use super::curve::Spline;
+pub use crate::rbm_core::softplus;
 use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var};
 use legume_numeric::candle::candle_nn::ops::{log_softmax, sigmoid};
 use rand::rngs::StdRng;
@@ -34,14 +35,12 @@ use rand_distr::{Distribution, Normal};
 /// Log range of the splicing and degradation rates.
 pub const LOG_RATE: (f64, f64) = (-3.0, 7.0);
 /// The floor's softness, as a share of `γ`: `m⁺ = εγ softplus(m/(εγ))`.
-const FLOOR_SOFTNESS: f64 = 0.05;
+pub(crate) const FLOOR_SOFTNESS: f64 = 0.05;
+/// An empty lineage's log weight: finite, so log-sum-exps stay finite, and
+/// far below any lineage in use.
+pub const EMPTY: f32 = -1e4;
 /// Values are floored here before a log.
 const TINY: f64 = 1e-30;
-
-/// `log(1 + eˣ)`, stable for any `x`.
-pub fn softplus(x: &Tensor) -> Result<Tensor> {
-    x.relu()? + x.abs()?.neg()?.exp()?.affine(1.0, 1.0)?.log()?
-}
 
 /// `lo + (hi − lo) σ(v)`.
 fn bounded(v: &Tensor, (lo, hi): (f64, f64)) -> Result<Tensor> {
@@ -118,10 +117,9 @@ pub struct Tables {
     pub bias: Tensor,
     /// `[2G × d]` the states' weights on every feature.
     pub w: Tensor,
-    /// `[H × d]` the states' loadings with the curves' spans removed.
-    pub load: Tensor,
     /// `[L·K × H]` every lineage's curve and velocity on the grid, `[L·K × 1]`
-    /// its size change.
+    /// its size change. The velocity is in the shared rates' time (`ż`
+    /// times the lineage's speed), so lineages compare.
     pub curve: Tensor,
     pub velocity: Tensor,
     pub size: Tensor,
@@ -135,7 +133,6 @@ impl Tables {
             psi: self.psi.detach(),
             bias: self.bias.detach(),
             w: self.w.detach(),
-            load: self.load.detach(),
             curve: self.curve.detach(),
             velocity: self.velocity.detach(),
             size: self.size.detach(),
@@ -185,6 +182,16 @@ impl Energy {
     /// Read the curves' velocity in the unspliced share (`true`) or hold
     /// every gene at its steady ratio (`false`), which no direction of time
     /// can tell apart.
+    /// The tables at steady state (the velocity off, the states off, the
+    /// lineages unweighted), detached; the motion left as it was.
+    pub fn steady_tables(&self, spline: &Spline) -> Result<Tables> {
+        let was = self.motion.get();
+        self.motion.set(0.0);
+        let t = self.tables(spline, false, &vec![0f32; self.lineages]);
+        self.motion.set(was);
+        Ok(t?.detach())
+    }
+
     pub fn set_motion(&self, on: bool) {
         self.motion.set(if on { 1.0 } else { 0.0 });
     }
@@ -204,14 +211,36 @@ impl Energy {
 
     /// Set every gene's splicing and degradation rates (`[1 × G]` natural
     /// logs), held inside their bounds.
+    /// A gene whose rates fall outside the bounds keeps its ratio `γ/β` (its
+    /// steady unspliced share): both are shifted together, and the ratio is
+    /// only cut where it is wider than the bounds themselves.
     pub fn set_log_rates(&self, log_beta: &Tensor, log_gamma: &Tensor) -> Result<()> {
-        let free = |x: &Tensor| -> Result<Tensor> {
-            let (lo, hi) = LOG_RATE;
-            let p = ((x.clamp(lo + 1e-3, hi - 1e-3)? - lo)? / (hi - lo))?;
+        let (lo, hi) = LOG_RATE;
+        let (lo, hi) = (lo + 1e-3, hi - 1e-3);
+        let (b, g) = (
+            log_beta.flatten_all()?.to_vec1::<f32>()?,
+            log_gamma.flatten_all()?.to_vec1::<f32>()?,
+        );
+        let (mut nb, mut ng) = (Vec::with_capacity(b.len()), Vec::with_capacity(g.len()));
+        for (&lb, &lg) in b.iter().zip(&g) {
+            let (lb, lg) = (f64::from(lb), f64::from(lg));
+            let ratio = (lg - lb).clamp(lo - hi, hi - lo);
+            // The shift that brings both inside, the ratio kept.
+            let low = lo.max(lo + ratio);
+            let high = hi.min(hi + ratio);
+            let lg = lg.clamp(low, high);
+            nb.push((lg - ratio) as f32);
+            ng.push(lg as f32);
+        }
+        let shape = log_beta.shape().clone();
+        let dev = log_beta.device();
+        let free = |v: Vec<f32>| -> Result<Tensor> {
+            let x = Tensor::from_vec(v, shape.clone(), dev)?;
+            let p = ((x - LOG_RATE.0)? / (LOG_RATE.1 - LOG_RATE.0))?;
             p.log()? - p.affine(-1.0, 1.0)?.log()?
         };
-        self.beta.set(&free(log_beta)?)?;
-        self.gamma.set(&free(log_gamma)?)
+        self.beta.set(&free(nb)?)?;
+        self.gamma.set(&free(ng)?)
     }
 
     /// The parameters [`Self::snapshot`] and [`Self::restore`] carry.
@@ -312,9 +341,37 @@ impl Energy {
     }
 
     /// `[L × 1]` every lineage's speed, `exp` of its centred log speed.
-    pub fn speed(&self) -> Result<Tensor> {
+    /// The log speeds are centred over the lineages in use (`log_weight`
+    /// above [`EMPTY`]; every lineage without weights), so an empty lineage's
+    /// speed neither moves the others nor drifts with them.
+    pub fn speed(&self, log_weight: Option<&[f32]>) -> Result<Tensor> {
         let ls = self.speed.as_tensor();
-        ls.broadcast_sub(&ls.mean_keepdim(0)?)?.exp()
+        let live: Vec<f32> = (0..self.lineages)
+            .map(|i| match log_weight {
+                Some(w) if w[i] <= EMPTY => 0.0,
+                _ => 1.0,
+            })
+            .collect();
+        let n = live.iter().sum::<f32>().max(1.0);
+        let live = Tensor::from_vec(live, (self.lineages, 1), ls.device())?;
+        let centre = (ls * &live)?.sum_all()?.affine(1.0 / f64::from(n), 0.0)?;
+        ls.broadcast_sub(&centre)?.exp()
+    }
+
+    /// Every lineage's curve roughness: the squared second differences of its
+    /// B-spline coefficients, summed (a P-spline penalty, Eilers and Marx,
+    /// *Statistical Science* (1996)). A bend in the curve is a jump in its
+    /// velocity, so this is what keeps the velocity from following noise.
+    pub fn roughness(&self) -> Result<Tensor> {
+        let (l, m) = (self.lineages, self.knots);
+        let mut total = Tensor::zeros((), DType::F32, self.coef.device())?;
+        for i in 0..l {
+            let c = self.coef.narrow(0, i * m, m)?;
+            let d2 = ((c.narrow(0, 2, m - 2)? - (c.narrow(0, 1, m - 2)? * 2.0)?)?
+                + c.narrow(0, 0, m - 2)?)?;
+            total = (total + d2.sqr()?.sum_all()?)?;
+        }
+        Ok(total)
     }
 
     /// The states' loadings.
@@ -335,29 +392,39 @@ impl Energy {
         let k = spline.values.dim(0)?;
         let rho = self.rho.as_tensor();
         let (beta, gamma) = (self.beta()?, self.gamma()?);
-        let speed = self.speed()?;
-        let (mut psi, mut curves, mut velocities, mut sizes) = (vec![], vec![], vec![], vec![]);
-        for i in 0..l {
-            let coef = self.coef.narrow(0, i * m, m)?;
-            let curve = spline.values.matmul(&coef)?; // [K × H]
-            let velocity = spline.slopes.matmul(&coef)?; // [K × H]
-            let size = spline.values.matmul(&self.size.narrow(0, i * m, m)?)?; // [K × 1]
-                                                                               // In the shared rates' time: the lineage's speed per unit `τ`.
-            let pace = (speed.narrow(0, i, 1)? * self.motion.get())?; // [1 × 1]
-            let raw = time_tables(
-                rho,
-                &curve,
-                &velocity.broadcast_mul(&pace)?,
-                &size.broadcast_mul(&pace)?,
-                self.base.as_tensor(),
-                &beta,
-                &gamma,
-            )?;
-            psi.push(log_softmax(&raw, 1)?);
-            curves.push(curve);
-            velocities.push(velocity);
-            sizes.push(size);
-        }
+        let speed = self.speed(Some(log_weight))?;
+        // Every lineage at once: `[L × K × M]` bases on `[L × M × H]`
+        // coefficients, rows `ℓ·K + k`; the time tables are row by row.
+        let h = rho.dim(1)?;
+        let lk = l * k;
+        let basis = |b: &Tensor| -> Result<Tensor> {
+            b.unsqueeze(0)?.broadcast_as((l, k, m))?.contiguous()
+        };
+        let (values, slopes) = (basis(&spline.values)?, basis(&spline.slopes)?);
+        let coef = self.coef.as_tensor().reshape((l, m, h))?;
+        let curve = values.matmul(&coef)?.reshape((lk, h))?;
+        let velocity = slopes.matmul(&coef)?.reshape((lk, h))?;
+        let size = values
+            .matmul(&self.size.as_tensor().reshape((l, m, 1))?)?
+            .reshape((lk, 1))?;
+        // Every row's lineage speed; in the shared rates' time the velocity
+        // runs at the speed per unit `τ`.
+        let speed_rows = speed
+            .unsqueeze(1)?
+            .broadcast_as((l, k, 1))?
+            .reshape((lk, 1))?;
+        let pace = (&speed_rows * self.motion.get())?;
+        let raw = time_tables(
+            rho,
+            &curve,
+            &velocity.broadcast_mul(&pace)?,
+            &size.broadcast_mul(&pace)?,
+            self.base.as_tensor(),
+            &beta,
+            &gamma,
+        )?;
+        let psi = log_softmax(&raw, 1)?;
+        let velocity = velocity.broadcast_mul(&speed_rows)?;
         let bias: Vec<f32> = log_weight
             .iter()
             .flat_map(|&w| std::iter::repeat_n(w - (k as f32).ln(), k))
@@ -369,13 +436,12 @@ impl Energy {
         };
         let half = rho.matmul(&load)?; // [G × d]
         Ok(Tables {
-            psi: Tensor::cat(&psi, 0)?,
-            bias: Tensor::from_vec(bias, (1, l * k), rho.device())?,
+            psi,
+            bias: Tensor::from_vec(bias, (1, lk), rho.device())?,
             w: Tensor::cat(&[&half, &half], 0)?,
-            load,
-            curve: Tensor::cat(&curves, 0)?,
-            velocity: Tensor::cat(&velocities, 0)?,
-            size: Tensor::cat(&sizes, 0)?,
+            curve,
+            velocity,
+            size,
             lineages: l,
         })
     }
@@ -399,7 +465,7 @@ impl Energy {
         let rho_bar = log_softmax(&spliced, 1)?.exp()?.matmul(rho)?;
         let along = velocity.matmul(&rho.t()?)?;
         let centre = (&rho_bar * &velocity)?.sum_keepdim(1)?;
-        let pace = self.speed()?.narrow(0, l, 1)?;
+        let pace = self.speed(None)?.narrow(0, l, 1)?;
         along
             .broadcast_sub(&centre)?
             .broadcast_add(&size)?
@@ -408,7 +474,7 @@ impl Energy {
 }
 
 /// `load` `[H × d]` with the span of the live lineages' curve travel
-/// removed: every live lineage's (`log_weight` finite) coefficient rows
+/// removed: every live lineage's (`log_weight` above [`EMPTY`]) coefficient rows
 /// (`coef` `[L·M × H]`) about their mean, as a B-spline curve moves only
 /// within them (its basis sums to one). The span is taken by its principal
 /// directions on the host, those above a relative floor, and at most `H − d`
@@ -417,14 +483,19 @@ impl Energy {
 pub fn without_span(load: &Tensor, coef: &Tensor, log_weight: &[f32]) -> Result<Tensor> {
     let (h, d) = load.dims2()?;
     let m = coef.dim(0)? / log_weight.len().max(1);
+    // Every lineage's coefficients on the host at once.
+    let all = coef.to_vec2::<f32>()?;
     let mut gram = nalgebra::DMatrix::<f64>::zeros(h, h);
     for (i, w) in log_weight.iter().enumerate() {
-        if !w.is_finite() {
+        if *w <= EMPTY {
             continue;
         }
-        let c = coef.narrow(0, i * m, m)?;
-        for r in c.broadcast_sub(&c.mean_keepdim(0)?)?.to_vec2::<f32>()? {
-            let v = nalgebra::DVector::from_iterator(h, r.iter().map(|&x| f64::from(x)));
+        let rows = &all[i * m..(i + 1) * m];
+        let mean: Vec<f64> = (0..h)
+            .map(|j| rows.iter().map(|r| f64::from(r[j])).sum::<f64>() / m as f64)
+            .collect();
+        for r in rows {
+            let v = nalgebra::DVector::from_iterator(h, (0..h).map(|j| f64::from(r[j]) - mean[j]));
             gram += &v * v.transpose();
         }
     }

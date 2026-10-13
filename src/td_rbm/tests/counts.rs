@@ -107,3 +107,20 @@ fn select_genes_drops_thin_tracks_and_keeps_the_most_variable() {
     );
     assert_eq!(select_genes(&t, 20.0, 1), vec![1], "varied beats flat");
 }
+
+/// Only genes with both an unspliced and a spliced row count.
+#[test]
+fn two_track_genes_counts_genes_with_both_rows() {
+    let rows: Vec<Box<str>> = [
+        "GENE1/count/spliced",
+        "GENE1/count/unspliced",
+        "GENE2/count/spliced",
+        "GENE3/count/unspliced",
+        "GENE4",
+    ]
+    .iter()
+    .map(|r| (*r).into())
+    .collect();
+    assert_eq!(two_track_genes(&rows), 1);
+    assert_eq!(two_track_genes(&rows[2..]), 0);
+}

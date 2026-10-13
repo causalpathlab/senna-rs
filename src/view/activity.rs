@@ -8,17 +8,21 @@
 //!   `log Σ_k θ_nk β_gk`. Only the relative level across cells means anything.
 //! - **observed**: `ln(1 + count)` from the run's data files, one row read at a
 //!   time. The backend is opened on first use.
+//! - **extra**: the same from a data file the run was not fitted on, opened in
+//!   the view, its cells matched to the run's by name ([`match_cells`]).
 //!
 //! Values come back aligned to a set of points by cell name, ready to be
 //! mapped onto a colour ramp. Which model row each point is, is worked out
 //! once per view and cached, not per feature.
 
+use data_beans::sparse_io::COLUMN_SEP;
 use data_beans::utilities::name_matching::GeneIndex;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunManifest};
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -33,6 +37,7 @@ pub(super) type Vector = nalgebra::DVector<f32>;
 pub enum Source {
     Expected,
     Observed,
+    Extra,
 }
 
 impl Source {
@@ -41,14 +46,45 @@ impl Source {
         match self {
             Source::Expected => "expected",
             Source::Observed => "observed",
+            Source::Extra => "extra",
         }
     }
 
+    /// The next source to show, `Extra` only when a file is open for it.
     #[must_use]
-    pub fn other(self) -> Self {
+    pub fn next(self, extra: bool) -> Self {
         match self {
             Source::Expected => Source::Observed,
-            Source::Observed => Source::Expected,
+            Source::Observed if extra => Source::Extra,
+            Source::Observed | Source::Extra => Source::Expected,
+        }
+    }
+
+    /// Whether the values are counts (`ln(1 + count)`), a zero "not seen".
+    fn counts(self) -> bool {
+        self != Source::Expected
+    }
+}
+
+/// A summary of each cell over every feature of a count source, or the
+/// share of its counts in a feature set (a group's markers).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stat {
+    /// `ln(1 + total count)`.
+    Total,
+    /// How many features have a count.
+    Detected,
+    /// The set's share of the cell's counts.
+    Share(Box<str>),
+}
+
+impl Stat {
+    #[must_use]
+    pub fn name(&self) -> String {
+        match self {
+            Stat::Total => "total counts".into(),
+            Stat::Detected => "features detected".into(),
+            Stat::Share(group) => format!("{group} markers' share of counts"),
         }
     }
 }
@@ -203,6 +239,103 @@ pub(crate) struct Observed {
     /// Column of each cell name.
     cell_index: HashMap<Box<str>, u32>,
     n_cells: usize,
+    /// Each column's total count and number of features detected, read on
+    /// first use.
+    totals: OnceLock<(Vec<f32>, Vec<f32>)>,
+}
+
+impl Observed {
+    fn new(data: SparseIoVec, cell_index: HashMap<Box<str>, u32>) -> anyhow::Result<Self> {
+        Ok(Self {
+            features: Axis::new(data.row_names()?),
+            n_cells: data.num_columns(),
+            cell_index,
+            data,
+            totals: OnceLock::new(),
+        })
+    }
+
+    /// Row `g`'s counts per column, each through `f`.
+    fn row(&self, g: usize, f: impl Fn(f32) -> f32) -> Result<Vec<f32>, String> {
+        // One row a read: see `observed_group_means`.
+        let row = self
+            .data
+            .read_rows_csr(std::iter::once(g))
+            .map_err(|e| e.to_string())?;
+        let mut values = vec![0f32; self.n_cells];
+        for (&c, &v) in row.col_indices().iter().zip(row.values()) {
+            values[c] = f(v);
+        }
+        Ok(values)
+    }
+
+    /// Each column's total count and number of features detected, in one
+    /// pass over the columns. No progress bar: the screen is the view's.
+    fn totals(&self) -> Result<&(Vec<f32>, Vec<f32>), String> {
+        if let Some(t) = self.totals.get() {
+            return Ok(t);
+        }
+        const BLOCK: usize = 4096;
+        let blocks: Vec<usize> = (0..self.n_cells).step_by(BLOCK).collect();
+        let parts = blocks
+            .par_iter()
+            .map(|&lb| {
+                let csc = self
+                    .data
+                    .read_columns_csc(lb..(lb + BLOCK).min(self.n_cells))?;
+                Ok(csc
+                    .col_iter()
+                    .map(|c| {
+                        let v = c.values();
+                        (
+                            v.iter().sum::<f32>(),
+                            v.iter().filter(|&&x| x > 0.0).count() as f32,
+                        )
+                    })
+                    .unzip::<_, _, Vec<f32>, Vec<f32>>())
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        let (mut total, mut detected) = (Vec::new(), Vec::new());
+        for (t, d) in parts {
+            total.extend(t);
+            detected.extend(d);
+        }
+        Ok(self.totals.get_or_init(|| (total, detected)))
+    }
+
+    /// `stat` per column.
+    fn stat(&self, stat: &Stat, set: &[Box<str>]) -> Result<Cow<'_, [f32]>, String> {
+        let (total, detected) = self.totals()?;
+        Ok(match stat {
+            Stat::Total => Cow::Owned(total.iter().map(|t| t.ln_1p()).collect()),
+            Stat::Detected => Cow::Borrowed(detected),
+            Stat::Share(_) => {
+                let rows: std::collections::BTreeSet<usize> = set
+                    .iter()
+                    .filter_map(|f| self.features.index.match_gene(f))
+                    .collect();
+                if rows.is_empty() {
+                    return Err("none of these features are in the counts".into());
+                }
+                let mut sum = vec![0f32; self.n_cells];
+                for g in rows {
+                    // One row a read: see `observed_group_means`.
+                    let row = self
+                        .data
+                        .read_rows_csr(std::iter::once(g))
+                        .map_err(|e| e.to_string())?;
+                    for (&c, &v) in row.col_indices().iter().zip(row.values()) {
+                        sum[c] += v;
+                    }
+                }
+                for (s, &t) in sum.iter_mut().zip(total) {
+                    *s = if t > 0.0 { *s / t } else { f32::NAN };
+                }
+                Cow::Owned(sum)
+            }
+        })
+    }
 }
 
 /// Values of one feature (or feature set) per point, `NaN` where the point
@@ -229,7 +362,7 @@ impl Levels {
         ((v - self.lo) / (self.hi - self.lo).max(1e-12)).clamp(0.0, 1.0)
     }
 
-    fn from_values(values: Vec<f32>, zero_is_off: bool) -> Self {
+    pub(super) fn from_values(values: Vec<f32>, zero_is_off: bool) -> Self {
         let mut sample: Vec<f32> = values
             .iter()
             .copied()
@@ -376,7 +509,7 @@ impl Activity {
         };
         let rows = match source {
             Source::Expected => lookup(self.expected()?.cell_index()),
-            Source::Observed => lookup(&self.observed()?.cell_index),
+            Source::Observed | Source::Extra => lookup(&self.counts(source)?.cell_index),
         };
         self.rows.insert((source, key), rows.clone());
         Ok(rows)
@@ -425,11 +558,44 @@ impl Activity {
             .map(|read| &read.observed)
     }
 
+    /// The extra file's counts, once read.
+    fn extra(&mut self) -> Result<&ExtraRead, String> {
+        self.loads
+            .extra
+            .as_ref()
+            .ok_or("no extra data file is open (O opens one)")?
+            .answer(self.patient)
+    }
+
+    /// The counts behind a count source.
+    fn counts(&mut self, source: Source) -> Result<&Observed, String> {
+        match source {
+            Source::Observed => self.observed(),
+            Source::Extra => self.extra().map(|x| &x.observed),
+            Source::Expected => Err("the model's expectation is not counts".into()),
+        }
+    }
+
+    /// Show `extra` as the extra source from now on, in place of any other.
+    pub(crate) fn set_extra(&mut self, extra: Arc<ExtraFiles>) {
+        self.loads.extra = Some(extra);
+        self.rows.retain(|(s, _), _| *s != Source::Extra);
+    }
+
+    /// What a count source is called in a message.
+    fn where_counts(&self, source: Source) -> String {
+        match (source, self.loads.extra.as_ref().and_then(|x| x.try_get())) {
+            (Source::Extra, Some(Ok(x))) => x.name.to_string(),
+            (Source::Extra, _) => "the extra data file".into(),
+            _ => "the data files".into(),
+        }
+    }
+
     /// Feature names on `source`'s axis, for search and completion.
     pub fn feature_names(&mut self, source: Source) -> Result<&[Box<str>], String> {
         Ok(match source {
             Source::Expected => &self.expected()?.features.names,
-            Source::Observed => &self.observed()?.features.names,
+            Source::Observed | Source::Extra => &self.counts(source)?.features.names,
         })
     }
 
@@ -468,22 +634,15 @@ impl Activity {
                 };
                 Ok((values, e.features.names[g].clone()))
             }
-            Source::Observed => {
-                let o = self.observed()?;
+            Source::Observed | Source::Extra => {
+                let place = self.where_counts(source);
+                let o = self.counts(source)?;
                 let g = o
                     .features
                     .index
                     .match_gene(feature)
-                    .ok_or_else(|| format!("no feature {feature} in the data files"))?;
-                let row = o
-                    .data
-                    .read_rows_csr(std::iter::once(g))
-                    .map_err(|e| e.to_string())?;
-                let mut values = vec![0f32; o.n_cells];
-                for (&c, &v) in row.col_indices().iter().zip(row.values()) {
-                    values[c] = v.ln_1p();
-                }
-                Ok((values, o.features.names[g].clone()))
+                    .ok_or_else(|| format!("no feature {feature} in {place}"))?;
+                Ok((o.row(g, f32::ln_1p)?, o.features.names[g].clone()))
             }
         }
     }
@@ -517,7 +676,7 @@ impl Activity {
             .is_ok_and(|rows| rows.iter().any(|&r| r != NO_ROW));
         let axis = match source {
             Source::Expected => self.expected().map(|e| &e.features),
-            Source::Observed => self.observed().map(|o| &o.features),
+            Source::Observed | Source::Extra => self.counts(source).map(|o| &o.features),
         };
         match axis {
             Ok(axis) if covers => features
@@ -538,10 +697,35 @@ impl Activity {
         let rows = self.rows(source, key, names)?;
         let (raw, spelled) = self.raw(feature, source)?;
         let values = Self::on_points(&raw, &rows);
-        Ok((
-            Levels::from_values(values, source == Source::Observed),
-            spelled,
-        ))
+        Ok((Levels::from_values(values, source.counts()), spelled))
+    }
+
+    /// `stat` on each of the points `names` (the view `key`), from a count
+    /// source; `set` is the feature set a share is of.
+    pub fn stat_levels(
+        &mut self,
+        stat: &Stat,
+        set: &[Box<str>],
+        source: Source,
+        key: usize,
+        names: &[Box<str>],
+    ) -> Result<Levels, String> {
+        if !source.counts() {
+            return Err(format!(
+                "{} needs counts: o shows the observed (or extra) counts",
+                stat.name()
+            ));
+        }
+        let rows = self.rows(source, key, names)?;
+        // The run's own totals are a pass over its data: on the side.
+        if source == Source::Observed {
+            self.loads.totals.answer(self.patient)?;
+        }
+        let raw = self.counts(source)?.stat(stat, set)?;
+        // A share starts at zero; a total or a count of features has no
+        // natural origin in view, so its ramp starts at a low quantile.
+        let from_zero = matches!(stat, Stat::Share(_));
+        Ok(Levels::from_values(Self::on_points(&raw, &rows), from_zero))
     }
 
     /// Mean ramp position over a feature set: each feature is first placed on
@@ -573,7 +757,10 @@ impl Activity {
         if used == 0 {
             return Err(match source {
                 Source::Expected => "none of these features are in the model".into(),
-                Source::Observed => "none of these features are in the data files".into(),
+                _ => format!(
+                    "none of these features are in {}",
+                    self.where_counts(source)
+                ),
             });
         }
         let values = sum
@@ -581,10 +768,7 @@ impl Activity {
             .zip(&seen)
             .map(|(&s, &ok)| if ok { s / used as f32 } else { f32::NAN })
             .collect();
-        Ok((
-            Levels::from_values(values, source == Source::Observed),
-            used,
-        ))
+        Ok((Levels::from_values(values, source.counts()), used))
     }
 
     /// Every feature's score for a view, in the model's feature order, with
@@ -1075,20 +1259,107 @@ pub(crate) fn read_run_data(m: &RunManifest, dir: &Path) -> anyhow::Result<RunRe
             &[],
         )
     });
-    let n_cells = cells.len();
     let cell_index = cells
         .into_iter()
         .enumerate()
         .map(|(i, n)| (n, i as u32))
         .collect();
-    let observed = Observed {
-        features: Axis::new(data.row_names()?),
-        cell_index,
-        n_cells,
-        data,
-    };
+    let observed = Observed::new(data, cell_index)?;
     Ok(RunRead { observed, batches })
 }
+
+/// Read a data file the run was not fitted on, its cells matched to the
+/// run's `cells` ([`match_cells`]), and each cell's totals with it. Refuses
+/// a file with none of the run's cells.
+pub(crate) fn read_extra(path: &Path, cells: &[Box<str>]) -> anyhow::Result<ExtraRead> {
+    let name = super::files::name(path);
+    info!("view: opening {name} as extra counts");
+    let SparseDataWithBatch { data, .. } = read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: vec![path.to_string_lossy().into()],
+        keep_empty_barcodes: true,
+        ..Default::default()
+    })?;
+    let cell_index = match_cells(cells, &data.column_names()?);
+    anyhow::ensure!(
+        !cell_index.is_empty(),
+        "none of the run's {} cells are in {name}",
+        cells.len()
+    );
+    let observed = Observed::new(data, cell_index)?;
+    observed.totals().map_err(anyhow::Error::msg)?;
+    Ok(ExtraRead {
+        name: name.into(),
+        observed,
+        of: cells.len(),
+    })
+}
+
+/// The column of each of the run's `cells` among a file's `columns`: by
+/// name, as senna matches cells everywhere; when that finds fewer than nine
+/// in ten, by barcode with any `@` tag left off both sides (a run fitted on
+/// several files tags each cell with its file), whichever finds more. A
+/// barcode is used only where it names one cell on each side.
+pub(crate) fn match_cells<'a>(
+    cells: &'a [Box<str>],
+    columns: &'a [Box<str>],
+) -> HashMap<Box<str>, u32> {
+    let by_name: HashMap<&str, u32> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_ref(), i as u32))
+        .collect();
+    let exact: HashMap<Box<str>, u32> = cells
+        .iter()
+        .filter_map(|n| Some((n.clone(), *by_name.get(n.as_ref())?)))
+        .collect();
+    if exact.len() * 10 >= cells.len() * 9 {
+        return exact;
+    }
+    let bare = |n: &'a str| n.split(COLUMN_SEP).next().unwrap_or_default();
+    // A barcode's column, `None` once it names a second one.
+    let mut column: HashMap<&str, Option<u32>> = HashMap::default();
+    for (i, n) in columns.iter().enumerate() {
+        column
+            .entry(bare(n))
+            .and_modify(|c| *c = None)
+            .or_insert(Some(i as u32));
+    }
+    let mut seen: HashMap<&str, usize> = HashMap::default();
+    for n in cells {
+        *seen.entry(bare(n)).or_default() += 1;
+    }
+    let by_barcode: HashMap<Box<str>, u32> = cells
+        .iter()
+        .filter_map(|n| {
+            let b = bare(n);
+            (seen[b] == 1).then_some(())?;
+            Some((n.clone(), (*column.get(b)?)?))
+        })
+        .collect();
+    if by_barcode.len() > exact.len() {
+        by_barcode
+    } else {
+        exact
+    }
+}
+
+/// A data file the run was not fitted on, opened in the view: its counts
+/// with the run's cell names, and how many of the run's cells it has.
+pub(crate) struct ExtraRead {
+    pub name: Box<str>,
+    observed: Observed,
+    pub of: usize,
+}
+
+impl ExtraRead {
+    /// How many of the run's cells the file has.
+    pub fn matched(&self) -> usize {
+        self.observed.cell_index.len()
+    }
+}
+
+/// An extra data file, read once on a worker thread.
+pub(crate) type ExtraFiles = crate::tui::Loading<ExtraRead>;
 
 /// What reading a run's data files gives: its observed counts, and each
 /// cell's batch when there is more than one.
@@ -1115,6 +1386,23 @@ pub(crate) struct RunLoads {
     pub files: Arc<RunFiles>,
     pub model: Arc<ModelTables>,
     pub features: Arc<FeatureTables>,
+    /// Every cell's totals in the run's own counts, read once the data
+    /// files are, on first asked: a pass over every column.
+    pub totals: Arc<CellTotals>,
+    /// A data file opened in the view, when one is.
+    pub extra: Option<Arc<ExtraFiles>>,
+}
+
+/// The run's own counts' per-cell totals, kept in [`Observed`] once read.
+pub(crate) type CellTotals = crate::tui::Loading<()>;
+
+/// A totals read waiting on `files`, the run's data files.
+fn totals_of(files: &Arc<RunFiles>) -> Arc<CellTotals> {
+    let files = files.clone();
+    Arc::new(CellTotals::new(move || {
+        let read = files.get().as_ref().map_err(Clone::clone)?;
+        read.observed.totals().map(|_| ())
+    }))
 }
 
 impl RunLoads {
@@ -1124,30 +1412,34 @@ impl RunLoads {
         let (fm, fd) = run();
         let (mm, md) = run();
         let (em, ed) = run();
+        let files = Arc::new(RunFiles::new(move || {
+            read_run_data(&fm, &fd).map_err(|e| e.to_string())
+        }));
         Self {
-            files: Arc::new(RunFiles::new(move || {
-                read_run_data(&fm, &fd).map_err(|e| e.to_string())
-            })),
+            totals: totals_of(&files),
+            files,
             model: Arc::new(ModelTables::new(move || {
                 load_expected(&mm, &md).map_err(|e| e.to_string())
             })),
             features: Arc::new(FeatureTables::new(move || {
                 super::features::FeatureEmbedding::load(Some(&(em, ed)))
             })),
+            extra: None,
         }
     }
 
-    /// No run to read from.
+    /// No run to read from, answered already: no worker thread answers
+    /// in the middle of a test.
     #[cfg(test)]
     pub(crate) fn none() -> Self {
         const NO: &str = "no run to read from";
-        let loads = Self {
-            files: Arc::new(RunFiles::new(|| Err(NO.into()))),
-            model: Arc::new(ModelTables::new(|| Err(NO.into()))),
-            features: Arc::new(FeatureTables::new(|| Err(NO.into()))),
-        };
-        loads.start();
-        loads
+        Self {
+            totals: Arc::new(CellTotals::ready(Err(NO.into()))),
+            files: Arc::new(RunFiles::ready(Err(NO.into()))),
+            model: Arc::new(ModelTables::ready(Err(NO.into()))),
+            features: Arc::new(FeatureTables::ready(Err(NO.into()))),
+            extra: None,
+        }
     }
 
     /// Start every read (each once).
@@ -1163,6 +1455,11 @@ impl RunLoads {
             ("model tables", self.model.busy()),
             ("data files", self.files.busy()),
             ("feature embedding", self.features.busy()),
+            ("cell totals", self.totals.busy()),
+            (
+                "extra data file",
+                self.extra.as_ref().and_then(|x| x.busy()),
+            ),
         ]
         .into_iter()
         .filter_map(|(what, t)| t.map(|t| (what, t)))
@@ -1176,6 +1473,8 @@ impl RunLoads {
         usize::from(self.files.try_get().is_some())
             + usize::from(self.model.try_get().is_some())
             + usize::from(self.features.try_get().is_some())
+            + usize::from(self.totals.try_get().is_some())
+            + usize::from(self.extra.as_ref().is_some_and(|x| x.try_get().is_some()))
     }
 }
 
@@ -1562,5 +1861,172 @@ mod tests {
             a.drawable(&listed, Source::Expected, 1, &elsewhere),
             [false, false]
         );
+    }
+
+    /// Names as boxed strings.
+    fn boxed(names: &[&str]) -> Vec<Box<str>> {
+        names.iter().map(|&n| n.into()).collect()
+    }
+
+    #[test]
+    fn cells_match_by_name_then_by_barcode_where_one_cell_has_it() {
+        // By name, when nine in ten match.
+        let m = match_cells(&boxed(&["a", "b"]), &boxed(&["b", "a", "z"]));
+        assert_eq!((m["a"], m["b"]), (1, 0));
+        // A run over several files tags its cells; the file does not.
+        let run = boxed(&["a@lib1", "b@lib1", "c@lib2", "c@lib1"]);
+        let m = match_cells(&run, &boxed(&["a", "b", "c"]));
+        assert_eq!((m["a@lib1"], m["b@lib1"]), (0, 1));
+        // `c` names two of the run's cells: neither is guessed.
+        assert_eq!(m.len(), 2);
+        // The other way round: the file tags, the run does not; a barcode
+        // twice in the file is not used either.
+        let m = match_cells(&boxed(&["a", "b"]), &boxed(&["a@x", "b@x", "b@y"]));
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["a"], 0);
+        // Nothing in common.
+        assert!(match_cells(&boxed(&["a"]), &boxed(&["q"])).is_empty());
+    }
+
+    /// A backend at `path`: genes `GENE1..3`, cells `columns`; cell `i`
+    /// has `i + 1` reads of GENE1 and, on even cells, 3 of GENE3.
+    fn counts_file(path: &Path, columns: &[&str]) {
+        use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+        let mut triplets = Vec::new();
+        for i in 0..columns.len() as u64 {
+            triplets.push((0, i, (i + 1) as f32));
+            if i % 2 == 0 {
+                triplets.push((2, i, 3.0));
+            }
+        }
+        let mut b = create_sparse_from_triplets(
+            &triplets,
+            (3, columns.len(), triplets.len()),
+            Some(path.to_str().unwrap()),
+            Some(&SparseIoBackend::Zarr),
+        )
+        .unwrap();
+        b.register_row_names_vec(&boxed(&["GENE1", "GENE2", "GENE3"]));
+        b.register_column_names_vec(&boxed(columns));
+    }
+
+    #[test]
+    fn an_extra_file_shows_features_and_per_cell_stats_on_the_run_s_cells() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.zarr");
+        // The file's columns in another order, one run cell missing, one
+        // column not the run's.
+        counts_file(&path, &["c2", "c0", "zz", "c1"]);
+        let run = boxed(&["c0@lib", "c1@lib", "c2@lib", "c3@lib"]);
+        let read = read_extra(&path, &run).unwrap();
+        assert_eq!((read.matched(), read.of, &*read.name), (3, 4, "other.zarr"));
+
+        let mut a = Activity::new(
+            RunManifest::new(senna::run_manifest::RunKind::Svd, "r"),
+            dir.path().to_path_buf(),
+            RunLoads::none(),
+            true,
+        );
+        a.set_extra(Arc::new(ExtraFiles::ready(Ok(read))));
+        // Points in the run's own order; the last has no column.
+        let (l, spelled) = a.levels("gene1", Source::Extra, 0, &run).unwrap();
+        assert_eq!(&*spelled, "GENE1");
+        // Columns c2, c0, zz, c1 hold 1, 2, 3, 4 reads of GENE1.
+        let want = [2f32, 4.0, 1.0].map(f32::ln_1p);
+        assert_eq!(&l.values[..3], &want);
+        assert!(l.values[3].is_nan() && l.zero_is_off);
+
+        let total = a
+            .stat_levels(&Stat::Total, &[], Source::Extra, 0, &run)
+            .unwrap();
+        // c0 (column 1) has 2 reads only; c2 (column 0) has 1 + 3.
+        assert_eq!(total.values[0], 2f32.ln_1p());
+        assert_eq!(total.values[2], 4f32.ln_1p());
+        let detected = a
+            .stat_levels(&Stat::Detected, &[], Source::Extra, 0, &run)
+            .unwrap();
+        assert_eq!(&detected.values[..3], &[1.0, 1.0, 2.0]);
+        let set = boxed(&["GENE3", "NOT_THERE"]);
+        let share = a
+            .stat_levels(&Stat::Share("CT1".into()), &set, Source::Extra, 0, &run)
+            .unwrap();
+        assert_eq!(&share.values[..3], &[0.0, 0.0, 0.75]);
+        // The model's expectation has no counts to summarise.
+        assert!(a
+            .stat_levels(&Stat::Total, &[], Source::Expected, 0, &run)
+            .is_err());
+    }
+
+    #[test]
+    fn a_file_with_none_of_the_run_s_cells_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.zarr");
+        counts_file(&path, &["q0", "q1"]);
+        let Err(e) = read_extra(&path, &boxed(&["c0", "c1"])) else {
+            panic!("a file with none of the run's cells was read");
+        };
+        assert!(e.to_string().contains("none of the run's 2 cells"), "{e}");
+    }
+
+    #[test]
+    fn a_scene_opens_an_extra_file_and_steps_through_its_stats() {
+        use crate::view::Pick;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.zarr");
+        counts_file(&path, &["c1", "c2", "c3", "c4"]);
+        let mut s = crate::view::tests::scene();
+        s.data.run = Some((
+            RunManifest::new(senna::run_manifest::RunKind::Svd, "r"),
+            dir.path().to_path_buf(),
+        ));
+        s.open_extra(&path);
+        // Shown at once, as each cell's total.
+        assert_eq!(s.source, Source::Extra);
+        assert_eq!(s.pick, Some(Pick::Stat(Stat::Total)));
+        let shown = s.shown.as_ref().expect("totals shown");
+        assert!(shown.levels.values.iter().all(|v| v.is_finite()));
+        s.cycle_stat();
+        assert_eq!(s.pick, Some(Pick::Stat(Stat::Detected)));
+        // No group in focus: no markers' share, back to group colours.
+        s.cycle_stat();
+        assert_eq!(s.pick, None);
+        // `o` goes through the extra source, then back to the model.
+        s.source = Source::Expected;
+        s.cycle_source();
+        s.cycle_source();
+        assert_eq!(s.source, Source::Extra);
+        s.cycle_source();
+        assert_eq!(s.source, Source::Expected);
+    }
+
+    #[test]
+    fn the_run_s_own_totals_are_read_on_the_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.zarr");
+        counts_file(&path, &["c0", "c1"]);
+        let cells = boxed(&["c0", "c1"]);
+        let observed = read_extra(&path, &cells).unwrap().observed;
+        // Read but not yet summed: `read_extra` sums its own file at once.
+        let observed = Observed::new(observed.data, observed.cell_index).unwrap();
+        let mut loads = RunLoads::none();
+        loads.files = Arc::new(RunFiles::ready(Ok(RunRead {
+            observed,
+            batches: None,
+        })));
+        loads.totals = totals_of(&loads.files);
+        let mut a = Activity::new(
+            RunManifest::new(senna::run_manifest::RunKind::Svd, "r"),
+            dir.path().to_path_buf(),
+            loads.clone(),
+            false,
+        );
+        // The screen does not wait: asked first, the totals are coming.
+        let first = a.stat_levels(&Stat::Total, &[], Source::Observed, 0, &cells);
+        assert_eq!(first.err().as_deref(), Some(crate::tui::LOADING));
+        assert!(loads.totals.get().is_ok());
+        let total = a
+            .stat_levels(&Stat::Total, &[], Source::Observed, 0, &cells)
+            .unwrap();
+        assert_eq!(total.values, [4f32.ln_1p(), 2f32.ln_1p()]);
     }
 }

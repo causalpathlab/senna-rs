@@ -1,6 +1,13 @@
+use super::direction::orient;
 use super::*;
 use crate::td_rbm::sim::{pearson, simulate, Sim, SimConfig};
-use crate::td_rbm::start::{base_start, curve_start, rho_start, scale_rows};
+use crate::td_rbm::start::{
+    base_start, rho_start, row_states, scale_rows, start_along, STATE_DIMS,
+};
+use crate::td_rbm::tree::Forest;
+
+/// Clusters of the simulated finest pseudobulks.
+const CLUSTERS: usize = 6;
 use crate::td_rbm::test_util::{noisy, spearman};
 
 /// The cells `rows` as `[n × F]` row-major counts (unspliced genes first).
@@ -82,15 +89,27 @@ fn fit_sim_from(
     let ps: Vec<f32> = fin.chunks(f).flat_map(|r| r[g..].to_vec()).collect();
     let rho = rho_start(&pu, &ps, p, g, cfg.embedding);
     let base = base_start(&ps, p, g);
-    // Lineages started by k-means on the finest pseudobulks' log expression.
-    let logx = nalgebra::DMatrix::from_fn(p, g, |i, j| {
-        let tot: f32 = (0..g)
-            .map(|q| pu[i * g + q] + ps[i * g + q])
-            .sum::<f32>()
-            .max(1.0);
-        ((pu[i * g + j] + ps[i * g + j]) / tot * 1e4).ln_1p()
-    });
-    let start_lineage = crate::td_rbm::start::kmeans(&logx, cfg.lineages, 3);
+    // The forest over the finest pseudobulks; every tree provisionally
+    // rooted at the leaf earliest by the start order (latest when
+    // `reverse`, though the start order itself already runs backwards then).
+    let states = row_states(fin, f, STATE_DIMS);
+    let forest = Forest::new(&states, CLUSTERS, cfg.knn, 3);
+    let roots: Vec<usize> = (0..forest.trees.len())
+        .map(|t| {
+            let mean = |c: usize| {
+                let v: Vec<f32> = (0..p)
+                    .filter(|&r| forest.cluster[r] == c)
+                    .map(|r| keys[r].fract())
+                    .collect();
+                v.iter().sum::<f32>() / v.len().max(1) as f32
+            };
+            *forest
+                .leaves(t)
+                .iter()
+                .min_by(|&&x, &&y| mean(x).total_cmp(&mean(y)))
+                .unwrap()
+        })
+        .collect();
     let values = Spline::new(cfg.knots, &grid_times(cfg.grid), &Device::Cpu)
         .unwrap()
         .values
@@ -98,27 +117,23 @@ fn fit_sim_from(
         .unwrap()
         .to_vec1::<f32>()
         .unwrap();
-    let mut curve = Vec::new();
-    let (pu, ps) = (&pu, &ps);
-    for lin in 0..cfg.lineages {
-        let members: Vec<usize> = (0..p).filter(|&i| start_lineage[i] == lin).collect();
-        let order: Vec<f32> = members.iter().map(|&i| keys[i].fract()).collect();
-        let tot: Vec<f32> = members
-            .iter()
-            .flat_map(|&i| {
-                (0..g)
-                    .map(move |j| pu[i * g + j] + ps[i * g + j])
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        curve.extend(curve_start(
-            &tot,
-            &order,
-            &rho,
-            &values,
-            (g, cfg.embedding, cfg.grid, cfg.knots),
-        ));
-    }
+    let begin = start_along(
+        fin,
+        f,
+        &states,
+        &forest,
+        &roots,
+        &rho,
+        &values,
+        (g, cfg.embedding, cfg.grid, cfg.knots),
+        cfg.knn,
+    );
+    let cfg = TrainConfig {
+        lineages: begin.paths.len(),
+        ..cfg.clone()
+    };
+    let mut begin = begin;
+    let curve = std::mem::take(&mut begin.curve);
     let model = fit(
         &levels,
         f,
@@ -129,8 +144,12 @@ fn fit_sim_from(
             beta: BETA0,
             gamma: GAMMA0,
         },
-        &start_lineage,
-        cfg,
+        begin,
+        &forest,
+        &states,
+        &roots,
+        &vec![false; forest.trees.len()],
+        &cfg,
         &Device::Cpu,
     )
     .unwrap();
@@ -170,11 +189,11 @@ fn the_fit_orders_held_out_cells_and_reads_their_velocity() {
         .sum::<f64>()
         / held.len() as f64;
     eprintln!(
-        "held-out Spearman {r:.3} (start {r0:.3}); gene velocity r {vel:.3}; directions {:?}",
+        "held-out Spearman {r:.3} (start {r0:.3}); gene velocity r {vel:.3}; roots {:?}",
         model
-            .directions
+            .roots
             .iter()
-            .map(|d| (d.reversed, d.lambda as i64, d.lambda_null as i64))
+            .map(|c| (c.provisional, c.chosen, c.determined))
             .collect::<Vec<_>>()
     );
     assert!(r > 0.95 && r > r0, "held-out Spearman {r}, start {r0}");
@@ -225,15 +244,20 @@ fn a_start_the_wrong_way_round_is_turned_by_the_splicing() {
     let tau: Vec<f32> = held.iter().map(|&i| out.tau[i]).collect();
     let truth: Vec<f32> = held.iter().map(|&i| sim.tau[i]).collect();
     let r = spearman(&tau, &truth);
-    let d = &model.directions[0];
+    let tree = model
+        .roots
+        .iter()
+        .max_by_key(|c| c.candidates.len())
+        .unwrap();
     eprintln!(
-        "reversed start: held-out signed Spearman {r:.3}; reversed {} Λ {:.1}",
-        d.reversed, d.lambda
+        "reversed start: held-out signed Spearman {r:.3}; root {} from {}, p {:?}",
+        tree.chosen, tree.provisional, tree.p
     );
     assert!(
-        d.reversed && r > 0.9,
-        "signed Spearman {r}, reversed {}",
-        d.reversed
+        tree.chosen != tree.provisional && tree.determined && r > 0.9,
+        "signed Spearman {r}, root {} from {}",
+        tree.chosen,
+        tree.provisional
     );
 }
 
@@ -364,12 +388,6 @@ fn diagnostic_truth_against_its_mirror() {
                 &dev,
             )
             .unwrap(),
-            load: Tensor::zeros(
-                (sim.rho[0].len(), 1),
-                legume_numeric::candle::candle_core::DType::F32,
-                &dev,
-            )
-            .unwrap(),
             curve,
             velocity,
             size,
@@ -401,7 +419,6 @@ fn direction_called_only_with_splicing() {
     let cfg = TrainConfig {
         knots: 5,
         embedding: h,
-        orient_epochs: 0,
         ..TrainConfig::default()
     };
     let energy = Energy::new(
@@ -461,13 +478,28 @@ fn direction_called_only_with_splicing() {
     };
     for (name, mirror) in [("truth", false), ("mirrored truth", true)] {
         restore(mirror);
-        let (d, _) = orient(&energy, &spline, &x, f, 0, &cfg, &dev, &mut rng).unwrap();
+        let (d, _) = orient(
+            &energy,
+            &spline,
+            &energy.steady_tables(&spline).unwrap(),
+            &x,
+            f,
+            0,
+            &cfg,
+            &dev,
+            &mut rng,
+        )
+        .unwrap();
         eprintln!(
-            "from the {name}: Λ {:.1}, null {:.1}, sd {:.1}, z {:+.2}",
-            d.lambda, d.lambda_null, d.lambda_sd, d.z
+            "from the {name}: p(as started) {:.4}, log BF {:+.1} (sd {:.1}), log ABF {:+.1}",
+            d.p_forward, d.log_bf, d.log_bf_sd, d.log_abf
         );
-        assert!(d.determined, "the direction is called from the {name}");
-        assert_eq!(d.reversed, mirror, "and set right from the {name}");
+        let p = if mirror {
+            1.0 - d.p_forward
+        } else {
+            d.p_forward
+        };
+        assert!(p > 0.99, "the truth's direction is called from the {name}");
     }
     // No dynamics: every cell's reads of a gene split between the tracks at
     // the gene's overall unspliced share, the same either way in time. (The
@@ -495,10 +527,121 @@ fn direction_called_only_with_splicing() {
     }
     let x = features(&steady, &all);
     restore(false);
-    let (d, _) = orient(&energy, &spline, &x, f, 0, &cfg, &dev, &mut rng).unwrap();
+    let (d, _) = orient(
+        &energy,
+        &spline,
+        &energy.steady_tables(&spline).unwrap(),
+        &x,
+        f,
+        0,
+        &cfg,
+        &dev,
+        &mut rng,
+    )
+    .unwrap();
     eprintln!(
-        "no dynamics: Λ {:.1}, null {:.1}, sd {:.1}, z {:+.2}",
-        d.lambda, d.lambda_null, d.lambda_sd, d.z
+        "no dynamics: p(as started) {:.4}, log BF {:+.1} (sd {:.1}), log ABF {:+.1}",
+        d.p_forward, d.log_bf, d.log_bf_sd, d.log_abf
     );
-    assert!(!d.determined, "no call without splicing");
+    assert!(
+        d.p_forward > 0.01 && d.p_forward < 0.99,
+        "no call without splicing"
+    );
+}
+
+/// How the gene velocity's accuracy depends on the start (the reseed's
+/// neighbours) and on the curves' roughness prior.
+#[test]
+#[ignore = "diagnostic"]
+fn diagnostic_velocity_against_start_and_smoothness() {
+    let sim = simulate(&SimConfig::default()).unwrap();
+    for smooth in [0.0, 1e2, 1e3, 1e4, 1e5] {
+        for knn in [10usize, 15] {
+            let cfg = TrainConfig {
+                knn,
+                smooth,
+                ..TrainConfig::default()
+            };
+            let (model, _, out) = fit_sim(&sim, 1500, &cfg);
+            let held: Vec<usize> = (1500..sim.n_cells).collect();
+            let tau: Vec<f32> = held.iter().map(|&i| out.tau[i]).collect();
+            let truth: Vec<f32> = held.iter().map(|&i| sim.tau[i]).collect();
+            let emb = model.energy.rho().to_vec2::<f32>().unwrap();
+            let vel: f64 = held
+                .iter()
+                .map(|&i| {
+                    let v = &out.velocity[i];
+                    let pred: Vec<f32> = emb
+                        .iter()
+                        .map(|row| row.iter().zip(v).map(|(a, b)| a * b).sum())
+                        .collect();
+                    pearson(&pred, &sim.log_slope[i])
+                })
+                .sum::<f64>()
+                / held.len() as f64;
+            let rough = model
+                .energy
+                .roughness()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            eprintln!(
+                "smooth {smooth:>8}: knn {knn}: ordering {:.3}, gene velocity {vel:.3}, roughness {rough:.3}",
+                spearman(&tau, &truth)
+            );
+        }
+    }
+}
+
+/// How the states phase's depth moves what it fits: the trajectory's
+/// ordering and velocity, and how well a state axis separates bystanders,
+/// timed per fit.
+#[test]
+#[ignore = "diagnostic"]
+fn diagnostic_states_at_a_depth() {
+    let sim = simulate(&SimConfig {
+        bystanders: 0.25,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    for state_depth in [20u64, 50, 100, 1000] {
+        let cfg = TrainConfig {
+            lineages: 2,
+            state_depth,
+            ..TrainConfig::default()
+        };
+        let clock = std::time::Instant::now();
+        let (model, _, out) = fit_sim(&sim, 1500, &cfg);
+        let secs = clock.elapsed().as_secs_f64();
+        let on: Vec<usize> = (1500..sim.n_cells).filter(|&i| !sim.bystander[i]).collect();
+        let tau: Vec<f32> = on.iter().map(|&i| out.tau[i]).collect();
+        let truth: Vec<f32> = on.iter().map(|&i| sim.tau[i]).collect();
+        let emb = model.energy.rho().to_vec2::<f32>().unwrap();
+        let vel: f64 = on
+            .iter()
+            .map(|&i| {
+                let v = &out.velocity[i];
+                let pred: Vec<f32> = emb
+                    .iter()
+                    .map(|row| row.iter().zip(v).map(|(a, b)| a * b).sum())
+                    .collect();
+                pearson(&pred, &sim.log_slope[i])
+            })
+            .sum::<f64>()
+            / on.len() as f64;
+        let d = out.state[0].len();
+        let label: Vec<f32> = (0..sim.n_cells)
+            .map(|i| f32::from(u8::from(sim.bystander[i])))
+            .collect();
+        let sep = (0..d)
+            .map(|j| {
+                let axis: Vec<f32> = out.state.iter().map(|h| h[j]).collect();
+                pearson(&axis, &label).abs()
+            })
+            .fold(0.0, f64::max);
+        eprintln!(
+            "state depth {state_depth:>5}: ordering {:.3}, velocity {vel:.3}, bystander separation {sep:.3}, {secs:.1} s",
+            spearman(&tau, &truth)
+        );
+    }
 }

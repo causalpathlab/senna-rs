@@ -152,17 +152,34 @@ pub(crate) struct Browser<W: Wanted> {
     listing: Option<(Listing<W>, std::time::Instant)>,
     /// The entry to put the cursor on once the folder is listed.
     select: Option<String>,
+    /// How long a folder may take to list before the browser shows it is
+    /// listing and carries on ([`LIST_GRACE`]).
+    grace: std::time::Duration,
 }
 
 /// A folder's entries, coming from a worker thread.
 type Listing<W> = super::Pending<Vec<Entry<<W as Wanted>::About>>>;
 
 /// How long a folder may take to list before the browser shows it is
-/// listing and carries on; a quicker one is shown at once.
+/// listing and carries on; a quicker one is shown at once. Tests wait for
+/// the listing, so they do not depend on how busy the machine is.
+#[cfg(not(test))]
 const LIST_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+#[cfg(test)]
+const LIST_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl<W: Wanted> Browser<W> {
     pub fn open(dir: PathBuf, want: W, select: Option<&str>) -> Self {
+        Self::open_within(dir, want, select, LIST_GRACE)
+    }
+
+    /// [`Self::open`], waiting at most `grace` for each folder's listing.
+    pub(crate) fn open_within(
+        dir: PathBuf,
+        want: W,
+        select: Option<&str>,
+        grace: std::time::Duration,
+    ) -> Self {
         let mut b = Browser {
             dir,
             want,
@@ -174,6 +191,7 @@ impl<W: Wanted> Browser<W> {
             refused: None,
             listing: None,
             select: None,
+            grace,
         };
         b.read(select);
         b
@@ -193,7 +211,7 @@ impl<W: Wanted> Browser<W> {
     fn load(&mut self) {
         let (dir, want) = (self.dir.clone(), self.want.clone());
         let listing = super::Pending::spawn(move || Ok(list_dir(&dir, &want)));
-        match listing.0.recv_timeout(LIST_GRACE) {
+        match listing.0.recv_timeout(self.grace) {
             Ok(entries) => self.install(entries.unwrap_or_default()),
             Err(_) => {
                 self.entries = vec![Entry::Up];

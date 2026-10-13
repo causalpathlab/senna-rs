@@ -40,14 +40,16 @@ fn expression_states_order_rows_along_time() {
     })
     .unwrap();
     let (p, g) = (sim.n_cells, sim.n_genes);
-    let tracks = crate::td_rbm::counts::PbTracks {
-        genes: (0..g).map(|j| format!("GENE{j}").into()).collect(),
-        unspliced: DMatrix::from_row_slice(p, g, &sim.unspliced),
-        spliced: DMatrix::from_row_slice(p, g, &sim.spliced),
-        cells: vec![1.0; p],
-    };
-    let genes: Vec<usize> = (0..g).collect();
-    let states = expression_states(&tracks, &genes, 30);
+    let x: Vec<f32> = (0..p)
+        .flat_map(|i| {
+            sim.unspliced[i * g..(i + 1) * g]
+                .iter()
+                .chain(&sim.spliced[i * g..(i + 1) * g])
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let states = crate::td_rbm::start::row_states(&x, 2 * g, 30);
     assert_eq!(states.shape(), (p, 30));
     let rho = spearman(&diffusion_order(&states, 15), &sim.tau);
     assert!(rho.abs() > 0.9, "Spearman {rho}");

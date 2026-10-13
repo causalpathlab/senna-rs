@@ -54,6 +54,9 @@ impl Tool {
     }
 }
 
+/// The method that fits time on two-track counts, not an embedding.
+pub const TD_RBM: &str = "td-rbm";
+
 /// The flag that hands the clones of `mung clones` to a senna fit, as
 /// its form lists it.
 pub const CLONES_FLAG: &str = "cnv-clones";

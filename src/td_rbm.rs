@@ -38,3 +38,4 @@ pub mod start;
 #[path = "td_rbm/tests/util.rs"]
 pub(crate) mod test_util;
 pub mod train;
+pub mod tree;

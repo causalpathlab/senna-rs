@@ -120,18 +120,30 @@ pub fn curve_start(
 
 /// Every row of `x` (`[N × F]` row-major counts) drawn again at `depth`
 /// reads: shares from the row's Dirichlet posterior (counts plus ½), then a
-/// multinomial; a pseudobulk sample at a cell's depth.
+/// multinomial; a pseudobulk sample at a cell's depth. Rows are drawn in
+/// parallel, each from its own generator seeded by one draw of `rng` and
+/// its index, so the result does not depend on the threads.
 pub fn resample(x: &[f32], f: usize, depth: u64, rng: &mut StdRng) -> Vec<f32> {
+    use rand::{RngExt, SeedableRng};
+    use rayon::prelude::*;
+    let base: u64 = rng.random();
     let mut out = vec![0f32; x.len()];
-    let mut p = vec![0f32; f];
-    for (row, o) in x.chunks(f).zip(out.chunks_mut(f)) {
-        for (pi, &c) in p.iter_mut().zip(row) {
-            *pi = Gamma::new(f64::from(c) + 0.5, 1.0).map_or(0.0, |d| d.sample(rng)) as f32;
-        }
-        let s: f32 = p.iter().sum::<f32>().max(1e-30);
-        p.iter_mut().for_each(|v| *v /= s);
-        super::rbm::multinomial(depth, &p, o, rng);
-    }
+    out.par_chunks_mut(f.max(1))
+        .zip(x.par_chunks(f.max(1)))
+        .enumerate()
+        .for_each(|(i, (o, row))| {
+            let mut rng =
+                StdRng::seed_from_u64(base ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut p: Vec<f32> = row
+                .iter()
+                .map(|&c| {
+                    Gamma::new(f64::from(c) + 0.5, 1.0).map_or(0.0, |d| d.sample(&mut rng)) as f32
+                })
+                .collect();
+            let s: f32 = p.iter().sum::<f32>().max(1e-30);
+            p.iter_mut().for_each(|v| *v /= s);
+            super::rbm::multinomial(depth, &p, o, &mut rng);
+        });
     out
 }
 
@@ -250,3 +262,119 @@ pub fn rank_correlation(a: &[f32], b: &[f32]) -> f64 {
     }
     c / (va * vb).sqrt().max(1e-12)
 }
+
+/// Where the fit starts along a forest's paths.
+pub struct Start {
+    /// The lineages: every tree's root-to-leaf paths.
+    pub paths: Vec<super::tree::Path>,
+    /// `[P]` every finest pseudobulk's starting lineage and its order there.
+    pub lineage: Vec<usize>,
+    pub order: Vec<f32>,
+    /// `[L·M × H]` every lineage's starting curve.
+    pub curve: Vec<f32>,
+}
+
+/// The start with every tree of `forest` rooted at `roots`, from the finest
+/// pseudobulks `x` (`[P × F]` counts) and their expression `states`
+/// ([`row_states`]): every path's pseudobulks (those of its
+/// clusters, the trunk's in every path through it) in their diffusion order
+/// (`knn` neighbours), run from the root cluster to the leaf, and a curve
+/// through them ([`curve_start`]) on `rho` and the basis `values`. A
+/// pseudobulk starts in the path through its cluster that holds the most
+/// pseudobulks (a trunk with its largest branch). `dims` is `(G, H, K, M)`.
+#[allow(clippy::too_many_arguments)]
+pub fn start_along(
+    x: &[f32],
+    f: usize,
+    states: &DMatrix<f32>,
+    forest: &super::tree::Forest,
+    roots: &[usize],
+    rho: &[f32],
+    values: &[f32],
+    dims: (usize, usize, usize, usize),
+    knn: usize,
+) -> Start {
+    let g = f / 2;
+    let p = x.len() / f;
+    let paths = forest.paths(roots);
+    let mut size = vec![0usize; forest.clusters];
+    for &c in &forest.cluster {
+        size[c] += 1;
+    }
+    let held: Vec<usize> = paths
+        .iter()
+        .map(|q| q.clusters.iter().map(|&c| size[c]).sum())
+        .collect();
+    let lineage: Vec<usize> = forest
+        .cluster
+        .iter()
+        .map(|&c| {
+            (0..paths.len())
+                .filter(|&l| paths[l].clusters.contains(&c))
+                .max_by_key(|&l| (held[l], std::cmp::Reverse(l)))
+                .expect("every cluster lies on a path")
+        })
+        .collect();
+    let mut order = vec![0f32; p];
+    let mut curve = Vec::new();
+    for (l, path) in paths.iter().enumerate() {
+        let step: Vec<Option<usize>> = (0..forest.clusters)
+            .map(|c| path.clusters.iter().position(|&a| a == c))
+            .collect();
+        let members: Vec<usize> = (0..p)
+            .filter(|&r| step[forest.cluster[r]].is_some())
+            .collect();
+        let mut own = if members.len() > 2 {
+            let sub = DMatrix::from_fn(members.len(), states.ncols(), |i, j| {
+                states[(members[i], j)]
+            });
+            super::init::diffusion_order(&sub, knn.min(members.len() - 1))
+        } else {
+            (0..members.len())
+                .map(|i| (i as f32 + 0.5) / members.len().max(1) as f32)
+                .collect()
+        };
+        // Run from the root: the order rises with the clusters' steps.
+        if path.clusters.len() > 1 {
+            let steps: Vec<f32> = members
+                .iter()
+                .map(|&r| step[forest.cluster[r]].expect("a member's step") as f32)
+                .collect();
+            if rank_correlation(&own, &steps) < 0.0 {
+                own.iter_mut().for_each(|t| *t = 1.0 - *t);
+            }
+        }
+        for (&r, &o) in members.iter().zip(&own) {
+            if lineage[r] == l {
+                order[r] = o;
+            }
+        }
+        let tot: Vec<f32> = members
+            .iter()
+            .flat_map(|&r| (0..g).map(move |j| x[r * f + j] + x[r * f + g + j]))
+            .collect();
+        curve.extend(curve_start(&tot, &own, rho, values, dims));
+    }
+    Start {
+        paths,
+        lineage,
+        order,
+        curve,
+    }
+}
+
+/// `log Σ e^v`, stable.
+pub fn log_sum_exp(v: &[f64]) -> f64 {
+    let top = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    top + v.iter().map(|x| (x - top).exp()).sum::<f64>().ln()
+}
+
+/// `e^v / Σ e^v`, stable.
+pub fn softmax(v: &[f64]) -> Vec<f64> {
+    let z = log_sum_exp(v);
+    v.iter().map(|x| (x - z).exp()).collect()
+}
+
+#[cfg(test)]
+#[path = "tests/start.rs"]
+mod tests;

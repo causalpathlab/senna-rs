@@ -497,12 +497,15 @@ enum Commands {
                       a (lineage, time) unit on a grid and Gaussian state units. Every\n\
                       lineage's trajectory in the genes' embedding sets which gene; its\n\
                       velocity sets the unspliced share by the splicing half of the ODE.\n\
-                      Lineages are found by a Dirichlet process over the pseudobulks;\n\
-                      every lineage's direction is called from its splicing alone, against\n\
-                      a null with no dynamics, and left as started when the data do not\n\
-                      decide it. Writes {out}.cell_time.parquet, cell_state, cell_velocity,\n\
-                      direction.tsv, gene_direction, gene_rates, feature_embedding,\n\
-                      gene_states and curve tables."
+                      The lineages are the root-to-leaf paths of a forest over clusters of\n\
+                      the pseudobulks (a minimum spanning tree cut where no neighbours\n\
+                      cross). Every tree's root, its lineages' one direction, is read from\n\
+                      the splicing along its edges against reads with no dynamics: the\n\
+                      likeliest root is taken, flagged undetermined when its posterior is\n\
+                      short of a call (--root fixes one). Writes {out}.cell_time.parquet,\n\
+                      cell_state, cell_velocity, gene_direction, gene_rates,\n\
+                      feature_embedding, gene_states and curve tables, and\n\
+                      {out}.{direction,roots,edges}.tsv."
     )]
     TdRbm(TdRbmArgs),
 

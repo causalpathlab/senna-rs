@@ -77,7 +77,15 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             ("/", "search a feature by name: matches list in the sidebar, ↑ ↓ choose, enter shows"),
             ("a", "activity of the focused group's whole marker set"),
-            ("o", "expected (model) or observed (counts)"),
+            ("o", "expected (model), observed (counts), or the extra file's counts"),
+            (
+                "O",
+                "open an extra data file the run was not fitted on: its cells matched to the run's by name, shown as the extra source",
+            ),
+            (
+                "u",
+                "per-cell statistics of the counts shown: total, features detected, the focused group's markers' share",
+            ),
             ("p", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
             ("x  esc", "back to group colours"),
         ],
@@ -168,6 +176,9 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "style of a group: colour, shape, opacity, size, hidden",
             ),
             ("t", "labels on the map: small, medium, large, largest, off, in turn"),
+            ("y", "colour the cells by a td-rbm run's time; again to stop"),
+            ("v", "a td-rbm run's velocity field over the cells: streamlines, arrows, off, in turn"),
+            ("{ }", "streamlines sparser, denser"),
             ("space  b", "sidebar on or off"),
             (
                 "<  >",

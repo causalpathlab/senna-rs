@@ -2,7 +2,7 @@
 
 use senna::embed_common::*;
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TdRbmArgs {
     #[arg(
         help = "Count backend with {gene}/count/spliced and {gene}/count/unspliced rows",
@@ -52,10 +52,20 @@ pub struct TdRbmArgs {
 
     #[arg(
         long,
-        default_value_t = 4,
-        help = "Most lineages (independent timelines); the data decide how many are used"
+        default_value_t = 12,
+        help = "Clusters of the finest pseudobulks the lineage forest is built on (its root-to-leaf paths are the lineages)"
     )]
-    pub max_lineages: usize,
+    pub clusters: usize,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Cells (one barcode a line) where time starts: their cluster roots its tree, instead of the splicing choosing",
+        long_help = "Cells (one barcode a line) where time starts. The cluster holding\n\
+                     most of them is its tree's root; the other trees' roots are chosen\n\
+                     from the splicing."
+    )]
+    pub root: Option<String>,
 
     #[arg(
         long,
@@ -73,17 +83,10 @@ pub struct TdRbmArgs {
 
     #[arg(
         long,
-        default_value_t = 20,
-        help = "Epochs fitting each lineage both ways round, to call its direction"
+        default_value_t = 16,
+        help = "Draws of every pseudobulk's time behind each lineage's direction (its posterior averages over them)"
     )]
-    pub orient_epochs: usize,
-
-    #[arg(
-        long,
-        default_value_t = 40,
-        help = "Bootstrap resamples of each lineage's pseudobulks behind its direction call"
-    )]
-    pub orient_draws: usize,
+    pub direction_draws: usize,
 
     #[arg(
         long,
@@ -115,7 +118,11 @@ pub struct TdRbmArgs {
     #[arg(long, default_value_t = 128, help = "Pseudobulk samples per minibatch")]
     pub batch: usize,
 
-    #[arg(long, default_value_t = 256, help = "Persistent Gibbs chains")]
+    #[arg(
+        long,
+        default_value_t = 128,
+        help = "Persistent Gibbs chains (about a minibatch)"
+    )]
     pub chains: usize,
 
     #[arg(long, default_value_t = 1, help = "Gibbs sweeps per step")]
@@ -133,10 +140,24 @@ pub struct TdRbmArgs {
 
     #[arg(
         long,
+        default_value_t = 1e4,
+        help = "Prior weight on every curve's roughness (squared second differences of its coefficients), in nats"
+    )]
+    pub smooth: f64,
+
+    #[arg(
+        long,
         default_value_t = 1000,
         help = "Reads of every pseudobulk sample, chain and (scaled) cell"
     )]
     pub depth: u64,
+
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "Reads of every sample and chain in the states phase (smaller tempers the time unit, so chains mix)"
+    )]
+    pub state_depth: u64,
 
     #[arg(
         long,

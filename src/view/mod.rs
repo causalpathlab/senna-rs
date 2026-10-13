@@ -21,9 +21,10 @@ mod style;
 mod sublayout;
 mod text;
 mod tui;
+mod velocity;
 mod zoom;
 
-use activity::{Activity, Levels, Source};
+use activity::{Activity, Levels, Source, Stat};
 use color::Rgb;
 use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
@@ -127,6 +128,21 @@ pub struct ViewArgs {
 
     #[arg(
         long,
+        value_enum,
+        num_args = 0..=1,
+        default_missing_value = "stream",
+        help = "Draw the run's velocity field over the cells, as streamlines (the default) or arrows (a td-rbm run's; v cycles it)"
+    )]
+    pub velocity: Option<VelocityStyle>,
+
+    #[arg(
+        long,
+        help = "Streamlines' density: lanes across the map (default 40; { and } change it)"
+    )]
+    pub stream_density: Option<f32>,
+
+    #[arg(
+        long,
         help = "Start with this group focused (a name in the starting grouping)"
     )]
     pub focus: Option<Box<str>>,
@@ -166,6 +182,29 @@ pub struct ViewArgs {
                      recorded in the manifest so it happens once."
     )]
     pub no_compute: bool,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Also open this data file (.zarr, .zarr.zip, .h5), one the run was not fitted on: its cells matched to the run's by name, shown as the extra source (O in the view)"
+    )]
+    pub extra: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Start coloured by a per-cell statistic of the counts shown (the extra file's, with --extra; `u` in the view)"
+    )]
+    pub cell_stat: Option<CellStat>,
+}
+
+/// A per-cell statistic to start on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum CellStat {
+    /// `ln(1 + total count)`.
+    Total,
+    /// How many features have a count.
+    Detected,
 }
 
 /// Features suggested for one view, best first.
@@ -191,6 +230,10 @@ pub(crate) struct ZoomRequest {
 pub(crate) enum Pick {
     One(Box<str>),
     Markers(Box<str>),
+    /// A td-rbm run's time of each cell.
+    Time,
+    /// A summary of each cell over a count source's features.
+    Stat(Stat),
 }
 
 /// Activity currently drawn: what it is of, where, and its levels.
@@ -207,6 +250,18 @@ struct Shown {
 
 /// The camera of a frame, and each group label it drew with where.
 type LabelHits = (Viewport, Vec<(u32, [f32; 4])>);
+
+/// How a run's velocity field is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum VelocityStyle {
+    /// Streamlines through the field, as scVelo draws them.
+    Stream,
+    /// An arrow per grid bin.
+    Arrows,
+}
+
+/// Every point's displacement on a map (its space index), as last drawn.
+type Moved = (usize, std::sync::Arc<Vec<[f32; 2]>>);
 
 /// Point of each name (its first, for a repeated name).
 type NameIndex = std::collections::HashMap<Box<str>, usize>;
@@ -280,6 +335,15 @@ pub(crate) struct Scene {
     /// in `data.input` and recorded path), for the front end to ask where
     /// it is.
     pub missing_data: Option<(usize, String)>,
+    /// Whether how the extra data file matched is still to be said.
+    extra_pending: bool,
+    /// A run's velocity field (read on the first `v`), whether it is drawn,
+    /// and every point's displacement on the last map it was drawn on.
+    velocity: Option<std::sync::Arc<velocity::Field>>,
+    pub velocity_style: Option<VelocityStyle>,
+    /// Streamlines' density: lanes across the visible map (`{` `}`).
+    pub stream_lanes: f32,
+    velocity_moved: std::cell::RefCell<Option<Moved>>,
 }
 
 impl Scene {
@@ -322,11 +386,41 @@ impl Scene {
             medians: std::cell::RefCell::new(None),
             note: None,
             missing_data: None,
+            extra_pending: false,
+            velocity: None,
+            velocity_style: None,
+            stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
+            velocity_moved: std::cell::RefCell::new(None),
         };
-        scene.colour = scene.default_colour(args.colour_by.as_deref());
+        // `--colour-by tau` (or `time`) colours a td-rbm run's cells by
+        // their time; any other name is a grouping.
+        let by_time = args
+            .colour_by
+            .as_deref()
+            .is_some_and(|w| w.eq_ignore_ascii_case("tau") || w.eq_ignore_ascii_case("time"));
+        let want = args.colour_by.as_deref().filter(|_| !by_time);
+        scene.colour = scene.default_colour(want);
         scene.refresh_groups();
+        if by_time {
+            scene.toggle_time();
+        }
+        if let Some(style) = args.velocity {
+            scene.show_velocity_as(style);
+        }
         if args.observed {
             scene.source = Source::Observed;
+        }
+        if let Some(path) = &args.extra {
+            scene.open_extra(path);
+        }
+        if let Some(stat) = args.cell_stat {
+            if scene.source == Source::Expected {
+                scene.source = scene.count_source();
+            }
+            scene.set_pick(Pick::Stat(match stat {
+                CellStat::Total => Stat::Total,
+                CellStat::Detected => Stat::Detected,
+            }));
         }
         if let Some(want) = args.focus.as_ref().or(args.zoom_into.as_ref()) {
             scene.focus = scene
@@ -402,6 +496,11 @@ impl Scene {
             locked: self.locked.clone(),
             note: None,
             missing_data: None,
+            extra_pending: self.extra_pending,
+            velocity: self.velocity.clone(),
+            velocity_style: self.velocity_style,
+            stream_lanes: self.stream_lanes,
+            velocity_moved: std::cell::RefCell::new(self.velocity_moved.borrow().clone()),
         };
         s.refresh_groups();
         s
@@ -677,6 +776,7 @@ mod tests {
             run: None,
             round: None,
             loads: activity::RunLoads::none(),
+            times: None,
             labels: vec![
                 Labels::clusters(
                     LabelKind::Cluster,
@@ -706,12 +806,16 @@ mod tests {
             feature: None,
             markers_of: None,
             observed: false,
+            velocity: None,
+            stream_density: None,
             focus: None,
             zoom_into: None,
             chart: None,
             relabel: false,
             lupin: None,
             no_compute: true,
+            extra: None,
+            cell_stat: None,
         };
         Scene::new(data, &args)
     }

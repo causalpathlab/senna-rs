@@ -8,7 +8,7 @@
 //! recorded name is chosen to begin with.
 
 use super::*;
-use crate::tui::browse::{is_data, Browser, Header, Outcome, Wanted};
+use crate::tui::browse::{is_data, size_of, Browser, Header, Outcome, Wanted};
 use data_beans::utilities::name_matching::GeneIndex;
 use senna::run_manifest::RunManifest;
 use std::borrow::Cow;
@@ -177,6 +177,40 @@ impl Wanted for Missing {
     fn best(&self, _dir: &Path, files: &[(&str, &())]) -> Option<String> {
         let name = files::name(Path::new(&self.0));
         files.iter().any(|(n, _)| *n == name).then_some(name)
+    }
+}
+
+/// A data file the run was not fitted on, to show beside it.
+#[derive(Clone)]
+pub(super) struct Extra;
+
+impl Wanted for Extra {
+    /// The file's size.
+    type About = String;
+
+    fn header(&self) -> Header {
+        Header {
+            title: "Open another data file".into(),
+            notes: vec![
+                "its cells are matched to the run's by name (or by barcode, @ tags aside);".into(),
+                "shown as the extra source (o), nothing written".into(),
+            ],
+            what: "data files (.zarr, .zarr.zip, .h5)",
+            star: None,
+            verb: "open it",
+        }
+    }
+
+    fn file(&self, path: &Path, name: &str) -> Option<String> {
+        is_data(name).then(|| size_of(path))
+    }
+
+    fn store(&self, _path: &Path, _name: &str) -> Option<String> {
+        Some(String::new())
+    }
+
+    fn describe<'a>(&self, size: &'a String) -> Cow<'a, str> {
+        Cow::Borrowed(size)
     }
 }
 

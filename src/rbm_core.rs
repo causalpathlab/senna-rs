@@ -1,9 +1,10 @@
-//! Pieces every restricted Boltzmann machine here shares: a host multinomial
-//! draw, a device cumulative sum that fits at any feature count, and a stable
-//! softplus.
+//! Pieces every restricted Boltzmann machine here shares: multinomial draws
+//! on the host and on the device, a device cumulative sum that fits at any
+//! feature count, and a stable softplus.
 
 use legume_numeric::candle::candle_core::{Result, Tensor};
 use rand::rngs::StdRng;
+use rand::RngExt;
 use rand_distr::{Binomial, Distribution};
 
 /// `log(1 + eˣ)`, stable for any `x`.
@@ -47,6 +48,55 @@ pub fn cumsum_rows(t: &Tensor) -> Result<Tensor> {
         .broadcast_add(&offset.unsqueeze(2)?)?
         .reshape((s, nb * b))?
         .narrow(1, 0, f)
+}
+
+/// Elements per comparison block in [`multinomial_rows`].
+const DRAW_BLOCK: usize = 1 << 24;
+
+/// `n_s` draws per row `s` from the categorical whose running shares are
+/// `cum` `[S × F]`, as counts `[S × F]`: a feature's count is how many of the
+/// row's uniforms fall in its stretch of the running shares. Only the
+/// `S × max n` uniforms come from `rng`; the comparisons run on `cum`'s
+/// device, a block of draws at a time. The last feature takes what the rest
+/// left, so rounding never loses a draw.
+pub fn multinomial_rows(cum: &Tensor, n: &[u32], rng: &mut StdRng) -> Result<Tensor> {
+    let dev = cum.device();
+    let (s, f) = cum.dims2()?;
+    let top = n.iter().copied().max().unwrap_or(0) as usize;
+    if top == 0 || f == 0 {
+        return cum.zeros_like();
+    }
+    // A row with fewer draws pads with uniforms past every share.
+    let u: Vec<f32> = n
+        .iter()
+        .flat_map(|&ns| (0..top).map(move |d| (d, ns)))
+        .map(|(d, ns)| {
+            if d < ns as usize {
+                rng.random::<f32>()
+            } else {
+                2.0
+            }
+        })
+        .collect();
+    let u = Tensor::from_vec(u, (s, top), dev)?;
+    let ns = Tensor::from_iter(n.iter().map(|&x| x as f32), dev)?.unsqueeze(1)?;
+    if f == 1 {
+        return Ok(ns);
+    }
+    // `below[s, j]`: the row's draws under the running share of feature `j`.
+    let head = cum.narrow(1, 0, f - 1)?.unsqueeze(1)?.contiguous()?; // [S × 1 × F−1]
+    let chunk = (DRAW_BLOCK / (s * f).max(1)).clamp(1, top);
+    let mut below = Tensor::zeros((s, f - 1), cum.dtype(), dev)?;
+    for start in (0..top).step_by(chunk) {
+        let c = chunk.min(top - start);
+        let us = u.narrow(1, start, c)?.unsqueeze(2)?; // [S × c × 1]
+        let hits = us.broadcast_lt(&head)?.to_dtype(cum.dtype())?.sum(1)?;
+        below = (below + hits)?;
+    }
+    let first = below.narrow(1, 0, 1)?;
+    let middle = (below.narrow(1, 1, f - 2)? - below.narrow(1, 0, f - 2)?)?;
+    let last = (ns - below.narrow(1, f - 2, 1)?)?;
+    Tensor::cat(&[first, middle, last], 1)
 }
 
 /// `n` draws over the categories of `p` (summing to one) into `out`, by
