@@ -339,7 +339,12 @@ fn a_slow_folder_is_listed_on_the_side_and_shown_when_done() {
     for f in ["a.txt", "b.txt", "c.txt"] {
         write(dir.path(), f);
     }
-    let mut b = Browser::open(dir.path().to_path_buf(), Slow, Some("b.txt"));
+    let mut b = Browser::open_within(
+        dir.path().to_path_buf(),
+        Slow,
+        Some("b.txt"),
+        std::time::Duration::ZERO,
+    );
     // Too slow to wait for: the browser is up at once, listing.
     assert!(b.listing().is_some());
     assert_eq!(names(&b), [".."]);

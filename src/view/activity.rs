@@ -717,6 +717,10 @@ impl Activity {
             ));
         }
         let rows = self.rows(source, key, names)?;
+        // The run's own totals are a pass over its data: on the side.
+        if source == Source::Observed {
+            self.loads.totals.answer(self.patient)?;
+        }
         let raw = self.counts(source)?.stat(stat, set)?;
         // A share starts at zero; a total or a count of features has no
         // natural origin in view, so its ramp starts at a low quantile.
@@ -1382,8 +1386,23 @@ pub(crate) struct RunLoads {
     pub files: Arc<RunFiles>,
     pub model: Arc<ModelTables>,
     pub features: Arc<FeatureTables>,
+    /// Every cell's totals in the run's own counts, read once the data
+    /// files are, on first asked: a pass over every column.
+    pub totals: Arc<CellTotals>,
     /// A data file opened in the view, when one is.
     pub extra: Option<Arc<ExtraFiles>>,
+}
+
+/// The run's own counts' per-cell totals, kept in [`Observed`] once read.
+pub(crate) type CellTotals = crate::tui::Loading<()>;
+
+/// A totals read waiting on `files`, the run's data files.
+fn totals_of(files: &Arc<RunFiles>) -> Arc<CellTotals> {
+    let files = files.clone();
+    Arc::new(CellTotals::new(move || {
+        let read = files.get().as_ref().map_err(Clone::clone)?;
+        read.observed.totals().map(|_| ())
+    }))
 }
 
 impl RunLoads {
@@ -1393,10 +1412,12 @@ impl RunLoads {
         let (fm, fd) = run();
         let (mm, md) = run();
         let (em, ed) = run();
+        let files = Arc::new(RunFiles::new(move || {
+            read_run_data(&fm, &fd).map_err(|e| e.to_string())
+        }));
         Self {
-            files: Arc::new(RunFiles::new(move || {
-                read_run_data(&fm, &fd).map_err(|e| e.to_string())
-            })),
+            totals: totals_of(&files),
+            files,
             model: Arc::new(ModelTables::new(move || {
                 load_expected(&mm, &md).map_err(|e| e.to_string())
             })),
@@ -1413,6 +1434,7 @@ impl RunLoads {
     pub(crate) fn none() -> Self {
         const NO: &str = "no run to read from";
         Self {
+            totals: Arc::new(CellTotals::ready(Err(NO.into()))),
             files: Arc::new(RunFiles::ready(Err(NO.into()))),
             model: Arc::new(ModelTables::ready(Err(NO.into()))),
             features: Arc::new(FeatureTables::ready(Err(NO.into()))),
@@ -1433,6 +1455,7 @@ impl RunLoads {
             ("model tables", self.model.busy()),
             ("data files", self.files.busy()),
             ("feature embedding", self.features.busy()),
+            ("cell totals", self.totals.busy()),
             (
                 "extra data file",
                 self.extra.as_ref().and_then(|x| x.busy()),
@@ -1450,6 +1473,7 @@ impl RunLoads {
         usize::from(self.files.try_get().is_some())
             + usize::from(self.model.try_get().is_some())
             + usize::from(self.features.try_get().is_some())
+            + usize::from(self.totals.try_get().is_some())
             + usize::from(self.extra.as_ref().is_some_and(|x| x.try_get().is_some()))
     }
 }
@@ -1973,5 +1997,36 @@ mod tests {
         assert_eq!(s.source, Source::Extra);
         s.cycle_source();
         assert_eq!(s.source, Source::Expected);
+    }
+
+    #[test]
+    fn the_run_s_own_totals_are_read_on_the_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.zarr");
+        counts_file(&path, &["c0", "c1"]);
+        let cells = boxed(&["c0", "c1"]);
+        let observed = read_extra(&path, &cells).unwrap().observed;
+        // Read but not yet summed: `read_extra` sums its own file at once.
+        let observed = Observed::new(observed.data, observed.cell_index).unwrap();
+        let mut loads = RunLoads::none();
+        loads.files = Arc::new(RunFiles::ready(Ok(RunRead {
+            observed,
+            batches: None,
+        })));
+        loads.totals = totals_of(&loads.files);
+        let mut a = Activity::new(
+            RunManifest::new(senna::run_manifest::RunKind::Svd, "r"),
+            dir.path().to_path_buf(),
+            loads.clone(),
+            false,
+        );
+        // The screen does not wait: asked first, the totals are coming.
+        let first = a.stat_levels(&Stat::Total, &[], Source::Observed, 0, &cells);
+        assert_eq!(first.err().as_deref(), Some(crate::tui::LOADING));
+        assert!(loads.totals.get().is_ok());
+        let total = a
+            .stat_levels(&Stat::Total, &[], Source::Observed, 0, &cells)
+            .unwrap();
+        assert_eq!(total.values, [4f32.ln_1p(), 2f32.ln_1p()]);
     }
 }
