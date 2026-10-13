@@ -229,7 +229,7 @@ impl Levels {
         ((v - self.lo) / (self.hi - self.lo).max(1e-12)).clamp(0.0, 1.0)
     }
 
-    fn from_values(values: Vec<f32>, zero_is_off: bool) -> Self {
+    pub(super) fn from_values(values: Vec<f32>, zero_is_off: bool) -> Self {
         let mut sample: Vec<f32> = values
             .iter()
             .copied()

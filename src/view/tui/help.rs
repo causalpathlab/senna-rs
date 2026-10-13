@@ -168,6 +168,8 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "style of a group: colour, shape, opacity, size, hidden",
             ),
             ("t", "labels on the map: small, medium, large, largest, off, in turn"),
+            ("y", "colour the cells by a td-rbm run's time; again to stop"),
+            ("v", "draw a td-rbm run's velocity field over the cells; again to hide"),
             ("space  b", "sidebar on or off"),
             (
                 "<  >",

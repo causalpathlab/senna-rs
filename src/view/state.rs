@@ -451,6 +451,7 @@ impl Scene {
         let pick = match &self.pick {
             Some(Pick::One(f)) => format!(" · feature {f} ({}) · x clears", self.source.name()),
             Some(Pick::Markers(g)) => format!(" · {g} markers ({}) · x clears", self.source.name()),
+            Some(Pick::Time) => " · time · x clears".to_string(),
             None => String::new(),
         };
         format!(

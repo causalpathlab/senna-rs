@@ -21,6 +21,7 @@ mod style;
 mod sublayout;
 mod text;
 mod tui;
+mod velocity;
 mod zoom;
 
 use activity::{Activity, Levels, Source};
@@ -127,6 +128,12 @@ pub struct ViewArgs {
 
     #[arg(
         long,
+        help = "Draw the run's velocity field over the cells (a td-rbm run's; v toggles it)"
+    )]
+    pub velocity: bool,
+
+    #[arg(
+        long,
         help = "Start with this group focused (a name in the starting grouping)"
     )]
     pub focus: Option<Box<str>>,
@@ -191,6 +198,8 @@ pub(crate) struct ZoomRequest {
 pub(crate) enum Pick {
     One(Box<str>),
     Markers(Box<str>),
+    /// A td-rbm run's time of each cell.
+    Time,
 }
 
 /// Activity currently drawn: what it is of, where, and its levels.
@@ -207,6 +216,9 @@ struct Shown {
 
 /// The camera of a frame, and each group label it drew with where.
 type LabelHits = (Viewport, Vec<(u32, [f32; 4])>);
+
+/// Every point's displacement on a map (its space index), as last drawn.
+type Moved = (usize, std::sync::Arc<Vec<[f32; 2]>>);
 
 /// Point of each name (its first, for a repeated name).
 type NameIndex = std::collections::HashMap<Box<str>, usize>;
@@ -280,6 +292,11 @@ pub(crate) struct Scene {
     /// in `data.input` and recorded path), for the front end to ask where
     /// it is.
     pub missing_data: Option<(usize, String)>,
+    /// A run's velocity field (read on the first `v`), whether it is drawn,
+    /// and every point's displacement on the last map it was drawn on.
+    velocity: Option<std::sync::Arc<velocity::Field>>,
+    pub show_velocity: bool,
+    velocity_moved: std::cell::RefCell<Option<Moved>>,
 }
 
 impl Scene {
@@ -322,9 +339,25 @@ impl Scene {
             medians: std::cell::RefCell::new(None),
             note: None,
             missing_data: None,
+            velocity: None,
+            show_velocity: false,
+            velocity_moved: std::cell::RefCell::new(None),
         };
-        scene.colour = scene.default_colour(args.colour_by.as_deref());
+        // `--colour-by tau` (or `time`) colours a td-rbm run's cells by
+        // their time; any other name is a grouping.
+        let by_time = args
+            .colour_by
+            .as_deref()
+            .is_some_and(|w| w.eq_ignore_ascii_case("tau") || w.eq_ignore_ascii_case("time"));
+        let want = args.colour_by.as_deref().filter(|_| !by_time);
+        scene.colour = scene.default_colour(want);
         scene.refresh_groups();
+        if by_time {
+            scene.toggle_time();
+        }
+        if args.velocity {
+            scene.toggle_velocity();
+        }
         if args.observed {
             scene.source = Source::Observed;
         }
@@ -402,6 +435,9 @@ impl Scene {
             locked: self.locked.clone(),
             note: None,
             missing_data: None,
+            velocity: self.velocity.clone(),
+            show_velocity: self.show_velocity,
+            velocity_moved: std::cell::RefCell::new(self.velocity_moved.borrow().clone()),
         };
         s.refresh_groups();
         s
@@ -677,6 +713,7 @@ mod tests {
             run: None,
             round: None,
             loads: activity::RunLoads::none(),
+            times: None,
             labels: vec![
                 Labels::clusters(
                     LabelKind::Cluster,
@@ -706,6 +743,7 @@ mod tests {
             feature: None,
             markers_of: None,
             observed: false,
+            velocity: false,
             focus: None,
             zoom_into: None,
             chart: None,

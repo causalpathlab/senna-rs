@@ -277,6 +277,8 @@ impl Scene {
 
     /// Labels, key and marks over a composited frame.
     pub fn decorate(&self, frame: &mut render::Frame, vp: &Viewport, cell_px: f32) {
+        // The velocity field under every mark and label.
+        self.draw_velocity(frame, vp);
         let cell_px = self.text_px(cell_px);
         // The picked feature is marked even with labels off: it is the answer
         // to what was just asked for.
@@ -406,4 +408,56 @@ fn mark(
         font,
         group: None,
     });
+}
+
+impl Scene {
+    /// Arrows of the run's velocity field over the cell map, when shown.
+    fn draw_velocity(&self, frame: &mut render::Frame, vp: &Viewport) {
+        let Some(field) = self.velocity.as_ref().filter(|_| self.show_velocity) else {
+            return;
+        };
+        if self.current().axis() != super::data::Axis::Cells {
+            return;
+        }
+        let points = &self.current().points;
+        let moved = {
+            let mut cache = self.velocity_moved.borrow_mut();
+            match cache.as_ref() {
+                Some((space, moved)) if *space == self.space => moved.clone(),
+                _ => {
+                    let moved = std::sync::Arc::new(field.embed(points));
+                    *cache = Some((self.space, moved.clone()));
+                    moved
+                }
+            }
+        };
+        let arrows = super::velocity::arrows(points, &moved, vp);
+        super::velocity::draw(frame, &arrows, color::oklch(0.30, 0.02, 250.0));
+    }
+
+    /// Show the run's velocity field, or stop; read on the first ask.
+    pub fn toggle_velocity(&mut self) {
+        if self.show_velocity {
+            self.show_velocity = false;
+            return;
+        }
+        if self.velocity.is_none() {
+            let Some((m, dir)) = self.data.run.clone() else {
+                self.note = Some("no manifest to read a velocity from".into());
+                return;
+            };
+            match super::velocity::Field::load(&m, &dir) {
+                Ok(Some(field)) => self.velocity = Some(std::sync::Arc::new(field)),
+                Ok(None) => {
+                    self.note = Some("this run has no cell velocity (a td-rbm run's)".into());
+                    return;
+                }
+                Err(e) => {
+                    self.note = Some(format!("no velocity field: {e}"));
+                    return;
+                }
+            }
+        }
+        self.show_velocity = true;
+    }
 }

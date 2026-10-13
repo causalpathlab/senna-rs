@@ -336,6 +336,41 @@ impl Scene {
     }
 
     /// Drop the activity view. Returns whether there was one.
+    /// Colour the cells by a td-rbm run's time, or stop.
+    pub fn toggle_time(&mut self) {
+        if self.pick == Some(Pick::Time) {
+            self.clear_pick();
+        } else if self.data.times.is_none() {
+            self.note = Some("this run has no cell times (a td-rbm run's)".into());
+        } else {
+            self.set_pick(Pick::Time);
+        }
+    }
+
+    /// The time of every point of `space` on the ramp.
+    fn show_time(&mut self, space: usize, source: Source) {
+        let Some(times) = self.data.times.clone() else {
+            self.shown = None;
+            self.note = Some("this run has no cell times".into());
+            return;
+        };
+        let values: Vec<f32> = self.data.spaces[space]
+            .points
+            .names
+            .iter()
+            .map(|n| times.get(n).copied().unwrap_or(f32::NAN))
+            .collect();
+        self.shown_ids += 1;
+        self.shown = Some(Shown {
+            id: self.shown_ids,
+            space,
+            pick: Pick::Time,
+            source,
+            title: "time".into(),
+            levels: Levels::from_values(values, false),
+        });
+    }
+
     pub fn clear_pick(&mut self) -> bool {
         self.shown = None;
         self.pick.take().is_some()
@@ -389,9 +424,13 @@ impl Scene {
         {
             return;
         }
+        if pick == Pick::Time {
+            self.show_time(space, source);
+            return;
+        }
         let set = match &pick {
             Pick::Markers(group) => self.marker_features(group),
-            Pick::One(_) => Vec::new(),
+            Pick::One(_) | Pick::Time => Vec::new(),
         };
         let Some((activity, data)) = self.activity_and_data() else {
             self.note = Some("no manifest to read activity from".into());
@@ -405,6 +444,7 @@ impl Scene {
             Pick::Markers(group) => activity
                 .set_levels(&set, source, space, names)
                 .map(|(l, used)| (l, format!("{group} markers ({used}) · {}", source.name()))),
+            Pick::Time => unreachable!("time is shown above"),
         };
         match result {
             Ok((levels, title)) => {

@@ -88,6 +88,11 @@ impl App {
             KeyCode::BackTab => self.step_view(-1),
             KeyCode::Char('m') => self.step_method(1, false),
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
+            KeyCode::Char('y') => self.change(Scene::toggle_time),
+            KeyCode::Char('v') => {
+                self.scene.toggle_velocity();
+                self.redecorate();
+            }
             KeyCode::Char(']') => self.change(|s| s.step_focus(1)),
             KeyCode::Char('[') => self.change(|s| s.step_focus(-1)),
             KeyCode::Char('t') => {
