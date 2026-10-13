@@ -210,6 +210,21 @@ type Read = (PathBuf, data::Described);
 /// A method row, its command line, and the flag clap blamed in it.
 type Blame = (usize, Vec<String>, Option<String>);
 
+/// Report the mouse's buttons and wheel to senna run, or stop. Movement is
+/// never reported, so a moving pointer wakes nothing; shift+drag still
+/// selects text in most terminals.
+fn mouse(on: bool) {
+    use std::io::Write;
+    let codes = if on {
+        "\x1b[?1000h\x1b[?1006h"
+    } else {
+        "\x1b[?1000l\x1b[?1006l"
+    };
+    let mut out = std::io::stdout();
+    let _ = out.write_all(codes.as_bytes());
+    let _ = out.flush();
+}
+
 /// Run the screens; `cli` is senna's built command, the source of every
 /// method's flags and the check of every command line.
 pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
@@ -218,8 +233,15 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
     let level = log::max_level();
     log::set_max_level(log::LevelFilter::Off);
     let mut terminal = ratatui::init();
-    ratatui::crossterm::execute!(std::io::stdout(), event::EnableMouseCapture)?;
+    // The wheel scrolls; a panic turns the mouse back over to the terminal
+    // with the rest of it.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        mouse(false);
+        hook(info);
+    }));
     let result = (|| -> anyhow::Result<()> {
+        mouse(true);
         while !app.quit {
             app.poll();
             terminal.draw(|f| app.draw(f))?;
@@ -255,7 +277,7 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
         }
         q.stop_within(STOP_GRACE);
     }
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
+    mouse(false);
     ratatui::restore();
     log::set_max_level(level);
     result?;
@@ -699,7 +721,7 @@ impl App {
                 self.relabel = None;
                 return;
             }
-            _ if crate::tui::list_move(&k, at, n).is_some() => {
+            _ if crate::tui::list_delta(&k).is_some() => {
                 crate::tui::list_move(&k, at, n).unwrap_or(at)
             }
             KeyCode::Enter if at < n => {
@@ -1361,12 +1383,10 @@ impl App {
     fn confirm_key(&mut self, k: KeyEvent) {
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') => self.confirm = None,
-            _ if crate::tui::list_move(&k, self.confirm_scroll, self.confirm_max.get() + 1)
-                .is_some() =>
-            {
-                self.confirm_scroll =
-                    crate::tui::list_move(&k, self.confirm_scroll, self.confirm_max.get() + 1)
-                        .unwrap_or(self.confirm_scroll);
+            _ if crate::tui::list_delta(&k).is_some() => {
+                let n = self.confirm_max.get() + 1;
+                self.confirm_scroll = crate::tui::list_move(&k, self.confirm_scroll, n)
+                    .unwrap_or(self.confirm_scroll);
             }
             KeyCode::Char('c') => {
                 let text = self.copy_text();

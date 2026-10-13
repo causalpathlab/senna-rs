@@ -4,7 +4,9 @@
 use super::jobs::{State, Tool, CLONES_FLAG};
 use super::{batches, App, Batch, Kind, Screen, Target};
 use crate::tui::child::Progress;
-use crate::tui::style::{bold, first_row, hint, page, popup, rgb, selected, At, MUTED, TEXT};
+use crate::tui::style::{
+    bold, first_row, hint, page, page_window, popup, rgb, scrolled, selected, At, MUTED, TEXT,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -89,7 +91,8 @@ impl App {
         }
         if self.help {
             let rows = usize::from(area.height).saturating_sub(4);
-            popup(f, area, self.help_lines(rows), 70, At::Middle, TEXT);
+            let width = usize::from(area.width.min(70)).saturating_sub(2);
+            popup(f, area, self.help_lines(rows, width), 70, At::Middle, TEXT);
         }
         if let Some(e) = &self.editor {
             let what = match &e.target {
@@ -142,7 +145,7 @@ impl App {
 
     /// The `?` page: every key, by where it works, one to a line with the
     /// keys in a column of their own, scrolled to fit `rows`.
-    fn help_lines(&self, rows: usize) -> Vec<Line<'static>> {
+    fn help_lines(&self, rows: usize, width: usize) -> Vec<Line<'static>> {
         let run = crate::tui::RUN_KEY;
         let sections: Vec<(&str, Vec<(String, &str)>)> = vec![
             (
@@ -157,6 +160,7 @@ impl App {
                     ("q".into(), "quit (in a popup: back)"),
                     ("esc".into(), "back out of a popup, filter or text"),
                     ("ctrl+c".into(), "stop the fits and quit"),
+                    ("shift+drag".into(), "select text (the wheel scrolls)"),
                 ],
             ),
             (
@@ -225,12 +229,12 @@ impl App {
                 ],
             ),
         ];
-        let width = sections
+        let key_w = sections
             .iter()
             .flat_map(|(_, keys)| keys.iter().map(|(k, _)| k.chars().count()))
             .max()
             .unwrap_or(0)
-            + 3;
+            + 2;
         let mut body = Vec::new();
         for (i, (place, keys)) in sections.into_iter().enumerate() {
             if i > 0 {
@@ -238,28 +242,31 @@ impl App {
             }
             body.push(Line::from(Span::styled(format!(" {place}"), bold())));
             for (k, what) in keys {
-                let pad = width.saturating_sub(k.chars().count());
-                body.push(Line::from(vec![
-                    Span::styled(format!("   {k}{}", " ".repeat(pad)), bold()),
-                    Span::raw(what),
-                ]));
+                for (i, l) in crate::tui::key_lines(3, &k, key_w, what, width)
+                    .into_iter()
+                    .enumerate()
+                {
+                    // The key bold, what it does plain.
+                    let at = if i == 0 { 3 + key_w } else { 0 };
+                    let (key, rest) =
+                        l.split_at(l.char_indices().nth(at).map_or(l.len(), |(b, _)| b));
+                    body.push(Line::from(vec![
+                        Span::styled(key.to_string(), bold()),
+                        Span::raw(rest.to_string()),
+                    ]));
+                }
             }
         }
-        let room = rows.saturating_sub(4).max(3);
-        let max = body.len().saturating_sub(room);
-        self.help_max.set(max);
-        let skip = self.help_scroll.min(max);
+        let (shown, stands) = page_window(
+            body,
+            rows.saturating_sub(4).max(3),
+            self.help_scroll,
+            &self.help_max,
+        );
         let mut out = vec![Line::from(Span::styled(" Keys", bold())), Line::from("")];
-        out.extend(body.into_iter().skip(skip).take(room));
-        let more = if max == 0 {
-            String::new()
-        } else if skip < max {
-            "more below · ".to_string()
-        } else {
-            "end · ".to_string()
-        };
+        out.extend(shown);
         out.push(Line::from(Span::styled(
-            format!(" {more}↑ ↓ / wheel scroll   esc, q or ? close"),
+            format!(" {stands}↑ ↓ / wheel scroll   esc, q or ? close"),
             hint(),
         )));
         out
@@ -419,19 +426,8 @@ impl App {
             tail.truncate(tail_room.saturating_sub(1));
             tail.push(Line::from(Span::styled(format!("  … {more} more"), hint())));
         }
-        let room = height.saturating_sub(tail.len()).max(1);
-        let first = first_row(self.pair_row, room, files.len());
-        let below = files.len().saturating_sub(first + room);
-        let mut shown: Vec<Line> = files.into_iter().skip(first).take(room).collect();
-        if first > 0 {
-            shown[0] = Line::from(Span::styled(format!(" ↑ {} more", first + 1), hint()));
-        }
-        if below > 0 {
-            if let Some(last) = shown.last_mut() {
-                *last = Line::from(Span::styled(format!(" ↓ {} more", below + 1), hint()));
-            }
-        }
-        lines.extend(shown);
+        let room = height.saturating_sub(tail.len());
+        lines.extend(scrolled(files, self.pair_row, room));
         lines.extend(tail);
         f.render_widget(Paragraph::new(lines), area);
     }
@@ -545,7 +541,7 @@ impl App {
             lines.push(Line::from(Span::styled(fit(&text, w), style)));
             // Notes under a row, wrapped by word under its name.
             let note = |lines: &mut Vec<Line<'static>>, text: &str, style: Style| {
-                for l in wrap_words(text, w.saturating_sub(6)) {
+                for l in crate::tui::wrap_words(text, w.saturating_sub(6)) {
                     lines.push(Line::from(Span::styled(format!("      {l}"), style)));
                 }
             };
@@ -570,18 +566,7 @@ impl App {
         // The heading stays; the rows scroll to keep the cursor in sight.
         let room = usize::from(area.height).saturating_sub(HEAD);
         let body = lines.split_off(HEAD.min(lines.len()));
-        let first = first_row(at.saturating_sub(HEAD), room, body.len());
-        if first > 0 {
-            lines[HEAD - 1] = Line::from(Span::styled(format!(" ↑ {first} more"), hint()));
-        }
-        let below = body.len().saturating_sub(first + room);
-        let mut shown: Vec<Line> = body.into_iter().skip(first).take(room).collect();
-        if below > 0 {
-            if let Some(last) = shown.last_mut() {
-                *last = Line::from(Span::styled(format!(" ↓ {} more", below + 1), hint()));
-            }
-        }
-        lines.extend(shown);
+        lines.extend(scrolled(body, at.saturating_sub(HEAD), room));
         f.render_widget(Paragraph::new(lines), area);
     }
 
@@ -955,21 +940,4 @@ impl App {
         }
         out
     }
-}
-
-/// `text` broken between words into lines of at most `width` columns.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    let mut lines = vec![String::new()];
-    for word in text.split(' ') {
-        let line = lines.last_mut().expect("a line");
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width.max(1) {
-            lines.push(word.to_string());
-        } else {
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-    }
-    lines
 }

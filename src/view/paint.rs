@@ -275,10 +275,12 @@ impl Scene {
             .and_then(|(_, index)| index.match_gene(name))
     }
 
-    /// Labels, key and marks over a composited frame.
-    pub fn decorate(&self, frame: &mut render::Frame, vp: &Viewport, cell_px: f32) {
+    /// Labels, key and marks over a composited frame. `floor` is the
+    /// thinnest stroke the frame can show: the screen's (a half-block cell
+    /// is one pixel across), or 1 for a page.
+    pub fn decorate(&self, frame: &mut render::Frame, vp: &Viewport, cell_px: f32, floor: f32) {
         // The velocity field under every mark and label.
-        self.draw_velocity(frame, vp);
+        self.draw_velocity(frame, vp, floor);
         let cell_px = self.text_px(cell_px);
         // The picked feature is marked even with labels off: it is the answer
         // to what was just asked for.
@@ -413,7 +415,7 @@ fn mark(
 impl Scene {
     /// The run's velocity field over the cell map, as streamlines or as
     /// arrows, when shown.
-    fn draw_velocity(&self, frame: &mut render::Frame, vp: &Viewport) {
+    fn draw_velocity(&self, frame: &mut render::Frame, vp: &Viewport, floor: f32) {
         let (Some(field), Some(style)) = (self.velocity.as_ref(), self.velocity_style) else {
             return;
         };
@@ -436,11 +438,11 @@ impl Scene {
         match style {
             super::VelocityStyle::Stream => {
                 let lines = super::velocity::streamlines(points, &moved, vp, self.stream_lanes);
-                super::velocity::draw_lines(frame, &lines, ink, self.stroke_floor);
+                super::velocity::draw_lines(frame, &lines, ink, floor);
             }
             super::VelocityStyle::Arrows => {
                 let arrows = super::velocity::arrows(points, &moved, vp);
-                super::velocity::draw(frame, &arrows, ink, self.stroke_floor);
+                super::velocity::draw(frame, &arrows, ink, floor);
             }
         }
     }

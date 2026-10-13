@@ -337,9 +337,6 @@ pub(crate) struct Scene {
     pub missing_data: Option<(usize, String)>,
     /// Whether how the extra data file matched is still to be said.
     extra_pending: bool,
-    /// The thinnest line drawn on the map, in frame pixels: one pixel of
-    /// the screen when it shows the frame in coarser pixels (half blocks).
-    pub(crate) stroke_floor: f32,
     /// A run's velocity field (read on the first `v`), whether it is drawn,
     /// and every point's displacement on the last map it was drawn on.
     velocity: Option<std::sync::Arc<velocity::Field>>,
@@ -390,7 +387,6 @@ impl Scene {
             note: None,
             missing_data: None,
             extra_pending: false,
-            stroke_floor: 1.0,
             velocity: None,
             velocity_style: None,
             stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
@@ -501,7 +497,6 @@ impl Scene {
             note: None,
             missing_data: None,
             extra_pending: self.extra_pending,
-            stroke_floor: self.stroke_floor,
             velocity: self.velocity.clone(),
             velocity_style: self.velocity_style,
             stream_lanes: self.stream_lanes,
@@ -694,9 +689,10 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         );
         let dpi = args.dpi as f32;
         let w = (args.width * dpi).round() as usize;
-        // One view: a page the map's own shape, as it would fill a screen of
-        // that shape. Several: a roughly 4:3 page of 4:3 tiles.
-        let h = if let [scene] = &scenes[..] {
+        // One map: a page of the map's own shape, as it would fill a screen
+        // of that shape. A chart, or several views: a roughly 4:3 page of
+        // 4:3 tiles.
+        let h = if let ([scene], None) = (&scenes[..], args.chart) {
             let [x0, y0, x1, y1] = scene.current().points.bounds;
             let aspect = ((y1 - y0) / (x1 - x0).max(1e-6)).clamp(0.4, 2.5);
             (w as f32 * aspect).round() as usize

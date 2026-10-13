@@ -53,13 +53,12 @@ impl App {
             }
         }
         // With a feature list in the sidebar, the arrows go through it.
-        if list_step(k.code).is_some_and(|d| self.step_pane(d)) {
+        if crate::tui::list_delta(&k).is_some_and(|d| self.step_pane(d)) {
             return true;
         }
         let step = |app: &App| app.vp.map_or(0.0, |v| 0.1 * v.w.min(v.h) as f32);
         match k.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Esc | KeyCode::Char('x') => {
                 let cleared = self.info.take().is_some()
                     || self.scene.clear_suggestions()
@@ -201,10 +200,10 @@ impl App {
                 }
                 return true;
             }
-            // The cursor moves through the matches listed in the sidebar.
-            code if list_step(code).is_some() => {
-                let d = list_step(code).unwrap_or_default();
-                *at = (*at as i64 + d).clamp(0, last as i64) as usize;
+            // The cursor moves through the matches listed in the sidebar;
+            // letters type into the query instead.
+            _ if !matches!(k.code, KeyCode::Char(_)) && crate::tui::list_delta(&k).is_some() => {
+                *at = crate::tui::list_move(&k, *at, last + 1).unwrap_or(*at);
             }
             // Type, backspace, ctrl+u clears; other control keys type nothing.
             _ if crate::tui::edit_line(query, &k) => self.research(),
@@ -552,17 +551,6 @@ fn adjust(
         2 => st.alpha = (st.alpha + 0.1 * step as f32).clamp(0.1, 1.0),
         3 => st.size = (st.size + 0.25 * step as f32).clamp(0.25, 4.0),
         _ => st.hidden = !st.hidden,
-    }
-}
-
-/// How far a key moves through a list: ±1 for the arrows, ±10 a page.
-pub(super) fn list_step(code: KeyCode) -> Option<i64> {
-    match code {
-        KeyCode::Up => Some(-1),
-        KeyCode::Down => Some(1),
-        KeyCode::PageUp => Some(-10),
-        KeyCode::PageDown => Some(10),
-        _ => None,
     }
 }
 

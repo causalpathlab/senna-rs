@@ -113,7 +113,7 @@ impl Deck {
             if self.grid {
                 self.layout_grid(area);
             } else {
-                self.apps[self.at].layout(area);
+                self.apps[self.at].layout(area, App::status_lines(full.width));
             }
             dirty |= self.background();
             dirty |= if self.grid {
@@ -493,7 +493,8 @@ impl Deck {
                 let job = tile.job.take().expect("checked above");
                 let vp = job.vp;
                 let mut frame = job.finish();
-                app.scene.decorate(&mut frame, &vp, self.cell.1);
+                app.scene
+                    .decorate(&mut frame, &vp, self.cell.1, app.stroke_floor);
                 frame.to_image()
             } else {
                 job.image()
@@ -664,7 +665,13 @@ impl Deck {
     fn strip(&self, full: Rect) -> Option<Rect> {
         let shows =
             self.show_saved && !self.gallery.entries().is_empty() && full.width >= 3 * SAVED_WIDTH;
-        shows.then(|| Rect::new(0, 0, SAVED_WIDTH, full.height.saturating_sub(STATUS_LINES)))
+        // Above the status area: the grid's, or the view's at full width.
+        let status = if self.grid {
+            STATUS_LINES
+        } else {
+            App::status_lines(full.width)
+        };
+        shows.then(|| Rect::new(0, 0, SAVED_WIDTH, full.height.saturating_sub(status)))
     }
 
     /// Where the views or the grid go: beside the strip, when it shows.

@@ -62,19 +62,25 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         .transpose()?;
     senna::run_manifest::InheritedFromManifest::ensure_replayable(inherited.as_ref(), "rbm")?;
     // `--multiome` names the files itself; otherwise they come positionally
-    // or from `--from`.
-    let data_files = if args.multiome.is_empty() {
-        senna::run_manifest::InheritedFromManifest::resolve_data(
-            inherited.as_ref(),
-            &args.data_files,
-        )?
+    // or from `--from`. Batch files then come with the files they label.
+    let (data_files, batch_files) = if args.multiome.is_empty() {
+        (
+            senna::run_manifest::InheritedFromManifest::resolve_data(
+                inherited.as_ref(),
+                &args.data_files,
+            )?,
+            senna::run_manifest::InheritedFromManifest::resolve_batch(
+                inherited.as_ref(),
+                args.batch_files.as_deref(),
+            ),
+        )
     } else {
-        args.data_files.clone()
+        anyhow::ensure!(
+            args.data_files.is_empty(),
+            "--multiome names the input files; pass them there, not also positionally"
+        );
+        (Vec::new(), args.batch_files.clone())
     };
-    let batch_files = senna::run_manifest::InheritedFromManifest::resolve_batch(
-        inherited.as_ref(),
-        args.batch_files.as_deref(),
-    );
     let prebuilt_partition = args.pb_from.partition(
         inherited.as_ref(),
         &crate::refine_weighting::partition_settings(args),

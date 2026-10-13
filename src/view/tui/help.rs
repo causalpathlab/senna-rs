@@ -385,8 +385,9 @@ fn keys_of(context: Context) -> [&'static str; 2] {
 }
 
 impl App {
-    /// The `?` overlay for the current context, scrolled to fit `rows`.
-    pub(super) fn help_lines(&self, rows: usize) -> Vec<Line<'static>> {
+    /// The `?` overlay for the current context, wrapped to `width` columns
+    /// and scrolled to fit `rows`.
+    pub(super) fn help_lines(&self, rows: usize, width: usize) -> Vec<Line<'static>> {
         let sections = if matches!(
             self.context(),
             Context::Relabel | Context::Merge | Context::Submit
@@ -400,24 +401,27 @@ impl App {
         for (title, keys) in sections {
             body.push(Line::from(Span::styled(format!(" {title}"), bold)));
             for (k, v) in *keys {
-                body.push(Line::from(format!("   {k:<15} {v}")));
+                body.extend(
+                    crate::tui::key_lines(3, k, 15, v, width)
+                        .into_iter()
+                        .map(Line::from),
+                );
             }
             body.push(Line::from(""));
         }
-        let room = rows.saturating_sub(1).max(3);
-        let max = body.len().saturating_sub(room);
-        self.help_max.set(max);
-        let skip = self.help_scroll.min(max);
-        let mut out: Vec<Line> = body.into_iter().skip(skip).take(room).collect();
-        let more = if max == 0 {
+        let (mut out, stands) = crate::tui::style::page_window(
+            body,
+            rows.saturating_sub(1).max(3),
+            self.help_scroll,
+            &self.help_max,
+        );
+        let scroll = if stands.is_empty() {
             ""
-        } else if skip < max {
-            "more below · ↑ ↓ / wheel scroll   "
         } else {
-            "end · ↑ ↓ / wheel scroll   "
+            "↑ ↓ / wheel scroll   "
         };
         out.push(Line::from(Span::styled(
-            format!(" {more}esc, q or ? close"),
+            format!(" {stands}{scroll}esc, q or ? close"),
             Style::default().add_modifier(ratatui::style::Modifier::DIM),
         )));
         out

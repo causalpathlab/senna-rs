@@ -199,7 +199,15 @@ impl App {
 
         if self.help {
             let rows = usize::from(map.height).saturating_sub(2);
-            popup(f, map, self.help_lines(rows), 96, At::Middle, color::TEXT);
+            let width = usize::from(map.width.min(96)).saturating_sub(2);
+            popup(
+                f,
+                map,
+                self.help_lines(rows, width),
+                96,
+                At::Middle,
+                color::TEXT,
+            );
         }
     }
 

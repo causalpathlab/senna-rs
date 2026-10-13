@@ -343,7 +343,13 @@ pub fn blamed<'a>(complaint: &str, fields: &'a [Field]) -> Option<&'a str> {
 /// control, highly variable features, the collapse into pseudobulks): the same
 /// in every method that loads counts, so a method's page lists them after its
 /// own.
-fn data_flags() -> std::collections::HashSet<String> {
+fn data_flags() -> &'static std::collections::HashSet<String> {
+    static FLAGS: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    FLAGS.get_or_init(build_data_flags)
+}
+
+fn build_data_flags() -> std::collections::HashSet<String> {
     use clap::Args;
     let mut c = Command::new("data");
     c = crate::refine_weighting::CollapseArgs::augment_args(c);

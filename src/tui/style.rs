@@ -48,6 +48,50 @@ pub(crate) fn first_row(row: usize, rows: usize, n: usize) -> usize {
     row.saturating_sub(rows / 2).min(n.saturating_sub(rows))
 }
 
+/// `rows` scrolled to keep row `at` in sight within `room` rows; the first
+/// and last rows shown say how many are cut off above and below.
+pub(crate) fn scrolled(rows: Vec<Line<'static>>, at: usize, room: usize) -> Vec<Line<'static>> {
+    let room = room.max(1);
+    let first = first_row(at, room, rows.len());
+    let below = rows.len().saturating_sub(first + room);
+    let mut shown: Vec<Line> = rows.into_iter().skip(first).take(room).collect();
+    let more =
+        |n: usize, arrow: &str| Line::from(Span::styled(format!(" {arrow} {n} more"), hint()));
+    if shown.len() > 1 {
+        if first > 0 {
+            shown[0] = more(first + 1, "↑");
+        }
+        if below > 0 {
+            let last = shown.len() - 1;
+            shown[last] = more(below + 1, "↓");
+        }
+    }
+    shown
+}
+
+/// The rows of a page that fit `room` from `scroll`, its furthest scroll put
+/// in `max` for the keys that move it, and where it stands for its footer:
+/// `"more below · "`, `"end · "`, or `""` when it all fits.
+pub(crate) fn page_window(
+    body: Vec<Line<'static>>,
+    room: usize,
+    scroll: usize,
+    max: &std::cell::Cell<usize>,
+) -> (Vec<Line<'static>>, &'static str) {
+    let room = room.max(1);
+    let furthest = body.len().saturating_sub(room);
+    max.set(furthest);
+    let skip = scroll.min(furthest);
+    let stands = if furthest == 0 {
+        ""
+    } else if skip < furthest {
+        "more below · "
+    } else {
+        "end · "
+    };
+    (body.into_iter().skip(skip).take(room).collect(), stands)
+}
+
 /// Where a popup sits over its area.
 #[derive(Clone, Copy)]
 pub(crate) enum At {
@@ -68,7 +112,13 @@ pub(crate) fn popup(
 ) {
     let w = max_w.min(area.width);
     let inner = usize::from(w.saturating_sub(2)).max(1);
-    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(inner)).sum();
+    let rows: usize = lines
+        .iter()
+        .map(|l| {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            super::wrapped_rows(&text, inner)
+        })
+        .sum();
     let h = (rows.min(usize::from(u16::MAX)) as u16)
         .saturating_add(2)
         .min(area.height);
