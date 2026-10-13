@@ -169,7 +169,8 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             ("t", "labels on the map: small, medium, large, largest, off, in turn"),
             ("y", "colour the cells by a td-rbm run's time; again to stop"),
-            ("v", "draw a td-rbm run's velocity field over the cells; again to hide"),
+            ("v", "a td-rbm run's velocity field over the cells: streamlines, arrows, off, in turn"),
+            ("{ }", "streamlines sparser, denser"),
             ("space  b", "sidebar on or off"),
             (
                 "<  >",

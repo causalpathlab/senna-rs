@@ -411,9 +411,10 @@ fn mark(
 }
 
 impl Scene {
-    /// Arrows of the run's velocity field over the cell map, when shown.
+    /// The run's velocity field over the cell map, as streamlines or as
+    /// arrows, when shown.
     fn draw_velocity(&self, frame: &mut render::Frame, vp: &Viewport) {
-        let Some(field) = self.velocity.as_ref().filter(|_| self.show_velocity) else {
+        let (Some(field), Some(style)) = (self.velocity.as_ref(), self.velocity_style) else {
             return;
         };
         if self.current().axis() != super::data::Axis::Cells {
@@ -431,16 +432,48 @@ impl Scene {
                 }
             }
         };
-        let arrows = super::velocity::arrows(points, &moved, vp);
-        super::velocity::draw(frame, &arrows, color::oklch(0.30, 0.02, 250.0));
+        let ink = color::oklch(0.30, 0.02, 250.0);
+        match style {
+            super::VelocityStyle::Stream => {
+                let lines = super::velocity::streamlines(points, &moved, vp, self.stream_lanes);
+                super::velocity::draw_lines(frame, &lines, ink);
+            }
+            super::VelocityStyle::Arrows => {
+                let arrows = super::velocity::arrows(points, &moved, vp);
+                super::velocity::draw(frame, &arrows, ink);
+            }
+        }
     }
 
-    /// Show the run's velocity field, or stop; read on the first ask.
+    /// The run's velocity field in turn: streamlines, arrows, off. Read on
+    /// the first ask.
     pub fn toggle_velocity(&mut self) {
-        if self.show_velocity {
-            self.show_velocity = false;
+        let next = match self.velocity_style {
+            None => super::VelocityStyle::Stream,
+            Some(super::VelocityStyle::Stream) => super::VelocityStyle::Arrows,
+            Some(super::VelocityStyle::Arrows) => {
+                self.velocity_style = None;
+                return;
+            }
+        };
+        self.show_velocity_as(next);
+    }
+
+    /// Streamlines denser (`more`) or sparser, by a quarter, within
+    /// [`super::velocity::LANES_RANGE`].
+    pub fn change_stream_density(&mut self, more: bool) {
+        if self.velocity_style != Some(super::VelocityStyle::Stream) {
+            self.note = Some("density is for streamlines: v shows them".into());
             return;
         }
+        let (lo, hi) = super::velocity::LANES_RANGE;
+        let f = if more { 1.25 } else { 0.8 };
+        self.stream_lanes = (self.stream_lanes * f).clamp(lo, hi);
+        self.note = Some(format!("streamlines {:.0} lanes across", self.stream_lanes));
+    }
+
+    /// Show the run's velocity field as `style`; read on the first ask.
+    pub fn show_velocity_as(&mut self, style: super::VelocityStyle) {
         if self.velocity.is_none() {
             let Some((m, dir)) = self.data.run.clone() else {
                 self.note = Some("no manifest to read a velocity from".into());
@@ -458,6 +491,6 @@ impl Scene {
                 }
             }
         }
-        self.show_velocity = true;
+        self.velocity_style = Some(style);
     }
 }

@@ -50,3 +50,32 @@ fn a_cell_without_a_velocity_does_not_move() {
     let moved = field.embed(&points);
     assert!(moved[2][0].is_nan());
 }
+
+/// A field along +x gives streamlines running left to right, spread over
+/// the map, none of them crossing back.
+#[test]
+fn a_field_along_x_streams_along_x() {
+    let side = 60;
+    let names: Vec<Box<str>> = (0..side * side).map(|i| format!("c{i}").into()).collect();
+    let xy: Vec<[f32; 2]> = (0..side * side)
+        .map(|i| [(i % side) as f32, (i / side) as f32])
+        .collect();
+    let points = Points::new(names, xy);
+    let moved = vec![[1.0f32, 0.0]; side * side];
+    let vp = Viewport::fit(points.bounds, 400, 400);
+    let lines = streamlines(&points, &moved, &vp, LANES);
+    // Denser lanes, more lines.
+    assert!(streamlines(&points, &moved, &vp, 2.0 * LANES).len() > lines.len());
+    assert!(lines.len() >= 10, "{} lines", lines.len());
+    for line in &lines {
+        for pair in line.windows(2) {
+            assert!(pair[1].0 > pair[0].0, "a step back: {pair:?}");
+        }
+    }
+    // Spread across the map, not bunched.
+    let ys: Vec<f32> = lines.iter().map(|l| l[l.len() / 2].1).collect();
+    let (lo, hi) = ys
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(a, b), &y| (a.min(y), b.max(y)));
+    assert!(hi - lo > 200.0, "lines span {lo}..{hi}");
+}

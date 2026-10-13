@@ -272,6 +272,233 @@ pub fn draw(frame: &mut Frame, arrows: &[Arrow], ink: Rgb) {
     }
 }
 
+/// Streamlines' grid nodes across the visible map.
+const NODES: f32 = 48.0;
+/// Occupancy cells across the visible map by default: the spacing between
+/// lines.
+pub const LANES: f32 = 40.0;
+/// The densities `{` and `}` step between.
+pub const LANES_RANGE: (f32, f32) = (10.0, 120.0);
+/// A grid node is in the field when its cells' kernel weight reaches this.
+const LEAST_WEIGHT: f32 = 1.0;
+
+/// The field smoothed onto a regular grid of the visible map: every node's
+/// mean displacement in pixels' directions, `None` where too few cells are
+/// near (a Gaussian kernel one node spacing wide).
+struct Grid {
+    nx: usize,
+    ny: usize,
+    step: f32,
+    at: Vec<Option<(f32, f32)>>,
+}
+
+impl Grid {
+    fn new(points: &Points, moved: &[[f32; 2]], vp: &Viewport) -> Self {
+        let step = (vp.w.max(vp.h) as f32 / NODES).max(2.0);
+        let (nx, ny) = (
+            (vp.w as f32 / step).ceil() as usize + 1,
+            (vp.h as f32 / step).ceil() as usize + 1,
+        );
+        let mut sum = vec![(0f32, 0f32, 0f32); nx * ny];
+        let reach = 3i64;
+        for (i, d) in moved.iter().enumerate() {
+            if !(d[0].is_finite() && d[1].is_finite()) {
+                continue;
+            }
+            let at = vp.to_px(points.xy[i]);
+            let ahead = vp.to_px([points.xy[i][0] + d[0], points.xy[i][1] + d[1]]);
+            let (dx, dy) = ((ahead.0 - at.0) / vp.scale, (ahead.1 - at.1) / vp.scale);
+            let (gx, gy) = ((at.0 / step).round() as i64, (at.1 / step).round() as i64);
+            for oy in -reach..=reach {
+                for ox in -reach..=reach {
+                    let (x, y) = (gx + ox, gy + oy);
+                    if x < 0 || y < 0 || x >= nx as i64 || y >= ny as i64 {
+                        continue;
+                    }
+                    let (px, py) = (x as f32 * step - at.0, y as f32 * step - at.1);
+                    let w = (-(px * px + py * py) / (2.0 * step * step)).exp();
+                    let e = &mut sum[y as usize * nx + x as usize];
+                    *e = (e.0 + w * dx, e.1 + w * dy, e.2 + w);
+                }
+            }
+        }
+        let at = sum
+            .into_iter()
+            .map(|(x, y, w)| (w >= LEAST_WEIGHT).then(|| (x / w, y / w)))
+            .collect();
+        Self { nx, ny, step, at }
+    }
+
+    /// The field at pixel `p`, bilinear between the four nodes around it;
+    /// `None` outside the map or where a node is out of the field.
+    fn sample(&self, p: (f32, f32)) -> Option<(f32, f32)> {
+        let (fx, fy) = (p.0 / self.step, p.1 / self.step);
+        if fx < 0.0 || fy < 0.0 {
+            return None;
+        }
+        let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+        if x0 + 1 >= self.nx || y0 + 1 >= self.ny {
+            return None;
+        }
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+        let node = |x: usize, y: usize| self.at[y * self.nx + x];
+        let (a, b, c, d) = (
+            node(x0, y0)?,
+            node(x0 + 1, y0)?,
+            node(x0, y0 + 1)?,
+            node(x0 + 1, y0 + 1)?,
+        );
+        let mix = |a: f32, b: f32, c: f32, d: f32| {
+            (a * (1.0 - tx) + b * tx) * (1.0 - ty) + (c * (1.0 - tx) + d * tx) * ty
+        };
+        Some((mix(a.0, b.0, c.0, d.0), mix(a.1, b.1, c.1, d.1)))
+    }
+}
+
+/// Streamlines of the field over the visible map, in pixels, as matplotlib
+/// draws them (and scVelo with it): seeded over an occupancy grid `lanes`
+/// cells across (the lines' density), each
+/// traced forward and backward at unit speed (second-order Runge–Kutta)
+/// until it leaves the map or the field, stalls, or runs into a lane another
+/// line holds; lines too short to read are dropped.
+#[must_use]
+pub fn streamlines(
+    points: &Points,
+    moved: &[[f32; 2]],
+    vp: &Viewport,
+    lanes: f32,
+) -> Vec<Vec<(f32, f32)>> {
+    let grid = Grid::new(points, moved, vp);
+    let fastest = grid
+        .at
+        .iter()
+        .flatten()
+        .map(|v| v.0.hypot(v.1))
+        .fold(0f32, f32::max);
+    if fastest <= 0.0 {
+        return Vec::new();
+    }
+    let lane = (vp.w.max(vp.h) as f32 / lanes.max(1.0)).max(3.0);
+    let (lx, ly) = (
+        (vp.w as f32 / lane).ceil() as usize,
+        (vp.h as f32 / lane).ceil() as usize,
+    );
+    let mut taken = vec![false; lx * ly];
+    let lane_of = |p: (f32, f32)| -> Option<usize> {
+        let (x, y) = ((p.0 / lane) as i64, (p.1 / lane) as i64);
+        (x >= 0 && y >= 0 && (x as usize) < lx && (y as usize) < ly)
+            .then(|| y as usize * lx + x as usize)
+    };
+    let step = 0.25 * grid.step;
+    let most = (4.0 * (vp.w + vp.h) as f32 / step) as usize;
+    // Unit direction at `p`, if the field there moves.
+    let ahead = |p: (f32, f32)| -> Option<(f32, f32)> {
+        let v = grid.sample(p)?;
+        let speed = v.0.hypot(v.1);
+        (speed > 0.05 * fastest).then(|| (v.0 / speed, v.1 / speed))
+    };
+    let mut lines = Vec::new();
+    for seed in 0..lx * ly {
+        if taken[seed] {
+            continue;
+        }
+        let start = (
+            ((seed % lx) as f32 + 0.5) * lane,
+            ((seed / lx) as f32 + 0.5) * lane,
+        );
+        if ahead(start).is_none() {
+            continue;
+        }
+        let mut mine: Vec<usize> = vec![seed];
+        let trace = |sign: f32, mine: &mut Vec<usize>| -> Vec<(f32, f32)> {
+            let mut path = Vec::new();
+            let mut p = start;
+            for _ in 0..most {
+                let Some(d) = ahead(p) else { break };
+                let mid = (p.0 + sign * 0.5 * step * d.0, p.1 + sign * 0.5 * step * d.1);
+                let Some(d) = ahead(mid) else { break };
+                let next = (p.0 + sign * step * d.0, p.1 + sign * step * d.1);
+                let Some(cell) = lane_of(next) else { break };
+                if taken[cell] && !mine.contains(&cell) {
+                    break;
+                }
+                if !mine.contains(&cell) {
+                    mine.push(cell);
+                }
+                path.push(next);
+                p = next;
+            }
+            path
+        };
+        let back = trace(-1.0, &mut mine);
+        let fore = trace(1.0, &mut mine);
+        if mine.len() < 3 {
+            continue;
+        }
+        for &c in &mine {
+            taken[c] = true;
+        }
+        let mut line: Vec<(f32, f32)> = back.into_iter().rev().collect();
+        line.push(start);
+        line.extend(fore);
+        lines.push(line);
+    }
+    lines
+}
+
+/// Every streamline drawn, with an arrowhead halfway along it.
+pub fn draw_lines(frame: &mut Frame, lines: &[Vec<(f32, f32)>], ink: Rgb) {
+    let width = (frame.w.max(frame.h) as f32 / 700.0).max(1.0);
+    for line in lines {
+        for pair in line.windows(2) {
+            stroke(frame, pair[0], pair[1], width, ink, 0.75);
+        }
+        if line.len() >= 3 {
+            let m = line.len() / 2;
+            let (a, b) = (line[m - 1], line[m]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len = dx.hypot(dy).max(1e-6);
+            let (ux, uy) = (dx / len, dy / len);
+            let head = 6.0 * width.max(1.5);
+            for side in [-1.0f32, 1.0] {
+                let (c, s) = (0.906f32, 0.423 * side);
+                let back = (-(ux * c - uy * s), -(ux * s + uy * c));
+                stroke(
+                    frame,
+                    b,
+                    (b.0 + back.0 * head, b.1 + back.1 * head),
+                    width,
+                    ink,
+                    0.9,
+                );
+            }
+        }
+    }
+}
+
+/// A line `width` pixels wide, as offset one-pixel lines.
+fn stroke(frame: &mut Frame, a: (f32, f32), b: (f32, f32), width: f32, ink: Rgb, alpha: f32) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = dx.hypot(dy).max(1e-6);
+    let (nx, ny) = (-dy / len, dx / len);
+    let n = width.ceil() as i32;
+    for i in -n..=n {
+        let o = i as f32 * 0.5;
+        if o.abs() > width * 0.5 + 0.01 {
+            continue;
+        }
+        render::draw_edge(
+            frame,
+            (a.0 + nx * o, a.1 + ny * o),
+            (b.0 + nx * o, b.1 + ny * o),
+            0.0,
+            0.0,
+            ink,
+            alpha,
+        );
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/velocity.rs"]
 mod tests;

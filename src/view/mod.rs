@@ -128,9 +128,18 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        help = "Draw the run's velocity field over the cells (a td-rbm run's; v toggles it)"
+        value_enum,
+        num_args = 0..=1,
+        default_missing_value = "stream",
+        help = "Draw the run's velocity field over the cells, as streamlines (the default) or arrows (a td-rbm run's; v cycles it)"
     )]
-    pub velocity: bool,
+    pub velocity: Option<VelocityStyle>,
+
+    #[arg(
+        long,
+        help = "Streamlines' density: lanes across the map (default 40; { and } change it)"
+    )]
+    pub stream_density: Option<f32>,
 
     #[arg(
         long,
@@ -217,6 +226,15 @@ struct Shown {
 /// The camera of a frame, and each group label it drew with where.
 type LabelHits = (Viewport, Vec<(u32, [f32; 4])>);
 
+/// How a run's velocity field is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum VelocityStyle {
+    /// Streamlines through the field, as scVelo draws them.
+    Stream,
+    /// An arrow per grid bin.
+    Arrows,
+}
+
 /// Every point's displacement on a map (its space index), as last drawn.
 type Moved = (usize, std::sync::Arc<Vec<[f32; 2]>>);
 
@@ -295,7 +313,9 @@ pub(crate) struct Scene {
     /// A run's velocity field (read on the first `v`), whether it is drawn,
     /// and every point's displacement on the last map it was drawn on.
     velocity: Option<std::sync::Arc<velocity::Field>>,
-    pub show_velocity: bool,
+    pub velocity_style: Option<VelocityStyle>,
+    /// Streamlines' density: lanes across the visible map (`{` `}`).
+    pub stream_lanes: f32,
     velocity_moved: std::cell::RefCell<Option<Moved>>,
 }
 
@@ -340,7 +360,8 @@ impl Scene {
             note: None,
             missing_data: None,
             velocity: None,
-            show_velocity: false,
+            velocity_style: None,
+            stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
             velocity_moved: std::cell::RefCell::new(None),
         };
         // `--colour-by tau` (or `time`) colours a td-rbm run's cells by
@@ -355,8 +376,8 @@ impl Scene {
         if by_time {
             scene.toggle_time();
         }
-        if args.velocity {
-            scene.toggle_velocity();
+        if let Some(style) = args.velocity {
+            scene.show_velocity_as(style);
         }
         if args.observed {
             scene.source = Source::Observed;
@@ -436,7 +457,8 @@ impl Scene {
             note: None,
             missing_data: None,
             velocity: self.velocity.clone(),
-            show_velocity: self.show_velocity,
+            velocity_style: self.velocity_style,
+            stream_lanes: self.stream_lanes,
             velocity_moved: std::cell::RefCell::new(self.velocity_moved.borrow().clone()),
         };
         s.refresh_groups();
@@ -743,7 +765,8 @@ mod tests {
             feature: None,
             markers_of: None,
             observed: false,
-            velocity: false,
+            velocity: None,
+            stream_density: None,
             focus: None,
             zoom_into: None,
             chart: None,

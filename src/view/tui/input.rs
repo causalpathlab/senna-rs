@@ -89,6 +89,11 @@ impl App {
             KeyCode::Char('m') => self.step_method(1, false),
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
             KeyCode::Char('y') => self.change(Scene::toggle_time),
+            KeyCode::Char('{' | '}') => {
+                self.scene
+                    .change_stream_density(k.code == KeyCode::Char('}'));
+                self.redecorate();
+            }
             KeyCode::Char('v') => {
                 self.scene.toggle_velocity();
                 self.redecorate();
