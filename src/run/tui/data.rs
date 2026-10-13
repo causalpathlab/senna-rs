@@ -122,6 +122,9 @@ pub struct Pair {
     /// Whether its rows read as gene counts for `gem`
     /// (`{gene}/count/{spliced|unspliced}`); `None` when unknown.
     pub gene_counts: Option<bool>,
+    /// How many genes have both an unspliced and a spliced row, what
+    /// td-rbm fits; `None` when unknown.
+    pub two_tracks: Option<usize>,
 }
 
 impl Pair {
@@ -134,6 +137,7 @@ impl Pair {
             cells: None,
             tags: None,
             gene_counts: None,
+            two_tracks: None,
         }
     }
 
@@ -143,6 +147,7 @@ impl Pair {
         self.cells = d.cells;
         self.tags = d.tags;
         self.gene_counts = d.gene_counts;
+        self.two_tracks = d.two_tracks;
     }
 }
 
@@ -154,10 +159,12 @@ pub struct Described {
     pub cells: Option<usize>,
     pub tags: Option<Vec<String>>,
     pub gene_counts: Option<bool>,
+    pub two_tracks: Option<usize>,
 }
 
-/// Its size, its barcodes' `@batch` tags, and whether the rows are gem's
-/// gene counts; or why the file does not open.
+/// Its size, its barcodes' `@batch` tags, whether the rows are gem's gene
+/// counts and how many genes are in both tracks; or why the file does not
+/// open.
 pub fn describe(path: &Path) -> Described {
     use data_beans::sparse_io::open_sparse_matrix_by_path;
     let m = match open_sparse_matrix_by_path(&path.to_string_lossy()) {
@@ -185,16 +192,24 @@ pub fn describe(path: &Path) -> Described {
             .map(|n| n.rsplit('@').next().unwrap_or(n).to_string())
             .collect()
     });
-    // gem's own reading of its row grammar decides.
-    let gene_counts = m
-        .row_names()
-        .ok()
-        .map(|names| crate::gem::tracks::assign_tracks(&names).is_ok());
+    // gem's and td-rbm's own readings of the row grammar decide.
+    let names = m.row_names().ok();
+    let gene_counts = names
+        .as_ref()
+        .map(|names| crate::gem::tracks::assign_tracks(names).is_ok());
+    let two_tracks = names
+        .as_ref()
+        .map(|names| crate::td_rbm::counts::two_track_genes(names));
+    let info = match two_tracks {
+        Some(n) if n > 0 => format!("{info}; {n} genes in two tracks"),
+        _ => info,
+    };
     Described {
         info,
         cells,
         tags,
         gene_counts,
+        two_tracks,
     }
 }
 

@@ -50,6 +50,13 @@ fn track_rows(rows: &[Box<str>]) -> (Vec<&str>, Vec<Role>) {
     (genes, role)
 }
 
+/// How many genes of `rows` have both an unspliced and a spliced row
+/// (`{gene}/count/unspliced`, `{gene}/count/spliced`): the genes td-rbm
+/// can fit.
+pub fn two_track_genes(rows: &[Box<str>]) -> usize {
+    track_rows(rows).0.len()
+}
+
 /// The backend at `path` cell by cell, in blocks of its columns: `f(first
 /// column, unspliced, spliced)` with each block's `[B × G]` reads on the
 /// genes named `genes`, in that order.

@@ -21,14 +21,15 @@ use batches::Batch;
 use data::Pair;
 use data::Pick;
 use form::{Field, Kind, Method};
-use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG};
+use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG, TD_RBM};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-/// The embedding methods `senna run` sets up, in the order listed.
-pub const METHODS: [&str; 9] = [
+/// The methods `senna run` sets up, in the order listed: the embeddings,
+/// then td-rbm (lineages and time on two-track counts).
+pub const METHODS: [&str; 10] = [
     "topic",
     "masked-topic",
     "masked-vae",
@@ -38,6 +39,7 @@ pub const METHODS: [&str; 9] = [
     "bge",
     "simba",
     "gem",
+    TD_RBM,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1231,6 +1233,8 @@ impl App {
                 Some("no data files: add some on the Data screen".to_string())
             } else if let Some(p) = batch_problem.or(clones_problem) {
                 Some(p)
+            } else if let Some(p) = self.two_track_problem(r) {
+                Some(p)
             } else if let Some(there) = [job.result(), job.script(), job.batches()]
                 .into_iter()
                 .find(|p| p.exists())
@@ -1262,6 +1266,28 @@ impl App {
         planned
     }
 
+    /// Why td-rbm cannot run on the data: it reads one file, whose genes
+    /// need both an unspliced and a spliced row. `None` for other methods,
+    /// or while the file is still being read.
+    fn two_track_problem(&self, r: &Row) -> Option<String> {
+        if r.tool != Tool::Senna || r.form.name != TD_RBM {
+            return None;
+        }
+        if self.pairs.len() != 1 {
+            return Some(format!(
+                "td-rbm reads one data file: {} chosen",
+                self.pairs.len()
+            ));
+        }
+        match self.pairs[0].two_tracks {
+            Some(0) => Some(
+                "td-rbm needs {gene}/count/unspliced and {gene}/count/spliced rows: no gene has both"
+                    .into(),
+            ),
+            _ => None,
+        }
+    }
+
     /// Whether the data look like what `method` reads: gem wants
     /// `{gene}/count/…` rows, the others plain features.
     fn shape_warning(&self, r: &Row) -> Option<String> {
@@ -1269,6 +1295,9 @@ impl App {
             return None;
         }
         let method = r.form.name.as_str();
+        if method == TD_RBM {
+            return None;
+        }
         let known: Vec<bool> = self.pairs.iter().filter_map(|p| p.gene_counts).collect();
         if known.is_empty() {
             return None;

@@ -119,7 +119,8 @@ pub fn command_lines(argv: &[String], tool: Tool) -> Vec<String> {
 /// `out`.
 #[must_use]
 pub fn text(argv: &[String], out: &str, tool: Tool) -> String {
-    let result = format!("${{out}}.{}", tool.result());
+    let method = argv.first().map_or("", String::as_str);
+    let result = format!("${{out}}.{}", tool.result_of(method));
     let mut s = String::new();
     s.push_str("#!/usr/bin/env bash\n");
     s.push_str(&format!(

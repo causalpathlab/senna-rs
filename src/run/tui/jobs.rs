@@ -52,7 +52,20 @@ impl Tool {
             Tool::Mung => "clones.parquet",
         }
     }
+
+    /// [`Self::result`] for `method`: td-rbm writes no manifest, and leaves
+    /// its cells' times.
+    #[must_use]
+    pub fn result_of(self, method: &str) -> &'static str {
+        match (self, method) {
+            (Tool::Senna, TD_RBM) => "cell_time.parquet",
+            _ => self.result(),
+        }
+    }
 }
+
+/// The method that fits time on two-track counts, not an embedding.
+pub const TD_RBM: &str = "td-rbm";
 
 /// The flag that hands the clones of `mung clones` to a senna fit, as
 /// its form lists it.
@@ -97,11 +110,15 @@ pub struct Job {
 }
 
 impl Job {
-    /// What it leaves when done: `{out}.senna.json`, or mung's clones.
+    /// What it leaves when done: `{out}.senna.json` (td-rbm's cell times),
+    /// or mung's clones.
     #[must_use]
     pub fn result(&self) -> PathBuf {
-        self.dir
-            .join(format!("{}.{}", self.out, self.tool.result()))
+        self.dir.join(format!(
+            "{}.{}",
+            self.out,
+            self.tool.result_of(&self.method)
+        ))
     }
 
     /// The command it runs and records, without the program: `argv`, then
@@ -313,7 +330,12 @@ impl Queue {
         self.jobs
             .iter()
             .zip(self.states())
-            .filter(|(j, s)| j.tool == Tool::Senna && *s == State::Done && j.result().exists())
+            .filter(|(j, s)| {
+                j.tool == Tool::Senna
+                    && j.method != TD_RBM
+                    && *s == State::Done
+                    && j.result().exists()
+            })
             .map(|(j, _)| j.result())
             .collect()
     }
