@@ -994,8 +994,8 @@ fn td_rbm_runs_on_one_file_whose_genes_have_both_tracks() {
     assert_eq!(p.problem, None);
     assert_eq!(p.warning, None, "no embedding's shape warning");
     assert_eq!(p.job.argv, [TD_RBM, "d1.zarr", "--out", TD_RBM]);
-    // Its result is its cells' times; one there stops a run over it.
-    assert!(p.job.result().ends_with("td-rbm.cell_time.parquet"));
-    std::fs::write(dir.path().join("td-rbm.cell_time.parquet"), "").unwrap();
+    // Its manifest, like every fit's; one there stops a run over it.
+    assert!(p.job.result().ends_with("td-rbm.senna.json"));
+    std::fs::write(dir.path().join("td-rbm.senna.json"), "{}").unwrap();
     assert!(problem(&a).unwrap().contains("exists"));
 }

@@ -139,10 +139,3 @@ fn a_mung_script_runs_mung_and_guards_its_clones() {
         "\"${MUNG:-mung}\" clones \\\n  d.zarr \\\n  --out \"$out\" \\\n  --gff g.gtf\n"
     ));
 }
-
-#[test]
-fn a_td_rbm_script_guards_its_cell_times() {
-    let s = text(&argv(&["td-rbm", "d.zarr", "--out", "r"]), "r", Tool::Senna);
-    assert!(s.contains("${out}.cell_time.parquet"), "{s}");
-    assert!(!s.contains("senna.json"), "{s}");
-}

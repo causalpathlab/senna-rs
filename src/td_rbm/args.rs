@@ -2,7 +2,7 @@
 
 use senna::embed_common::*;
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TdRbmArgs {
     #[arg(
         help = "Count backend with {gene}/count/spliced and {gene}/count/unspliced rows",
