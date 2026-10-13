@@ -39,7 +39,7 @@ pub(super) fn fit_states(
     let x0: Vec<f32> = (0..cfg.chains)
         .flat_map(|j| drawn[(j % p) * f..(j % p + 1) * f].to_vec())
         .collect();
-    let mut chains = Chains::new(x0, f, cfg.seed.wrapping_add(1));
+    let mut chains = Chains::new(x0, f, dev, cfg.seed.wrapping_add(1))?;
     for epoch in cfg.time_epochs..cfg.epochs {
         let (mut gap, mut steps) = (0f64, 0usize);
         for lv in levels {
@@ -54,7 +54,7 @@ pub(super) fn fit_states(
             for chunk in order.chunks(cfg.batch) {
                 let batch = all.select(&Tensor::from_slice(chunk, chunk.len(), dev)?)?;
                 let t = energy.tables(spline, true, log_weight)?;
-                let fantasy = chains.reads(dev)?;
+                let fantasy = chains.reads()?;
                 let loss = ((free_energy(&batch, &t)?.mean_all()?
                     - free_energy(&fantasy, &t)?.mean_all()?)?
                     / cfg.depth as f64)?;

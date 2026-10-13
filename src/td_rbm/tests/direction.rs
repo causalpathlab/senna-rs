@@ -2,11 +2,10 @@ use super::*;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Poisson};
 
-/// The tensor evidence (f32, what a GPU runs) and the host's (f64, exact
-/// log-gammas, every table at once) agree gene by gene, both orientations,
-/// on reads with dynamics.
+/// The host evidence scores tables together as it does alone, and reads
+/// made forward favour forward.
 #[test]
-fn tensor_and_host_evidence_agree() {
+fn evidence_scores_tables_alike_and_reads_the_direction() {
     let (k, g) = (12, 9);
     let mut rng = StdRng::seed_from_u64(5);
     let mut x = vec![vec![0f32; g]; k];
@@ -35,31 +34,38 @@ fn tensor_and_host_evidence_agree() {
     let reach: Vec<f32> = (0..g)
         .map(|j| (0..k).map(|kk| x[kk][j].abs()).fold(1e-6f32, f32::max).ln())
         .collect();
-    let dev = Device::Cpu;
-    let t = |m: &[Vec<f32>]| Tensor::from_vec(m.concat(), (k, g), &dev).unwrap();
-    for sign in [1.0, -1.0] {
-        // Scored with a second table beside it, as the draws are: the shared
-        // per-grid terms must not leak between tables.
-        let other: Vec<Vec<f32>> = s
-            .iter()
-            .map(|r| r.iter().map(|v| v + 3.0).collect())
-            .collect();
-        let (fwd, bwd) = evidence_host(
-            &[(u.clone(), s.clone()), (u.clone(), other)],
-            &x,
-            &rest,
-            &reach,
-        );
-        let host = if sign > 0.0 { &fwd[0] } else { &bwd[0] };
-        let tens = evidence(&t(&u), &t(&s), &t(&x), &rest, &reach, sign, &dev).unwrap();
+    // Every table scored beside others, as the draws are, gets what it gets
+    // alone: the shared per-grid terms do not leak between tables.
+    let other: Vec<Vec<f32>> = s
+        .iter()
+        .map(|r| r.iter().map(|v| v + 3.0).collect())
+        .collect();
+    let (fwd, bwd) = evidence_host(
+        &[(u.clone(), s.clone()), (u.clone(), other)],
+        &x,
+        &rest,
+        &reach,
+    );
+    let (fwd1, bwd1) = evidence_host(&[(u.clone(), s.clone())], &x, &rest, &reach);
+    for (together, alone) in [(&fwd[0], &fwd1[0]), (&bwd[0], &bwd1[0])] {
         for j in 0..g {
-            let (a, b) = (host.log_e[j], tens.log_e[j]);
             assert!(
-                (a - b).abs() < 0.05,
-                "gene {j}, sign {sign}: host {a}, tensor {b}"
+                (together.log_e[j] - alone.log_e[j]).abs() < 1e-9,
+                "gene {j}"
             );
-            assert!((host.log_gamma[j] - tens.log_gamma[j]).abs() < 0.05);
-            assert!((host.log_beta[j] - tens.log_beta[j]).abs() < 0.05);
+            assert!((together.log_gamma[j] - alone.log_gamma[j]).abs() < 1e-9);
+            assert!((together.log_beta[j] - alone.log_beta[j]).abs() < 1e-9);
         }
     }
+    // Reads made with the velocity forward favour forward, gene by gene, for
+    // the genes the velocity moves.
+    let moved = (0..g).filter(|&j| j != 4);
+    let favoured = moved
+        .filter(|&j| fwd1[0].log_e[j] > bwd1[0].log_e[j])
+        .count();
+    assert!(
+        favoured >= g - 2,
+        "{favoured} of {} genes favour forward",
+        g - 1
+    );
 }

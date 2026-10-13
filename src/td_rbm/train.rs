@@ -19,7 +19,6 @@
 //!    parameter with them.
 
 mod direction;
-mod evidence;
 mod exact;
 mod roots;
 mod states;

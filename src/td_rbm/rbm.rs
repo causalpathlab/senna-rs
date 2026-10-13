@@ -86,49 +86,60 @@ pub fn posterior(r: &Reads, t: &Tables) -> Result<(Tensor, Tensor)> {
 }
 
 /// Persistent Gibbs chains over the reads: `S` chains, each holding its
-/// reads and keeping its depth.
+/// reads (on the machine's device) and keeping its depth. A sweep draws on
+/// the host on a CPU, where successive binomials are cheapest; on a GPU it
+/// stays on the device, only the uniforms and normals drawn on the host
+/// (from the chains' own seed, so a run replays).
 pub struct Chains {
-    x: Vec<f32>,
-    depth: Vec<u64>,
-    features: usize,
+    x: Tensor,
+    depth: Vec<u32>,
     rng: StdRng,
+    on_device: bool,
 }
 
 impl Chains {
-    /// Chains started at the rows `x` `[S × F]` (row-major, whole counts).
-    pub fn new(x: Vec<f32>, features: usize, seed: u64) -> Self {
+    /// Chains started at the rows `x` `[S × F]` (row-major, whole counts)
+    /// on `dev`.
+    pub fn new(x: Vec<f32>, features: usize, dev: &Device, seed: u64) -> Result<Self> {
         let depth = x
             .chunks(features)
-            .map(|row| row.iter().sum::<f32>().round() as u64)
-            .collect();
-        Self {
-            x,
+            .map(|row| row.iter().sum::<f32>().round() as u32)
+            .collect::<Vec<_>>();
+        Ok(Self {
+            x: Tensor::from_vec(x, (depth.len(), features), dev)?,
             depth,
-            features,
             rng: StdRng::seed_from_u64(seed),
-        }
+            on_device: !dev.is_cpu(),
+        })
     }
 
-    pub fn len(&self) -> usize {
-        self.depth.len()
+    /// Sweep on the device whatever it is (the GPU path, testable on a CPU).
+    #[cfg(test)]
+    pub fn on_device(mut self) -> Self {
+        self.on_device = true;
+        self
     }
 
-    /// The chains' reads on `dev`.
-    pub fn reads(&self, dev: &Device) -> Result<Reads> {
-        Reads::from_features(Tensor::from_slice(
-            &self.x,
-            (self.len(), self.features),
-            dev,
-        )?)
+    /// The chains' reads.
+    pub fn reads(&self) -> Result<Reads> {
+        Reads::from_features(self.x.clone())
     }
 
     /// One block Gibbs sweep at the tables `t`: hidden units given the
     /// reads, then reads given the hidden units.
     pub fn sweep(&mut self, t: &Tables) -> Result<()> {
-        let dev = t.psi.device();
-        let (p_time, mean) = posterior(&self.reads(dev)?, t)?;
+        if self.on_device {
+            self.sweep_on_device(t)
+        } else {
+            self.sweep_on_host(t)
+        }
+    }
+
+    fn sweep_on_host(&mut self, t: &Tables) -> Result<()> {
+        let dev = self.x.device().clone();
+        let (p_time, mean) = posterior(&self.reads()?, t)?;
         let (p_time, mean) = (p_time.to_vec2::<f32>()?, mean.to_vec2::<f32>()?);
-        let s = self.len();
+        let (s, f) = self.x.dims2()?;
         let d = t.w.dim(1)?;
         let normal = Normal::new(0.0f32, 1.0).expect("a valid sd");
         let mut k = Vec::with_capacity(s);
@@ -143,16 +154,128 @@ impl Chains {
                     .map(|&m| (m + normal.sample(&mut self.rng)) / n),
             );
         }
-        let k = Tensor::from_vec(k, s, dev)?;
-        let h = Tensor::from_vec(h, (s, d), dev)?;
+        let k = Tensor::from_vec(k, s, &dev)?;
+        let h = Tensor::from_vec(h, (s, d), &dev)?;
         let logits = (t.psi.index_select(&k, 0)? + h.matmul(&t.w.t()?)?)?;
         let probs = softmax(&logits, D::Minus1)?.to_vec2::<f32>()?;
+        let mut x = vec![0f32; s * f];
         for (j, p) in probs.iter().enumerate() {
-            let row = &mut self.x[j * self.features..(j + 1) * self.features];
-            multinomial(self.depth[j], p, row, &mut self.rng);
+            multinomial(
+                u64::from(self.depth[j]),
+                p,
+                &mut x[j * f..(j + 1) * f],
+                &mut self.rng,
+            );
         }
+        self.x = Tensor::from_vec(x, (s, f), &dev)?;
         Ok(())
     }
+
+    fn sweep_on_device(&mut self, t: &Tables) -> Result<()> {
+        let dev = self.x.device().clone();
+        let (p_time, mean) = posterior(&self.reads()?, t)?;
+        let (s, d) = mean.dims2()?;
+        // (lineage, time) one-hot by one draw each; its tables by a matmul.
+        let hot = multinomial_rows(&cumsum_rows(&p_time)?, &vec![1; s], &mut self.rng)?;
+        let psi = hot.matmul(&t.psi)?;
+        // The state, read per read: (mean + noise) / N.
+        let normal = Normal::new(0.0f32, 1.0).expect("a valid sd");
+        let noise: Vec<f32> = (0..s * d).map(|_| normal.sample(&mut self.rng)).collect();
+        let n =
+            Tensor::from_iter(self.depth.iter().map(|&n| n.max(1) as f32), &dev)?.unsqueeze(1)?;
+        let h = (mean + Tensor::from_vec(noise, (s, d), &dev)?)?.broadcast_div(&n)?;
+        let logits = (psi + h.matmul(&t.w.t()?)?)?;
+        let probs = softmax(&logits, D::Minus1)?;
+        self.x = multinomial_rows(&cumsum_rows(&probs)?, &self.depth, &mut self.rng)?;
+        Ok(())
+    }
+}
+
+/// Every row's running sum `[S × F]`, by blocks of `√F` (a triangular
+/// matmul within every block, then every block's offset): candle's own
+/// cumulative sum multiplies by an `F × F` triangle, which at thousands of
+/// features does not fit on a device.
+pub fn cumsum_rows(t: &Tensor) -> Result<Tensor> {
+    let (s, f) = t.dims2()?;
+    if f <= 1 {
+        return Ok(t.clone());
+    }
+    let b = ((f as f64).sqrt().ceil() as usize).max(1);
+    let nb = f.div_ceil(b);
+    let padded = if nb * b > f {
+        Tensor::cat(
+            &[
+                t.clone(),
+                Tensor::zeros((s, nb * b - f), t.dtype(), t.device())?,
+            ],
+            1,
+        )?
+    } else {
+        t.clone()
+    };
+    let within = padded
+        .contiguous()?
+        .reshape((s * nb, b))?
+        .matmul(&Tensor::triu2(b, t.dtype(), t.device())?)?
+        .reshape((s, nb, b))?;
+    let totals = within.narrow(2, b - 1, 1)?.squeeze(2)?.contiguous()?;
+    // Every block's offset: the totals of the blocks before it.
+    let before =
+        (Tensor::triu2(nb, t.dtype(), t.device())? - Tensor::eye(nb, t.dtype(), t.device())?)?;
+    let offset = totals.matmul(&before)?;
+    within
+        .broadcast_add(&offset.unsqueeze(2)?)?
+        .reshape((s, nb * b))?
+        .narrow(1, 0, f)
+}
+
+/// Elements per comparison block in [`multinomial_rows`].
+const DRAW_BLOCK: usize = 1 << 24;
+
+/// `n_s` draws per row `s` from the categorical whose running shares are
+/// `cum` `[S × F]`, as counts `[S × F]`: a feature's count is how many of the
+/// row's uniforms fall in its stretch of the running shares. Only the
+/// `S × max n` uniforms come from `rng`; the comparisons run on `cum`'s
+/// device, a block of draws at a time. The last feature takes what the rest
+/// left, so rounding never loses a draw.
+pub fn multinomial_rows(cum: &Tensor, n: &[u32], rng: &mut StdRng) -> Result<Tensor> {
+    let dev = cum.device();
+    let (s, f) = cum.dims2()?;
+    let top = n.iter().copied().max().unwrap_or(0) as usize;
+    if top == 0 || f == 0 {
+        return cum.zeros_like();
+    }
+    // A row with fewer draws pads with uniforms past every share.
+    let u: Vec<f32> = n
+        .iter()
+        .flat_map(|&ns| (0..top).map(move |d| (d, ns)))
+        .map(|(d, ns)| {
+            if d < ns as usize {
+                rng.random::<f32>()
+            } else {
+                2.0
+            }
+        })
+        .collect();
+    let u = Tensor::from_vec(u, (s, top), dev)?;
+    let ns = Tensor::from_iter(n.iter().map(|&x| x as f32), dev)?.unsqueeze(1)?;
+    if f == 1 {
+        return Ok(ns);
+    }
+    // `below[s, j]`: the row's draws under the running share of feature `j`.
+    let head = cum.narrow(1, 0, f - 1)?.unsqueeze(1)?.contiguous()?; // [S × 1 × F−1]
+    let chunk = (DRAW_BLOCK / (s * f).max(1)).clamp(1, top);
+    let mut below = Tensor::zeros((s, f - 1), cum.dtype(), dev)?;
+    for start in (0..top).step_by(chunk) {
+        let c = chunk.min(top - start);
+        let us = u.narrow(1, start, c)?.unsqueeze(2)?; // [S × c × 1]
+        let hits = us.broadcast_lt(&head)?.to_dtype(cum.dtype())?.sum(1)?;
+        below = (below + hits)?;
+    }
+    let first = below.narrow(1, 0, 1)?;
+    let middle = (below.narrow(1, 1, f - 2)? - below.narrow(1, 0, f - 2)?)?;
+    let last = (ns - below.narrow(1, f - 2, 1)?)?;
+    Tensor::cat(&[first, middle, last], 1)
 }
 
 fn unit(rng: &mut StdRng) -> f32 {

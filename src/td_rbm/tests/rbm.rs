@@ -100,6 +100,17 @@ fn ln_factorial(n: f32) -> f64 {
 
 #[test]
 fn gibbs_chains_reach_the_machines_time_marginal() {
+    chains_reach_the_time_marginal(false);
+}
+
+/// The device sweep (the GPU path, run here on the CPU) reaches the same
+/// marginal.
+#[test]
+fn device_gibbs_chains_reach_the_machines_time_marginal() {
+    chains_reach_the_time_marginal(true);
+}
+
+fn chains_reach_the_time_marginal(device: bool) {
     // At depth n, p(v) ∝ (n! / Π v_f!) e^{−F(v)}: the time unit's marginal is
     // that average of p(k | v); compare the chains' with it.
     let t = tables();
@@ -127,12 +138,15 @@ fn gibbs_chains_reach_the_machines_time_marginal() {
     }
     let s = 2000;
     let start: Vec<f32> = (0..s).flat_map(|_| [n as f32, 0.0, 0.0, 0.0]).collect();
-    let mut chains = Chains::new(start, F, 11);
+    let mut chains = Chains::new(start, F, &Device::Cpu, 11).unwrap();
+    if device {
+        chains = chains.on_device();
+    }
     let mut seen = [0f64; K];
     for sweep in 0..60 {
         chains.sweep(&t).unwrap();
         if sweep >= 10 {
-            let (p, _) = posterior(&chains.reads(&Device::Cpu).unwrap(), &t).unwrap();
+            let (p, _) = posterior(&chains.reads().unwrap(), &t).unwrap();
             for row in p.to_vec2::<f32>().unwrap() {
                 for k in 0..K {
                     seen[k] += f64::from(row[k]);
@@ -192,12 +206,12 @@ fn diagnostic_gibbs_with_and_without_state() {
             }
         }
         let start: Vec<f32> = (0..2000).flat_map(|_| [n as f32, 0.0, 0.0, 0.0]).collect();
-        let mut chains = Chains::new(start, F, 11);
+        let mut chains = Chains::new(start, F, &Device::Cpu, 11).unwrap();
         let mut seen = [0f64; K];
         for sweep in 0..1000 {
             chains.sweep(&t).unwrap();
             if sweep >= 200 {
-                let (p, _) = posterior(&chains.reads(&Device::Cpu).unwrap(), &t).unwrap();
+                let (p, _) = posterior(&chains.reads().unwrap(), &t).unwrap();
                 for row in p.to_vec2::<f32>().unwrap() {
                     for k in 0..K {
                         seen[k] += f64::from(row[k]);
@@ -345,5 +359,51 @@ fn diagnostic_the_time_prior_at_a_depth() {
             prior.iter().map(|p| p / z).collect::<Vec<_>>(),
             approx.iter().map(|p| p / za).collect::<Vec<_>>()
         );
+    }
+}
+
+#[test]
+fn blocked_running_sums_match_the_plain_ones() {
+    let (s, f) = (3, 37);
+    let v: Vec<f32> = (0..s * f).map(|i| ((i * 7) % 11) as f32 / 10.0).collect();
+    let t = Tensor::from_vec(v.clone(), (s, f), &Device::Cpu).unwrap();
+    let got = cumsum_rows(&t).unwrap().to_vec2::<f32>().unwrap();
+    for r in 0..s {
+        let mut run = 0f32;
+        for j in 0..f {
+            run += v[r * f + j];
+            assert!((got[r][j] - run).abs() < 1e-4, "row {r}, feature {j}");
+        }
+    }
+}
+
+/// Device multinomials keep every row's depth (mixed depths, zero among
+/// them) and match the shares.
+#[test]
+fn device_multinomials_keep_the_depth_and_the_shares() {
+    let p = [0.1f32, 0.2, 0.3, 0.4];
+    let n = [0u32, 1, 17, 1000, 1000];
+    let rows: Vec<f32> = (0..n.len()).flat_map(|_| p).collect();
+    let t = Tensor::from_vec(rows, (n.len(), 4), &Device::Cpu).unwrap();
+    let mut rng = StdRng::seed_from_u64(4);
+    let mut total = [0f64; 4];
+    for _ in 0..40 {
+        let x = multinomial_rows(&cumsum_rows(&t).unwrap(), &n, &mut rng)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        for (row, &ns) in x.iter().zip(&n) {
+            assert_eq!(row.iter().sum::<f32>() as u32, ns);
+            assert!(row.iter().all(|&c| c >= 0.0));
+        }
+        for row in &x[3..] {
+            for j in 0..4 {
+                total[j] += f64::from(row[j]);
+            }
+        }
+    }
+    let all: f64 = total.iter().sum();
+    for j in 0..4 {
+        assert!((total[j] / all - f64::from(p[j])).abs() < 0.01, "share {j}");
     }
 }

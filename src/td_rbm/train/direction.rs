@@ -7,8 +7,8 @@
 //! velocity forward or reversed (`d x_kg`, `x` the curve's `d log s/dt`), the
 //! unspliced share is `μ_kg = σ(log m⁺(γ_g + d x_kg) − log β_g)`, and
 //! `U_kg ~ BetaBinomial(U + S, μ κ_g, (1 − μ) κ_g)`. Every gene's evidence
-//! for each `d` integrates its `(log γ/β, log γ, log κ)` exactly on a grid
-//! ([`super::evidence`]), less the same on the reads with no dynamics (every
+//! for each `d` integrates its `(log γ/β, log γ, log κ)` exactly on a grid,
+//! in f64 on the host, less the same on the reads with no dynamics (every
 //! grid time at the gene's overall unspliced share): the prior and the floor
 //! alone favour one way on a skewed curve, and that bias, summed over
 //! thousands of genes, would decide. Given `d` the genes are independent, so
@@ -20,10 +20,9 @@
 //! a quasi-binomial logistic slope on `x` is the direction; its sign Bayes
 //! factor under a normal prior is `Φ(z′)/Φ(−z′)`.
 
-use super::evidence::ln_beta;
 use super::TrainConfig;
 use crate::td_rbm::curve::Spline;
-use crate::td_rbm::model::{softplus, Energy, Tables, FLOOR_SOFTNESS};
+use crate::td_rbm::model::{Energy, Tables, FLOOR_SOFTNESS};
 use crate::td_rbm::rbm::Reads;
 use crate::td_rbm::start::log_sum_exp;
 use legume_numeric::candle::candle_core::{Device, Result, Tensor, D};
@@ -59,8 +58,6 @@ const GAMMA_SPAN: (f64, f64, usize) = (0.25, 64.0, 16);
 const KAPPA_SPAN: (f64, f64, usize) = (2.0, 2000.0, 6);
 /// Wakefield's prior variance on the standardised slope.
 const ABF_W: f64 = 1.0;
-/// Elements per evidence block (grid × times × genes).
-const BLOCK_ELEMS: usize = 1 << 23;
 
 fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
     (0..n)
@@ -241,23 +238,13 @@ pub(crate) fn bayes(
         tables.push((u, s));
         tables.push((u0, s0));
     }
-    // On the CPU every gene on its own thread in f64, all tables at once; on
-    // a GPU every table as f32 tensors.
-    let (fwd, bwd) = if dev.is_cpu() {
-        let host: Vec<HostTable> = tables
-            .iter()
-            .map(|(u, s)| Ok((u.to_vec2::<f32>()?, s.to_vec2::<f32>()?)))
-            .collect::<Result<_>>()?;
-        evidence_host(&host, &xv, &rest, &reach)
-    } else {
-        let score = |sign: f64| -> Result<Vec<Evidence>> {
-            tables
-                .iter()
-                .map(|(u, s)| evidence(u, s, &readout, &rest, &reach, sign, dev))
-                .collect()
-        };
-        (score(1.0)?, score(-1.0)?)
-    };
+    // Scored on the host whatever the device: every gene on its own thread
+    // (a grid of thousands of tiny per-gene sums is far slower as kernels).
+    let host: Vec<HostTable> = tables
+        .iter()
+        .map(|(u, s)| Ok((u.to_vec2::<f32>()?, s.to_vec2::<f32>()?)))
+        .collect::<Result<_>>()?;
+    let (fwd, bwd) = evidence_host(&host, &xv, &rest, &reach);
     let share = 1.0 / draws as f64;
     let mut out = Bayes {
         lbf: Vec::with_capacity(draws),
@@ -326,86 +313,7 @@ struct Evidence {
     log_gamma: Vec<f64>,
 }
 
-/// The grid evidence (module docs) of `u`, `s` (`[K × G]` pooled reads) for
-/// the velocity `sign · readout`, every gene's grid placed by `rest` (its
-/// log `U/S`) and `reach` (its log largest `|x|`). Genes go in blocks.
-fn evidence(
-    u: &Tensor,
-    s: &Tensor,
-    readout: &Tensor,
-    rest: &[f32],
-    reach: &[f32],
-    sign: f64,
-    dev: &Device,
-) -> Result<Evidence> {
-    let (k, g) = u.dims2()?;
-    let (r_off, g_off, k_log) = grid();
-    let n_grid = r_off.len() * g_off.len() * k_log.len();
-    let (mut ro, mut go, mut ko) = (vec![], vec![], vec![]);
-    for &a in &r_off {
-        for &b in &g_off {
-            for &c in &k_log {
-                ro.push(a as f32);
-                go.push(b as f32);
-                ko.push(c as f32);
-            }
-        }
-    }
-    let col = |v: &[f32]| Tensor::from_slice(v, (n_grid, 1, 1), dev);
-    let (ro, go, lk) = (col(&ro)?, col(&go)?, col(&ko)?);
-    let kappa = lk.exp()?;
-    let block = (BLOCK_ELEMS / (n_grid * k)).max(1);
-    let mut out = Evidence {
-        log_e: Vec::with_capacity(g),
-        log_beta: Vec::with_capacity(g),
-        log_gamma: Vec::with_capacity(g),
-    };
-    for start in (0..g).step_by(block) {
-        let w = block.min(g - start);
-        let shape = (n_grid, k, w);
-        let pick = |t: &Tensor| -> Result<Tensor> { t.narrow(1, start, w)?.unsqueeze(0) };
-        let (ub, sb) = (pick(u)?, pick(s)?);
-        let xb = (pick(readout)? * sign)?;
-        let at = |v: &[f32]| Tensor::from_slice(&v[start..start + w], (1, 1, w), dev);
-        let lr = ro.broadcast_add(&at(rest)?)?; // [N × 1 × w] log γ/β
-        let lg = go.broadcast_add(&at(reach)?)?; // [N × 1 × w] log γ
-        let gamma = lg.exp()?;
-        let floor = (&gamma * FLOOR_SOFTNESS)?;
-        let m = xb.broadcast_add(&gamma)?;
-        let m_plus = softplus(&m.broadcast_div(&floor)?)?.broadcast_mul(&floor)?;
-        // η = log m⁺ − log β, log β = log γ − log γ/β.
-        let eta = m_plus.log()?.broadcast_sub(&(&lg - &lr)?)?;
-        let mu =
-            legume_numeric::candle::candle_nn::ops::sigmoid(&eta)?.clamp(1e-6f32, 1.0 - 1e-6)?;
-        let a = mu.broadcast_mul(&kappa)?;
-        let b = (mu.affine(-1.0, 1.0)?).broadcast_mul(&kappa)?;
-        let (uf, sf) = (ub.broadcast_as(shape)?, sb.broadcast_as(shape)?);
-        let ll = (ln_beta(&(&uf + &a)?, &(&sf + &b)?)? - ln_beta(&a, &b)?)?.sum(1)?; // [N × w]
-        let top = ll.max_keepdim(0)?;
-        let z = ll.broadcast_sub(&top)?.exp()?;
-        let total = z.sum_keepdim(0)?;
-        let log_e = ((total.log()? + &top)? - (n_grid as f64).ln())?;
-        let weight = z.broadcast_div(&total)?; // [N × w]
-        let lg2 = lg.squeeze(1)?.broadcast_as((n_grid, w))?;
-        let lb2 = (&lg - &lr)?.squeeze(1)?.broadcast_as((n_grid, w))?;
-        let mean_g = (&weight * &lg2)?.sum(0)?;
-        let mean_b = (&weight * &lb2)?.sum(0)?;
-        out.log_e.extend(
-            log_e
-                .squeeze(0)?
-                .to_vec1::<f32>()?
-                .into_iter()
-                .map(f64::from),
-        );
-        out.log_gamma
-            .extend(mean_g.to_vec1::<f32>()?.into_iter().map(f64::from));
-        out.log_beta
-            .extend(mean_b.to_vec1::<f32>()?.into_iter().map(f64::from));
-    }
-    Ok(out)
-}
-
-/// [`evidence`] on the host for every table of `tables` (`u`, `s`, each
+/// The grid evidence (module docs) for every table of `tables` (`u`, `s`, each
 /// `[K][G]`) at once, the velocity `x` (`[K][G]`) read forward and reversed:
 /// every gene on its own thread, in f64 with exact log-gammas. The share,
 /// `a`, `b` and `ln Γ(a) + ln Γ(b)` at every grid point are the tables'
