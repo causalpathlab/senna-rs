@@ -592,3 +592,56 @@ fn diagnostic_velocity_against_start_and_smoothness() {
         }
     }
 }
+
+/// How the states phase's depth moves what it fits: the trajectory's
+/// ordering and velocity, and how well a state axis separates bystanders,
+/// timed per fit.
+#[test]
+#[ignore = "diagnostic"]
+fn diagnostic_states_at_a_depth() {
+    let sim = simulate(&SimConfig {
+        bystanders: 0.25,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    for state_depth in [20u64, 50, 100, 1000] {
+        let cfg = TrainConfig {
+            lineages: 2,
+            state_depth,
+            ..TrainConfig::default()
+        };
+        let clock = std::time::Instant::now();
+        let (model, _, out) = fit_sim(&sim, 1500, &cfg);
+        let secs = clock.elapsed().as_secs_f64();
+        let on: Vec<usize> = (1500..sim.n_cells).filter(|&i| !sim.bystander[i]).collect();
+        let tau: Vec<f32> = on.iter().map(|&i| out.tau[i]).collect();
+        let truth: Vec<f32> = on.iter().map(|&i| sim.tau[i]).collect();
+        let emb = model.energy.rho().to_vec2::<f32>().unwrap();
+        let vel: f64 = on
+            .iter()
+            .map(|&i| {
+                let v = &out.velocity[i];
+                let pred: Vec<f32> = emb
+                    .iter()
+                    .map(|row| row.iter().zip(v).map(|(a, b)| a * b).sum())
+                    .collect();
+                pearson(&pred, &sim.log_slope[i])
+            })
+            .sum::<f64>()
+            / on.len() as f64;
+        let d = out.state[0].len();
+        let label: Vec<f32> = (0..sim.n_cells)
+            .map(|i| f32::from(u8::from(sim.bystander[i])))
+            .collect();
+        let sep = (0..d)
+            .map(|j| {
+                let axis: Vec<f32> = out.state.iter().map(|h| h[j]).collect();
+                pearson(&axis, &label).abs()
+            })
+            .fold(0.0, f64::max);
+        eprintln!(
+            "state depth {state_depth:>5}: ordering {:.3}, velocity {vel:.3}, bystander separation {sep:.3}, {secs:.1} s",
+            spearman(&tau, &truth)
+        );
+    }
+}

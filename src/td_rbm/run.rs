@@ -51,8 +51,8 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         "--batch and --chains must be positive"
     );
     anyhow::ensure!(
-        args.depth > 0 && args.assign_depth > 0.0,
-        "--depth and --assign-depth must be positive"
+        args.depth > 0 && args.state_depth > 0 && args.assign_depth > 0.0,
+        "--depth, --state-depth and --assign-depth must be positive"
     );
     anyhow::ensure!(
         args.states > 0 && args.epochs > args.time_epochs,
@@ -202,6 +202,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         smooth: args.smooth,
         assign_depth: args.assign_depth,
         depth: args.depth,
+        state_depth: args.state_depth,
         batch: args.batch,
         chains: args.chains,
         sweeps: args.sweeps,

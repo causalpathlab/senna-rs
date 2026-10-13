@@ -397,28 +397,38 @@ impl Energy {
         let rho = self.rho.as_tensor();
         let (beta, gamma) = (self.beta()?, self.gamma()?);
         let speed = self.speed(Some(log_weight))?;
-        let (mut psi, mut curves, mut velocities, mut sizes) = (vec![], vec![], vec![], vec![]);
-        for i in 0..l {
-            let coef = self.coef.narrow(0, i * m, m)?;
-            let curve = spline.values.matmul(&coef)?; // [K × H]
-            let velocity = spline.slopes.matmul(&coef)?; // [K × H]
-            let size = spline.values.matmul(&self.size.narrow(0, i * m, m)?)?; // [K × 1]
-                                                                               // In the shared rates' time: the lineage's speed per unit `τ`.
-            let pace = (speed.narrow(0, i, 1)? * self.motion.get())?; // [1 × 1]
-            let raw = time_tables(
-                rho,
-                &curve,
-                &velocity.broadcast_mul(&pace)?,
-                &size.broadcast_mul(&pace)?,
-                self.base.as_tensor(),
-                &beta,
-                &gamma,
-            )?;
-            psi.push(log_softmax(&raw, 1)?);
-            curves.push(curve);
-            velocities.push(velocity.broadcast_mul(&speed.narrow(0, i, 1)?)?);
-            sizes.push(size);
-        }
+        // Every lineage at once: `[L × K × M]` bases on `[L × M × H]`
+        // coefficients, rows `ℓ·K + k`; the time tables are row by row.
+        let h = rho.dim(1)?;
+        let lk = l * k;
+        let basis = |b: &Tensor| -> Result<Tensor> {
+            b.unsqueeze(0)?.broadcast_as((l, k, m))?.contiguous()
+        };
+        let (values, slopes) = (basis(&spline.values)?, basis(&spline.slopes)?);
+        let coef = self.coef.as_tensor().reshape((l, m, h))?;
+        let curve = values.matmul(&coef)?.reshape((lk, h))?;
+        let velocity = slopes.matmul(&coef)?.reshape((lk, h))?;
+        let size = values
+            .matmul(&self.size.as_tensor().reshape((l, m, 1))?)?
+            .reshape((lk, 1))?;
+        // Every row's lineage speed; in the shared rates' time the velocity
+        // runs at the speed per unit `τ`.
+        let speed_rows = speed
+            .unsqueeze(1)?
+            .broadcast_as((l, k, 1))?
+            .reshape((lk, 1))?;
+        let pace = (&speed_rows * self.motion.get())?;
+        let raw = time_tables(
+            rho,
+            &curve,
+            &velocity.broadcast_mul(&pace)?,
+            &size.broadcast_mul(&pace)?,
+            self.base.as_tensor(),
+            &beta,
+            &gamma,
+        )?;
+        let psi = log_softmax(&raw, 1)?;
+        let velocity = velocity.broadcast_mul(&speed_rows)?;
         let bias: Vec<f32> = log_weight
             .iter()
             .flat_map(|&w| std::iter::repeat_n(w - (k as f32).ln(), k))
@@ -430,12 +440,12 @@ impl Energy {
         };
         let half = rho.matmul(&load)?; // [G × d]
         Ok(Tables {
-            psi: Tensor::cat(&psi, 0)?,
-            bias: Tensor::from_vec(bias, (1, l * k), rho.device())?,
+            psi,
+            bias: Tensor::from_vec(bias, (1, lk), rho.device())?,
             w: Tensor::cat(&[&half, &half], 0)?,
-            curve: Tensor::cat(&curves, 0)?,
-            velocity: Tensor::cat(&velocities, 0)?,
-            size: Tensor::cat(&sizes, 0)?,
+            curve,
+            velocity,
+            size,
             lineages: l,
         })
     }

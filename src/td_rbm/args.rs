@@ -118,7 +118,11 @@ pub struct TdRbmArgs {
     #[arg(long, default_value_t = 128, help = "Pseudobulk samples per minibatch")]
     pub batch: usize,
 
-    #[arg(long, default_value_t = 256, help = "Persistent Gibbs chains")]
+    #[arg(
+        long,
+        default_value_t = 128,
+        help = "Persistent Gibbs chains (about a minibatch)"
+    )]
     pub chains: usize,
 
     #[arg(long, default_value_t = 1, help = "Gibbs sweeps per step")]
@@ -147,6 +151,13 @@ pub struct TdRbmArgs {
         help = "Reads of every pseudobulk sample, chain and (scaled) cell"
     )]
     pub depth: u64,
+
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "Reads of every sample and chain in the states phase (smaller tempers the time unit, so chains mix)"
+    )]
+    pub state_depth: u64,
 
     #[arg(
         long,

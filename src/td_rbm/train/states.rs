@@ -33,9 +33,9 @@ pub(super) fn fit_states(
     let mut vars = energy.vars();
     vars.push(energy.load_var());
     let mut opt = adam(vars, cfg.lr)?;
-    let pass_reads = pass_reads(levels, cfg.depth);
+    let pass_reads = pass_reads(levels, cfg.state_depth);
     let p = levels[finest].cells.len();
-    let drawn = resample(&levels[finest].x, f, cfg.depth, rng);
+    let drawn = resample(&levels[finest].x, f, cfg.state_depth, rng);
     let x0: Vec<f32> = (0..cfg.chains)
         .flat_map(|j| drawn[(j % p) * f..(j % p + 1) * f].to_vec())
         .collect();
@@ -45,7 +45,7 @@ pub(super) fn fit_states(
         for lv in levels {
             let rows = lv.cells.len();
             let all = Reads::from_features(Tensor::from_vec(
-                resample(&lv.x, f, cfg.depth, rng),
+                resample(&lv.x, f, cfg.state_depth, rng),
                 (rows, f),
                 dev,
             )?)?;
@@ -57,14 +57,17 @@ pub(super) fn fit_states(
                 let fantasy = chains.reads()?;
                 let loss = ((free_energy(&batch, &t)?.mean_all()?
                     - free_energy(&fantasy, &t)?.mean_all()?)?
-                    / cfg.depth as f64)?;
+                    / cfg.state_depth as f64)?;
                 let prior = (energy.roughness()? * (cfg.smooth / pass_reads))?;
                 opt.backward_step(&(&loss + prior)?)?;
                 gap += f64::from(loss.to_scalar::<f32>()?);
                 steps += 1;
-                let after = energy.tables(spline, true, log_weight)?.detach();
+                // The chains move under the tables this step was taken at,
+                // one optimiser step behind (as persistent chains always
+                // are, a step or so): one build of the tables a step.
+                let t = t.detach();
                 for _ in 0..cfg.sweeps {
-                    chains.sweep(&after)?;
+                    chains.sweep(&t)?;
                 }
             }
         }

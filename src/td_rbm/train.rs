@@ -64,8 +64,13 @@ pub struct TrainConfig {
     /// rich-get-richer prior weighs in between lineages that explain it about
     /// equally well.
     pub assign_depth: f64,
-    /// Reads every pseudobulk sample (and every chain) holds.
+    /// Reads every pseudobulk sample holds in the exact phases.
     pub depth: u64,
+    /// Reads every sample and every chain holds in the states phase: the
+    /// time unit's evidence grows with the reads, so a smaller depth
+    /// tempers its posterior and the chains move between times and
+    /// lineages; the states read per read and are the same at any depth.
+    pub state_depth: u64,
     pub batch: usize,
     /// Neighbours per pseudobulk in a lineage's diffusion order.
     pub knn: usize,
@@ -94,10 +99,11 @@ impl Default for TrainConfig {
             direction_draws: 16,
             assign_depth: 300.0,
             depth: 1000,
+            state_depth: 1000,
             knn: 10,
             smooth: 1e4,
             batch: 128,
-            chains: 256,
+            chains: 128,
             sweeps: 1,
             lr: 1e-2,
             seed: 1,
