@@ -295,7 +295,7 @@ pub(crate) fn categorical(p: &[f32], rng: &mut StdRng) -> usize {
 }
 
 /// `n` draws over the categories of `p` into `out`, by successive binomials.
-pub(super) fn multinomial(n: u64, p: &[f32], out: &mut [f32], rng: &mut StdRng) {
+pub(crate) fn multinomial(n: u64, p: &[f32], out: &mut [f32], rng: &mut StdRng) {
     let mut left = n;
     let mut mass = 1.0f64;
     for (o, &pi) in out.iter_mut().zip(p) {

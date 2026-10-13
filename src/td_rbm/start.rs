@@ -120,18 +120,30 @@ pub fn curve_start(
 
 /// Every row of `x` (`[N × F]` row-major counts) drawn again at `depth`
 /// reads: shares from the row's Dirichlet posterior (counts plus ½), then a
-/// multinomial; a pseudobulk sample at a cell's depth.
+/// multinomial; a pseudobulk sample at a cell's depth. Rows are drawn in
+/// parallel, each from its own generator seeded by one draw of `rng` and
+/// its index, so the result does not depend on the threads.
 pub fn resample(x: &[f32], f: usize, depth: u64, rng: &mut StdRng) -> Vec<f32> {
+    use rand::{RngExt, SeedableRng};
+    use rayon::prelude::*;
+    let base: u64 = rng.random();
     let mut out = vec![0f32; x.len()];
-    let mut p = vec![0f32; f];
-    for (row, o) in x.chunks(f).zip(out.chunks_mut(f)) {
-        for (pi, &c) in p.iter_mut().zip(row) {
-            *pi = Gamma::new(f64::from(c) + 0.5, 1.0).map_or(0.0, |d| d.sample(rng)) as f32;
-        }
-        let s: f32 = p.iter().sum::<f32>().max(1e-30);
-        p.iter_mut().for_each(|v| *v /= s);
-        super::rbm::multinomial(depth, &p, o, rng);
-    }
+    out.par_chunks_mut(f.max(1))
+        .zip(x.par_chunks(f.max(1)))
+        .enumerate()
+        .for_each(|(i, (o, row))| {
+            let mut rng =
+                StdRng::seed_from_u64(base ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut p: Vec<f32> = row
+                .iter()
+                .map(|&c| {
+                    Gamma::new(f64::from(c) + 0.5, 1.0).map_or(0.0, |d| d.sample(&mut rng)) as f32
+                })
+                .collect();
+            let s: f32 = p.iter().sum::<f32>().max(1e-30);
+            p.iter_mut().for_each(|v| *v /= s);
+            super::rbm::multinomial(depth, &p, o, &mut rng);
+        });
     out
 }
 
@@ -362,3 +374,7 @@ pub fn softmax(v: &[f64]) -> Vec<f64> {
     let z = log_sum_exp(v);
     v.iter().map(|x| (x - z).exp()).collect()
 }
+
+#[cfg(test)]
+#[path = "tests/start.rs"]
+mod tests;
