@@ -559,7 +559,7 @@ fn draw_heatmap(frame: &mut Frame, hm: &Heatmap, font: Font, bold: Font) {
     let lh = font.line_height();
     let adv = font.advance();
     let what = match hm.source {
-        Source::Observed => "mean ln(1 + count)",
+        Source::Observed | Source::Extra => "mean ln(1 + count)",
         Source::Expected => "model's expected level (no count files)",
     };
     let title = format!(

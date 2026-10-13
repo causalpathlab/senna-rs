@@ -88,6 +88,7 @@ impl App {
             Setting::Values => match scene.source {
                 crate::view::activity::Source::Expected => "model".into(),
                 crate::view::activity::Source::Observed => "counts".into(),
+                crate::view::activity::Source::Extra => "extra counts".into(),
             },
             Setting::Labels => scene.labels_said().into(),
             Setting::Dots => format!("{:.2}×", scene.scale),
@@ -101,7 +102,11 @@ impl App {
             Setting::Layout => self.step_method(d, true),
             Setting::Map => self.step_view(d),
             Setting::Colour => self.change(|sc| sc.step_colour(d)),
-            Setting::Values => self.change(Scene::toggle_source),
+            Setting::Values => {
+                // Each source has its own feature axis to search.
+                self.names = None;
+                self.change(Scene::toggle_source);
+            }
             Setting::Labels => {
                 self.change_text(|sc| sc.step_labels(d));
                 self.redecorate();

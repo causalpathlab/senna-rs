@@ -1,6 +1,7 @@
 //! Features on the map: suggestions, the picked feature's activity, and
 //! features near a clicked cell.
 
+use super::activity::{read_extra, ExtraFiles};
 use super::*;
 use crate::tui::LOADING;
 
@@ -326,13 +327,92 @@ impl Scene {
     }
 
     pub fn toggle_source(&mut self) {
-        self.source = self.source.other();
+        self.source = self.source.next(self.data.loads.extra.is_some());
         // A click's list holds the features with values in the source shown;
         // suggestions on screen stay as they are.
         let shown = self.pick.clone();
         self.rerun_near();
         self.pick = shown;
         self.refresh_activity();
+    }
+
+    /// Colour the cells by the next per-cell statistic of the counts shown:
+    /// total, features detected, the focused group's markers' share (when
+    /// it has markers), then back to group colours. The model's expectation
+    /// has none, so the counts come up in its place.
+    pub fn cycle_stat(&mut self) {
+        let share = || {
+            self.focused_name()
+                .filter(|g| !self.marker_features(g).is_empty())
+                .map(Stat::Share)
+        };
+        let next = match &self.pick {
+            Some(Pick::Stat(Stat::Total)) => Some(Stat::Detected),
+            Some(Pick::Stat(Stat::Detected)) => share(),
+            Some(Pick::Stat(Stat::Share(_))) => None,
+            _ => Some(Stat::Total),
+        };
+        let Some(stat) = next else {
+            self.clear_pick();
+            return;
+        };
+        if self.source == Source::Expected {
+            self.source = if self.data.loads.extra.is_some() {
+                Source::Extra
+            } else {
+                Source::Observed
+            };
+        }
+        self.set_pick(Pick::Stat(stat));
+    }
+
+    /// Open `path` as the extra source, a data file the run was not fitted
+    /// on, read on the side; its cells are matched to the run's. Shows it at
+    /// once: the feature on screen, else each cell's total.
+    pub fn open_extra(&mut self, path: &std::path::Path) {
+        let cells = self.cell_names().map(<[_]>::to_vec).unwrap_or_default();
+        let path = path.to_path_buf();
+        let extra = std::sync::Arc::new(ExtraFiles::new(move || {
+            read_extra(&path, &cells).map_err(|e| e.to_string())
+        }));
+        extra.start();
+        self.data.loads.extra = Some(extra.clone());
+        if let Some(a) = self.activity.as_mut() {
+            a.set_extra(extra);
+        }
+        self.extra_noted = false;
+        self.source = Source::Extra;
+        self.shown = None;
+        if !matches!(
+            self.pick,
+            Some(Pick::One(_) | Pick::Markers(_) | Pick::Stat(_))
+        ) {
+            self.pick = Some(Pick::Stat(Stat::Total));
+        }
+        self.refresh_activity();
+        // Read already when the scene waits for reads (no screen).
+        self.note_extra();
+    }
+
+    /// How the extra file's cells matched the run's, once, when it is read.
+    fn note_extra(&mut self) {
+        let Some(read) = self.data.loads.extra.as_ref().and_then(|x| x.try_get()) else {
+            return;
+        };
+        if std::mem::replace(&mut self.extra_noted, true) {
+            return;
+        }
+        self.note = Some(match read {
+            Ok(x) if x.matched * 10 < x.of * 9 => format!(
+                "extra: only {} of the run's {} cells are in {}: is it the same cells?",
+                x.matched, x.of, x.name
+            ),
+            Ok(x) => format!(
+                "extra: {} · {} of the run's {} cells matched",
+                x.name, x.matched, x.of
+            ),
+            Err(e) => format!("extra data file: {e}"),
+        });
     }
 
     /// Drop the activity view. Returns whether there was one.
@@ -429,8 +509,8 @@ impl Scene {
             return;
         }
         let set = match &pick {
-            Pick::Markers(group) => self.marker_features(group),
-            Pick::One(_) | Pick::Time => Vec::new(),
+            Pick::Markers(group) | Pick::Stat(Stat::Share(group)) => self.marker_features(group),
+            Pick::One(_) | Pick::Time | Pick::Stat(_) => Vec::new(),
         };
         let Some((activity, data)) = self.activity_and_data() else {
             self.note = Some("no manifest to read activity from".into());
@@ -444,6 +524,9 @@ impl Scene {
             Pick::Markers(group) => activity
                 .set_levels(&set, source, space, names)
                 .map(|(l, used)| (l, format!("{group} markers ({used}) · {}", source.name()))),
+            Pick::Stat(stat) => activity
+                .stat_levels(stat, &set, source, space, names)
+                .map(|l| (l, format!("{} · {}", stat.name(), source.name()))),
             Pick::Time => unreachable!("time is shown above"),
         };
         match result {
@@ -557,6 +640,7 @@ impl Scene {
             return batches;
         }
         self.answered = answered;
+        self.note_extra();
         match self.redo.take() {
             Some(Ask::Near { name, centre }) => match centre {
                 Centre::Cell => self.show_near(&name),

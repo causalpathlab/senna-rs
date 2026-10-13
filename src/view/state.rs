@@ -452,6 +452,9 @@ impl Scene {
             Some(Pick::One(f)) => format!(" · feature {f} ({}) · x clears", self.source.name()),
             Some(Pick::Markers(g)) => format!(" · {g} markers ({}) · x clears", self.source.name()),
             Some(Pick::Time) => " · time · x clears".to_string(),
+            Some(Pick::Stat(stat)) => {
+                format!(" · {} ({}) · x clears", stat.name(), self.source.name())
+            }
             None => String::new(),
         };
         format!(

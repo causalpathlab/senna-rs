@@ -89,6 +89,8 @@ impl App {
             KeyCode::Char('m') => self.step_method(1, false),
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
             KeyCode::Char('y') => self.change(Scene::toggle_time),
+            KeyCode::Char('u') => self.change(Scene::cycle_stat),
+            KeyCode::Char('O') => self.ask_extra(),
             KeyCode::Char('{' | '}') => {
                 self.scene
                     .change_stream_density(k.code == KeyCode::Char('}'));

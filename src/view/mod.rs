@@ -24,7 +24,7 @@ mod tui;
 mod velocity;
 mod zoom;
 
-use activity::{Activity, Levels, Source};
+use activity::{Activity, Levels, Source, Stat};
 use color::Rgb;
 use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
@@ -182,6 +182,29 @@ pub struct ViewArgs {
                      recorded in the manifest so it happens once."
     )]
     pub no_compute: bool,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Also open this data file (.zarr, .zarr.zip, .h5), one the run was not fitted on: its cells matched to the run's by name, shown as the extra source (O in the view)"
+    )]
+    pub extra: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Start coloured by a per-cell statistic of the counts shown (the extra file's, with --extra; `u` in the view)"
+    )]
+    pub cell_stat: Option<CellStat>,
+}
+
+/// A per-cell statistic to start on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum CellStat {
+    /// `ln(1 + total count)`.
+    Total,
+    /// How many features have a count.
+    Detected,
 }
 
 /// Features suggested for one view, best first.
@@ -209,6 +232,8 @@ pub(crate) enum Pick {
     Markers(Box<str>),
     /// A td-rbm run's time of each cell.
     Time,
+    /// A summary of each cell over a count source's features.
+    Stat(Stat),
 }
 
 /// Activity currently drawn: what it is of, where, and its levels.
@@ -310,6 +335,8 @@ pub(crate) struct Scene {
     /// in `data.input` and recorded path), for the front end to ask where
     /// it is.
     pub missing_data: Option<(usize, String)>,
+    /// Whether how the extra data file matched has been said.
+    extra_noted: bool,
     /// A run's velocity field (read on the first `v`), whether it is drawn,
     /// and every point's displacement on the last map it was drawn on.
     velocity: Option<std::sync::Arc<velocity::Field>>,
@@ -359,6 +386,7 @@ impl Scene {
             medians: std::cell::RefCell::new(None),
             note: None,
             missing_data: None,
+            extra_noted: false,
             velocity: None,
             velocity_style: None,
             stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
@@ -381,6 +409,18 @@ impl Scene {
         }
         if args.observed {
             scene.source = Source::Observed;
+        }
+        if let Some(path) = &args.extra {
+            scene.open_extra(path);
+        }
+        if let Some(stat) = args.cell_stat {
+            if scene.source == Source::Expected {
+                scene.source = Source::Observed;
+            }
+            scene.set_pick(Pick::Stat(match stat {
+                CellStat::Total => Stat::Total,
+                CellStat::Detected => Stat::Detected,
+            }));
         }
         if let Some(want) = args.focus.as_ref().or(args.zoom_into.as_ref()) {
             scene.focus = scene
@@ -456,6 +496,7 @@ impl Scene {
             locked: self.locked.clone(),
             note: None,
             missing_data: None,
+            extra_noted: self.extra_noted,
             velocity: self.velocity.clone(),
             velocity_style: self.velocity_style,
             stream_lanes: self.stream_lanes,
@@ -773,6 +814,8 @@ mod tests {
             relabel: false,
             lupin: None,
             no_compute: true,
+            extra: None,
+            cell_stat: None,
         };
         Scene::new(data, &args)
     }

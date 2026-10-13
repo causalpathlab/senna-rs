@@ -77,7 +77,15 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             ("/", "search a feature by name: matches list in the sidebar, ↑ ↓ choose, enter shows"),
             ("a", "activity of the focused group's whole marker set"),
-            ("o", "expected (model) or observed (counts)"),
+            ("o", "expected (model), observed (counts), or the extra file's counts"),
+            (
+                "O",
+                "open an extra data file the run was not fitted on: its cells matched to the run's by name, shown as the extra source",
+            ),
+            (
+                "u",
+                "per-cell statistics of the counts shown: total, features detected, the focused group's markers' share",
+            ),
             ("p", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
             ("x  esc", "back to group colours"),
         ],
