@@ -22,7 +22,9 @@ use data::Pair;
 use data::Pick;
 use form::{Field, Kind, Method};
 use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG, TD_RBM};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -190,6 +192,11 @@ pub(crate) struct App {
     queue: Option<Queue>,
     message: Option<String>,
     quit: bool,
+    /// The `?` page of every key: up, and how far it is scrolled; its
+    /// furthest scroll as last drawn.
+    help: bool,
+    help_scroll: usize,
+    help_max: std::cell::Cell<usize>,
     /// Manifests to open in `senna view` once the terminal is given back.
     view: Vec<PathBuf>,
 }
@@ -211,6 +218,7 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
     let level = log::max_level();
     log::set_max_level(log::LevelFilter::Off);
     let mut terminal = ratatui::init();
+    ratatui::crossterm::execute!(std::io::stdout(), event::EnableMouseCapture)?;
     let result = (|| -> anyhow::Result<()> {
         while !app.quit {
             app.poll();
@@ -223,10 +231,16 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
                 Duration::from_secs(60)
             };
             if event::poll(wait)? {
-                if let Event::Key(k) = event::read()? {
-                    if k.kind != KeyEventKind::Release {
-                        app.key(k);
-                    }
+                match event::read()? {
+                    Event::Key(k) if k.kind != KeyEventKind::Release => app.key(k),
+                    // The wheel scrolls whatever list or page is in front,
+                    // as the arrow keys do.
+                    Event::Mouse(m) => match m.kind {
+                        MouseEventKind::ScrollUp => app.key(KeyEvent::from(KeyCode::Up)),
+                        MouseEventKind::ScrollDown => app.key(KeyEvent::from(KeyCode::Down)),
+                        _ => {}
+                    },
+                    _ => {}
                 }
             }
         }
@@ -241,6 +255,7 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
         }
         q.stop_within(STOP_GRACE);
     }
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
     ratatui::restore();
     log::set_max_level(level);
     result?;
@@ -315,6 +330,9 @@ impl App {
             queue: None,
             message: None,
             quit: false,
+            help: false,
+            help_scroll: 0,
+            help_max: std::cell::Cell::new(0),
             view: Vec::new(),
         };
         app.refresh_outs();
@@ -377,6 +395,19 @@ impl App {
             return;
         }
         self.message = None;
+        if self.help {
+            // The page scrolls; esc, q or ? closes it, other keys do nothing.
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q' | '?') => self.help = false,
+                _ => {
+                    let n = self.help_max.get() + 1;
+                    if let Some(at) = crate::tui::list_move(&k, self.help_scroll, n) {
+                        self.help_scroll = at;
+                    }
+                }
+            }
+            return;
+        }
         if self.editor.is_some() {
             self.editor_key(k);
         } else if self.browser.is_some() {
@@ -437,10 +468,14 @@ impl App {
                 }
             }
             _ if crate::tui::is_run_key(&k) => self.open_confirm(),
+            KeyCode::Char('?') => {
+                self.help = true;
+                self.help_scroll = 0;
+            }
             KeyCode::Char('q') => {
                 if self.running() {
                     self.message =
-                        Some("fits are running: s stops them, ctrl-c stops and quits".into());
+                        Some("fits are running: s stops them, ctrl+c stops and quits".into());
                 } else {
                     self.quit = true;
                 }
@@ -514,17 +549,11 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace | KeyCode::Char(_) => {
-                if let KeyCode::Char(c) = k.code {
-                    e.text.push(c);
-                } else {
-                    e.text.pop();
-                }
-                // The filter narrows the flags as it is typed.
-                if e.target == Target::Filter {
-                    self.filter.clone_from(&e.text);
-                    self.field_row = 0;
-                }
+            // Type, backspace, ctrl+u clears; the filter narrows the flags
+            // as it is typed.
+            _ if crate::tui::edit_line(&mut e.text, &k) && e.target == Target::Filter => {
+                self.filter.clone_from(&e.text);
+                self.field_row = 0;
             }
             _ => {}
         }
@@ -670,8 +699,9 @@ impl App {
                 self.relabel = None;
                 return;
             }
-            KeyCode::Up => at.saturating_sub(1),
-            KeyCode::Down => (at + 1).min(n.saturating_sub(1)),
+            _ if crate::tui::list_move(&k, at, n).is_some() => {
+                crate::tui::list_move(&k, at, n).unwrap_or(at)
+            }
             KeyCode::Enter if at < n => {
                 let now = match &self.pairs[row].batch {
                     Batch::Labels {
@@ -704,9 +734,11 @@ impl App {
 
     fn data_key(&mut self, k: KeyEvent) {
         let last = self.pairs.len().saturating_sub(1);
+        if let Some(row) = crate::tui::list_move(&k, self.pair_row, self.pairs.len()) {
+            self.pair_row = row;
+            return;
+        }
         match k.code {
-            KeyCode::Up => self.pair_row = self.pair_row.saturating_sub(1),
-            KeyCode::Down => self.pair_row = (self.pair_row + 1).min(last),
             KeyCode::Char('a') => self.browse(Pick::Data),
             KeyCode::Char('b') if !self.pairs.is_empty() => self.browse(Pick::Batch),
             KeyCode::Char('x') => {
@@ -756,10 +788,11 @@ impl App {
     // ───────────── methods ─────────────
 
     fn methods_key(&mut self, k: KeyEvent) {
-        let last = self.rows.len() - 1;
+        if let Some(row) = crate::tui::list_move(&k, self.method_row, self.rows.len()) {
+            self.method_row = row;
+            return;
+        }
         match k.code {
-            KeyCode::Up => self.method_row = self.method_row.saturating_sub(1),
-            KeyCode::Down => self.method_row = (self.method_row + 1).min(last),
             KeyCode::Char(' ') => {
                 let r = &mut self.rows[self.method_row];
                 r.on = !r.on;
@@ -808,10 +841,12 @@ impl App {
             .collect()
     }
 
-    /// The flags at least two queued fits have, in the order first met, as
-    /// a form: each with the value they all hold, or none (and listed even
-    /// when advanced) where they differ; a choice offers only the values
-    /// every fit takes.
+    /// The flags at least two queued fits have with the same default, in the
+    /// order first met, as a form: each with the value they all hold, or
+    /// none (and listed even when advanced) where they differ; a choice
+    /// offers only the values every fit takes. A flag whose default differs
+    /// between fits means something different in each (rbm's `--depth` is a
+    /// temperature, td-rbm's a read count), so it stays on each fit's page.
     fn shared_form(&self) -> Method {
         let rows = self.shared_rows();
         // Each flag's fields across the fits, in the order first met.
@@ -830,7 +865,7 @@ impl App {
         }
         let fields = found
             .into_iter()
-            .filter(|each| each.len() > 1)
+            .filter(|each| each.len() > 1 && each.iter().all(|f| f.default == each[0].default))
             .map(|each| {
                 let mut x = each[0].clone();
                 // A choice the page sets in every fit: only values all take.
@@ -1005,15 +1040,11 @@ impl App {
     }
 
     fn params_key(&mut self, k: KeyEvent) {
-        let n = self.visible().len();
-        let last = n.saturating_sub(1);
+        if let Some(row) = crate::tui::list_move(&k, self.field_row, self.visible().len()) {
+            self.field_row = row;
+            return;
+        }
         match k.code {
-            KeyCode::Up => self.field_row = self.field_row.saturating_sub(1),
-            KeyCode::Down => self.field_row = (self.field_row + 1).min(last),
-            KeyCode::PageUp => self.field_row = self.field_row.saturating_sub(10),
-            KeyCode::PageDown => self.field_row = (self.field_row + 10).min(last),
-            KeyCode::Home => self.field_row = 0,
-            KeyCode::End => self.field_row = last,
             KeyCode::Char('[' | ']') => {
                 // The shared page first, when two fits or more are queued.
                 let mut pages: Vec<Option<usize>> = Vec::new();
@@ -1330,9 +1361,12 @@ impl App {
     fn confirm_key(&mut self, k: KeyEvent) {
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') => self.confirm = None,
-            KeyCode::Up => self.confirm_scroll = self.confirm_scroll.saturating_sub(1),
-            KeyCode::Down => {
-                self.confirm_scroll = (self.confirm_scroll + 1).min(self.confirm_max.get());
+            _ if crate::tui::list_move(&k, self.confirm_scroll, self.confirm_max.get() + 1)
+                .is_some() =>
+            {
+                self.confirm_scroll =
+                    crate::tui::list_move(&k, self.confirm_scroll, self.confirm_max.get() + 1)
+                        .unwrap_or(self.confirm_scroll);
             }
             KeyCode::Char('c') => {
                 let text = self.copy_text();
@@ -1412,11 +1446,11 @@ impl App {
     /// or stop.
     fn clones_key(&mut self, k: KeyEvent) {
         let keep = match k.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 self.clones_scroll = self.clones_scroll.saturating_sub(1);
                 return;
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 self.clones_scroll += 1;
                 return;
             }
@@ -1441,8 +1475,8 @@ impl App {
     fn run_key(&mut self, k: KeyEvent) {
         let page = self.log_rows.get().max(1);
         match k.code {
-            KeyCode::Up => self.scroll_log(-1),
-            KeyCode::Down => self.scroll_log(1),
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_log(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_log(1),
             KeyCode::PageUp => self.scroll_log(-(page as isize)),
             KeyCode::PageDown => self.scroll_log(page as isize),
             KeyCode::Home => self.log_top = Some(0),

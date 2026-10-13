@@ -137,7 +137,7 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        help = "Streamlines' density: lanes across the map (default 40; { and } change it)"
+        help = "Streamlines' density: lanes across the map (default 40; ( and ) change it)"
     )]
     pub stream_density: Option<f32>,
 
@@ -694,9 +694,16 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         );
         let dpi = args.dpi as f32;
         let w = (args.width * dpi).round() as usize;
-        // A roughly 4:3 page, its tiles 4:3 too.
-        let (cols, rows) = deck::shape(scenes.len(), 4.0, 3.0);
-        let h = (w as f32 * 0.75 * rows as f32 / cols as f32).round() as usize;
+        // One view: a page the map's own shape, as it would fill a screen of
+        // that shape. Several: a roughly 4:3 page of 4:3 tiles.
+        let h = if let [scene] = &scenes[..] {
+            let [x0, y0, x1, y1] = scene.current().points.bounds;
+            let aspect = ((y1 - y0) / (x1 - x0).max(1e-6)).clamp(0.4, 2.5);
+            (w as f32 * aspect).round() as usize
+        } else {
+            let (cols, rows) = deck::shape(scenes.len(), 4.0, 3.0);
+            (w as f32 * 0.75 * rows as f32 / cols as f32).round() as usize
+        };
         anyhow::ensure!(
             w * h <= deck::MAX_PIXELS,
             "{w} × {h} px is too large; lower --width or --dpi"

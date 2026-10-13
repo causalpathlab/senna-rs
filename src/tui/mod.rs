@@ -158,7 +158,7 @@ pub fn home(text: &str) -> String {
     }
 }
 
-/// Edit a one-line text field with key `k`: type, backspace, ctrl-u clears.
+/// Edit a one-line text field with key `k`: type, backspace, ctrl+u clears.
 /// Returns whether it was an editing key.
 pub fn edit_line(text: &mut String, k: &ratatui::crossterm::event::KeyEvent) -> bool {
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
@@ -172,6 +172,52 @@ pub fn edit_line(text: &mut String, k: &ratatui::crossterm::event::KeyEvent) -> 
         _ => return false,
     }
     true
+}
+
+/// Key hints `text`, its entries three spaces apart, broken into lines of at
+/// most `width` between entries, so a narrow terminal cuts none in half.
+#[must_use]
+pub fn wrap_keys(text: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for entry in text.split("   ").filter(|e| !e.is_empty()) {
+        let line = lines.last_mut().expect("a line");
+        let room = width.saturating_sub(1);
+        if !line.is_empty() && line.chars().count() + 3 + entry.chars().count() > room {
+            lines.push(entry.to_string());
+        } else {
+            if !line.is_empty() {
+                line.push_str("   ");
+            }
+            line.push_str(entry);
+        }
+    }
+    lines
+}
+
+/// Rows a page key moves in a list.
+pub const PAGE: usize = 10;
+
+/// The row a list key leads to from `row` in a list of `len` rows: ↑↓ or
+/// k/j by one, PgUp/PgDn by a page, Home/End to either end. `None` when `k`
+/// moves nothing, so the caller can give it its own meaning.
+#[must_use]
+pub fn list_move(k: &ratatui::crossterm::event::KeyEvent, row: usize, len: usize) -> Option<usize> {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    if k.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return None;
+    }
+    let last = len.saturating_sub(1);
+    Some(match k.code {
+        KeyCode::Up | KeyCode::Char('k') => row.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => (row + 1).min(last),
+        KeyCode::PageUp => row.saturating_sub(PAGE),
+        KeyCode::PageDown => (row + PAGE).min(last),
+        KeyCode::Home => 0,
+        KeyCode::End => last,
+        _ => return None,
+    })
 }
 
 /// A path as shown: relative to the working directory when it is under it.

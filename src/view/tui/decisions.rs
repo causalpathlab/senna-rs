@@ -17,9 +17,6 @@ impl App {
                 self.modal = None;
                 self.message = Some("decision cancelled".into());
             }
-            KeyCode::Backspace => {
-                p.input.pop();
-            }
             KeyCode::Tab if !p.why => {
                 let Some(k) = p.completions().next().map(String::from) else {
                     return false;
@@ -42,7 +39,7 @@ impl App {
                     p.input = std::mem::take(&mut p.why_prefill);
                 }
             }
-            KeyCode::Char(c) => p.input.push(c),
+            _ if crate::tui::edit_line(&mut p.input, &k) => {}
             _ => return false,
         }
         true

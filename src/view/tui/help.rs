@@ -27,6 +27,22 @@ pub(super) enum Context {
     StyleMenu,
 }
 
+impl Context {
+    pub(super) const ALL: [Context; 11] = [
+        Context::Browse,
+        Context::Feature,
+        Context::Relabel,
+        Context::Merge,
+        Context::Prompt,
+        Context::File,
+        Context::Chart,
+        Context::Submit,
+        Context::Recompute,
+        Context::Search,
+        Context::StyleMenu,
+    ];
+}
+
 /// `?` help for browsing, by task.
 const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
     (
@@ -160,11 +176,15 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("lowercase", "looks: changes what is on screen, never the run's files"),
             (
                 "R A T X",
-                "uppercase opens a mode or writes: relabel, annotate, make topics, close a view for good",
+                "uppercase that opens a mode or writes: relabel, annotate, make topics, close a view for good",
+            ),
+            (
+                "g G  f F  z Z",
+                "other capitals step back, or go further, than their lowercase key",
             ),
             ("r", "recompute opens a menu first; nothing is written until it runs"),
-            ("ctrl-r", "runs what a menu or popup set up (recompute, submit)"),
-            ("ctrl-l", "reloads the run from disk"),
+            ("ctrl+r", "runs what a menu or popup set up (recompute, submit)"),
+            ("ctrl+l", "reloads the run from disk"),
             ("esc  x", "back out: close a popup, clear a click or a feature"),
         ],
     ),
@@ -178,7 +198,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("t", "labels on the map: small, medium, large, largest, off, in turn"),
             ("y", "colour the cells by a td-rbm run's time; again to stop"),
             ("v", "a td-rbm run's velocity field over the cells: streamlines, arrows, off, in turn"),
-            ("{ }", "streamlines sparser, denser"),
+            ("(  )", "streamlines sparser, denser"),
             ("space  b", "sidebar on or off"),
             (
                 "<  >",
@@ -186,13 +206,13 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "r",
-                "recompute this run's layouts or clusters: choose in a menu, then ctrl-r (or enter) runs it",
+                "recompute this run's layouts or clusters: choose in a menu, then ctrl+r (or enter) runs it",
             ),
             (
                 "s",
                 "save as PDF: this view, or every run (one grid, or a page each); width, dpi, file name",
             ),
-            ("ctrl-l", "reload the run from disk and redraw the screen"),
+            ("ctrl+l", "reload the run from disk and redraw the screen"),
             ("q", "quit"),
         ],
     ),
@@ -300,13 +320,38 @@ impl App {
     /// The keys that act here, for the two key lines of the status area:
     /// the main ones, then the rest.
     pub(super) fn status_keys(&self) -> [&'static str; 2] {
-        match self.context() {
+        keys_of(self.context())
+    }
+
+    /// Rows of the status area at `width`: the message line, then the key
+    /// lines of whichever context wraps to the most, so the map keeps its
+    /// size as the context changes.
+    pub(super) fn status_lines(width: u16) -> u16 {
+        let w = usize::from(width).saturating_sub(2);
+        let keys = Context::ALL
+            .iter()
+            .map(|&c| {
+                keys_of(c)
+                    .iter()
+                    .map(|k| crate::tui::wrap_keys(k, w).len())
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(2);
+        (1 + keys).clamp(3, 7) as u16
+    }
+}
+
+/// The keys that act in `context`: the main ones, then the rest.
+fn keys_of(context: Context) -> [&'static str; 2] {
+    {
+        match context {
             Context::Browse => [
                 "click a cell: its cluster and the features nearest it (p pins their names)   [ ] focus a group   n suggest features   settings: click ‹ › on the right",
                 "R relabel clusters   A annotate with lupin   r recompute   , . rounds   z lay out a group   d copy view   w all views   s save PDF   ? all keys   q quit",
             ],
             Context::Feature => [
-                "↑ ↓ next or previous feature in the list   o switch between counts and model   a the group's whole marker set   x back to group colours",
+                "↑ ↓ / g G next or previous feature in the list   o switch between counts and model   a the group's whole marker set   x back to group colours",
                 "/ search a feature   n new suggestions   p pin its name   [ ] focus a group   ? all keys",
             ],
             Context::Merge => [
@@ -315,7 +360,7 @@ impl App {
             ],
             Context::Relabel => [
                 "→ ← next or previous cluster   ↑ ↓ choose a feature   enter show it   y / n marker or not   A accept all ? proposals",
-                "tab working type   L label   K keep   M merge clusters   p pin names   P preview   S submit all   R leave   ? the steps",
+                "tab working type   L label   K keep   M merge clusters   p pin names   P preview   S submit all   esc / R leave   x back to the cluster   ? the steps",
             ],
             Context::Prompt => [
                 "type, or keep what is filled in   enter accepts   esc cancels",
@@ -323,7 +368,7 @@ impl App {
             ],
             Context::Chart => [
                 "H next chart (structure plot, heatmap, map)   c group by another grouping   + / - features per group (heatmap)",
-                "s save PDF   ctrl-l redraw   ? all keys   q quit",
+                "s save PDF   ctrl+l redraw   ? all keys   q quit",
             ],
             // The popup says what the keys do.
             Context::Submit | Context::Recompute | Context::File => ["", ""],
@@ -333,13 +378,15 @@ impl App {
             ],
             Context::StyleMenu => [
                 "↑ ↓ choose a group   ← → change the value   tab next property",
-                "space show / hide   backspace reset   enter done",
+                "space show / hide   backspace reset   enter, esc or q done",
             ],
         }
     }
+}
 
-    /// The `?` overlay for the current context.
-    pub(super) fn help_lines(&self) -> Vec<Line<'static>> {
+impl App {
+    /// The `?` overlay for the current context, scrolled to fit `rows`.
+    pub(super) fn help_lines(&self, rows: usize) -> Vec<Line<'static>> {
         let sections = if matches!(
             self.context(),
             Context::Relabel | Context::Merge | Context::Submit
@@ -349,15 +396,30 @@ impl App {
             BROWSE_HELP
         };
         let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
-        let mut out = Vec::new();
+        let mut body = Vec::new();
         for (title, keys) in sections {
-            out.push(Line::from(Span::styled(format!(" {title}"), bold)));
+            body.push(Line::from(Span::styled(format!(" {title}"), bold)));
             for (k, v) in *keys {
-                out.push(Line::from(format!("   {k:<15} {v}")));
+                body.push(Line::from(format!("   {k:<15} {v}")));
             }
-            out.push(Line::from(""));
+            body.push(Line::from(""));
         }
-        out.push(Line::from(" any key closes this"));
+        let room = rows.saturating_sub(1).max(3);
+        let max = body.len().saturating_sub(room);
+        self.help_max.set(max);
+        let skip = self.help_scroll.min(max);
+        let mut out: Vec<Line> = body.into_iter().skip(skip).take(room).collect();
+        let more = if max == 0 {
+            ""
+        } else if skip < max {
+            "more below · ↑ ↓ / wheel scroll   "
+        } else {
+            "end · ↑ ↓ / wheel scroll   "
+        };
+        out.push(Line::from(Span::styled(
+            format!(" {more}esc, q or ? close"),
+            Style::default().add_modifier(ratatui::style::Modifier::DIM),
+        )));
         out
     }
 }

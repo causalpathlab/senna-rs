@@ -135,14 +135,17 @@ mod tests {
         );
         cli.build();
         let mut form = Method::new(&cli, "topic").unwrap();
+        let at =
+            |form: &Method, long: &str| form.fields.iter().position(|f| f.long == long).unwrap();
+        let (k, pb_from) = (at(&form, "n-latent-topics"), at(&form, PB_FROM_FLAG));
         let narrow = key(&form, false).unwrap();
-        form.fields[1].value = "30".into();
+        form.fields[k].value = "30".into();
         assert_eq!(key(&form, false).unwrap(), narrow, "K under proj-dim");
-        form.fields[1].value = "100".into();
+        form.fields[k].value = "100".into();
         assert_ne!(key(&form, false).unwrap(), narrow, "K over proj-dim");
         // Given the clones, or another's partition, it builds its own.
         assert!(key(&form, true).is_none());
-        form.fields[2].value = "run".into();
+        form.fields[pb_from].value = "run".into();
         assert!(key(&form, false).is_none());
     }
 }

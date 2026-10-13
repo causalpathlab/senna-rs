@@ -276,7 +276,14 @@ impl Deck {
     fn deck_key(&mut self, k: KeyEvent) -> bool {
         let n = self.apps.len();
         let app = &mut self.apps[self.at];
-        if app.modal.is_some() || app.menu.is_some() {
+        // Not over the help page, a box or menu being typed in, or a
+        // relabel round; on a chart only saving and redrawing, as its
+        // footer says.
+        if app.help || app.modal.is_some() || app.menu.is_some() || app.scene.review.is_some() {
+            return false;
+        }
+        let ctrl_l = k.code == KeyCode::Char('l') && k.modifiers.contains(KeyModifiers::CONTROL);
+        if app.scene.chart.is_some() && !(ctrl_l || k.code == KeyCode::Char('s')) {
             return false;
         }
         let several = |app: &mut App| {
@@ -1035,7 +1042,7 @@ fn draw_move(f: &mut ratatui::Frame, m: &MoveDialog) {
                 hint(),
             )),
         },
-        Line::from(" type the path (ctrl-u clears)   enter move   esc cancel"),
+        Line::from(" type the path (ctrl+u clears)   enter move   esc cancel"),
     ];
     popup(f, f.area(), lines, 76, At::Middle, color::TEXT);
 }
@@ -1336,7 +1343,7 @@ impl Deck {
         };
         lines.push(note);
         lines.push(Line::from(
-            " ↑ ↓ field   ← → change   type to rename (ctrl-u clears)   enter save   esc cancel",
+            " ↑ ↓ field   ← → change   type to rename (ctrl+u clears)   enter save   esc cancel",
         ));
         popup(f, f.area(), lines, 76, At::Middle, color::TEXT);
     }

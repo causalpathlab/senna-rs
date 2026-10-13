@@ -249,10 +249,17 @@ impl Method {
             .get_arguments()
             .find(|a| a.get_long() == Some("batch-files"))
             .map(many_of);
+        // The method's own flags first, then those of the data steps every
+        // method shares, each in clap's order.
+        let data = data_flags();
+        let (own, shared): (Vec<Field>, Vec<Field>) = cmd
+            .get_arguments()
+            .filter_map(Field::from_arg)
+            .partition(|f| !data.contains(f.long.as_str()));
         Ok(Method {
             name: name.to_string(),
             about: cmd.get_about().map(ToString::to_string).unwrap_or_default(),
-            fields: cmd.get_arguments().filter_map(Field::from_arg).collect(),
+            fields: own.into_iter().chain(shared).collect(),
             batch,
         })
     }
@@ -330,6 +337,23 @@ pub fn blamed<'a>(complaint: &str, fields: &'a [Field]) -> Option<&'a str> {
             complaint.contains(&format!("'--{l}")) || complaint.contains(&format!("--{l} "))
         })
         .max_by_key(|l| l.len())
+}
+
+/// The long names of the data steps' flags (`--from`, `--multiome`, quality
+/// control, highly variable features, the collapse into pseudobulks): the same
+/// in every method that loads counts, so a method's page lists them after its
+/// own.
+fn data_flags() -> std::collections::HashSet<String> {
+    use clap::Args;
+    let mut c = Command::new("data");
+    c = crate::refine_weighting::CollapseArgs::augment_args(c);
+    c = crate::refine_weighting::PbFromArgs::augment_args(c);
+    c = crate::hvg::HvgCliArgs::augment_args(c);
+    c = senna::embed_common::QcArgs::augment_args(c);
+    c.get_arguments()
+        .filter_map(|a| a.get_long().map(str::to_string))
+        .chain(["from", "multiome", "preload-data", "block-size"].map(String::from))
+        .collect()
 }
 
 #[cfg(test)]

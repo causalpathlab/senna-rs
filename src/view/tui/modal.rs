@@ -64,14 +64,19 @@ impl App {
             Some(Modal::DataFile(..)) => self.data_file_key(k),
             Some(Modal::ExtraFile(_)) => self.extra_file_key(k),
             Some(Modal::Recompute(..)) => self.recompute_key(k),
+            // Submit on enter, S or ctrl+r; esc or q backs out; other keys
+            // do nothing, so a stray one neither submits nor cancels.
             Some(Modal::Submit(_)) => {
-                self.modal = None;
                 if crate::tui::is_run_key(&k)
                     || matches!(k.code, KeyCode::Char('S') | KeyCode::Enter)
                 {
+                    self.modal = None;
                     self.send_draft(Mode::Next);
-                } else {
+                } else if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) {
+                    self.modal = None;
                     self.message = Some("not submitted · the draft is kept".into());
+                } else {
+                    return false;
                 }
                 true
             }

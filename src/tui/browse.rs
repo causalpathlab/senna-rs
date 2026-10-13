@@ -432,7 +432,8 @@ impl<W: Wanted> Browser<W> {
                 Some(Entry::File(..)) if k.code == KeyCode::Enter => return self.take_here(),
                 Some(Entry::File(..)) => return Outcome::Ignored,
             },
-            KeyCode::Char(c) => {
+            // Typing narrows the list; control keys type nothing.
+            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                 let on = self.current().map(|e| e.name().to_string());
                 self.filter.push(c);
                 self.follow();
@@ -453,7 +454,7 @@ impl<W: Wanted> Browser<W> {
     }
 
     /// Space marks or unmarks the file under the cursor and moves on;
-    /// ctrl-a marks every file shown; enter on a file takes the marked
+    /// ctrl+a marks every file shown; enter on a file takes the marked
     /// ones, or this one when none is. On a folder enter still opens it, so
     /// files marked here and there can be taken together.
     fn mark_key(&mut self, k: KeyEvent) -> Option<Outcome> {
@@ -558,7 +559,7 @@ impl<W: Wanted> Browser<W> {
                 foot.push(Line::from(format!(" {} marked", self.marked.len())));
             }
             foot.push(Line::from(Span::styled(
-                " space mark   ctrl-a mark all shown   enter take marked (or the one here)",
+                " space mark   ctrl+a mark all shown   enter take marked (or the one here)",
                 hint(),
             )));
         }

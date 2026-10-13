@@ -174,7 +174,11 @@ struct App {
     base: Option<(Viewport, Frame)>,
     proto: Option<Protocol>,
     message: Option<String>,
+    /// The `?` page: up, how far it is scrolled, and its furthest scroll as
+    /// last drawn.
     help: bool,
+    help_scroll: usize,
+    help_max: std::cell::Cell<usize>,
     drag: Option<Drag>,
     /// What is being typed in the status line, if anything.
     modal: Option<Modal>,
@@ -261,6 +265,8 @@ impl App {
             proto: None,
             message: newer,
             help: false,
+            help_scroll: 0,
+            help_max: std::cell::Cell::new(0),
             drag: None,
             names: None,
             menu: None,
@@ -428,7 +434,7 @@ impl App {
     /// Map and sidebar areas and the viewport for the current terminal size.
     fn layout(&mut self, area: Rect) {
         let body = Rect {
-            height: area.height.saturating_sub(STATUS_LINES),
+            height: area.height.saturating_sub(Self::status_lines(area.width)),
             ..area
         };
         // The sidebar takes its columns from the map rather than covering it.

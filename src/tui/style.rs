@@ -56,30 +56,50 @@ pub(crate) enum At {
 }
 
 /// A bordered popup of `lines` over `area`, at most `max_w` columns wide
-/// and as tall as its lines.
+/// and as tall as its lines once wrapped. When they do not fit, the last
+/// line (a popup's keys) keeps the bottom row, so it is never cut off.
 pub(crate) fn popup(
     f: &mut ratatui::Frame,
     area: Rect,
-    lines: Vec<Line<'_>>,
+    mut lines: Vec<Line<'_>>,
     max_w: u16,
     at: At,
     border: [u8; 3],
 ) {
     let w = max_w.min(area.width);
-    let h = (lines.len() as u16 + 2).min(area.height);
+    let inner = usize::from(w.saturating_sub(2)).max(1);
+    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(inner)).sum();
+    let h = (rows.min(usize::from(u16::MAX)) as u16)
+        .saturating_add(2)
+        .min(area.height);
     let y = match at {
         At::Top => area.y + 1.min(area.height - h),
         At::Middle => area.y + (area.height - h) / 2,
     };
     let r = Rect::new(area.x + (area.width - w) / 2, y, w, h);
     f.render_widget(Clear, r);
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(Block::bordered().border_style(Style::default().fg(rgb(border))))
-            .style(page()),
-        r,
-    );
+    let block = Block::bordered()
+        .border_style(Style::default().fg(rgb(border)))
+        .style(page());
+    let body = block.inner(r);
+    f.render_widget(block, r);
+    let wrap = ratatui::widgets::Wrap { trim: false };
+    if rows > usize::from(body.height) && lines.len() > 1 && body.height > 1 {
+        let last = lines.pop().unwrap_or_default();
+        let top = Rect {
+            height: body.height - 1,
+            ..body
+        };
+        let bottom = Rect {
+            y: body.y + body.height - 1,
+            height: 1,
+            ..body
+        };
+        f.render_widget(Paragraph::new(lines).wrap(wrap), top);
+        f.render_widget(Paragraph::new(last), bottom);
+    } else {
+        f.render_widget(Paragraph::new(lines).wrap(wrap), body);
+    }
 }
 
 /// A one-line notice at the top of `area`: lupin answered, a file saved.

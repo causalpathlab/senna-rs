@@ -895,11 +895,13 @@ enum Commands {
                       \n\
                       Pick the data files and the batch labels of each, queue one or\n\
                       more of topic, masked-topic, masked-vae, masked-sbp, vae, svd,\n\
-                      bge, simba and gem, and change their flags. Every flag a method\n\
-                      has is listed with its help; hidden ones under `a`.\n\
+                      bge, simba, gem, rbm and td-rbm, and change their flags. Every\n\
+                      flag a method has is listed with its help, its own flags first;\n\
+                      hidden ones under `a`. Flags the queued fits share are set\n\
+                      together on the shared page. `?` lists every key.\n\
                       \n\
-                      `G` shows the exact commands, checked as senna would parse them,\n\
-                      and runs them in turn with their log on screen.\n\
+                      ctrl+r shows the exact commands, checked as senna would parse\n\
+                      them, and runs them in turn with their log on screen.\n\
                       Each is saved first as `{out}.cmd.sh`: run it again with\n\
                       `bash {out}.cmd.sh`. The script refuses to run over an existing\n\
                       `{out}.senna.json`, and senna run never writes over a script.\n\

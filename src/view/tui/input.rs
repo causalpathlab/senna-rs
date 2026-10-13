@@ -7,6 +7,11 @@ impl App {
     /// A key press. Returns whether anything on screen may have changed
     /// (a cleared message counts).
     pub(super) fn key(&mut self, k: KeyEvent) -> bool {
+        // ctrl+c quits from anywhere, a text field included.
+        if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+            self.quit = true;
+            return true;
+        }
         if self.modal.is_some() {
             return self.modal_key(k);
         }
@@ -24,7 +29,14 @@ impl App {
         }
         self.message = None;
         if self.help {
-            self.help = false;
+            // The page scrolls; esc, q or ? closes it, other keys do nothing.
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q' | '?') => self.help = false,
+                _ => match crate::tui::list_move(&k, self.help_scroll, self.help_max.get() + 1) {
+                    Some(at) => self.help_scroll = at,
+                    None => return false,
+                },
+            }
             return true;
         }
         if self.scene.chart.is_some() {
@@ -79,7 +91,10 @@ impl App {
                     self.modal = Some(Modal::Search(String::new(), Vec::new(), 0));
                 }
             }
-            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('?') => {
+                self.help = true;
+                self.help_scroll = 0;
+            }
             KeyCode::Tab => self.step_view(1),
             KeyCode::BackTab => self.step_view(-1),
             KeyCode::Char('m') => self.step_method(1, false),
@@ -87,9 +102,10 @@ impl App {
             KeyCode::Char('y') => self.change(Scene::toggle_time),
             KeyCode::Char('u') => self.change_source(Scene::cycle_stat),
             KeyCode::Char('O') => self.ask_extra(),
-            KeyCode::Char('{' | '}') => {
+            // `{ }` step between views; the streamlines' density has its own.
+            KeyCode::Char('(' | ')') => {
                 self.scene
-                    .change_stream_density(k.code == KeyCode::Char('}'));
+                    .change_stream_density(k.code == KeyCode::Char(')'));
                 self.redecorate();
             }
             KeyCode::Char('v') => {
@@ -190,14 +206,8 @@ impl App {
                 let d = list_step(code).unwrap_or_default();
                 *at = (*at as i64 + d).clamp(0, last as i64) as usize;
             }
-            KeyCode::Backspace => {
-                query.pop();
-                self.research();
-            }
-            KeyCode::Char(c) => {
-                query.push(c);
-                self.research();
-            }
+            // Type, backspace, ctrl+u clears; other control keys type nothing.
+            _ if crate::tui::edit_line(query, &k) => self.research(),
             _ => return false,
         }
         true
@@ -273,6 +283,15 @@ impl App {
 
     /// A mouse event. Returns whether anything changed.
     pub(super) fn mouse(&mut self, m: MouseEvent) -> bool {
+        // Over the `?` page the wheel scrolls it.
+        if self.help {
+            let step = match m.kind {
+                MouseEventKind::ScrollUp => KeyCode::Up,
+                MouseEventKind::ScrollDown => KeyCode::Down,
+                _ => return false,
+            };
+            return self.key(KeyEvent::from(step));
+        }
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
             if self.panel_click(m.column, m.row) || self.pane_click(m.column, m.row) {
                 return true;
@@ -666,6 +685,37 @@ mod tests {
         }
         assert_eq!(a.scene.space, space);
         assert!(a.zooming.is_none());
+    }
+
+    #[test]
+    fn the_help_page_scrolls_and_closes_only_on_esc_q_or_question_mark() {
+        let mut a = app();
+        press(&mut a, '?');
+        assert!(a.help);
+        a.help_max.set(5);
+        press(&mut a, 'j');
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(a.help_scroll, 2);
+        // A key of the map does nothing while the page is up.
+        let colour = a.scene.colour;
+        press(&mut a, 'c');
+        assert!(a.help && a.scene.colour == colour);
+        press(&mut a, 'q');
+        assert!(!a.help && !a.quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_and_control_keys_type_nothing_in_search() {
+        let mut a = app();
+        a.modal = Some(Modal::Search(String::new(), Vec::new(), 0));
+        press(&mut a, 'g');
+        a.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        match &a.modal {
+            Some(Modal::Search(query, ..)) => assert_eq!(query, "g"),
+            _ => panic!("search closed"),
+        }
+        a.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(a.quit);
     }
 
     #[test]
