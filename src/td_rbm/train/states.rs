@@ -3,6 +3,7 @@
 //! Gibbs chains ([`Chains`]); every parameter is fitted with the states.
 
 use super::{adam, pass_reads, Level, TrainConfig};
+use crate::logging::new_progress_bar;
 use crate::td_rbm::curve::Spline;
 use crate::td_rbm::model::Energy;
 use crate::td_rbm::rbm::{free_energy, Chains, Reads};
@@ -40,7 +41,9 @@ pub(super) fn fit_states(
         .flat_map(|j| drawn[(j % p) * f..(j % p + 1) * f].to_vec())
         .collect();
     let mut chains = Chains::new(x0, f, dev, cfg.seed.wrapping_add(1))?;
+    let bar = new_progress_bar((cfg.epochs - cfg.time_epochs) as u64).with_message("td-rbm states");
     for epoch in cfg.time_epochs..cfg.epochs {
+        bar.inc(1);
         let (mut gap, mut steps) = (0f64, 0usize);
         for lv in levels {
             let rows = lv.cells.len();
@@ -78,5 +81,6 @@ pub(super) fn fit_states(
             );
         }
     }
+    bar.finish_and_clear();
     Ok(())
 }

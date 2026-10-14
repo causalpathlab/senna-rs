@@ -27,6 +27,7 @@ mod states;
 pub use direction::Direction;
 pub use roots::RootCall;
 
+use crate::logging::new_progress_bar;
 use crate::rbm_core::adam;
 use crate::td_rbm::curve::{grid_times, Spline};
 use crate::td_rbm::model::{Energy, Init0, Shape, Tables, EMPTY};
@@ -181,7 +182,9 @@ impl Model {
             state: Vec::with_capacity(n),
             velocity: Vec::with_capacity(n),
         };
+        let bar = new_progress_bar(n.div_ceil(BLOCK) as u64).with_message("td-rbm cells");
         for start in (0..n).step_by(BLOCK) {
+            bar.inc(1);
             let w = BLOCK.min(n - start);
             let mut rows = x[start * f..(start + w) * f].to_vec();
             for row in rows.chunks_mut(f) {
@@ -212,6 +215,7 @@ impl Model {
                 out.p_lineage.push(pl);
             }
         }
+        bar.finish_and_clear();
         Ok(out)
     }
 }

@@ -26,7 +26,6 @@ pub mod args;
 pub mod counts;
 pub mod curve;
 pub mod init;
-pub mod levels;
 pub mod model;
 pub mod rbm;
 pub mod run;

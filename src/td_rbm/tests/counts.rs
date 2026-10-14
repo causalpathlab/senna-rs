@@ -1,5 +1,24 @@
 use super::*;
-use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
+use data_beans::sparse_io::{
+    create_sparse_from_dmatrix, open_sparse_matrix_by_path, SparseIoBackend,
+};
+use data_beans::sparse_io_vector::RowAlignment;
+
+/// The backends at `paths` as td-rbm's loader reads them: every file's
+/// cells in turn, tagged `@{file}` when there are several, on the rows
+/// every file has.
+fn open_tracks(paths: &[Box<str>]) -> SparseIoVec {
+    let mut data = SparseIoVec::new()
+        .with_row_alignment(RowAlignment::Intersect)
+        .unwrap();
+    for path in paths {
+        let name =
+            (paths.len() > 1).then(|| legume_numeric::matrix::common_io::basename(path).unwrap());
+        let backend = open_sparse_matrix_by_path(path).unwrap();
+        data.push(std::sync::Arc::from(backend), name).unwrap();
+    }
+    data
+}
 
 /// Rows: A spliced, B spliced, A unspliced, C unspliced (C has one track
 /// only); cells c1..c4.
@@ -37,7 +56,7 @@ fn sums_cells_into_every_levels_pseudobulks_on_both_tracks() {
     let path = backend(dir.path());
     // Coarse: every cell in one; fine: c3 alone, c1 + c2, c4 in none.
     let levels = vec![vec![Some(0); 4], vec![Some(1), Some(1), Some(0), None]];
-    let t = pb_tracks(&open_tracks(&[path.into()]).unwrap(), &levels).unwrap();
+    let t = pb_tracks(&open_tracks(&[path.into()]), &levels).unwrap();
     assert_eq!(
         t[1].genes,
         vec![Box::<str>::from("A")],
@@ -61,8 +80,10 @@ fn cell_blocks_read_each_cells_tracks_on_the_named_genes() {
     let path = backend(dir.path());
     let mut seen = Vec::new();
     for_cell_blocks(
-        &open_tracks(&[path.into()]).unwrap(),
+        &open_tracks(&[path.into()]),
         &[Box::from("A")],
+        // Blocks of three: the fourth cell starts a second.
+        3,
         |start, u, s| {
             assert_eq!((u.ncols(), s.ncols()), (1, 1));
             for c in 0..u.nrows() {
@@ -114,7 +135,7 @@ fn several_files_read_together_on_their_shared_genes() {
         backend(dir.path()).into(),
         second_backend(dir.path()).into(),
     ];
-    let data = open_tracks(&files).unwrap();
+    let data = open_tracks(&files);
     let cells = data.column_names().unwrap();
     assert_eq!(cells.len(), 6);
     assert!(
@@ -129,7 +150,7 @@ fn several_files_read_together_on_their_shared_genes() {
     assert_eq!(t[0].unspliced[(4, 0)], 1.0);
     assert_eq!(t[0].spliced[(3, 0)], 4.0);
     let mut seen = Vec::new();
-    for_cell_blocks(&data, &[Box::from("A")], |start, u, s| {
+    for_cell_blocks(&data, &[Box::from("A")], 4096, |start, u, s| {
         for c in 0..u.nrows() {
             seen.push((start + c, u[(c, 0)], s[(c, 0)]));
         }
@@ -137,11 +158,6 @@ fn several_files_read_together_on_their_shared_genes() {
     })
     .unwrap();
     assert_eq!(seen[4..], [(4, 1.0, 10.0), (5, 0.0, 20.0)]);
-    // The same name twice could not tell the cells apart.
-    let Err(e) = open_tracks(&[files[0].clone(), files[0].clone()]) else {
-        panic!("a name twice opened");
-    };
-    assert!(e.to_string().contains("two files are named"), "{e}");
 }
 
 #[test]

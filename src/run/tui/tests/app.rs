@@ -1,22 +1,9 @@
 use super::*;
 
 fn cli() -> clap::Command {
-    // A stand-in for senna's command: every embedding takes data files,
-    // --out and batch files, and one flag of its own; td-rbm files and
-    // --out only.
+    // A stand-in for senna's command: every fit takes data files, --out
+    // and batch files, and one flag of its own.
     let method = |name: &'static str| {
-        if name == TD_RBM {
-            return clap::Command::new(name)
-                .about("time")
-                .arg(clap::Arg::new("tracks").required(true).num_args(1..))
-                .arg(clap::Arg::new("out").long("out").required(true))
-                .arg(
-                    clap::Arg::new("grid")
-                        .long("grid")
-                        .default_value("32")
-                        .value_parser(clap::value_parser!(u64)),
-                );
-        }
         let c = clap::Command::new(name)
             .about("fit")
             .arg(
@@ -293,13 +280,6 @@ fn every_method_of_senna_parses_from_an_untouched_form() {
     for m in METHODS {
         let form = Method::new(&cli, m).unwrap();
         assert!(!form.fields.is_empty(), "{m} has no flags");
-        if m == TD_RBM {
-            // Two-track files, no batches.
-            assert!(!form.takes_batches());
-            let argv = form.argv(&["d1.zarr".into(), "d2.zarr".into()], &[], "o");
-            assert_eq!(form::check(&cli, &argv), Ok(()), "{m}: {argv:?}");
-            continue;
-        }
         assert!(form.takes_batches(), "{m} takes no batch files");
         let argv = form.argv(
             &["d1.zarr".into(), "d2.zarr".into()],

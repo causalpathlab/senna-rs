@@ -3,13 +3,11 @@
 //! of every level, the genes the kinetics are fitted on, and the cells' own
 //! reads block by block.
 
+use crate::logging::new_progress_bar;
 use data_beans::aux::feature_rows::split_count_row;
-use data_beans::sparse_io::open_sparse_matrix_by_path;
-use data_beans::sparse_io_vector::{RowAlignment, SparseIoVec};
-use legume_numeric::matrix::common_io::basename;
+use data_beans::sparse_io_vector::SparseIoVec;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Columns read per call.
 const COLUMNS_PER_READ: usize = 4096;
@@ -60,33 +58,13 @@ pub fn two_track_genes(rows: &[Box<str>]) -> usize {
     track_rows(rows).0.len()
 }
 
-/// The backends at `paths` as one: every file's cells in turn (each
-/// barcode tagged `@{file}` when there are several files), on the rows
-/// every file has.
-pub fn open_tracks(paths: &[Box<str>]) -> anyhow::Result<SparseIoVec> {
-    anyhow::ensure!(!paths.is_empty(), "no count backend given");
-    let names: Vec<Box<str>> = paths
-        .iter()
-        .map(|p| basename(p))
-        .collect::<anyhow::Result<_>>()?;
-    let mut seen = std::collections::HashSet::new();
-    if let Some(twice) = names.iter().find(|n| !seen.insert(*n)) {
-        anyhow::bail!("two files are named {twice}: a cell's tag would not say which");
-    }
-    let mut data = SparseIoVec::new().with_row_alignment(RowAlignment::Intersect)?;
-    for (path, name) in paths.iter().zip(names) {
-        let name = (paths.len() > 1).then_some(name);
-        data.push(Arc::from(open_sparse_matrix_by_path(path)?), name)?;
-    }
-    Ok(data)
-}
-
 /// The cells of `data` one block of columns at a time: `f(first column,
 /// unspliced, spliced)` with each block's `[B × G]` reads on the genes
 /// named `genes`, in that order.
 pub fn for_cell_blocks(
     data: &SparseIoVec,
     genes: &[Box<str>],
+    block: usize,
     mut f: impl FnMut(usize, DMatrix<f32>, DMatrix<f32>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let rows = data.row_names()?;
@@ -102,19 +80,20 @@ pub fn for_cell_blocks(
         .map(|r| r.and_then(|(j, u)| column.get(all[j]).map(|&c| (c, u))))
         .collect();
     let n = data.num_columns();
-    for start in (0..n).step_by(COLUMNS_PER_READ) {
-        let end = (start + COLUMNS_PER_READ).min(n);
+    let bar = new_progress_bar(n.div_ceil(block.max(1)) as u64).with_message("reading cells");
+    for start in (0..n).step_by(block.max(1)) {
+        bar.inc(1);
+        let end = (start + block).min(n);
         let mut unspliced = DMatrix::<f32>::zeros(end - start, genes.len());
         let mut spliced = DMatrix::<f32>::zeros(end - start, genes.len());
-        data.for_each_triplet(start..end, COLUMNS_PER_READ, |row, col, v| {
-            match role[row as usize] {
-                Some((c, true)) => unspliced[(col as usize, c)] += v,
-                Some((c, false)) => spliced[(col as usize, c)] += v,
-                None => {}
-            }
+        data.for_each_triplet(start..end, block, |row, col, v| match role[row as usize] {
+            Some((c, true)) => unspliced[(col as usize, c)] += v,
+            Some((c, false)) => spliced[(col as usize, c)] += v,
+            None => {}
         })?;
         f(start, unspliced, spliced)?;
     }
+    bar.finish_and_clear();
     Ok(())
 }
 
@@ -151,7 +130,9 @@ pub fn pb_tracks(
             }
         })
         .collect();
+    let bar = new_progress_bar(n.div_ceil(COLUMNS_PER_READ) as u64).with_message("pseudobulks");
     for start in (0..n).step_by(COLUMNS_PER_READ) {
+        bar.inc(1);
         let end = (start + COLUMNS_PER_READ).min(n);
         data.for_each_triplet(start..end, COLUMNS_PER_READ, |row, col, v| {
             let Some((j, u)) = role[row as usize] else {
@@ -165,6 +146,7 @@ pub fn pb_tracks(
             }
         })?;
     }
+    bar.finish_and_clear();
     Ok(out)
 }
 

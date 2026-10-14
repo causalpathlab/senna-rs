@@ -3,31 +3,45 @@
 use senna::embed_common::*;
 
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub struct TdRbmArgs {
     #[arg(
-        required = true,
-        num_args = 1..,
-        help = "Count backends with {gene}/count/spliced and {gene}/count/unspliced rows",
+        value_delimiter = ',',
+        help = "Two-track count backends (optional when --from is given)",
         long_help = "Count backends whose rows are `{gene}/count/spliced` and\n\
-                     `{gene}/count/unspliced` (as `faba count` writes). Their cells are\n\
-                     read together, on the genes every file has, and grouped into\n\
-                     multilevel pseudobulks (every file a batch); the machine is\n\
-                     fitted on samples of them and then reads every cell. With\n\
-                     several files, every barcode is tagged `@{file}`."
+                     `{gene}/count/unspliced` (as `faba count` writes); optional when\n\
+                     --from is given. Several files are read together on the genes\n\
+                     they share, every file a batch unless --batch-files says\n\
+                     otherwise. Their cells are grouped into multilevel pseudobulks;\n\
+                     the machine is fitted on samples of them and then reads every\n\
+                     cell."
     )]
-    #[serde(deserialize_with = "one_or_many")]
-    pub tracks: Vec<Box<str>>,
-
-    #[arg(short, long, help = "Output prefix")]
-    pub out: Box<str>,
+    #[serde(alias = "tracks", deserialize_with = "one_or_many")]
+    pub(crate) data_files: Vec<Box<str>>,
 
     #[arg(
         long,
-        default_value_t = 3,
-        value_parser = clap::value_parser!(u64).range(1..),
-        help = "Pseudobulk levels of the collapse, read coarse to fine every epoch"
+        help = "Chain data, batch and cell→pb partition from a prior run"
     )]
-    pub levels: u64,
+    pub(crate) from: Option<Box<str>>,
+
+    #[arg(short, long, required = true, help = "Output prefix")]
+    pub(crate) out: Box<str>,
+
+    #[arg(
+        long,
+        short,
+        value_delimiter(','),
+        help = "Batch membership files, one per data file"
+    )]
+    pub(crate) batch_files: Option<Vec<Box<str>>>,
+
+    #[command(flatten)]
+    pub(crate) collapse: crate::refine_weighting::CollapseArgs,
+
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) pb_from: crate::refine_weighting::PbFromArgs,
 
     #[arg(long, default_value_t = 2000, help = "Most variable genes fitted")]
     pub max_genes: usize,
@@ -110,7 +124,12 @@ pub struct TdRbmArgs {
     #[arg(long, default_value_t = 16, help = "Width of the gene embedding")]
     pub embedding_dim: usize,
 
-    #[arg(long, default_value_t = 80, help = "Epochs over every level")]
+    #[arg(
+        long,
+        short = 'i',
+        default_value_t = 80,
+        help = "Epochs over every level"
+    )]
     pub epochs: usize,
 
     #[arg(
@@ -120,8 +139,14 @@ pub struct TdRbmArgs {
     )]
     pub time_epochs: usize,
 
-    #[arg(long, default_value_t = 128, help = "Pseudobulk samples per minibatch")]
-    pub batch: usize,
+    #[arg(
+        long,
+        default_value_t = 128,
+        alias = "batch",
+        help = "Pseudobulk samples per minibatch"
+    )]
+    #[serde(alias = "batch")]
+    pub minibatch_size: usize,
 
     #[arg(
         long,
@@ -130,11 +155,23 @@ pub struct TdRbmArgs {
     )]
     pub chains: usize,
 
-    #[arg(long, default_value_t = 1, help = "Gibbs sweeps per step")]
-    pub sweeps: usize,
+    #[arg(
+        long,
+        default_value_t = 1,
+        alias = "sweeps",
+        help = "Gibbs sweeps per training step"
+    )]
+    #[serde(alias = "sweeps")]
+    pub gibbs_sweeps: usize,
 
-    #[arg(long, default_value_t = 1e-2, help = "Learning rate")]
-    pub lr: f64,
+    #[arg(
+        long,
+        default_value_t = 1e-2,
+        alias = "lr",
+        help = "Adam learning rate"
+    )]
+    #[serde(alias = "lr")]
+    pub learning_rate: f64,
 
     #[arg(
         long,
@@ -177,14 +214,36 @@ pub struct TdRbmArgs {
     )]
     pub steady_unspliced: Option<u64>,
 
-    #[arg(long, default_value_t = 1, help = "Seed of the chains and the start")]
+    #[arg(
+        long,
+        default_value_t = 1,
+        value_name = "N",
+        help = "Seed for every random choice the fit makes"
+    )]
     pub seed: u64,
 
     #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
     pub device: ComputeDevice,
 
-    #[arg(long, default_value_t = 0, help = "Device number")]
+    #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
     pub device_no: usize,
+
+    #[arg(long, default_value_t = 1024, help = "Cells per evaluation block")]
+    pub(crate) block_size: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Load all columns into memory before training",
+        hide = true
+    )]
+    pub(crate) preload_data: bool,
+
+    #[command(flatten)]
+    pub(crate) hvg: crate::hvg::HvgCliArgs,
+
+    #[command(flatten)]
+    pub(crate) qc: QcArgs,
 }
 
 /// A file list, or the one file a run recorded before td-rbm took several.

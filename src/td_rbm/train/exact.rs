@@ -2,6 +2,7 @@
 //! lineages drawn by collapsed Gibbs under a truncated Dirichlet process.
 
 use super::{adam, pass_reads, Level, TrainConfig};
+use crate::logging::new_progress_bar;
 use crate::td_rbm::curve::Spline;
 use crate::td_rbm::model::Energy;
 use crate::td_rbm::rbm::{lineage_log_likelihood, Reads};
@@ -68,7 +69,9 @@ impl Phase<'_> {
         let zero = vec![0f32; l];
         let pass_reads = pass_reads(self.levels, cfg.depth);
         let mut opt = adam(self.energy.vars(), cfg.lr)?;
+        let bar = new_progress_bar(epochs as u64).with_message(format!("td-rbm {label}"));
         for epoch in 0..epochs {
+            bar.inc(1);
             let (mut nll, mut reads) = (0f64, 0f64);
             let drawn: Vec<Reads> = self
                 .levels
@@ -137,6 +140,7 @@ impl Phase<'_> {
                 );
             }
         }
+        bar.finish_and_clear();
         Ok(())
     }
 }

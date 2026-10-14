@@ -1820,15 +1820,12 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         | RunKind::JointTopic
         | RunKind::Vae
         | RunKind::Simba
-        | RunKind::Rbm => {}
+        | RunKind::Rbm
+        | RunKind::TdRbm => {}
         RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
              use a bge / fne / topic-family run as the source",
             m.kind
-        ),
-        RunKind::TdRbm => anyhow::bail!(
-            "--from: a td-rbm run fits two-track counts and is not a source to inherit; \
-             use a bge / fne / topic-family run"
         ),
     }
     let to_box = |s: &str| -> Box<str> { resolve(&dir, s).to_string_lossy().into_owned().into() };
