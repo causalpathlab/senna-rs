@@ -45,6 +45,16 @@ pub struct BgeArgs {
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
+    #[arg(
+        long,
+        help = "Chain data, batch and cell→pb partition from a prior run"
+    )]
+    pub(crate) from: Option<Box<str>>,
+
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) pb_from: crate::refine_weighting::PbFromArgs,
+
     /// The parent's carried pseudobulks, when `senna update` chose to reuse
     /// them instead of re-reading its cells. Derived per invocation, so it is
     /// neither a CLI flag nor part of the recorded configuration.

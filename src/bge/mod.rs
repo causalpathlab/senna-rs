@@ -42,14 +42,38 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
          end — and their weights are applied by position. Pass --no-pb-reference for this \
          round and let it re-collapse."
     );
+    // `--from` chains the data, batches and partition of an earlier run;
+    // `--pb-from` collapses on another run's partition.
+    let inherited = args
+        .from
+        .as_deref()
+        .map(senna::run_manifest::inherit_from)
+        .transpose()?;
+    senna::run_manifest::InheritedFromManifest::ensure_replayable(inherited.as_ref(), "bge")?;
+    let given_files = if inherited.is_some() {
+        senna::run_manifest::InheritedFromManifest::resolve_data(
+            inherited.as_ref(),
+            &args.data_files,
+        )?
+    } else {
+        args.data_files.clone()
+    };
+    let given_batches = senna::run_manifest::InheritedFromManifest::resolve_batch(
+        inherited.as_ref(),
+        args.batch_files.as_deref(),
+    );
+    let partition = args.pb_from.partition(
+        inherited.as_ref(),
+        &crate::refine_weighting::partition_settings(args),
+    )?;
     // Multiome layout. `--multiome` declares it; otherwise it is read off the
     // inputs themselves — the feature axes say which files are the same assay,
     // and the barcode lists say which cells are the same cell. Both routes
     // land on one `MultiomePlan`, so nothing below has two shapes to handle.
     let multiome_plan = multiome::resolve_plan(
         &args.multiome,
-        &args.data_files,
-        args.batch_files.as_ref().map_or(0, Vec::len),
+        &given_files,
+        given_batches.as_ref().map_or(0, Vec::len),
         args.pb_reference.is_some(),
     )?;
     let is_multiome = multiome_plan.is_some();
@@ -76,13 +100,13 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         Some(p) => p.files.clone(),
         None => {
             anyhow::ensure!(
-                !args.data_files.is_empty(),
+                !given_files.is_empty(),
                 "no input files: pass the count matrices positionally. Modality \n\
                  groups are detected from the data; declare them by hand with \n\
                  `--multiome rna.zarr,atac.zarr [--multiome rna2.zarr,atac2.zarr ...]` \n\
                  when the feature axes overlap (spliced vs unspliced, say)."
             );
-            args.data_files.clone()
+            given_files.clone()
         }
     };
     let feature_suffix: Option<Vec<Box<str>>> = multiome_plan.as_ref().map(|p| p.modality.clone());
@@ -103,7 +127,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
 
     let batch_files = senna::senna_input::effective_batch_files(
         args.collapse.ignore_batch,
-        args.batch_files.as_deref(),
+        given_batches.as_deref(),
     );
 
     let mut unified = ge::load_unified_data(ge::LoadUnifiedArgs {
@@ -180,6 +204,12 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     let embedding_dim =
         crate::feature_preset::resolve_dim(args.embedding_dim, &mut preset_features, &mut carried)?;
 
+    // On another run's partition, bge trains on that run's cells (it
+    // trains on every cell otherwise, QC trimming only its outputs).
+    let partition = partition
+        .map(|(levels, names)| on_partition(&mut unified, levels, &names))
+        .transpose()?;
+
     driver::fit_embed_family(driver::EmbedPlan {
         knobs: args.knobs(embedding_dim),
         unified,
@@ -191,5 +221,46 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         pb_reference: args.pb_reference.as_ref(),
         init_from: args.init_from.as_deref(),
         train_args: senna::run_manifest::record_train_args(args)?,
+        partition,
     })
+}
+
+/// Keep only the cells of a given partition (`levels`, finest last, over
+/// cells `names`) and return it aligned to them, finest first as the
+/// engine takes it.
+fn on_partition(
+    unified: &mut ge::UnifiedData,
+    levels: Vec<Vec<usize>>,
+    names: &[Box<str>],
+) -> anyhow::Result<Vec<Vec<usize>>> {
+    let given: std::collections::HashSet<&str> = names.iter().map(AsRef::as_ref).collect();
+    let keep: Vec<bool> = unified
+        .barcodes
+        .iter()
+        .map(|b| given.contains(b.as_ref()))
+        .collect();
+    let kept = keep.iter().filter(|&&k| k).count();
+    anyhow::ensure!(
+        kept > 0,
+        "--pb-from: none of this run's cells is in that partition"
+    );
+    if kept < keep.len() {
+        info!(
+            "--pb-from: training on that partition's {kept} of {} cells",
+            keep.len()
+        );
+        let pick = |v: &[u32]| data_beans::qc_lib::filter_by_keep(v, &keep);
+        unified.batch_membership = pick(&unified.batch_membership);
+        unified.condition_membership = pick(&unified.condition_membership);
+        unified.cell_modality = pick(&unified.cell_modality);
+        unified.barcodes = data_beans::qc_lib::filter_by_keep(&unified.barcodes, &keep);
+        unified.count_backend_mut().mask_columns(&keep)?;
+    }
+    let mut aligned = senna::run_manifest::InheritedFromManifest::align_cell_to_pb_to_cells(
+        levels,
+        names,
+        &unified.barcodes,
+    )?;
+    aligned.reverse();
+    Ok(aligned)
 }

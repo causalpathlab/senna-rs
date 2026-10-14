@@ -1265,6 +1265,9 @@ impl App {
                             b.method
                         ));
                     }
+                    // bge collapses on a partition but keeps none of its own
+                    // for another fit.
+                    None if r.form.name == "bge" => {}
                     None => builders.push((
                         key,
                         Builder {

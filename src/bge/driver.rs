@@ -72,6 +72,9 @@ pub(crate) struct EmbedPlan<'a> {
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
     pub train_args: senna::run_manifest::TrainArgsRecord,
+    /// Another run's partition to collapse on, every level finest first
+    /// and indexed by `unified`'s cells; `None` builds one.
+    pub partition: Option<Vec<Vec<usize>>>,
 }
 
 /// Run the fit: multilevel pseudobulk collapse, phase-1/phase-2
@@ -84,6 +87,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // `unified`.
     let preset_features = plan.preset_features.take();
     let carried = plan.carried.take();
+    let partition = plan.partition.take();
     let build_config = move |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = plan.hvg_weights.as_ref().map(|w| {
             unified
@@ -107,6 +111,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             None => None,
         };
         Ok(ge::FitConfig {
+            partition,
             embedding_dim: knobs.embedding_dim,
             // Greedy batch correction against the carried reference, exactly
             // as in the other families — see `MultilevelParams::anchor_batches`.

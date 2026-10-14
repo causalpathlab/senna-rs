@@ -563,7 +563,7 @@ impl Activity {
         self.loads
             .extra
             .as_ref()
-            .ok_or("no extra data file is open (O opens one)")?
+            .ok_or("no extra data file is open (E opens one)")?
             .answer(self.patient)
     }
 
