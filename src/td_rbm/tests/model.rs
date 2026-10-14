@@ -139,6 +139,7 @@ fn states_never_touch_the_unspliced_share_nor_the_curves_span() {
             beta: 2.0,
             gamma: 1.0,
             given: None,
+            modules: None,
         },
         3,
         &Device::Cpu,
@@ -227,6 +228,7 @@ fn a_lineages_speed_scales_its_velocity_and_only_ratios_count() {
             beta: 2.0,
             gamma: 1.0,
             given: None,
+            modules: None,
         },
         3,
         &Device::Cpu,
@@ -283,6 +285,7 @@ fn mirroring_a_lineage_runs_its_curve_backwards_exactly() {
             beta: 2.0,
             gamma: 1.0,
             given: None,
+            modules: None,
         },
         3,
         &Device::Cpu,
@@ -357,6 +360,7 @@ fn a_given_tables_rows_are_held_as_its_mode_says() {
                     pinned,
                     lora_rank,
                 }),
+                modules: None,
             },
             3,
             &Device::Cpu,
@@ -392,4 +396,51 @@ fn a_given_tables_rows_are_held_as_its_mode_says() {
 
     let (_, after) = step(false, None);
     assert!(moved(&after[0], &given[0]), "an init row trains");
+}
+
+/// With gene modules a gene's row of ρ is its module's vector plus its
+/// residual, and the ridge is the residuals' mean square norm.
+#[test]
+fn modules_compose_rho_from_their_vectors_and_residuals() {
+    let shape = Shape {
+        genes: G,
+        embedding: H,
+        knots: 4,
+        states: 2,
+        lineages: 1,
+    };
+    let (base, curve) = (vec![0f32; G], vec![0.1f32; 4 * H]);
+    // Genes 0-2 in module 0, 3-5 in module 1; residuals 0 but on gene 4.
+    let labels = [0u32, 0, 0, 1, 1, 1];
+    let mu = vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0];
+    let mut residual = vec![0f32; G * H];
+    residual[4 * H..5 * H].copy_from_slice(&[0.5, 0.5, 0.5]);
+    let e = Energy::new(
+        shape,
+        &Init0 {
+            rho: &residual,
+            base: &base,
+            curve: &curve,
+            beta: 2.0,
+            gamma: 1.0,
+            given: None,
+            modules: Some(ModulesInit {
+                labels: &labels,
+                mu: &mu,
+            }),
+        },
+        3,
+        &Device::Cpu,
+    )
+    .unwrap();
+    let rho = e.rho().unwrap().to_vec2::<f32>().unwrap();
+    assert_eq!(rho[1], vec![1.0, 2.0, 3.0]);
+    assert_eq!(rho[4], vec![-0.5, -1.5, -2.5]);
+    let pen = e
+        .module_penalty()
+        .unwrap()
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    assert!((pen - 0.75 / G as f32).abs() < 1e-6, "{pen}");
 }

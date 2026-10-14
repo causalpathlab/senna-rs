@@ -113,7 +113,7 @@ pub(super) fn orient_all(
     // The model carries on with every gene's rates' posterior means under
     // the kept directions, averaged over the lineages by their pseudobulks.
     if let Some((sb, sg, sw)) = rate_sum {
-        energy.set_log_rates(&(sb / sw)?, &(sg / sw)?)?;
+        energy.set_log_rates(&(sb / sw)?, &(sg / sw)?, &cfg.root_genes)?;
     }
     Ok(out)
 }
@@ -173,17 +173,41 @@ pub(crate) fn bayes(
     let k = t.grid_len()?;
     let logits = rows.x.matmul(&t.psi.narrow(0, lin * k, k)?.t()?)?; // [P × K]
     let q = legume_numeric::candle::candle_nn::ops::softmax(&logits, D::Minus1)?;
-    let readout = energy.velocity_readout(spline, lin)?.detach(); // [K × G]
-    let soft = q.t()?.matmul(&rows.x)?.to_vec2::<f32>()?; // [K × F]
+    // Only the root genes are scored: they call the roots and directions,
+    // and their rates are read; every other gene keeps the rates the fit
+    // gives it (all genes enter only the machine's own fit). Their columns
+    // are cut out once, here.
+    let scored: Vec<usize> = (0..g)
+        .filter(|&j| cfg.root_genes.get(j).copied().unwrap_or(true))
+        .collect();
+    let gs = scored.len();
+    let cols: Vec<u32> = scored
+        .iter()
+        .map(|&j| j as u32)
+        .chain(scored.iter().map(|&j| (g + j) as u32))
+        .collect();
+    let genes_t = Tensor::from_vec(
+        scored.iter().map(|&j| j as u32).collect::<Vec<_>>(),
+        gs,
+        dev,
+    )?;
+    let x_s = rows
+        .x
+        .index_select(&Tensor::from_vec(cols, 2 * gs, dev)?, 1)?; // [P × 2T]
+    let readout = energy
+        .velocity_readout(spline, lin)?
+        .detach()
+        .index_select(&genes_t, 1)?; // [K × T]
+    let soft = q.t()?.matmul(&x_s)?.to_vec2::<f32>()?; // [K × 2T]
     let xv = readout.to_vec2::<f32>()?;
 
     let wake: Vec<(f64, f64)> = if wakefield {
-        (0..g)
+        (0..gs)
             .into_par_iter()
             .map(|j| {
                 let u: Vec<f64> = (0..k).map(|kk| f64::from(soft[kk][j])).collect();
                 let n: Vec<f64> = (0..k)
-                    .map(|kk| f64::from(soft[kk][j] + soft[kk][g + j]))
+                    .map(|kk| f64::from(soft[kk][j] + soft[kk][gs + j]))
                     .collect();
                 let xs: Vec<f64> = (0..k).map(|kk| f64::from(xv[kk][j])).collect();
                 wakefield_sign(&u, &n, &xs)
@@ -194,17 +218,17 @@ pub(crate) fn bayes(
     };
 
     // Every gene's overall log U/S and largest |x| place its grid.
-    let (mut tot_u, mut tot_s) = (vec![0f64; g], vec![0f64; g]);
+    let (mut tot_u, mut tot_s) = (vec![0f64; gs], vec![0f64; gs]);
     for row in &soft {
-        for j in 0..g {
+        for j in 0..gs {
             tot_u[j] += f64::from(row[j]);
-            tot_s[j] += f64::from(row[g + j]);
+            tot_s[j] += f64::from(row[gs + j]);
         }
     }
-    let rest: Vec<f32> = (0..g)
+    let rest: Vec<f32> = (0..gs)
         .map(|j| ((tot_u[j] + 0.5) / (tot_s[j] + 0.5)).ln() as f32)
         .collect();
-    let reach: Vec<f32> = (0..g)
+    let reach: Vec<f32> = (0..gs)
         .map(|j| {
             (0..k)
                 .map(|kk| xv[kk][j].abs())
@@ -213,10 +237,10 @@ pub(crate) fn bayes(
         })
         .collect();
     let unspliced_share = Tensor::from_vec(
-        (0..g)
+        (0..gs)
             .map(|j| (tot_u[j] / (tot_u[j] + tot_s[j]).max(1e-12)) as f32)
             .collect::<Vec<_>>(),
-        (1, g),
+        (1, gs),
         dev,
     )?;
 
@@ -232,8 +256,8 @@ pub(crate) fn bayes(
         for (r, row) in qv.iter().enumerate() {
             hot[r * k + crate::td_rbm::rbm::categorical(row, rng)] = 1.0;
         }
-        let pooled = Tensor::from_vec(hot, (p, k), dev)?.t()?.matmul(&rows.x)?; // [K × F]
-        let (u, s) = (pooled.narrow(1, 0, g)?, pooled.narrow(1, g, g)?);
+        let pooled = Tensor::from_vec(hot, (p, k), dev)?.t()?.matmul(&x_s)?; // [K × 2T]
+        let (u, s) = (pooled.narrow(1, 0, gs)?, pooled.narrow(1, gs, gs)?);
         let n = (&u + &s)?;
         let u0 = n.broadcast_mul(&unspliced_share)?;
         let s0 = (&n - &u0)?;
@@ -248,23 +272,40 @@ pub(crate) fn bayes(
         .collect::<Result<_>>()?;
     let (fwd, bwd) = evidence_host(&host, &xv, &rest, &reach);
     let share = 1.0 / draws as f64;
+    // Every gene's log rates as the fit has them; the scored genes' are
+    // their posterior means, summed over the draws below.
+    let now = |r: Tensor| -> Result<Vec<f64>> {
+        let mut v: Vec<f64> = r
+            .log()?
+            .flatten_all()?
+            .to_vec1::<f32>()?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        scored.iter().for_each(|&j| v[j] = 0.0);
+        Ok(v)
+    };
+    let mut z = vec![0.0; g];
+    for (&j, w) in scored.iter().zip(&wake) {
+        z[j] = w.0;
+    }
     let mut out = Bayes {
         lbf: Vec::with_capacity(draws),
         genes: vec![0.0; g],
-        rates: (vec![0.0; g], vec![0.0; g]),
-        z: wake.iter().map(|w| w.0).collect(),
+        rates: (now(energy.beta()?)?, now(energy.gamma()?)?),
+        z,
         log_abf: wake.iter().map(|w| w.1).sum(),
     };
-    for i in 0..draws {
-        let (data, null) = (2 * i, 2 * i + 1);
+    for d in 0..draws {
+        let (data, null) = (2 * d, 2 * d + 1);
         let mut total = 0f64;
-        for j in 0..g {
-            let v = (fwd[data].log_e[j] - bwd[data].log_e[j])
-                - (fwd[null].log_e[j] - bwd[null].log_e[j]);
+        for (i, &j) in scored.iter().enumerate() {
+            out.rates.0[j] += fwd[data].log_beta[i] * share;
+            out.rates.1[j] += fwd[data].log_gamma[i] * share;
+            let v = (fwd[data].log_e[i] - bwd[data].log_e[i])
+                - (fwd[null].log_e[i] - bwd[null].log_e[i]);
             out.genes[j] += v * share;
             total += v;
-            out.rates.0[j] += fwd[data].log_beta[j] * share;
-            out.rates.1[j] += fwd[data].log_gamma[j] * share;
         }
         out.lbf.push(total);
     }

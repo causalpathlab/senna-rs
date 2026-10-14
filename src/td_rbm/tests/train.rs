@@ -144,6 +144,7 @@ fn fit_sim_from(
             beta: BETA0,
             gamma: GAMMA0,
             given: None,
+            modules: None,
         },
         begin,
         &forest,
@@ -157,7 +158,13 @@ fn fit_sim_from(
     let all: Vec<usize> = (0..sim.n_cells).collect();
     let cells = features(sim, &all);
     let out = model
-        .summarise(&cells, f, cfg.depth as f32, &Device::Cpu)
+        .summarise(
+            &model.read_tables().unwrap(),
+            cells.clone(),
+            f,
+            cfg.depth as f32,
+            &Device::Cpu,
+        )
         .unwrap();
     (model, start, out)
 }
@@ -437,6 +444,7 @@ fn direction_called_only_with_splicing() {
             beta: 4.0,
             gamma: 1.0,
             given: None,
+            modules: None,
         },
         1,
         &dev,

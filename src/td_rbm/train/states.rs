@@ -2,7 +2,7 @@
 //! phase is the rows' free energy, the negative phase that of persistent
 //! Gibbs chains ([`Chains`]); every parameter is fitted with the states.
 
-use super::{adam, pass_reads, stopped, with_lora_ridge, Level, TrainConfig};
+use super::{adam, pass_reads, stopped, with_rho_ridges, Level, TrainConfig};
 use crate::logging::new_progress_bar;
 use crate::td_rbm::curve::Spline;
 use crate::td_rbm::model::Energy;
@@ -68,7 +68,7 @@ pub(super) fn fit_states(
                     - free_energy(&fantasy, &t)?.mean_all()?)?
                     / cfg.state_depth as f64)?;
                 let prior = (energy.roughness()? * (cfg.smooth / pass_reads))?;
-                let total = with_lora_ridge(&(&loss + prior)?, energy, cfg)?;
+                let total = with_rho_ridges(&(&loss + prior)?, energy, cfg)?;
                 opt.backward_step(&total)?;
                 gap += f64::from(loss.to_scalar::<f32>()?);
                 steps += 1;

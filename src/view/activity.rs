@@ -15,13 +15,14 @@
 //! mapped onto a colour ramp. Which model row each point is, is worked out
 //! once per view and cached, not per feature.
 
-use data_beans::sparse_io::COLUMN_SEP;
 use data_beans::utilities::name_matching::GeneIndex;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunManifest};
-use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
+use senna::senna_input::{
+    match_cells, read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch,
+};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1294,55 +1295,6 @@ pub(crate) fn read_extra(path: &Path, cells: &[Box<str>]) -> anyhow::Result<Extr
     })
 }
 
-/// The column of each of the run's `cells` among a file's `columns`: by
-/// name, as senna matches cells everywhere; when that finds fewer than nine
-/// in ten, by barcode with any `@` tag left off both sides (a run fitted on
-/// several files tags each cell with its file), whichever finds more. A
-/// barcode is used only where it names one cell on each side.
-pub(crate) fn match_cells<'a>(
-    cells: &'a [Box<str>],
-    columns: &'a [Box<str>],
-) -> HashMap<Box<str>, u32> {
-    let by_name: HashMap<&str, u32> = columns
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.as_ref(), i as u32))
-        .collect();
-    let exact: HashMap<Box<str>, u32> = cells
-        .iter()
-        .filter_map(|n| Some((n.clone(), *by_name.get(n.as_ref())?)))
-        .collect();
-    if exact.len() * 10 >= cells.len() * 9 {
-        return exact;
-    }
-    let bare = |n: &'a str| n.split(COLUMN_SEP).next().unwrap_or_default();
-    // A barcode's column, `None` once it names a second one.
-    let mut column: HashMap<&str, Option<u32>> = HashMap::default();
-    for (i, n) in columns.iter().enumerate() {
-        column
-            .entry(bare(n))
-            .and_modify(|c| *c = None)
-            .or_insert(Some(i as u32));
-    }
-    let mut seen: HashMap<&str, usize> = HashMap::default();
-    for n in cells {
-        *seen.entry(bare(n)).or_default() += 1;
-    }
-    let by_barcode: HashMap<Box<str>, u32> = cells
-        .iter()
-        .filter_map(|n| {
-            let b = bare(n);
-            (seen[b] == 1).then_some(())?;
-            Some((n.clone(), (*column.get(b)?)?))
-        })
-        .collect();
-    if by_barcode.len() > exact.len() {
-        by_barcode
-    } else {
-        exact
-    }
-}
-
 /// A data file the run was not fitted on, opened in the view: its counts
 /// with the run's cell names, and how many of the run's cells it has.
 pub(crate) struct ExtraRead {
@@ -1866,26 +1818,6 @@ mod tests {
     /// Names as boxed strings.
     fn boxed(names: &[&str]) -> Vec<Box<str>> {
         names.iter().map(|&n| n.into()).collect()
-    }
-
-    #[test]
-    fn cells_match_by_name_then_by_barcode_where_one_cell_has_it() {
-        // By name, when nine in ten match.
-        let m = match_cells(&boxed(&["a", "b"]), &boxed(&["b", "a", "z"]));
-        assert_eq!((m["a"], m["b"]), (1, 0));
-        // A run over several files tags its cells; the file does not.
-        let run = boxed(&["a@lib1", "b@lib1", "c@lib2", "c@lib1"]);
-        let m = match_cells(&run, &boxed(&["a", "b", "c"]));
-        assert_eq!((m["a@lib1"], m["b@lib1"]), (0, 1));
-        // `c` names two of the run's cells: neither is guessed.
-        assert_eq!(m.len(), 2);
-        // The other way round: the file tags, the run does not; a barcode
-        // twice in the file is not used either.
-        let m = match_cells(&boxed(&["a", "b"]), &boxed(&["a@x", "b@x", "b@y"]));
-        assert_eq!(m.len(), 1);
-        assert_eq!(m["a"], 0);
-        // Nothing in common.
-        assert!(match_cells(&boxed(&["a"]), &boxed(&["q"])).is_empty());
     }
 
     /// A backend at `path`: genes `GENE1..3`, cells `columns`; cell `i`

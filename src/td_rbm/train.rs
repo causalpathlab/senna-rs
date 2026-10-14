@@ -27,7 +27,6 @@ mod states;
 pub use direction::Direction;
 pub use roots::RootCall;
 
-use crate::logging::new_progress_bar;
 use crate::rbm_core::adam;
 use crate::td_rbm::curve::{grid_times, Spline};
 use crate::td_rbm::model::{Energy, Init0, Shape, Tables, EMPTY};
@@ -89,6 +88,12 @@ pub struct TrainConfig {
     /// `lr`, and its ridge per held row.
     pub lora_lr_ratio: f64,
     pub lora_ridge: f64,
+    /// The ridge on every gene's residual from its module (with modules).
+    pub module_ridge: f64,
+    /// `[G]` the genes whose splicing evidence calls the roots and
+    /// directions (the most variable), and whose rates that evidence sets;
+    /// an empty list means every gene.
+    pub root_genes: Vec<bool>,
 }
 
 impl Default for TrainConfig {
@@ -116,6 +121,8 @@ impl Default for TrainConfig {
             seed: 1,
             lora_lr_ratio: 1.0,
             lora_ridge: 0.0,
+            module_ridge: 0.0,
+            root_genes: Vec::new(),
         }
     }
 }
@@ -149,6 +156,7 @@ pub struct Model {
 }
 
 /// Every row's lineage, time, its spread, state and velocity.
+#[derive(Default)]
 pub struct Summary {
     /// The likeliest lineage, and the posterior over lineages `[N × L]`.
     pub lineage: Vec<usize>,
@@ -165,6 +173,19 @@ pub struct Summary {
     pub position: Vec<Vec<f32>>,
 }
 
+impl Summary {
+    /// `other`'s rows after these.
+    pub fn extend(&mut self, other: Summary) {
+        self.lineage.extend(other.lineage);
+        self.p_lineage.extend(other.p_lineage);
+        self.tau.extend(other.tau);
+        self.tau_sd.extend(other.tau_sd);
+        self.state.extend(other.state);
+        self.velocity.extend(other.velocity);
+        self.position.extend(other.position);
+    }
+}
+
 /// Rows read at a time at the end.
 const BLOCK: usize = 4096;
 
@@ -174,13 +195,25 @@ impl Model {
         self.energy.tables(&self.spline, states, &self.log_weight)
     }
 
-    /// Every row of `x` (`[N × F]` counts on the host), read under the
-    /// fitted machine a block at a time. A row deeper than `depth` (the
-    /// training depth) is read as if scaled down to it, as the machine's
-    /// samples were; a shallower one at its own depth, never inflated, so its
-    /// posteriors stay as wide as its reads allow.
-    pub fn summarise(&self, x: &[f32], f: usize, depth: f32, dev: &Device) -> Result<Summary> {
-        let t = self.tables(true)?.detach();
+    /// The tables the cells are read at ([`Self::summarise`]), built once.
+    pub fn read_tables(&self) -> Result<Tables> {
+        Ok(self.tables(true)?.detach())
+    }
+
+    /// Every row of `x` (`[N × F]` counts on the host, taken to be scaled
+    /// in place), read under the fitted machine's tables `t`
+    /// ([`Self::read_tables`]) a block at a time. A row deeper than `depth`
+    /// (the training depth) is read as if scaled down to it, as the
+    /// machine's samples were; a shallower one at its own depth, never
+    /// inflated, so its posteriors stay as wide as its reads allow.
+    pub fn summarise(
+        &self,
+        t: &Tables,
+        mut x: Vec<f32>,
+        f: usize,
+        depth: f32,
+        dev: &Device,
+    ) -> Result<Summary> {
         let (l, k) = (t.lineages, t.grid_len()?);
         let n = x.len() / f;
         let times = grid_times(k);
@@ -193,19 +226,17 @@ impl Model {
             velocity: Vec::with_capacity(n),
             position: Vec::with_capacity(n),
         };
-        let bar = new_progress_bar(n.div_ceil(BLOCK) as u64).with_message("td-rbm cells");
         for start in (0..n).step_by(BLOCK) {
-            bar.inc(1);
             let w = BLOCK.min(n - start);
-            let mut rows = x[start * f..(start + w) * f].to_vec();
+            let rows = &mut x[start * f..(start + w) * f];
             for row in rows.chunks_mut(f) {
                 let own: f32 = row.iter().sum();
                 if own > depth {
                     row.iter_mut().for_each(|v| *v *= depth / own);
                 }
             }
-            let block = Reads::from_features(Tensor::from_vec(rows, (w, f), dev)?)?;
-            let (p, state) = posterior(&block, &t)?;
+            let block = Reads::from_features(Tensor::from_slice(rows, (w, f), dev)?)?;
+            let (p, state) = posterior(&block, t)?;
             out.velocity
                 .extend(p.matmul(&t.velocity)?.to_vec2::<f32>()?);
             out.position.extend(p.matmul(&t.curve)?.to_vec2::<f32>()?);
@@ -227,7 +258,6 @@ impl Model {
                 out.p_lineage.push(pl);
             }
         }
-        bar.finish_and_clear();
         Ok(out)
     }
 }
@@ -269,12 +299,17 @@ fn lora_adam(energy: &Energy, cfg: &TrainConfig) -> Result<Option<AdamW>> {
         .transpose()
 }
 
-/// `loss` with a given table's LoRA ridge added.
-fn with_lora_ridge(loss: &Tensor, energy: &Energy, cfg: &TrainConfig) -> Result<Tensor> {
-    match energy.lora_penalty()? {
-        Some(pen) => loss + (pen * cfg.lora_ridge)?,
-        None => Ok(loss.clone()),
+/// `loss` with the ridges on `ρ` added: a given table's LoRA residual's, or
+/// the genes' residuals from their modules.
+fn with_rho_ridges(loss: &Tensor, energy: &Energy, cfg: &TrainConfig) -> Result<Tensor> {
+    let mut loss = loss.clone();
+    if let Some(pen) = energy.lora_penalty()? {
+        loss = (loss + (pen * cfg.lora_ridge)?)?;
     }
+    if let Some(pen) = energy.module_penalty()? {
+        loss = (loss + (pen * cfg.module_ridge)?)?;
+    }
+    Ok(loss)
 }
 
 /// Fit the machine on pseudobulks of every level (`levels`, coarse to fine),

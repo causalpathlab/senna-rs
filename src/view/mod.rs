@@ -1,7 +1,6 @@
 //! `senna view`: a run's layouts, coloured by its groupings, in the terminal.
 
 mod activity;
-pub(crate) use activity::match_cells;
 mod chart;
 mod color;
 mod data;
