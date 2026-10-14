@@ -12,7 +12,9 @@ pub struct TdRbmArgs {
                      `{gene}/count/unspliced` (as `faba count` writes); optional when\n\
                      --from is given. Several files are read together on the genes\n\
                      they share, every file a batch unless --batch-files says\n\
-                     otherwise. Their cells are grouped into multilevel pseudobulks;\n\
+                     otherwise (--ignore-batch when they are one tissue with no batch\n\
+                     effect: the cross-batch collapse makes fewer, coarser pseudobulks).\n\
+                     Their cells are grouped into multilevel pseudobulks;\n\
                      the machine is fitted on samples of them and then reads every\n\
                      cell."
     )]
@@ -81,7 +83,7 @@ pub struct TdRbmArgs {
         help = "Cells (one barcode a line) where time starts: their cluster roots its tree, instead of the splicing choosing",
         long_help = "Cells (one barcode a line) where time starts. The cluster holding\n\
                      most of them is its tree's root; the other trees' roots are chosen\n\
-                     from the splicing. A barcode matches with or without its `@` tags."
+                     from the splicing. A barcode matches without its `@` tags when it names one cell."
     )]
     pub root: Option<String>,
 

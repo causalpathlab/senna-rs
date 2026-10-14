@@ -1,11 +1,11 @@
-//! `senna td-rbm`: read two-track count backends, collapse its cells into
+//! `senna td-rbm`: read two-track count backends, collapse their cells into
 //! multilevel pseudobulks, pick the genes, start the genes' embedding and the
 //! curve from the finest pseudobulks in their expression order (as `senna
 //! time` starts), fit the machine on samples of every level
 //! ([`super::train`]) and read every cell.
 
 use super::args::TdRbmArgs;
-use super::counts::{for_cell_blocks, pb_tracks, select_genes};
+use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
 use super::curve::{grid_times, Spline};
 use super::model::Init0;
 use super::start::{base_start, rho_start, row_states, start_along, STATE_DIMS};
@@ -19,6 +19,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Binomial, Distribution};
 use senna::embed_common::Mat;
+use std::borrow::Cow;
 
 /// Columns `0..n` of `rows` (`[N × n]` row-major) as named columns.
 fn columns(prefix: &str, rows: &[Vec<f32>], n: usize) -> Vec<(Box<str>, Vec<f32>)> {
@@ -54,6 +55,8 @@ struct Loaded {
     proj_kn: Mat,
     /// Every cell's pseudobulk at every level, coarse to fine.
     cell_to_pb: Vec<Vec<usize>>,
+    /// The finest pseudobulks' reads `[D × P]` on every row of `data`.
+    finest_counts: nalgebra::DMatrix<f32>,
     pb_tree: Option<data_beans::alg::collapse_data::PbTree>,
 }
 
@@ -77,6 +80,15 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
     let data_files = InheritedFromManifest::resolve_data(inherited.as_ref(), &args.data_files)?;
     let batch_files =
         InheritedFromManifest::resolve_batch(inherited.as_ref(), args.batch_files.as_deref());
+    // Before the collapse, as a file's header says it: every file has genes
+    // with both tracks.
+    for file in &data_files {
+        let rows = data_beans::sparse_io::open_sparse_matrix_by_path(file)?.row_names()?;
+        anyhow::ensure!(
+            two_track_genes(&rows).0 > 0,
+            "{file}: no gene has both `/count/spliced` and `/count/unspliced` rows"
+        );
+    }
     let prebuilt_partition = args.pb_from.partition(
         inherited.as_ref(),
         &crate::refine_weighting::partition_settings(args),
@@ -84,7 +96,7 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
     let hvg = crate::hvg::resolve_multiome_with_hvg(false, data_files.len(), &args.hvg);
     let crate::topic::common::PreparedData {
         data_vec,
-        collapsed_levels: _,
+        collapsed_levels,
         proj_kn,
         cell_to_pb_per_level,
         pb_tree,
@@ -123,8 +135,14 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
         cnv_clones: args.collapse.cnv_clones.as_deref(),
         multiome: None,
     })?;
+    let cell_to_pb = cell_to_pb_per_level.expect("the collapse keeps its hierarchy");
+    let (finest_counts, _) = collapsed_levels
+        .last()
+        .expect("at least one level")
+        .observed_counts(cell_to_pb.last().expect("at least one level"))?;
     Ok(Loaded {
-        cell_to_pb: cell_to_pb_per_level.expect("the collapse keeps its hierarchy"),
+        cell_to_pb,
+        finest_counts,
         data: data_vec,
         keep: output_keep_idx,
         inputs: Inputs {
@@ -137,6 +155,7 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
 }
 
 pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
+    senna::embed_common::mkdir_parent(&args.out)?;
     anyhow::ensure!(
         args.minibatch_size > 0 && args.chains > 0 && args.block_size > 0,
         "--minibatch-size, --chains and --block-size must be positive"
@@ -156,17 +175,18 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         inputs,
         proj_kn,
         cell_to_pb,
+        finest_counts,
         pb_tree,
     } = load(args)?;
     let all_cells = data.column_names()?;
-    let levels = &cell_to_pb;
-    let member = levels.last().expect("at least one level");
-    let finest = pb_tracks(&data, member)?;
+    let member = cell_to_pb.last().expect("at least one level");
+    let finest = pb_tracks(&data.row_names()?, &finest_counts)?;
+    drop(finest_counts);
     let genes = select_genes(&finest, args.min_reads, args.max_genes);
     anyhow::ensure!(!genes.is_empty(), "no gene left to fit");
-    let (g, n_pb) = (genes.len(), finest.cells.len());
+    let (g, n_pb) = (genes.len(), finest.spliced.nrows());
     // Cells per pseudobulk at every level.
-    let level_cells: Vec<Vec<f32>> = levels
+    let level_cells: Vec<Vec<f32>> = cell_to_pb
         .iter()
         .map(|member| {
             let mut n = vec![0f32; member.iter().max().map_or(0, |&m| m + 1)];
@@ -179,7 +199,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         "td-rbm: {} cells from {} files; {} levels, {n_pb} finest pseudobulks; {} genes with both tracks, {g} fitted",
         all_cells.len(),
         inputs.data_files.len(),
-        levels.len(),
+        cell_to_pb.len(),
         finest.genes.len(),
     );
     // Every cell's reads on the fitted genes, `[C × F]` (unspliced genes
@@ -215,7 +235,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     }
     // Every level's pseudobulks, `[P × F]`, coarse to fine: sums of their
     // cells' reads.
-    let rows: Vec<Vec<f32>> = levels
+    let rows: Vec<Vec<f32>> = cell_to_pb
         .iter()
         .zip(&level_cells)
         .map(|(member, n)| {
@@ -231,18 +251,20 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         .collect();
     // The cells read out: QC keeps near-empty cells in the pseudobulks but
     // not in the outputs.
-    let (cells, of_cell): (Vec<Box<str>>, Vec<usize>) = match &keep {
+    let (cells, of_cell): (Cow<[Box<str>]>, Cow<[usize]>) = match &keep {
         Some(keep) => {
             // In place, every kept row moved forward.
             for (to, &from) in keep.iter().enumerate() {
                 x.copy_within(from * f..(from + 1) * f, to * f);
             }
             x.truncate(keep.len() * f);
-            keep.iter()
+            let (cells, of_cell): (Vec<_>, Vec<_>) = keep
+                .iter()
                 .map(|&i| (all_cells[i].clone(), member[i]))
-                .unzip()
+                .unzip();
+            (cells.into(), of_cell.into())
         }
-        None => (all_cells.clone(), member.clone()),
+        None => (all_cells.as_slice().into(), member.as_slice().into()),
     };
 
     // Where the fit starts: a forest over clusters of the finest
@@ -256,19 +278,16 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     let mut roots: Vec<usize> = (0..forest.trees.len()).map(|t| forest.far_end(t)).collect();
     let mut given = vec![false; forest.trees.len()];
     if let Some(path) = &args.root {
-        let wanted: std::collections::HashSet<String> = std::fs::read_to_string(path)?
+        let wanted: Vec<Box<str>> = std::fs::read_to_string(path)?
             .lines()
-            .map(|l| l.trim().to_string())
+            .map(str::trim)
             .filter(|l| !l.is_empty())
+            .map(Box::from)
             .collect();
+        // Named as written out, or by a barcode that names one cell.
         let mut votes = vec![0usize; forest.clusters];
-        // A cell is named as written out or by its barcode alone, before
-        // the `@` tag.
-        for (i, c) in cells.iter().enumerate() {
-            let barcode = c.split_once('@').map_or(c.as_ref(), |(b, _)| b);
-            if wanted.contains(c.as_ref()) || wanted.contains(barcode) {
-                votes[forest.cluster[of_cell[i]]] += 1;
-            }
+        for &i in crate::view::match_cells(&wanted, &cells).values() {
+            votes[forest.cluster[of_cell[i as usize]]] += 1;
         }
         let top = (0..forest.clusters)
             .max_by_key(|&c| votes[c])

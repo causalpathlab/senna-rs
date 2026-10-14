@@ -1,6 +1,6 @@
 //! A td-rbm run chains only into td-rbm: its feature table is in genes
 //! while its data rows are tracks, so no other fit takes it as a source.
-//! And a retired gem run says so instead of failing to parse.
+//! And a run of a retired kind says so instead of failing to parse.
 
 use senna::run_manifest::{inherit_data_from, inherit_from, RunKind, RunManifest};
 
@@ -31,5 +31,9 @@ fn a_gem_run_is_named_as_retired() {
     let Err(e) = RunManifest::load(&path) else {
         panic!("a gem run opened");
     };
-    assert!(e.to_string().contains("gem is retired"), "{e}");
+    assert!(
+        e.to_string()
+            .contains("a `senna gem` run, a kind this senna does not open"),
+        "{e}"
+    );
 }

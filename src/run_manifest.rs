@@ -442,7 +442,6 @@ pub enum ExpressionModel {
 /// about this, not about which command ran. They used to be asked as
 /// `matches!(kind, Bge | Fne)` and `_ =>` at five separate sites, so a new
 /// `RunKind` compiled fine and silently took the fallback at every one of them.
-/// Adding two kinds in one commit missed all five.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CellSpace {
     /// Euclidean coordinates where MAGNITUDE carries signal. Angular distance
@@ -1361,15 +1360,19 @@ impl RunManifest {
         let raw = fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
         let mut m: Self = serde_json::from_str(&raw).map_err(|e| {
-            let kind = serde_json::from_str::<serde_json::Value>(&raw)
+            // A kind this senna does not know: a retired command's, or a
+            // newer senna's.
+            let unknown = serde_json::from_str::<serde_json::Value>(&raw)
                 .ok()
-                .and_then(|v| v.get("kind")?.as_str().map(str::to_string));
-            match kind.as_deref() {
-                Some("gem") => anyhow::anyhow!(
-                    "{} is a `senna gem` run; gem is retired and its runs no longer open",
+                .and_then(|v| v.get("kind").cloned())
+                .filter(|k| serde_json::from_value::<RunKind>(k.clone()).is_err());
+            match unknown.as_ref().and_then(serde_json::Value::as_str) {
+                Some(kind) => anyhow::anyhow!(
+                    "{} is a `senna {kind}` run, a kind this senna does not open \
+                     (retired, or from a newer senna)",
                     path.display()
                 ),
-                _ => anyhow::anyhow!("parse {}: {e}", path.display()),
+                None => anyhow::anyhow!("parse {}: {e}", path.display()),
             }
         })?;
         m.lift_v1_feature_slots();

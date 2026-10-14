@@ -181,7 +181,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         crate::feature_preset::resolve_dim(args.embedding_dim, &mut preset_features, &mut carried)?;
 
     driver::fit_embed_family(driver::EmbedPlan {
-        kind: senna::run_manifest::RunKind::Bge,
         knobs: args.knobs(embedding_dim),
         unified,
         data_files,

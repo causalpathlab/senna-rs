@@ -45,18 +45,8 @@ pub(crate) struct EmbedKnobs<'a> {
     pub device: &'a ComputeDevice,
     pub device_no: usize,
 
-    /// The `--feature-modules` flag group. bge always passes `Some`; kept
-    /// `Option` because a caller that never resolves gene modules can still
-    /// pass `None` explicitly.
-    pub modules: Option<&'a ge::FeatureModuleArgs>,
-    /// The module count this command trains when `--feature-modules` is not
-    /// passed explicitly. bge passes `Some(DEFAULT_FEATURE_MODULES)`:
-    /// the hierarchical phase 1 has no module-free mode (the hard gene
-    /// partition it scores against is structural, not an optional layer —
-    /// `ge::fit` errors "the hierarchical phase 1 needs a module count"
-    /// without one), so `None` here is not a state the fit can actually
-    /// run in.
-    pub default_feature_modules: Option<usize>,
+    /// The `--feature-modules` flag group.
+    pub modules: &'a ge::FeatureModuleArgs,
 
     pub out: &'a str,
     pub batch_files: Option<&'a [Box<str>]>,
@@ -65,7 +55,6 @@ pub(crate) struct EmbedKnobs<'a> {
 /// Everything [`fit_embed_family`] needs for one fit: the caller's already
 /// -loaded data plus its resolved knobs.
 pub(crate) struct EmbedPlan<'a> {
-    pub kind: RunKind,
     pub knobs: EmbedKnobs<'a>,
     pub unified: ge::UnifiedData,
     /// The data files this run was loaded from (manifest `data.input`).
@@ -92,9 +81,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     let knobs = &plan.knobs;
 
     // Assemble a `FitConfig` for the CURRENT feature AND cell axes of
-    // `unified`. Kept as a closure (rather than inlined) even though this
-    // task's callers run it once, matching `fit_bge`'s own shape from before
-    // the extraction.
+    // `unified`.
     let preset_features = plan.preset_features.take();
     let carried = plan.carried.take();
     let build_config = move |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
@@ -105,14 +92,11 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 .map(|&i| w[i])
                 .collect::<Vec<f32>>()
         });
-        let feature_modules = match knobs.modules {
-            Some(m) => match m.resolve(knobs.default_feature_modules)? {
-                Some(mut gm) => {
-                    gm.parent = parent_modules(plan.init_from, &unified.feature_names)?;
-                    Some(gm)
-                }
-                None => None,
-            },
+        let feature_modules = match knobs.modules.resolve(Some(DEFAULT_FEATURE_MODULES))? {
+            Some(mut gm) => {
+                gm.parent = parent_modules(plan.init_from, &unified.feature_names)?;
+                Some(gm)
+            }
             None => None,
         };
         let strata = match knobs.collapse.cnv_clones.as_deref() {
@@ -366,7 +350,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     let has_modules = out.model.modules.is_some();
     senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
         train_args: Some(plan.train_args),
-        kind: plan.kind,
+        kind: RunKind::Bge,
         prefix: knobs.out,
         data_input: &input,
         data_batch: &batch,
@@ -546,8 +530,8 @@ fn write_pb_embeddings(
 }
 
 /// Default module count for the hierarchical phase 1's hard gene partition,
-/// used by `senna bge` unless `--feature-modules` overrides it — the engine has no module-free mode, so this is a shared policy
-/// constant rather than an opt-in default.
+/// unless `--feature-modules` overrides it: the engine has no module-free
+/// mode (`ge::fit` needs a module count).
 const DEFAULT_FEATURE_MODULES: usize = 1024;
 
 impl super::BgeArgs {
@@ -574,8 +558,7 @@ impl super::BgeArgs {
             seed: self.seed,
             device: &self.device,
             device_no: self.device_no,
-            modules: Some(&self.modules),
-            default_feature_modules: Some(DEFAULT_FEATURE_MODULES),
+            modules: &self.modules,
             out: &self.out,
             batch_files: self.batch_files.as_deref(),
         }
