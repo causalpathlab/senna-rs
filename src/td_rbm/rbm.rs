@@ -158,17 +158,9 @@ impl Chains {
         let k = Tensor::from_vec(k, s, &dev)?;
         let h = Tensor::from_vec(h, (s, d), &dev)?;
         let logits = (t.psi.index_select(&k, 0)? + h.matmul(&t.w.t()?)?)?;
-        let probs = softmax(&logits, D::Minus1)?.to_vec2::<f32>()?;
-        let mut x = vec![0f32; s * f];
-        for (j, p) in probs.iter().enumerate() {
-            multinomial(
-                u64::from(self.depth[j]),
-                p,
-                &mut x[j * f..(j + 1) * f],
-                &mut self.rng,
-            );
-        }
-        self.x = Tensor::from_vec(x, (s, f), &dev)?;
+        let probs = softmax(&logits, D::Minus1)?;
+        self.x = draw_reads(&probs, &self.depth, &mut self.rng)?;
+        debug_assert_eq!(self.x.dims2()?, (s, f));
         Ok(())
     }
 
@@ -187,9 +179,31 @@ impl Chains {
         let h = (mean + Tensor::from_vec(noise, (s, d), &dev)?)?.broadcast_div(&n)?;
         let logits = (psi + h.matmul(&t.w.t()?)?)?;
         let probs = softmax(&logits, D::Minus1)?;
-        self.x = multinomial_rows(&cumsum_rows(&probs)?, &self.depth, &mut self.rng)?;
+        self.x = draw_reads(&probs, &self.depth, &mut self.rng)?;
         Ok(())
     }
+}
+
+/// Every row's reads drawn from its shares `probs` (`[S × F]`) at its depth,
+/// on the host, the rows in parallel, each from its own generator seeded by
+/// one draw of `rng` and its index (so the draws do not depend on the
+/// threads). A draw on the device compares every read with every feature;
+/// on the host it is one binomial per feature.
+fn draw_reads(probs: &Tensor, depth: &[u32], rng: &mut StdRng) -> Result<Tensor> {
+    use rayon::prelude::*;
+    let (s, f) = probs.dims2()?;
+    let p = probs.flatten_all()?.to_vec1::<f32>()?;
+    let base: u64 = rng.random();
+    let mut x = vec![0f32; s * f];
+    x.par_chunks_mut(f.max(1))
+        .zip(p.par_chunks(f.max(1)))
+        .enumerate()
+        .for_each(|(j, (o, row))| {
+            let mut rng =
+                StdRng::seed_from_u64(base ^ (j as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            multinomial(u64::from(depth[j]), row, o, &mut rng);
+        });
+    Tensor::from_vec(x, (s, f), probs.device())
 }
 
 fn unit(rng: &mut StdRng) -> f32 {

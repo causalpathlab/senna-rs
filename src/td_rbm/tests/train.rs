@@ -158,7 +158,13 @@ fn fit_sim_from(
     let all: Vec<usize> = (0..sim.n_cells).collect();
     let cells = features(sim, &all);
     let out = model
-        .summarise(&cells, f, cfg.depth as f32, &Device::Cpu)
+        .summarise(
+            &model.read_tables().unwrap(),
+            cells.clone(),
+            f,
+            cfg.depth as f32,
+            &Device::Cpu,
+        )
         .unwrap();
     (model, start, out)
 }

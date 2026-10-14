@@ -44,13 +44,17 @@ pub struct TdRbmArgs {
     #[serde(flatten)]
     pub(crate) pb_from: crate::refine_weighting::PbFromArgs,
 
-    #[arg(long, default_value_t = 2000, help = "Most variable genes fitted")]
+    #[arg(
+        long,
+        default_value_t = 2000,
+        help = "Most variable genes: they start the fit and call the roots and directions (every gene is fitted)"
+    )]
     pub max_genes: usize,
 
     #[arg(
         long,
         default_value_t = 20.0,
-        help = "Fewest reads a fitted gene has on each track, over all cells"
+        help = "Fewest reads a starting gene (--max-genes) has on each track, over all cells"
     )]
     pub min_reads: f32,
 

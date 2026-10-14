@@ -119,8 +119,10 @@ pub fn curve_start(
 }
 
 /// Every row of `x` (`[N × F]` row-major counts) drawn again at `depth`
-/// reads: shares from the row's Dirichlet posterior (counts plus ½), then a
-/// multinomial; a pseudobulk sample at a cell's depth. Rows are drawn in
+/// reads: shares from the row's Dirichlet posterior (counts plus ½ on the
+/// features it has: over every gene, a prior on every feature would be
+/// tens of thousands of reads no row holds), then a multinomial; a
+/// pseudobulk sample at a cell's depth. Rows are drawn in
 /// parallel, each from its own generator seeded by one draw of `rng` and
 /// its index, so the result does not depend on the threads.
 pub fn resample(x: &[f32], f: usize, depth: u64, rng: &mut StdRng) -> Vec<f32> {
@@ -137,7 +139,12 @@ pub fn resample(x: &[f32], f: usize, depth: u64, rng: &mut StdRng) -> Vec<f32> {
             let mut p: Vec<f32> = row
                 .iter()
                 .map(|&c| {
-                    Gamma::new(f64::from(c) + 0.5, 1.0).map_or(0.0, |d| d.sample(&mut rng)) as f32
+                    if c > 0.0 {
+                        Gamma::new(f64::from(c) + 0.5, 1.0).map_or(0.0, |d| d.sample(&mut rng))
+                            as f32
+                    } else {
+                        0.0
+                    }
                 })
                 .collect();
             let s: f32 = p.iter().sum::<f32>().max(1e-30);

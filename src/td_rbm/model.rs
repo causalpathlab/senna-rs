@@ -115,8 +115,8 @@ pub struct Energy {
     held: Option<(Tensor, Tensor)>,
     /// The low-rank residual `U` `[G × r]`, `V` `[r × H]` on the held rows.
     lora: Option<(Var, Var)>,
-    /// Gene modules: every gene's membership `[G × M]` (one-hot) and the
-    /// modules' vectors `[M × H]`; `rho` is then the residual.
+    /// Gene modules: every gene's module `[G]` (u32) and the modules'
+    /// vectors `[M × H]`; `rho` is then the residual.
     modules: Option<(Tensor, Var)>,
     /// `[L·M × H]` every lineage's curve coefficients, `[L·M × 1]` its size
     /// curve's.
@@ -219,12 +219,8 @@ impl Energy {
         let modules = match init.modules {
             Some(m) => {
                 let n = m.mu.len() / h.max(1);
-                let mut hot = vec![0f32; g * n];
-                for (j, &label) in m.labels.iter().enumerate() {
-                    hot[j * n + label as usize] = 1.0;
-                }
                 Some((
-                    Tensor::from_vec(hot, (g, n), dev)?,
+                    Tensor::from_slice(m.labels, g, dev)?,
                     Var::from_tensor(&Tensor::from_slice(m.mu, (n, h), dev)?)?,
                 ))
             }
@@ -323,7 +319,15 @@ impl Energy {
     /// A gene whose rates fall outside the bounds keeps its ratio `γ/β` (its
     /// steady unspliced share): both are shifted together, and the ratio is
     /// only cut where it is wider than the bounds themselves.
-    pub fn set_log_rates(&self, log_beta: &Tensor, log_gamma: &Tensor) -> Result<()> {
+    ///
+    /// Only the genes `only` marks are set (every gene when it is empty);
+    /// the others keep theirs untouched.
+    pub fn set_log_rates(
+        &self,
+        log_beta: &Tensor,
+        log_gamma: &Tensor,
+        only: &[bool],
+    ) -> Result<()> {
         let (lo, hi) = LOG_RATE;
         let (lo, hi) = (lo + 1e-3, hi - 1e-3);
         let (b, g) = (
@@ -348,8 +352,21 @@ impl Energy {
             let p = ((x - LOG_RATE.0)? / (LOG_RATE.1 - LOG_RATE.0))?;
             p.log()? - p.affine(-1.0, 1.0)?.log()?
         };
-        self.beta.set(&free(nb)?)?;
-        self.gamma.set(&free(ng)?)
+        let keep = |new: Tensor, old: &Var| -> Result<Tensor> {
+            if only.is_empty() {
+                return Ok(new);
+            }
+            let mask = Tensor::from_vec(
+                only.iter()
+                    .map(|&m| f32::from(u8::from(m)))
+                    .collect::<Vec<_>>(),
+                shape.clone(),
+                dev,
+            )?;
+            new.broadcast_mul(&mask)? + old.as_tensor().broadcast_mul(&mask.affine(-1.0, 1.0)?)?
+        };
+        self.beta.set(&keep(free(nb)?, &self.beta)?)?;
+        self.gamma.set(&keep(free(ng)?, &self.gamma)?)
     }
 
     /// The parameters [`Self::snapshot`] and [`Self::restore`] carry.
@@ -438,8 +455,8 @@ impl Energy {
     /// residual with gene modules; else the free rows, and the held rows a
     /// given table pins (plus their LoRA residual).
     pub fn rho(&self) -> Result<Tensor> {
-        if let Some((hot, mu)) = self.modules.as_ref() {
-            return hot.matmul(mu.as_tensor())? + self.rho.as_tensor();
+        if let Some((labels, mu)) = self.modules.as_ref() {
+            return mu.as_tensor().index_select(labels, 0)? + self.rho.as_tensor();
         }
         let rho = self.rho.as_tensor();
         let Some((rho0, mask)) = self.held.as_ref() else {

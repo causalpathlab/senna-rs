@@ -1,18 +1,19 @@
 //! `senna td-rbm`: read two-track count backends, collapse their cells into
-//! multilevel pseudobulks, pick the genes, start the genes' embedding and the
-//! curve from the finest pseudobulks in their expression order (as `senna
-//! time` starts), fit the machine on samples of every level
-//! ([`super::train`]) and read every cell.
+//! multilevel pseudobulks (the collapse's own rates, batch-adjusted when
+//! there are batches), start the fit on the most variable genes (the
+//! forest, the curves, the genes' embedding), fit the machine on samples of
+//! every level over every gene, with gene modules ([`super::train`]); the
+//! roots and directions are called on the most variable genes alone. Every
+//! cell is then read once, a block at a time.
 
 use super::args::TdRbmArgs;
-use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes, PbTracks};
+use super::counts::{
+    for_cell_blocks, gene_columns, pb_tracks, select_genes, two_track_genes, PbTracks,
+};
 use super::curve::{grid_times, Spline};
 use super::model::{GivenRho, Init0, ModulesInit};
 use super::start::{base_start, rho_start, row_states, start_along, STATE_DIMS};
 use super::train::{fit, Level, Summary, TrainConfig, BETA0, GAMMA0};
-
-/// Gene modules unless `--feature-modules` says (as rbm).
-const DEFAULT_GENE_MODULES: usize = 50;
 use super::tree::Forest;
 use data_beans::sparse_io_vector::SparseIoVec;
 use legume_numeric::candle::candle_core::{Device, Tensor};
@@ -48,6 +49,10 @@ fn write(
         .collect();
     write_named_table(path, key, names, &cols)
 }
+
+/// Gene modules when neither `--feature-modules` nor `--no-feature-modules`
+/// is given (as rbm).
+const DEFAULT_GENE_MODULES: usize = 50;
 
 /// The cells as the shared loader reads them, and their pseudobulks.
 struct Loaded {
@@ -192,23 +197,24 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         })
         .collect();
     // Every level's pseudobulks on both tracks of every gene, as the
-    // collapse has them (batch-adjusted when there are batches): rates
-    // times cells.
+    // collapse has them (batch-adjusted when there are batches): its rates
+    // as the data alone give them (no prior), times the cells.
     let row_names = data.row_names()?;
     let tracks: Vec<PbTracks> = collapsed
         .iter()
         .zip(&level_cells)
         .map(|(c, n)| {
-            let mut counts = c
-                .mu_adjusted
-                .as_ref()
-                .unwrap_or(&c.mu_observed)
-                .posterior_mean()
-                .clone();
-            anyhow::ensure!(counts.ncols() == n.len(), "a pseudobulk per rate column");
-            for (j, mut col) in counts.column_iter_mut().enumerate() {
-                col *= n[j];
-            }
+            let rates = c.mu_adjusted.as_ref().unwrap_or(&c.mu_observed);
+            let mean = rates.posterior_mean();
+            anyhow::ensure!(mean.ncols() == n.len(), "a pseudobulk per rate column");
+            let counts = nalgebra::DMatrix::<f32>::from_fn(mean.nrows(), n.len(), |r, j| {
+                let rate = if c.stats_kept {
+                    rates.evidence_mean(r, j)
+                } else {
+                    mean[(r, j)]
+                };
+                rate * n[j]
+            });
             pb_tracks(&row_names, &counts)
         })
         .collect::<anyhow::Result<_>>()?;
@@ -249,31 +255,24 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
                 .collect()
         })
         .collect();
-    if let Some(seed) = args.steady_unspliced {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let share: Vec<f64> = (0..g)
+    // The genes' overall unspliced shares the control splits at, and its
+    // draws: the pseudobulks here, the cells when they are read.
+    let mut steady: Option<(Vec<f64>, StdRng)> = args.steady_unspliced.map(|seed| {
+        let total = |m: &nalgebra::DMatrix<f32>, j: usize| -> f64 {
+            m.column(j).iter().map(|&v| f64::from(v)).sum()
+        };
+        let share = (0..g)
             .map(|j| {
-                let u: f64 = finest
-                    .unspliced
-                    .column(j)
-                    .iter()
-                    .map(|&v| f64::from(v))
-                    .sum();
-                let s: f64 = finest.spliced.column(j).iter().map(|&v| f64::from(v)).sum();
+                let (u, s) = (total(&finest.unspliced, j), total(&finest.spliced, j));
                 u / (u + s).max(1.0)
             })
             .collect();
-        for x in &mut rows {
-            for row in x.chunks_mut(f) {
-                for j in 0..g {
-                    let n = (row[j] + row[g + j]).round() as u64;
-                    let a = Binomial::new(n, share[j]).map_or(0, |b| b.sample(&mut rng));
-                    row[j] = a as f32;
-                    row[g + j] = (n - a) as f32;
-                }
-            }
-        }
-        info!("td-rbm: every gene's reads split at its overall unspliced share (seed {seed})");
+        (share, StdRng::seed_from_u64(seed))
+    });
+    if let Some((share, rng)) = steady.as_mut() {
+        rows.iter_mut()
+            .for_each(|x| x.chunks_mut(f).for_each(|row| resplit(row, share, rng)));
+        info!("td-rbm: every gene's reads split at its overall unspliced share");
     }
     drop(tracks);
     // An earlier run's gene table (`--{init,freeze,lora}-feature-embedding`):
@@ -292,15 +291,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     // root.
     let fin = rows.last().expect("a level");
     let ft = 2 * t;
-    let fin_top: Vec<f32> = fin
-        .chunks(f)
-        .flat_map(|r| {
-            top.iter()
-                .map(|&j| r[j])
-                .chain(top.iter().map(|&j| r[g + j]))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let fin_top: Vec<f32> = fin.chunks(f).flat_map(|r| gene_columns(r, &top)).collect();
     let states = row_states(&fin_top, ft, STATE_DIMS);
     let forest = Forest::new(&states, args.clusters, args.knn, args.seed);
     let mut roots: Vec<usize> = (0..forest.trees.len()).map(|t| forest.far_end(t)).collect();
@@ -354,10 +345,21 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     if let Some(p) = preset.as_ref() {
         given_rows(&mut rho, &mut mask, p, h);
     }
+    // The curves start in the coordinates ρ starts at: the most variable
+    // genes' rows as the fit takes them (a given table's, when there is one).
+    let rho_start_top: Vec<f32> = top
+        .iter()
+        .flat_map(|&j| rho[j * h..(j + 1) * h].to_vec())
+        .collect();
     // Gene modules, as bge and rbm have them, unless a table is given.
+    anyhow::ensure!(
+        preset.is_none() || args.modules.feature_modules.is_none(),
+        "--feature-modules builds every gene's row from its module, so no row is a given \
+         table's: drop --feature-modules or the --{{init,freeze,lora}}-feature-embedding"
+    );
     let module_cfg = if args.no_feature_modules {
         None
-    } else if preset.is_some() && args.modules.feature_modules.is_none() {
+    } else if preset.is_some() {
         info!("td-rbm: a given feature embedding has per-gene rows; gene modules are off");
         None
     } else {
@@ -415,7 +417,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         &states,
         &forest,
         &roots,
-        &rho_top,
+        &rho_start_top,
         &values,
         (t, h, k, m),
         args.knn,
@@ -495,8 +497,12 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     // (batch-adjusted when there are batches); QC's near-empty cells stay out.
     let rho_rows = model.energy.rho()?.to_vec2::<f32>()?;
     let rho_top_fit: Vec<Vec<f32>> = top.iter().map(|&j| rho_rows[j].clone()).collect();
-    let kept: Option<std::collections::HashSet<usize>> =
-        keep.as_ref().map(|k| k.iter().copied().collect());
+    let kept: Option<Vec<bool>> = keep.as_ref().map(|k| {
+        let mut m = vec![false; all_cells.len()];
+        k.iter().for_each(|&i| m[i] = true);
+        m
+    });
+    let tables = model.read_tables()?;
     let mut out = Summary::default();
     let (mut cells, mut of_cell, mut reads, mut map) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -507,24 +513,22 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         delta.as_ref(),
         |start, u, s| {
             let rows: Vec<usize> = (0..u.nrows())
-                .filter(|i| kept.as_ref().is_none_or(|k| k.contains(&(start + i))))
+                .filter(|i| kept.as_ref().is_none_or(|k| k[start + i]))
                 .collect();
             let mut x = Vec::with_capacity(rows.len() * f);
-            let mut x_top = Vec::with_capacity(rows.len() * ft);
             for &i in &rows {
-                x.extend((0..g).map(|j| u[(i, j)]));
-                x.extend((0..g).map(|j| s[(i, j)]));
-                x_top.extend(top.iter().map(|&j| u[(i, j)]));
-                x_top.extend(top.iter().map(|&j| s[(i, j)]));
+                x.extend(u.row(i).iter().chain(s.row(i).iter()));
                 cells.push(all_cells[start + i].clone());
                 of_cell.push(member[start + i]);
             }
-            reads.extend(
-                x.chunks(f)
-                    .map(|r| r.iter().sum::<f32>().clamp(1.0, args.depth as f32)),
-            );
-            map.extend(x_top.chunks(ft).map(|r| basis.place(r)));
-            out.extend(model.summarise(&x, f, args.depth as f32, &dev)?);
+            if let Some((share, rng)) = steady.as_mut() {
+                x.chunks_mut(f).for_each(|row| resplit(row, share, rng));
+            }
+            for row in x.chunks(f) {
+                reads.push(row.iter().sum::<f32>().clamp(1.0, args.depth as f32));
+                map.push(basis.place(&gene_columns(row, &top)));
+            }
+            out.extend(model.summarise(&tables, x, f, args.depth as f32, &dev)?);
             Ok(())
         },
     )?;
@@ -879,8 +883,8 @@ fn write_manifest(args: &TdRbmArgs, inputs: &Inputs, has_pb_tree: bool) -> anyho
 }
 
 /// Put a given table's rows into `rho` (`[G × H]` row-major) and mark them
-/// in `mask`. The free rows, started from the expression, are scaled per
-/// column to the given rows' spread, so the two start alike.
+/// in `mask`. The free rows started from the expression (the non-zero ones)
+/// are scaled per column to the given rows' spread, so the two start alike.
 fn given_rows(rho: &mut [f32], mask: &mut [f32], p: &graph_embedding_util::PresetRows, h: usize) {
     let rms = |rows: &mut dyn Iterator<Item = f32>| {
         let (s, n) = rows.fold((0f64, 0usize), |(s, n), v| (s + f64::from(v * v), n + 1));
@@ -888,7 +892,10 @@ fn given_rows(rho: &mut [f32], mask: &mut [f32], p: &graph_embedding_util::Prese
     };
     for d in 0..h {
         let given = rms(&mut (0..p.ids.len()).map(|i| p.rows[i * h + d]));
-        let free = rms(&mut (0..mask.len()).map(|j| rho[j * h + d]));
+        let started: Vec<usize> = (0..mask.len())
+            .filter(|&j| rho[j * h..(j + 1) * h].iter().any(|&v| v != 0.0))
+            .collect();
+        let free = rms(&mut started.iter().map(|&j| rho[j * h + d]));
         let scale = if free > 1e-12 {
             (given / free) as f32
         } else {
@@ -900,6 +907,19 @@ fn given_rows(rho: &mut [f32], mask: &mut [f32], p: &graph_embedding_util::Prese
         let j = id as usize;
         rho[j * h..(j + 1) * h].copy_from_slice(&p.rows[i * h..(i + 1) * h]);
         mask[j] = 1.0;
+    }
+}
+
+/// A row's reads of every gene (`[2G]`, unspliced genes first) split anew
+/// between the tracks at the gene's unspliced `share`: the negative control
+/// with no splicing dynamics.
+fn resplit(row: &mut [f32], share: &[f64], rng: &mut StdRng) {
+    let g = share.len();
+    for (j, &p) in share.iter().enumerate() {
+        let n = (row[j] + row[g + j]).round() as u64;
+        let a = Binomial::new(n, p).map_or(0, |b| b.sample(rng));
+        row[j] = a as f32;
+        row[g + j] = (n - a) as f32;
     }
 }
 

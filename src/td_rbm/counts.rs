@@ -140,6 +140,18 @@ pub fn pb_tracks(rows: &[Box<str>], counts: &DMatrix<f32>) -> anyhow::Result<PbT
     Ok(out)
 }
 
+/// The genes `genes` of a row on both tracks (`[2G]`, unspliced genes
+/// first), the same layout: their unspliced reads, then their spliced.
+#[must_use]
+pub fn gene_columns(row: &[f32], genes: &[usize]) -> Vec<f32> {
+    let g = row.len() / 2;
+    genes
+        .iter()
+        .map(|&j| row[j])
+        .chain(genes.iter().map(|&j| row[g + j]))
+        .collect()
+}
+
 /// The genes to fit: at least `min_reads` reads on each track over all
 /// pseudobulks, then the `max_genes` most variable by the variance of their
 /// log total per 10⁴ reads across pseudobulks. Ascending gene indices.
