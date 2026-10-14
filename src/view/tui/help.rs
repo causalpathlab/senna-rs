@@ -348,10 +348,10 @@ fn keys_of(context: Context) -> [&'static str; 2] {
         match context {
             Context::Browse => [
                 "click a cell: its cluster and the features nearest it (p pins their names)   [ ] focus a group   n suggest features   settings: click ‹ › on the right",
-                "R relabel clusters   A annotate with lupin   r recompute   , . rounds   z lay out a group   d copy view   w all views   s save PDF   ? all keys   q quit",
+                "R relabel clusters   A annotate with lupin   r recompute   , . rounds   z lay out a group   O open another data file   d copy view   w all views   s save PDF   ? all keys   q quit",
             ],
             Context::Feature => [
-                "↑ ↓ / g G next or previous feature in the list   o switch between counts and model   a the group's whole marker set   x back to group colours",
+                "↑ ↓ / g G next or previous feature in the list   o switch between model, counts and another file's   O open another data file   a the group's whole marker set   x back to group colours",
                 "/ search a feature   n new suggestions   p pin its name   [ ] focus a group   ? all keys",
             ],
             Context::Merge => [

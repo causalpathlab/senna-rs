@@ -404,6 +404,12 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     let out = model.summarise(&x, f, args.depth as f32, &dev)?;
     let rho_rows = model.energy.rho()?.to_vec2::<f32>()?;
     let (map, map_velocity) = map_space(&x, f, &rho_rows, &out.velocity)?;
+    // Every cell's reads as the read-out saw them (capped at the training
+    // depth): the state reaches the reads per read, `W h / N`.
+    let reads: Vec<f32> = x
+        .chunks(f)
+        .map(|r| r.iter().sum::<f32>().clamp(1.0, args.depth as f32))
+        .collect();
     drop(x);
 
     // The start as the chosen roots have it, so its lineages are the
@@ -591,11 +597,66 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         &columns("rho", &e.rho()?.to_vec2::<f32>()?, h),
     )?;
     let t = model.tables(true)?;
+    let w = t.w.narrow(0, 0, g)?.to_vec2::<f32>()?;
     write(
         &format!("{}.gene_states.parquet", args.out),
         "gene",
         &names,
-        &columns("w", &t.w.narrow(0, 0, g)?.to_vec2::<f32>()?, args.states),
+        &columns("w", &w, args.states),
+    )?;
+    // The model of expression `senna view` reads as latent × dictionary: a
+    // gene's spliced logit in a cell is `ρ_g · z + w_g · h / N + base_g`, its
+    // place on the curves `z` and its state `h` averaged over its posterior,
+    // `N` its reads.
+    let base = row(e.base())?;
+    let rho = e.rho()?.to_vec2::<f32>()?;
+    let cell_model: Vec<Vec<f32>> = out
+        .position
+        .iter()
+        .zip(&out.state)
+        .zip(&reads)
+        .map(|((z, s), n)| {
+            z.iter()
+                .copied()
+                .chain(s.iter().map(|v| v / n))
+                .chain([1.0])
+                .collect()
+        })
+        .collect();
+    let gene_model: Vec<Vec<f32>> = (0..g)
+        .map(|j| {
+            rho[j]
+                .iter()
+                .chain(&w[j])
+                .copied()
+                .chain([base[j]])
+                .collect()
+        })
+        .collect();
+    let model_names: Vec<Box<str>> = (0..h)
+        .map(|i| format!("z{i}"))
+        .chain((0..args.states).map(|i| format!("h{i}")))
+        .chain(["one".to_string()])
+        .map(Into::into)
+        .collect();
+    let named = |rows: &[Vec<f32>]| -> Vec<(Box<str>, Vec<f32>)> {
+        model_names
+            .iter()
+            .enumerate()
+            .map(|(k, n)| (n.clone(), rows.iter().map(|r| r[k]).collect()))
+            .collect()
+    };
+    write(
+        &format!("{}.latent.parquet", args.out),
+        "cell",
+        &cells,
+        &named(&cell_model),
+    )?;
+    write(
+        &format!("{}.dictionary.parquet", args.out),
+        "gene",
+        &names,
+        &named(&gene_model),
     )?;
     let times: Vec<Box<str>> = (0..l)
         .flat_map(|i| {
@@ -651,7 +712,7 @@ fn write_manifest(args: &TdRbmArgs, inputs: &Inputs, has_pb_tree: bool) -> anyho
         data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
-        dictionary_suffix: None,
+        dictionary_suffix: Some("dictionary.parquet"),
         has_model: false,
         has_cell_proj: true,
         pb_gene_suffix: None,
@@ -667,7 +728,7 @@ fn write_manifest(args: &TdRbmArgs, inputs: &Inputs, has_pb_tree: bool) -> anyho
         cell_embedding_suffix: Some("cell_embedding.parquet"),
         cell_encoder_suffix: None,
         default_colour_by: "cluster",
-        has_latent: false,
+        has_latent: true,
         has_cell_to_pb: true,
         has_pb_tree,
     })?;
