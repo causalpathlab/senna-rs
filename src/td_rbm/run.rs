@@ -305,7 +305,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
             .collect();
         // Named as written out, or by a barcode that names one cell.
         let mut votes = vec![0usize; forest.clusters];
-        for &i in crate::view::match_cells(&wanted, &all_cells).values() {
+        for &i in senna::senna_input::match_cells(&wanted, &all_cells).values() {
             votes[forest.cluster[member[i as usize]]] += 1;
         }
         let top_cluster = (0..forest.clusters)
