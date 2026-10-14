@@ -781,11 +781,20 @@ impl App {
         let head = if finished {
             "Finished".to_string()
         } else {
-            let at = states
-                .iter()
-                .position(|s| *s == State::Running)
-                .map_or(done, |i| i + 1);
-            format!("Running {at} of {}, one after another", states.len())
+            let lanes = q.jobs.iter().map(|j| j.lane + 1).max().unwrap_or(1);
+            if lanes > 1 {
+                let running = states.iter().filter(|s| **s == State::Running).count();
+                format!(
+                    "{done} of {} done, {running} running: one after another on each of {lanes} GPUs",
+                    states.len()
+                )
+            } else {
+                let at = states
+                    .iter()
+                    .position(|s| *s == State::Running)
+                    .map_or(done, |i| i + 1);
+                format!("Running {at} of {}, one after another", states.len())
+            }
         };
         let mut lines = vec![Line::from(Span::styled(head, bold())), Line::from("")];
         for (((j, state), last), progress) in q.jobs.iter().zip(&states).zip(&last).zip(&progress) {
