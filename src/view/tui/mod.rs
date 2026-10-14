@@ -296,6 +296,7 @@ impl App {
         let listed = match &mut self.modal {
             Some(Modal::MarkersFile(b)) => b.poll() || b.listing().is_some(),
             Some(Modal::DataFile(b, _)) => b.poll() || b.listing().is_some(),
+            Some(Modal::ExtraFile(b)) => b.poll() || b.listing().is_some(),
             _ => false,
         };
         let mut changed = answered

@@ -69,6 +69,7 @@ impl App {
                 }
                 self.restart();
             }
+            KeyCode::Char('e') if k.modifiers.contains(KeyModifiers::CONTROL) => self.ask_extra(),
             KeyCode::Char('e') => self.open_menu(),
             KeyCode::Char('g') => self.change(|s| s.step_feature(1)),
             KeyCode::Char('G') => self.change(|s| s.step_feature(-1)),
@@ -100,7 +101,6 @@ impl App {
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
             KeyCode::Char('y') => self.change(Scene::toggle_time),
             KeyCode::Char('u') => self.change_source(Scene::cycle_stat),
-            KeyCode::Char('E') => self.ask_extra(),
             // `{ }` step between views; the streamlines' density has its own.
             KeyCode::Char('(' | ')') => {
                 self.scene
@@ -704,6 +704,20 @@ mod tests {
         }
         a.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(a.quit);
+    }
+
+    #[test]
+    fn ctrl_e_asks_for_an_extra_file_and_e_alone_opens_the_menu() {
+        let mut a = app();
+        a.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert!(a.menu.is_none());
+        match a.scene.data.run {
+            Some(_) => assert!(matches!(a.modal, Some(Modal::ExtraFile(_)))),
+            None => assert!(a.message.as_deref().unwrap().starts_with("no run")),
+        }
+        a.modal = None;
+        press(&mut a, 'e');
+        assert!(a.menu.is_some());
     }
 
     #[test]
