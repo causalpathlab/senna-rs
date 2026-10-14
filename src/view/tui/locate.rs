@@ -1,8 +1,9 @@
 //! A run's data file that is not where its manifest says, as when a manifest
 //! is copied from another machine: the view asks where it is, then writes
-//! the answer into the manifest so every later reader finds it too.
+//! the answer into the manifest so every later reader finds it too. And a
+//! data file the run was not fitted on, opened beside it: nothing written.
 
-use super::browse::Missing;
+use super::browse::{Extra, Missing};
 use super::*;
 use crate::tui::browse::{Browser, Outcome};
 use crate::view::activity::Activity;
@@ -83,7 +84,9 @@ impl App {
         };
         let name = files::name(chosen);
         // The data files were just chosen: wait for them to be checked.
-        let loads = crate::view::activity::RunLoads::new(&m, &dir);
+        let mut loads = crate::view::activity::RunLoads::new(&m, &dir);
+        // An extra data file open stays open.
+        loads.extra = self.scene.data.loads.extra.clone();
         let mut activity = Activity::new(m.clone(), dir, loads.clone(), true);
         if let Some((next, recorded)) = activity.missing_inputs().into_iter().next() {
             self.message = Some(format!(
@@ -111,10 +114,13 @@ impl App {
             return self.refuse(format!("could not save the manifest: {e}"));
         }
         let from = self.from.clone();
+        // An extra file still being read is still to be noted once it is.
+        let extra_pending = self.scene.extra_pending;
         self.open_round(&from, "reloaded");
         // The data is open already: the scene keeps it rather than reading
         // it again.
         self.scene.data.loads = loads;
+        self.scene.extra_pending = extra_pending;
         self.scene.activity = Some(activity);
         self.change(|s| {
             s.source = crate::view::activity::Source::Observed;
@@ -134,6 +140,38 @@ impl App {
                 files::name(&from)
             ));
         }
+    }
+
+    /// Browse for a data file to show beside the run's (`O`).
+    pub(super) fn ask_extra(&mut self) {
+        if self.scene.data.run.is_none() {
+            self.message = Some("no run to match a data file's cells to".into());
+            return;
+        }
+        self.modal = Some(Modal::ExtraFile(Browser::open(
+            start_dir(&self.from),
+            Extra,
+            None,
+        )));
+    }
+
+    /// A key in the extra file's browser. Returns whether anything changed.
+    pub(super) fn extra_file_key(&mut self, k: KeyEvent) -> bool {
+        let Some(Modal::ExtraFile(b)) = self.modal.as_mut() else {
+            return false;
+        };
+        match b.key(k) {
+            Outcome::Ignored => return false,
+            Outcome::Moved => {}
+            Outcome::Cancelled => self.modal = None,
+            Outcome::Chosen(c) => {
+                self.modal = None;
+                let path = c.file();
+                self.message = Some(format!("opening {}…", files::name(&path)));
+                self.change_source(|s| s.open_extra(&path));
+            }
+        }
+        true
     }
 
     /// Give up on the chosen data, saying `why`: the manifest is untouched.

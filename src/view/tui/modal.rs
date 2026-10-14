@@ -1,6 +1,6 @@
 //! What is being typed in the status line: at most one at a time.
 
-use super::browse::{Missing, Panels};
+use super::browse::{Extra, Missing, Panels};
 use super::help::Context;
 use super::*;
 use crate::tui::browse::Browser;
@@ -16,6 +16,8 @@ pub(super) enum Modal {
     /// Browsing for a data file that is not where the manifest says: its
     /// place in `data.input`.
     DataFile(Browser<Missing>, usize),
+    /// Browsing for a data file to show beside the run's.
+    ExtraFile(Browser<Extra>),
     /// Submitting the relabel draft: one line per decision it hands lupin.
     Submit(Vec<String>),
     /// The `r` menu: what to recompute for the run.
@@ -27,7 +29,7 @@ impl Modal {
         match self {
             Modal::Search(..) => Context::Search,
             Modal::Prompt(_) => Context::Prompt,
-            Modal::MarkersFile(..) | Modal::DataFile(..) => Context::File,
+            Modal::MarkersFile(..) | Modal::DataFile(..) | Modal::ExtraFile(_) => Context::File,
             Modal::Submit(_) => Context::Submit,
             Modal::Recompute(..) => Context::Recompute,
         }
@@ -46,7 +48,8 @@ impl Modal {
             Modal::Submit(_)
             | Modal::Recompute(..)
             | Modal::MarkersFile(_)
-            | Modal::DataFile(..) => return None,
+            | Modal::DataFile(..)
+            | Modal::ExtraFile(_) => return None,
         })
     }
 }
@@ -59,15 +62,21 @@ impl App {
             Some(Modal::Prompt(_)) => self.prompt_key(k),
             Some(Modal::MarkersFile(..)) => self.markers_key(k),
             Some(Modal::DataFile(..)) => self.data_file_key(k),
+            Some(Modal::ExtraFile(_)) => self.extra_file_key(k),
             Some(Modal::Recompute(..)) => self.recompute_key(k),
+            // Submit on enter, S or ctrl+r; esc or q backs out; other keys
+            // do nothing, so a stray one neither submits nor cancels.
             Some(Modal::Submit(_)) => {
-                self.modal = None;
                 if crate::tui::is_run_key(&k)
                     || matches!(k.code, KeyCode::Char('S') | KeyCode::Enter)
                 {
+                    self.modal = None;
                     self.send_draft(Mode::Next);
-                } else {
+                } else if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) {
+                    self.modal = None;
                     self.message = Some("not submitted · the draft is kept".into());
+                } else {
+                    return false;
                 }
                 true
             }

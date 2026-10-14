@@ -212,6 +212,11 @@ impl Scene {
             self.batches_taken = false;
             self.answered = 0;
             self.redo = None;
+            // An extra data file was matched to the other run's cells.
+            self.extra_pending = false;
+            if self.source == Source::Extra {
+                self.source = Source::Observed;
+            }
         }
         self.near = None;
         self.locked.clear();
@@ -416,6 +421,9 @@ impl Scene {
 
     /// What the map is coloured by, as said.
     pub fn colour_said(&self) -> &'static str {
+        if self.pick == Some(Pick::Time) {
+            return "time";
+        }
         self.colour
             .map_or("groups", |c| self.data.labels[c].kind.title())
     }
@@ -451,6 +459,10 @@ impl Scene {
         let pick = match &self.pick {
             Some(Pick::One(f)) => format!(" · feature {f} ({}) · x clears", self.source.name()),
             Some(Pick::Markers(g)) => format!(" · {g} markers ({}) · x clears", self.source.name()),
+            Some(Pick::Time) => " · time · x clears".to_string(),
+            Some(Pick::Stat(stat)) => {
+                format!(" · {} ({}) · x clears", stat.name(), self.source.name())
+            }
             None => String::new(),
         };
         format!(

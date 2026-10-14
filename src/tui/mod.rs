@@ -158,7 +158,7 @@ pub fn home(text: &str) -> String {
     }
 }
 
-/// Edit a one-line text field with key `k`: type, backspace, ctrl-u clears.
+/// Edit a one-line text field with key `k`: type, backspace, ctrl+u clears.
 /// Returns whether it was an editing key.
 pub fn edit_line(text: &mut String, k: &ratatui::crossterm::event::KeyEvent) -> bool {
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
@@ -172,6 +172,119 @@ pub fn edit_line(text: &mut String, k: &ratatui::crossterm::event::KeyEvent) -> 
         _ => return false,
     }
     true
+}
+
+/// Key hints `text`, its entries three spaces apart, broken into lines of at
+/// most `width` between entries, so a narrow terminal cuts none in half.
+#[must_use]
+pub fn wrap_keys(text: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for entry in text.split("   ").filter(|e| !e.is_empty()) {
+        let line = lines.last_mut().expect("a line");
+        let room = width.saturating_sub(1);
+        if !line.is_empty() && line.chars().count() + 3 + entry.chars().count() > room {
+            lines.push(entry.to_string());
+        } else {
+            if !line.is_empty() {
+                line.push_str("   ");
+            }
+            line.push_str(entry);
+        }
+    }
+    lines
+}
+
+/// `text` broken between words into lines of at most `width` columns.
+#[must_use]
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for word in text.split(' ') {
+        let line = lines.last_mut().expect("a line");
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width.max(1) {
+            lines.push(word.to_string());
+        } else {
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+    }
+    lines
+}
+
+/// Rows `text` takes word-wrapped to `width` columns, as ratatui wraps a
+/// paragraph: whole words to a row, a word wider than a row broken.
+#[must_use]
+pub fn wrapped_rows(text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let (mut rows, mut used) = (1, 0usize);
+    for word in text.split(' ') {
+        let n = word.chars().count();
+        let need = if used == 0 { n } else { used + 1 + n };
+        if need <= width {
+            used = need;
+        } else if n <= width {
+            rows += 1;
+            used = n;
+        } else {
+            // Broken across rows of its own.
+            rows += usize::from(used > 0) + (n - 1) / width;
+            used = n % width;
+        }
+    }
+    rows
+}
+
+/// A key and what it does, as lines of at most `width` columns: the key in
+/// a column `key_w` wide after `indent`, the words after it wrapped under
+/// themselves.
+#[must_use]
+pub fn key_lines(indent: usize, key: &str, key_w: usize, what: &str, width: usize) -> Vec<String> {
+    let lead = indent + key_w + 1;
+    let pad = key_w.saturating_sub(key.chars().count());
+    wrap_words(what, width.saturating_sub(lead).max(8))
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                format!("{}{key}{} {l}", " ".repeat(indent), " ".repeat(pad))
+            } else {
+                format!("{}{l}", " ".repeat(lead))
+            }
+        })
+        .collect()
+}
+
+/// Rows a page key moves in a list.
+pub const PAGE: usize = 10;
+
+/// How far a list key moves: ↑↓ or k/j by one, PgUp/PgDn by a page,
+/// Home/End to either end (as far as any list goes). `None` when `k` moves
+/// nothing, so the caller can give it its own meaning.
+#[must_use]
+pub fn list_delta(k: &ratatui::crossterm::event::KeyEvent) -> Option<i64> {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    if k.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return None;
+    }
+    Some(match k.code {
+        KeyCode::Up | KeyCode::Char('k') => -1,
+        KeyCode::Down | KeyCode::Char('j') => 1,
+        KeyCode::PageUp => -(PAGE as i64),
+        KeyCode::PageDown => PAGE as i64,
+        KeyCode::Home => i64::MIN / 2,
+        KeyCode::End => i64::MAX / 2,
+        _ => return None,
+    })
+}
+
+/// The row [`list_delta`] leads to from `row` in a list of `len` rows.
+#[must_use]
+pub fn list_move(k: &ratatui::crossterm::event::KeyEvent, row: usize, len: usize) -> Option<usize> {
+    let last = len.saturating_sub(1) as i64;
+    list_delta(k).map(|d| (row as i64).saturating_add(d).clamp(0, last) as usize)
 }
 
 /// A path as shown: relative to the working directory when it is under it.
@@ -226,5 +339,43 @@ mod loading_tests {
     fn a_panic_in_the_work_is_an_answer() {
         let l: Loading<u32> = Loading::new(|| panic!("boom"));
         assert!(l.get().as_ref().is_err_and(|e| e.contains("panic")));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn rows_count_as_words_wrap() {
+        assert_eq!(wrapped_rows("", 10), 1);
+        assert_eq!(wrapped_rows("aaaa bbbb", 9), 1);
+        // A word that does not fit the row goes whole to the next.
+        assert_eq!(wrapped_rows("aaaa bbbbb", 9), 2);
+        // Wider than a row: broken across rows.
+        assert_eq!(wrapped_rows("aaaaaaaaaaaaaaaaaaaa", 8), 3);
+    }
+
+    #[test]
+    fn hints_and_keys_wrap_whole() {
+        let lines = wrap_keys("a one   b two   c three", 14);
+        assert_eq!(lines, ["a one   b two", "c three"]);
+        let lines = key_lines(2, "x", 4, "one two three four", 16);
+        assert!(lines.iter().all(|l| l.chars().count() <= 16), "{lines:?}");
+        assert!(lines[0].starts_with("  x    one"));
+        assert!(lines[1].starts_with("       "));
+    }
+
+    #[test]
+    fn list_keys_move_and_clamp() {
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(list_move(&k(KeyCode::Char('j')), 0, 5), Some(1));
+        assert_eq!(list_move(&k(KeyCode::Up), 0, 5), Some(0));
+        assert_eq!(list_move(&k(KeyCode::End), 1, 5), Some(4));
+        assert_eq!(list_move(&k(KeyCode::Home), 3, 5), Some(0));
+        assert_eq!(list_move(&k(KeyCode::Char('x')), 3, 5), None);
+        let ctrl_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(list_move(&ctrl_j, 0, 5), None);
     }
 }

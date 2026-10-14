@@ -166,6 +166,10 @@ struct App {
     picker: Picker,
     /// Pixels per terminal cell.
     cell: (f32, f32),
+    /// The thinnest line drawn on the map, in frame pixels: one pixel of
+    /// the screen when it shows the frame in coarser pixels (half blocks).
+    /// A property of the screen, so a saved page never takes it.
+    stroke_floor: f32,
     map: Rect,
     vp: Option<Viewport>,
     job: Option<Job>,
@@ -174,7 +178,11 @@ struct App {
     base: Option<(Viewport, Frame)>,
     proto: Option<Protocol>,
     message: Option<String>,
+    /// The `?` page: up, how far it is scrolled, and its furthest scroll as
+    /// last drawn.
     help: bool,
+    help_scroll: usize,
+    help_max: std::cell::Cell<usize>,
     drag: Option<Drag>,
     /// What is being typed in the status line, if anything.
     modal: Option<Modal>,
@@ -218,6 +226,13 @@ struct App {
 impl App {
     fn new(scene: Scene, picker: Picker, from: std::path::PathBuf, lupin: String) -> Self {
         let f = picker.font_size();
+        // Half blocks show a cell's frame pixels as one pixel across: a
+        // thinner line averages away.
+        let stroke_floor = if picker.protocol_type() == ProtocolType::Halfblocks {
+            f32::from(f.width.max(1))
+        } else {
+            1.0
+        };
         // Opened on an older round: say where the newest work is.
         let newer = scene
             .data
@@ -248,6 +263,7 @@ impl App {
             sidebar: true,
             scene,
             cell: (f32::from(f.width.max(1)), f32::from(f.height.max(1))),
+            stroke_floor,
             picker,
             map: Rect::default(),
             vp: None,
@@ -256,6 +272,8 @@ impl App {
             proto: None,
             message: newer,
             help: false,
+            help_scroll: 0,
+            help_max: std::cell::Cell::new(0),
             drag: None,
             names: None,
             menu: None,
@@ -388,7 +406,7 @@ impl App {
             _ => None,
         };
         let next = match at {
-            Some(i) => (i as i64 + delta).clamp(0, last as i64) as usize,
+            Some(i) => (i as i64).saturating_add(delta).clamp(0, last as i64) as usize,
             None if delta > 0 => 0,
             None => last,
         };
@@ -421,9 +439,11 @@ impl App {
     }
 
     /// Map and sidebar areas and the viewport for the current terminal size.
-    fn layout(&mut self, area: Rect) {
+    /// `status` rows at the bottom are the status area, measured at the
+    /// terminal's full width as the status is drawn.
+    fn layout(&mut self, area: Rect, status: u16) {
         let body = Rect {
-            height: area.height.saturating_sub(STATUS_LINES),
+            height: area.height.saturating_sub(status),
             ..area
         };
         // The sidebar takes its columns from the map rather than covering it.
@@ -526,7 +546,8 @@ impl App {
             let vp = job.vp;
             let base = job.finish();
             let mut frame = base.clone();
-            self.scene.decorate(&mut frame, &vp, self.cell.1);
+            self.scene
+                .decorate(&mut frame, &vp, self.cell.1, self.stroke_floor);
             self.base = Some((vp, base));
             frame.to_image()
         } else {
@@ -569,7 +590,8 @@ impl App {
         let img = match &self.base {
             Some((vp, base)) if Some(*vp) == self.vp => {
                 let mut frame = base.clone();
-                self.scene.decorate(&mut frame, vp, self.cell.1);
+                self.scene
+                    .decorate(&mut frame, vp, self.cell.1, self.stroke_floor);
                 frame.to_image()
             }
             _ => return self.restart(),

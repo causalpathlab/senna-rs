@@ -1,9 +1,21 @@
 use super::*;
 
 fn cli() -> clap::Command {
-    // A stand-in for senna's command: every method takes data files,
-    // --out and batch files, and one flag of its own.
+    // A stand-in for senna's command: every embedding takes data files,
+    // --out and batch files, and one flag of its own; td-rbm one file.
     let method = |name: &'static str| {
+        if name == TD_RBM {
+            return clap::Command::new(name)
+                .about("time")
+                .arg(clap::Arg::new("tracks").required(true))
+                .arg(clap::Arg::new("out").long("out").required(true))
+                .arg(
+                    clap::Arg::new("grid")
+                        .long("grid")
+                        .default_value("32")
+                        .value_parser(clap::value_parser!(u64)),
+                );
+        }
         let c = clap::Command::new(name)
             .about("fit")
             .arg(
@@ -48,6 +60,12 @@ fn cli() -> clap::Command {
             )
         } else {
             c
+        };
+        // Two name a flag alike that means something else in each.
+        let c = match name {
+            "vae" => c.arg(clap::Arg::new("depth").long("depth").default_value("20")),
+            "svd" => c.arg(clap::Arg::new("depth").long("depth").default_value("1000")),
+            _ => c,
         };
         // All but one take the clones of `mung clones`.
         if name == "simba" {
@@ -112,6 +130,7 @@ fn data(dir: &Path, names: &[&str]) -> Vec<Pair> {
                 cells: Some(3),
                 tags: None,
                 gene_counts: None,
+                two_tracks: None,
             }
         })
         .collect()
@@ -274,6 +293,13 @@ fn every_method_of_senna_parses_from_an_untouched_form() {
     for m in METHODS {
         let form = Method::new(&cli, m).unwrap();
         assert!(!form.fields.is_empty(), "{m} has no flags");
+        if m == TD_RBM {
+            // One two-track file, no batches.
+            assert!(!form.takes_batches());
+            let argv = form.argv(&["d.zarr".into()], &[], "o");
+            assert_eq!(form::check(&cli, &argv), Ok(()), "{m}: {argv:?}");
+            continue;
+        }
         assert!(form.takes_batches(), "{m} takes no batch files");
         let argv = form.argv(
             &["d1.zarr".into(), "d2.zarr".into()],
@@ -949,4 +975,134 @@ fn fits_with_the_same_collapse_share_one_partition() {
     let plan = a.plan();
     let by = |name: &str| plan.iter().find(|p| p.job.method == name).unwrap();
     assert_eq!(by("vae").job.pb_from, None);
+}
+
+#[test]
+fn td_rbm_runs_on_one_file_whose_genes_have_both_tracks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    let row = METHODS.iter().position(|m| *m == TD_RBM).unwrap();
+    a.rows[row].on = true;
+    let problem = |a: &App| a.plan()[0].problem.clone();
+
+    a.pairs = data(dir.path(), &["d1.zarr", "d2.zarr"]);
+    assert!(problem(&a).unwrap().contains("one data file"));
+
+    a.pairs.truncate(1);
+    a.pairs[0].two_tracks = Some(0);
+    assert!(problem(&a).unwrap().contains("no gene has both"));
+    // Still being read: nothing to say yet.
+    a.pairs[0].two_tracks = None;
+    assert_eq!(problem(&a), None);
+
+    a.pairs[0].two_tracks = Some(50);
+    let p = &a.plan()[0];
+    assert_eq!(p.problem, None);
+    assert_eq!(p.warning, None, "no embedding's shape warning");
+    assert_eq!(p.job.argv, [TD_RBM, "d1.zarr", "--out", TD_RBM]);
+    // Its manifest, like every fit's; one there stops a run over it.
+    assert!(p.job.result().ends_with("td-rbm.senna.json"));
+    std::fs::write(dir.path().join("td-rbm.senna.json"), "{}").unwrap();
+    assert!(problem(&a).unwrap().contains("exists"));
+}
+
+#[test]
+fn a_flag_whose_default_differs_between_fits_stays_on_each_fits_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    let (vae, svd) = (row_of(&a, "vae"), row_of(&a, "svd"));
+    a.rows[vae].on = true;
+    a.rows[svd].on = true;
+    let shared: Vec<String> = a.shared_form().fields.into_iter().map(|f| f.long).collect();
+    assert!(shared.contains(&"steps".to_string()), "{shared:?}");
+    assert!(!shared.contains(&"depth".to_string()), "{shared:?}");
+    for m in [vae, svd] {
+        assert!(a.rows[m].form.fields.iter().any(|f| f.long == "depth"));
+    }
+}
+
+#[test]
+fn question_mark_lists_the_keys_and_any_key_closes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    let screen = a.screen;
+    key(&mut a, KeyCode::Char('?'));
+    assert!(a.help);
+    // The key that closes the page does nothing else.
+    key(&mut a, KeyCode::Char('q'));
+    assert!(!a.help && !a.quit && a.screen == screen);
+}
+
+#[test]
+fn j_and_k_move_as_the_arrows_do() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.screen = Screen::Methods;
+    key(&mut a, KeyCode::Char('j'));
+    key(&mut a, KeyCode::Char('j'));
+    assert_eq!(a.method_row, 2);
+    key(&mut a, KeyCode::Char('k'));
+    assert_eq!(a.method_row, 1);
+    key(&mut a, KeyCode::End);
+    assert_eq!(a.method_row, a.rows.len() - 1);
+    key(&mut a, KeyCode::Home);
+    assert_eq!(a.method_row, 0);
+}
+
+#[test]
+fn a_text_field_takes_no_control_keys_and_ctrl_u_clears_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.edit(Target::Header, "exp".into());
+    a.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    assert_eq!(a.editor.as_ref().unwrap().text, "exp");
+    a.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    assert_eq!(a.editor.as_ref().unwrap().text, "");
+}
+
+/// The screen `a` draws on a `w` × `h` terminal, as text.
+fn drawn(a: &App, w: u16, h: u16) -> String {
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+    t.draw(|f| a.draw(f)).unwrap();
+    let buf = t.backend().buffer().clone();
+    (0..h)
+        .map(|y| {
+            (0..w)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn long_lists_scroll_to_keep_the_cursor_on_a_small_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    let names: Vec<String> = (0..40).map(|i| format!("file{i:02}.zarr")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    a.pairs = data(dir.path(), &refs);
+    a.pair_row = 30;
+    let text = drawn(&a, 80, 20);
+    assert!(text.contains("file30.zarr"), "{text}");
+    assert!(text.contains("more"), "{text}");
+    a.screen = Screen::Methods;
+    a.method_row = a.rows.len() - 1;
+    let text = drawn(&a, 80, 16);
+    assert!(text.contains(TD_RBM), "{text}");
+}
+
+#[test]
+fn every_key_hint_is_whole_on_a_narrow_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    for screen in [Screen::Data, Screen::Methods, Screen::Params] {
+        a.screen = screen;
+        let text = drawn(&a, 72, 24);
+        // The last hint of the global line is never cut off.
+        assert!(text.contains("q quit"), "{screen:?}: {text}");
+    }
+    a.help = true;
+    let text = drawn(&a, 72, 16);
+    assert!(text.contains("esc, q or ? close"), "{text}");
 }

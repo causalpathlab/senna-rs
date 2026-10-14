@@ -4,7 +4,9 @@
 use super::jobs::{State, Tool, CLONES_FLAG};
 use super::{batches, App, Batch, Kind, Screen, Target};
 use crate::tui::child::Progress;
-use crate::tui::style::{bold, first_row, hint, page, popup, rgb, selected, At, MUTED, TEXT};
+use crate::tui::style::{
+    bold, first_row, hint, page, page_window, popup, rgb, scrolled, selected, At, MUTED, TEXT,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -46,10 +48,12 @@ impl App {
     pub(super) fn draw(&self, f: &mut ratatui::Frame) {
         let area = f.area();
         f.render_widget(Block::default().style(page()), area);
+        // The footer wraps its keys to the width, so none is cut off.
+        let footer = self.status(usize::from(area.width).saturating_sub(1));
         let [top, body, status] = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(footer.len() as u16),
         ])
         .areas(area);
         f.render_widget(Paragraph::new(self.tabs()), top);
@@ -64,7 +68,7 @@ impl App {
             Screen::Params => self.draw_params(f, inner),
             Screen::Run => self.draw_run(f, inner),
         }
-        f.render_widget(Paragraph::new(self.status()), status);
+        f.render_widget(Paragraph::new(footer), status);
         if let Some(b) = &self.browser {
             let lines = b.lines(usize::from(area.height).saturating_sub(2));
             popup(f, area, lines, 110, At::Middle, TEXT);
@@ -84,6 +88,11 @@ impl App {
                 At::Middle,
                 TEXT,
             );
+        }
+        if self.help {
+            let rows = usize::from(area.height).saturating_sub(4);
+            let width = usize::from(area.width.min(70)).saturating_sub(2);
+            popup(f, area, self.help_lines(rows, width), 70, At::Middle, TEXT);
         }
         if let Some(e) = &self.editor {
             let what = match &e.target {
@@ -118,13 +127,149 @@ impl App {
                         " O on Methods changes it later; o names one --out by hand",
                         hint(),
                     )),
-                    Line::from(Span::styled(" enter keep   esc no header", hint())),
+                    Line::from(Span::styled(
+                        if self.header.is_empty() {
+                            " enter keep   esc no header".to_string()
+                        } else {
+                            format!(" enter keep   esc keep {}", self.header)
+                        },
+                        hint(),
+                    )),
                 ]);
             } else {
                 lines.push(Line::from(Span::styled(" enter keep   esc cancel", hint())));
             }
             popup(f, area, lines, 90, At::Middle, TEXT);
         }
+    }
+
+    /// The `?` page: every key, by where it works, one to a line with the
+    /// keys in a column of their own, scrolled to fit `rows`.
+    fn help_lines(&self, rows: usize, width: usize) -> Vec<Line<'static>> {
+        let run = crate::tui::RUN_KEY;
+        let sections: Vec<(&str, Vec<(String, &str)>)> = vec![
+            (
+                "Everywhere",
+                vec![
+                    (
+                        "tab  shift+tab  1-4".into(),
+                        "next, previous or numbered screen",
+                    ),
+                    (run.to_string(), "review the commands, then run them"),
+                    ("?".into(), "this page"),
+                    ("q".into(), "quit (in a popup: back)"),
+                    ("esc".into(), "back out of a popup, filter or text"),
+                    ("ctrl+c".into(), "stop the fits and quit"),
+                    ("shift+drag".into(), "select text (the wheel scrolls)"),
+                ],
+            ),
+            (
+                "Lists and pages",
+                vec![
+                    ("↑ ↓  k j  wheel".into(), "one row"),
+                    ("PgUp PgDn".into(), "a page"),
+                    ("Home End".into(), "first or last row"),
+                ],
+            ),
+            (
+                "Typing",
+                vec![
+                    ("enter".into(), "keep"),
+                    ("ctrl+u".into(), "clear the line"),
+                ],
+            ),
+            (
+                "Data",
+                vec![
+                    ("a".into(), "add data files"),
+                    ("b".into(), "label files (several: paired by name)"),
+                    ("n".into(), "name the batch"),
+                    ("e".into(), "rename the labels"),
+                    ("x  X".into(), "own name, for this file or all"),
+                    ("d  delete".into(), "remove the file"),
+                    ("J  K".into(), "move the row down or up"),
+                    ("enter".into(), "on to the methods"),
+                ],
+            ),
+            (
+                "Methods",
+                vec![
+                    ("space".into(), "queue or unqueue"),
+                    ("enter".into(), "queue and set its flags"),
+                    ("o".into(), "this fit's --out"),
+                    ("O".into(), "the output header of every --out"),
+                ],
+            ),
+            (
+                "Parameters",
+                vec![
+                    ("space  enter".into(), "toggle a switch, or step a choice"),
+                    ("← →".into(), "step a choice"),
+                    ("enter  e".into(), "type a value"),
+                    ("f".into(), "pick a file for the value"),
+                    ("r  R".into(), "reset this flag, or all"),
+                    ("a".into(), "show or hide the advanced flags"),
+                    ("/".into(), "filter the flags (esc clears it)"),
+                    ("[  ]".into(), "previous or next method's page"),
+                ],
+            ),
+            (
+                "Review",
+                vec![
+                    (format!("enter  {run}"), "run"),
+                    ("c".into(), "copy the commands"),
+                ],
+            ),
+            (
+                "Run",
+                vec![
+                    ("s".into(), "stop (twice: kill)"),
+                    ("v".into(), "open the results in senna view"),
+                    ("End".into(), "follow the log"),
+                ],
+            ),
+        ];
+        let key_w = sections
+            .iter()
+            .flat_map(|(_, keys)| keys.iter().map(|(k, _)| k.chars().count()))
+            .max()
+            .unwrap_or(0)
+            + 2;
+        let mut body = Vec::new();
+        for (i, (place, keys)) in sections.into_iter().enumerate() {
+            if i > 0 {
+                body.push(Line::from(""));
+            }
+            body.push(Line::from(Span::styled(format!(" {place}"), bold())));
+            for (k, what) in keys {
+                for (i, l) in crate::tui::key_lines(3, &k, key_w, what, width)
+                    .into_iter()
+                    .enumerate()
+                {
+                    // The key bold, what it does plain.
+                    let at = if i == 0 { 3 + key_w } else { 0 };
+                    let (key, rest) =
+                        l.split_at(l.char_indices().nth(at).map_or(l.len(), |(b, _)| b));
+                    body.push(Line::from(vec![
+                        Span::styled(key.to_string(), bold()),
+                        Span::raw(rest.to_string()),
+                    ]));
+                }
+            }
+        }
+        let (shown, stands) = page_window(
+            body,
+            rows.saturating_sub(4).max(3),
+            self.help_scroll,
+            &self.help_max,
+        );
+        let mut out = vec![Line::from(Span::styled(" Keys", bold())), Line::from("")];
+        out.extend(shown);
+        out.push(Line::from(Span::styled(
+            format!(" {stands}↑ ↓ / wheel scroll   esc, q or ? close"),
+            hint(),
+        )));
+        out
     }
 
     fn tabs(&self) -> Vec<Line<'static>> {
@@ -157,27 +302,43 @@ impl App {
         vec![Line::from(spans), Line::from("")]
     }
 
-    fn status(&self) -> Vec<Line<'static>> {
+    fn status(&self, width: usize) -> Vec<Line<'static>> {
         let keys = match self.screen {
-            Screen::Data => "a add data   n name the batch   b label files (several: paired by name)   e rename labels   x own name   X all own   d remove   J K reorder",
-            Screen::Methods => "space queue   enter flags   o change --out   O output header",
-            Screen::Params => "space / enter change   e type   f pick a file   ← → choices   r reset   R reset all   a advanced   / filter   [ ] method (shared first)",
-            Screen::Run => "↑ ↓ PgUp PgDn scroll the log   End follow it   s stop   v open the results in senna view",
+            Screen::Data => "a add data   n name the batch   b label files (several: paired by name)   e rename labels   x own name   X all own   d remove   J K move   enter methods".to_string(),
+            Screen::Methods => "space queue   enter queue and set flags   o change --out   O output header".to_string(),
+            Screen::Params => {
+                // What space, enter and the arrows do to the flag under the
+                // cursor, then the page's own keys.
+                let on = self.field().map(|i| self.page_form().fields[i].clone());
+                let change = match on.as_ref().map(|x| (&x.kind, x.takes_table())) {
+                    Some((Kind::Flag { .. }, _)) => "space / enter toggle",
+                    Some((Kind::Choice(_), _)) => "← → / space choose",
+                    Some((Kind::Text, true)) => "enter pick a table   e type",
+                    Some((Kind::Text, false)) => "enter / e type   f pick a file",
+                    None => "",
+                };
+                let filter = if self.filter.is_empty() { "/ filter" } else { "/ filter   esc clear it" };
+                format!("{change}   r reset   R reset all   a advanced   {filter}   [ ] method (shared first)")
+            }
+            Screen::Run => "↑ ↓ PgUp PgDn Home scroll the log   End follow it   s stop   v open the results in senna view".to_string(),
         };
-        vec![
-            Line::from(Span::styled(
-                format!(" {}", self.message.clone().unwrap_or_default()),
-                bold(),
-            )),
-            Line::from(Span::styled(format!(" {keys}"), hint())),
-            Line::from(Span::styled(
-                format!(
-                    " tab / 1-4 screens   {} review and run   q quit",
-                    crate::tui::RUN_KEY
-                ),
-                hint(),
-            )),
-        ]
+        let everywhere = format!(
+            "↑ ↓ / j k / wheel move   tab / 1-{} screens   {} review and run   ? keys   q quit",
+            self.screens().len(),
+            crate::tui::RUN_KEY
+        );
+        let mut lines = vec![Line::from(Span::styled(
+            format!(" {}", self.message.clone().unwrap_or_default()),
+            bold(),
+        ))];
+        for text in [keys, everywhere] {
+            lines.extend(
+                crate::tui::wrap_keys(&text, width)
+                    .into_iter()
+                    .map(|l| Line::from(Span::styled(format!(" {l}"), hint()))),
+            );
+        }
+        lines
     }
 
     fn draw_data(&self, f: &mut ratatui::Frame, area: Rect) {
@@ -200,6 +361,7 @@ impl App {
             .max()
             .unwrap_or(0)
             .min(w / 2);
+        let mut files = Vec::new();
         for (i, p) in self.pairs.iter().enumerate() {
             let batch = match &p.batch {
                 Batch::Own if p.tags.is_some() => "its barcodes' @batch tags".to_string(),
@@ -232,12 +394,13 @@ impl App {
             } else {
                 Style::default()
             };
-            lines.push(Line::from(Span::styled(fit(&text, w), style)));
+            files.push(Line::from(Span::styled(fit(&text, w), style)));
         }
         let summary = batches::summary(&self.pairs);
+        let mut tail = Vec::new();
         if !summary.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
+            tail.push(Line::from(""));
+            tail.push(Line::from(Span::styled(
                 format!(
                     "{} batch{}",
                     summary.len(),
@@ -251,9 +414,21 @@ impl App {
                     "  {name:<24} {cells:>8} cells  {files} file{}",
                     if files == 1 { "" } else { "s" }
                 );
-                lines.push(Line::from(Span::styled(fit(&text, w), hint())));
+                tail.push(Line::from(Span::styled(fit(&text, w), hint())));
             }
         }
+        // The batches take at most a third of the room; the files scroll
+        // in the rest to keep the cursor in sight.
+        let height = usize::from(area.height).saturating_sub(lines.len());
+        let tail_room = tail.len().min(height / 3);
+        if tail.len() > tail_room {
+            let more = tail.len() - tail_room + 1;
+            tail.truncate(tail_room.saturating_sub(1));
+            tail.push(Line::from(Span::styled(format!("  … {more} more"), hint())));
+        }
+        let room = height.saturating_sub(tail.len());
+        lines.extend(scrolled(files, self.pair_row, room));
+        lines.extend(tail);
         f.render_widget(Paragraph::new(lines), area);
     }
 
@@ -299,7 +474,7 @@ impl App {
         }
         out.push(Line::from(""));
         out.push(Line::from(Span::styled(
-            " ↑ ↓ choose   enter rename (empty: as it was)   esc back",
+            " ↑ ↓ choose   enter rename (empty: as it was)   esc / q back",
             hint(),
         )));
         out
@@ -321,6 +496,8 @@ impl App {
             ]),
             Line::from(""),
         ];
+        const HEAD: usize = 3;
+        let mut at = 0;
         let w = usize::from(area.width);
         let out_w = self
             .rows
@@ -358,28 +535,47 @@ impl App {
             } else {
                 Style::default()
             };
+            if i == self.method_row {
+                at = lines.len();
+            }
             lines.push(Line::from(Span::styled(fit(&text, w), style)));
+            // Notes under a row, wrapped by word under its name.
+            let note = |lines: &mut Vec<Line<'static>>, text: &str, style: Style| {
+                for l in crate::tui::wrap_words(text, w.saturating_sub(6)) {
+                    lines.push(Line::from(Span::styled(format!("      {l}"), style)));
+                }
+            };
             if r.tool == Tool::Mung {
-                lines.push(Line::from(Span::styled(
-                    "      runs first; once it is done you see its clones and choose whether the fits get --cnv-clones",
+                note(
+                    &mut lines,
+                    "runs first; once it is done you see its clones and choose whether the fits get --cnv-clones",
                     hint(),
-                )));
+                );
                 lines.push(Line::from(""));
             }
             if r.on {
+                // What review would refuse, said where the fit is queued.
+                if let Some(problem) = self.two_track_problem(r) {
+                    note(&mut lines, &format!("✗ {problem}"), bold());
+                }
                 if let Some(warn) = self.shape_warning(r) {
-                    lines.push(Line::from(Span::styled(format!("      {warn}"), hint())));
+                    note(&mut lines, &warn, hint());
                 }
             }
         }
+        // The heading stays; the rows scroll to keep the cursor in sight.
+        let room = usize::from(area.height).saturating_sub(HEAD);
+        let body = lines.split_off(HEAD.min(lines.len()));
+        lines.extend(scrolled(body, at.saturating_sub(HEAD), room));
         f.render_widget(Paragraph::new(lines), area);
     }
 
     fn draw_params(&self, f: &mut ratatui::Frame, area: Rect) {
+        // The flag's help takes up to a third of the screen; the list the rest.
         let [head, list, help] = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(3),
-            Constraint::Length(10),
+            Constraint::Length((area.height / 3).clamp(4, 10)),
         ])
         .areas(area);
         let mut tabs = Vec::new();
@@ -399,8 +595,9 @@ impl App {
                 Span::styled(name, hint())
             });
         }
+        let shown = self.visible().len();
         let mut sub = format!(
-            "{}{}",
+            "{}{}  · {} of {shown}",
             if self.advanced {
                 "all flags (a hides advanced ones, marked ·)"
             } else {
@@ -410,7 +607,8 @@ impl App {
                 String::new()
             } else {
                 format!(" containing “{}”", self.filter)
-            }
+            },
+            (self.field_row + 1).min(shown)
         );
         sub.insert_str(0, "  ");
         tabs.push(Span::styled(sub, hint()));
@@ -731,9 +929,9 @@ impl App {
         out.extend(body.into_iter().skip(skip).take(room));
         out.push(Line::from(Span::styled(
             if blocked {
-                " enter go to the problem   c copy   ↑ ↓ scroll   esc back"
+                " enter go to the problem   c copy   ↑ ↓ scroll   esc / q back"
             } else {
-                " enter run   c copy the commands   ↑ ↓ scroll   esc back"
+                " enter or ctrl+r run   c copy the commands   ↑ ↓ scroll   esc / q back"
             },
             hint(),
         )));

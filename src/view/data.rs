@@ -151,6 +151,10 @@ pub enum LabelKind {
     Changed,
     /// The source round's annotation.
     Previous,
+    /// A td-rbm run's lineage of each cell.
+    Lineage,
+    /// The clusters a td-rbm run's lineage forest is built on.
+    TreeCluster,
 }
 
 impl LabelKind {
@@ -168,6 +172,8 @@ impl LabelKind {
             LabelKind::FeatureCluster => "feature cluster",
             LabelKind::Changed => "changed",
             LabelKind::Previous => "previous annotation",
+            LabelKind::Lineage => "lineage",
+            LabelKind::TreeCluster => "tree cluster",
         }
     }
 
@@ -314,6 +320,24 @@ pub struct Dataset {
     /// The run's slow reads (data files, model tables, feature embedding):
     /// each done once, shared by every view of the run.
     pub loads: super::activity::RunLoads,
+    /// A td-rbm run's time of each cell (`cell_time`'s `tau`), when it has
+    /// one.
+    pub times: Option<std::sync::Arc<HashMap<Box<str>, f32>>>,
+}
+
+/// A td-rbm run's `cell_time` table's `tau` by cell.
+fn read_times(path: &Path) -> anyhow::Result<HashMap<Box<str>, f32>> {
+    let (strs, nums) = legume_numeric::matrix::parquet::read_table_columns(
+        &path.to_string_lossy(),
+        &["cell"],
+        &["tau"],
+    )?;
+    let cells = strs.into_iter().next().unwrap_or_default();
+    let tau = nums.into_iter().next().unwrap_or_default();
+    Ok(cells
+        .into_iter()
+        .zip(tau.into_iter().map(|t| t as f32))
+        .collect())
 }
 
 fn read_xy(path: &Path) -> anyhow::Result<Points> {
@@ -544,6 +568,14 @@ fn load_labels(
     if let Some(p) = &m.cluster.clusters {
         keep("clusters", read_cluster_labels(&at(p), LabelKind::Cluster));
     }
+    if let Some(p) = &m.outputs.cell_time {
+        for (column, kind) in [
+            ("lineage", LabelKind::Lineage),
+            ("cluster", LabelKind::TreeCluster),
+        ] {
+            keep(column, read_time_labels(&at(p), column, kind));
+        }
+    }
     // An embedding run's `latent` is log θ only when Z went to
     // `cell_embedding`; older manifests kept Z there instead.
     let latent_is_topics = m.kind.latent_is_log_simplex() || m.outputs.cell_embedding.is_some();
@@ -572,6 +604,21 @@ fn load_labels(
     labels
 }
 
+/// A td-rbm run's `cell_time` table's string column `column` as labels.
+fn read_time_labels(path: &Path, column: &str, kind: LabelKind) -> anyhow::Result<Labels> {
+    let (strs, _) = legume_numeric::matrix::parquet::read_table_columns(
+        &path.to_string_lossy(),
+        &["cell", column],
+        &[],
+    )?;
+    let mut cols = strs.into_iter();
+    let (cells, levels) = (
+        cols.next().unwrap_or_default(),
+        cols.next().unwrap_or_default(),
+    );
+    Ok(Labels::new(kind, cells.into_iter().zip(levels), &[]))
+}
+
 impl Dataset {
     /// Whether any layout shows points of `axis`.
     #[must_use]
@@ -593,10 +640,17 @@ impl Dataset {
         let round = super::rounds::Round::load(&m, &dir, &manifest_path);
         let prefix = run_manifest::derive_out_prefix(from);
         let labels = load_labels(&m, &dir, &round, &prefix);
+        let times = m.outputs.cell_time.as_deref().and_then(|p| {
+            read_times(&run_manifest::resolve(&dir, p))
+                .map_err(|e| log::warn!("view: skipping cell times: {e}"))
+                .ok()
+                .map(std::sync::Arc::new)
+        });
         Ok(Self {
             prefix,
             spaces,
             labels,
+            times,
             loads: super::activity::RunLoads::new(&m, &dir),
             run: Some((m, dir)),
             round: Some(round),

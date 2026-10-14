@@ -1,6 +1,7 @@
 //! Features on the map: suggestions, the picked feature's activity, and
 //! features near a clicked cell.
 
+use super::activity::{read_extra, ExtraFiles};
 use super::*;
 use crate::tui::LOADING;
 
@@ -325,8 +326,8 @@ impl Scene {
         self.set_pick(Pick::Markers(name));
     }
 
-    pub fn toggle_source(&mut self) {
-        self.source = self.source.other();
+    pub fn cycle_source(&mut self) {
+        self.source = self.source.next(self.data.loads.extra.is_some());
         // A click's list holds the features with values in the source shown;
         // suggestions on screen stay as they are.
         let shown = self.pick.clone();
@@ -335,7 +336,134 @@ impl Scene {
         self.refresh_activity();
     }
 
+    /// Colour the cells by the next per-cell statistic of the counts shown:
+    /// total, features detected, the focused group's markers' share (when
+    /// it has markers), then back to group colours. The model's expectation
+    /// has none, so the counts come up in its place.
+    pub fn cycle_stat(&mut self) {
+        let share = || {
+            self.focused_name()
+                .filter(|g| !self.marker_features(g).is_empty())
+                .map(Stat::Share)
+        };
+        let next = match &self.pick {
+            Some(Pick::Stat(Stat::Total)) => Some(Stat::Detected),
+            Some(Pick::Stat(Stat::Detected)) => share(),
+            Some(Pick::Stat(Stat::Share(_))) => None,
+            _ => Some(Stat::Total),
+        };
+        let Some(stat) = next else {
+            self.clear_pick();
+            return;
+        };
+        if self.source == Source::Expected {
+            self.source = self.count_source();
+        }
+        self.set_pick(Pick::Stat(stat));
+    }
+
+    /// The counts to summarise when the model's expectation is shown: the
+    /// extra file's when one is open, else the run's own.
+    pub(super) fn count_source(&self) -> Source {
+        if self.data.loads.extra.is_some() {
+            Source::Extra
+        } else {
+            Source::Observed
+        }
+    }
+
+    /// Open `path` as the extra source, a data file the run was not fitted
+    /// on, read on the side; its cells are matched to the run's. Shows it at
+    /// once: the feature or time on screen, else each cell's total.
+    pub fn open_extra(&mut self, path: &std::path::Path) {
+        let cells = self.cell_names().map(<[_]>::to_vec).unwrap_or_default();
+        let path = path.to_path_buf();
+        let extra = std::sync::Arc::new(ExtraFiles::new(move || {
+            read_extra(&path, &cells).map_err(|e| e.to_string())
+        }));
+        extra.start();
+        self.data.loads.extra = Some(extra.clone());
+        if let Some(a) = self.activity.as_mut() {
+            a.set_extra(extra);
+        }
+        self.extra_pending = true;
+        self.source = Source::Extra;
+        self.shown = None;
+        if !matches!(
+            self.pick,
+            Some(Pick::One(_) | Pick::Markers(_) | Pick::Stat(_) | Pick::Time)
+        ) {
+            self.pick = Some(Pick::Stat(Stat::Total));
+        }
+        self.refresh_activity();
+        // Read already when the scene waits for reads (no screen).
+        self.note_extra();
+    }
+
+    /// How the extra file's cells matched the run's, once it is read.
+    /// Returns whether it was said now.
+    fn note_extra(&mut self) -> bool {
+        if !self.extra_pending {
+            return false;
+        }
+        let Some(read) = self.data.loads.extra.as_ref().and_then(|x| x.try_get()) else {
+            return false;
+        };
+        self.extra_pending = false;
+        self.note = Some(match read {
+            Ok(x) if x.matched() * 10 < x.of * 9 => format!(
+                "extra: only {} of the run's {} cells are in {}: is it the same cells?",
+                x.matched(),
+                x.of,
+                x.name
+            ),
+            Ok(x) => format!(
+                "extra: {} · {} of the run's {} cells matched",
+                x.name,
+                x.matched(),
+                x.of
+            ),
+            Err(e) => format!("extra data file: {e}"),
+        });
+        true
+    }
+
     /// Drop the activity view. Returns whether there was one.
+    /// Colour the cells by a td-rbm run's time, or stop.
+    pub fn toggle_time(&mut self) {
+        if self.pick == Some(Pick::Time) {
+            self.clear_pick();
+        } else if self.data.times.is_none() {
+            self.note = Some("this run has no cell times (a td-rbm run's)".into());
+        } else {
+            self.set_pick(Pick::Time);
+        }
+    }
+
+    /// The time of every point of `space` on the ramp.
+    fn show_time(&mut self, space: usize, source: Source) {
+        let Some(times) = self.data.times.clone() else {
+            self.shown = None;
+            self.note = Some("this run has no cell times".into());
+            return;
+        };
+        let values: Vec<f32> = self.data.spaces[space]
+            .points
+            .names
+            .iter()
+            .map(|n| times.get(n).copied().unwrap_or(f32::NAN))
+            .collect();
+        self.shown_ids += 1;
+        self.shown = Some(Shown {
+            id: self.shown_ids,
+            space,
+            pick: Pick::Time,
+            source,
+            title: "time".into(),
+            levels: Levels::from_values(values, false),
+        });
+    }
+
     pub fn clear_pick(&mut self) -> bool {
         self.shown = None;
         self.pick.take().is_some()
@@ -389,9 +517,13 @@ impl Scene {
         {
             return;
         }
+        if pick == Pick::Time {
+            self.show_time(space, source);
+            return;
+        }
         let set = match &pick {
-            Pick::Markers(group) => self.marker_features(group),
-            Pick::One(_) => Vec::new(),
+            Pick::Markers(group) | Pick::Stat(Stat::Share(group)) => self.marker_features(group),
+            Pick::One(_) | Pick::Time | Pick::Stat(_) => Vec::new(),
         };
         let Some((activity, data)) = self.activity_and_data() else {
             self.note = Some("no manifest to read activity from".into());
@@ -405,6 +537,10 @@ impl Scene {
             Pick::Markers(group) => activity
                 .set_levels(&set, source, space, names)
                 .map(|(l, used)| (l, format!("{group} markers ({used}) · {}", source.name()))),
+            Pick::Stat(stat) => activity
+                .stat_levels(stat, &set, source, space, names)
+                .map(|l| (l, format!("{} · {}", stat.name(), source.name()))),
+            Pick::Time => unreachable!("time is shown above"),
         };
         match result {
             Ok((levels, title)) => {
@@ -513,7 +649,10 @@ impl Scene {
     pub fn poll_loads(&mut self) -> bool {
         let batches = self.take_batches();
         let answered = self.data.loads.answered();
-        if answered == self.answered {
+        // An extra file read is news even when the count of answers is as
+        // it was (one file in place of another).
+        let extra = self.note_extra();
+        if answered == self.answered && !extra {
             return batches;
         }
         self.answered = answered;

@@ -85,6 +85,23 @@ downstream kNN or linear model. NB objective only. Outputs otherwise match
 > removed along with the flag; a model recorded with `kl_weight` still replays, the
 > value is ignored.
 
+## `senna rbm` — feature-embedded restricted Boltzmann machine
+
+Cells as the hidden units of a restricted Boltzmann machine over their reads,
+with weights factored through a feature embedding, `W = ρ αᵀ`: a cell reaches
+the hidden units only through where its reads sit in `ρ`. Visible units are a
+multinomial per modality block at the cell's own depth; multiome inputs are
+detected as `senna bge` detects them, and a cell missing a modality is read
+exactly from the blocks it has. Hidden units are Bernoulli, binomial,
+truncated Poisson or Gaussian (`--hidden`). Fitted on pseudobulks by
+persistent contrastive divergence (Adam on candle's backward of the
+free-energy gap), read out on every cell with no encoder. `senna docs rbm`
+has the model, the two phases of the gradient and the role of `--depth`.
+
+```bash
+senna rbm counts.zarr -o out -t 10 --hidden bernoulli
+```
+
 ## `senna vae` — scVI-style Gaussian VAE
 
 The continuous-latent sibling of `senna topic`. Same data pipeline (batch-aware

@@ -81,7 +81,8 @@ pub(crate) fn frames(views: &[(&Scene, Viewport, f32)], keep_text: bool) -> Vec<
             if keep_text {
                 frame.keep_text();
             }
-            scene.decorate(&mut frame, &vp, cell_px);
+            // A page shows any stroke: the screen's floor stays on screen.
+            scene.decorate(&mut frame, &vp, cell_px, 1.0);
             frame
         })
         .collect()

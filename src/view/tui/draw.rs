@@ -6,8 +6,11 @@ impl App {
     pub(super) fn draw(&self, f: &mut ratatui::Frame) {
         let page = page();
         f.render_widget(Block::default().style(page), f.area());
-        let [_, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(STATUS_LINES)])
-            .areas(f.area());
+        let [_, status] = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(Self::status_lines(f.area().width)),
+        ])
+        .areas(f.area());
         let map = self.map;
         if let Some(p) = &self.proto {
             f.render_widget(Image::new(p), map);
@@ -47,12 +50,20 @@ impl App {
         if let Some(loading) = self.scene.loading_line() {
             first.push_str(&format!("   · {loading}"));
         }
+        // The keys wrap between entries, so a narrow terminal cuts none.
         let [main, more] = self.status_keys();
-        let lines = vec![
-            Line::from(format!(" {first}")),
-            Line::from(format!(" {main}")),
-            Line::from(Span::styled(format!(" {more}"), hint())),
-        ];
+        let w = usize::from(status.width).saturating_sub(2);
+        let mut lines = vec![Line::from(format!(" {first}"))];
+        lines.extend(
+            crate::tui::wrap_keys(main, w)
+                .into_iter()
+                .map(|l| Line::from(format!(" {l}"))),
+        );
+        lines.extend(
+            crate::tui::wrap_keys(more, w)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(format!(" {l}"), hint()))),
+        );
         f.render_widget(Paragraph::new(lines).style(page), status);
 
         let side = self.side;
@@ -165,7 +176,7 @@ impl App {
                 " lupin writes a new round from these; this one stays as it is",
             ));
             lines.push(Line::from(Span::styled(
-                " ctrl+r, S or enter submits   any other key cancels",
+                " ctrl+r, S or enter submits   esc or q cancels",
                 hint(),
             )));
             popup(f, map, lines, 76, At::Middle, color::TEXT);
@@ -187,7 +198,16 @@ impl App {
         }
 
         if self.help {
-            popup(f, map, self.help_lines(), 96, At::Middle, color::TEXT);
+            let rows = usize::from(map.height).saturating_sub(2);
+            let width = usize::from(map.width.min(96)).saturating_sub(2);
+            popup(
+                f,
+                map,
+                self.help_lines(rows, width),
+                96,
+                At::Middle,
+                color::TEXT,
+            );
         }
     }
 

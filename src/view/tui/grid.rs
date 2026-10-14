@@ -113,7 +113,7 @@ impl Deck {
             if self.grid {
                 self.layout_grid(area);
             } else {
-                self.apps[self.at].layout(area);
+                self.apps[self.at].layout(area, App::status_lines(full.width));
             }
             dirty |= self.background();
             dirty |= if self.grid {
@@ -276,7 +276,14 @@ impl Deck {
     fn deck_key(&mut self, k: KeyEvent) -> bool {
         let n = self.apps.len();
         let app = &mut self.apps[self.at];
-        if app.modal.is_some() || app.menu.is_some() {
+        // Not over the help page, a box or menu being typed in, or a
+        // relabel round; on a chart only saving and redrawing, as its
+        // footer says.
+        if app.help || app.modal.is_some() || app.menu.is_some() || app.scene.review.is_some() {
+            return false;
+        }
+        let ctrl_l = k.code == KeyCode::Char('l') && k.modifiers.contains(KeyModifiers::CONTROL);
+        if app.scene.chart.is_some() && !(ctrl_l || k.code == KeyCode::Char('s')) {
             return false;
         }
         let several = |app: &mut App| {
@@ -486,7 +493,8 @@ impl Deck {
                 let job = tile.job.take().expect("checked above");
                 let vp = job.vp;
                 let mut frame = job.finish();
-                app.scene.decorate(&mut frame, &vp, self.cell.1);
+                app.scene
+                    .decorate(&mut frame, &vp, self.cell.1, app.stroke_floor);
                 frame.to_image()
             } else {
                 job.image()
@@ -657,7 +665,13 @@ impl Deck {
     fn strip(&self, full: Rect) -> Option<Rect> {
         let shows =
             self.show_saved && !self.gallery.entries().is_empty() && full.width >= 3 * SAVED_WIDTH;
-        shows.then(|| Rect::new(0, 0, SAVED_WIDTH, full.height.saturating_sub(STATUS_LINES)))
+        // Above the status area: the grid's, or the view's at full width.
+        let status = if self.grid {
+            STATUS_LINES
+        } else {
+            App::status_lines(full.width)
+        };
+        shows.then(|| Rect::new(0, 0, SAVED_WIDTH, full.height.saturating_sub(status)))
     }
 
     /// Where the views or the grid go: beside the strip, when it shows.
@@ -1035,7 +1049,7 @@ fn draw_move(f: &mut ratatui::Frame, m: &MoveDialog) {
                 hint(),
             )),
         },
-        Line::from(" type the path (ctrl-u clears)   enter move   esc cancel"),
+        Line::from(" type the path (ctrl+u clears)   enter move   esc cancel"),
     ];
     popup(f, f.area(), lines, 76, At::Middle, color::TEXT);
 }
@@ -1336,7 +1350,7 @@ impl Deck {
         };
         lines.push(note);
         lines.push(Line::from(
-            " ↑ ↓ field   ← → change   type to rename (ctrl-u clears)   enter save   esc cancel",
+            " ↑ ↓ field   ← → change   type to rename (ctrl+u clears)   enter save   esc cancel",
         ));
         popup(f, f.area(), lines, 76, At::Middle, color::TEXT);
     }
