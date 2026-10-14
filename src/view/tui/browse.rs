@@ -180,7 +180,8 @@ impl Wanted for Missing {
     }
 }
 
-/// A data file the run was not fitted on, to show beside it.
+/// Data files the run was not fitted on, to show beside it: one, or several
+/// marked to read together.
 #[derive(Clone)]
 pub(super) struct Extra;
 
@@ -190,9 +191,11 @@ impl Wanted for Extra {
 
     fn header(&self) -> Header {
         Header {
-            title: "Open another data file".into(),
+            title: "Open other data files".into(),
             notes: vec![
-                "its cells are matched to the run's by name (or by barcode, @ tags aside);".into(),
+                "their cells are matched to the run's by name (or by barcode, @ tags aside);"
+                    .into(),
+                "several marked are read together, on the features they share;".into(),
                 "shown as the extra source (o), nothing written".into(),
             ],
             what: "data files (.zarr, .zarr.zip, .h5)",
@@ -211,6 +214,10 @@ impl Wanted for Extra {
 
     fn describe<'a>(&self, size: &'a String) -> Cow<'a, str> {
         Cow::Borrowed(size)
+    }
+
+    fn many(&self) -> bool {
+        true
     }
 }
 

@@ -186,9 +186,10 @@ pub struct ViewArgs {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Also open this data file (.zarr, .zarr.zip, .h5), one the run was not fitted on: its cells matched to the run's by name, shown as the extra source (E opens one in the view)"
+        num_args = 1..,
+        help = "Also open these data files (.zarr, .zarr.zip, .h5), ones the run was not fitted on: their cells together, matched to the run's by name, shown as the extra source (ctrl+e opens them in the view)"
     )]
-    pub extra: Option<std::path::PathBuf>,
+    pub extra: Vec<std::path::PathBuf>,
 
     #[arg(
         long,
@@ -410,8 +411,8 @@ impl Scene {
         if args.observed {
             scene.source = Source::Observed;
         }
-        if let Some(path) = &args.extra {
-            scene.open_extra(path);
+        if !args.extra.is_empty() {
+            scene.open_extra(&args.extra);
         }
         if let Some(stat) = args.cell_stat {
             if scene.source == Source::Expected {
@@ -822,7 +823,7 @@ mod tests {
             relabel: false,
             lupin: None,
             no_compute: true,
-            extra: None,
+            extra: Vec::new(),
             cell_stat: None,
         };
         Scene::new(data, &args)

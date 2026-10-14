@@ -372,14 +372,15 @@ impl Scene {
         }
     }
 
-    /// Open `path` as the extra source, a data file the run was not fitted
-    /// on, read on the side; its cells are matched to the run's. Shows it at
-    /// once: the feature or time on screen, else each cell's total.
-    pub fn open_extra(&mut self, path: &std::path::Path) {
+    /// Open `paths` as the extra source, data files the run was not fitted
+    /// on, read together on the side; their cells are matched to the run's.
+    /// Shows it at once: the feature or time on screen, else each cell's
+    /// total.
+    pub fn open_extra(&mut self, paths: &[std::path::PathBuf]) {
         let cells = self.cell_names().map(<[_]>::to_vec).unwrap_or_default();
-        let path = path.to_path_buf();
+        let paths = paths.to_vec();
         let extra = std::sync::Arc::new(ExtraFiles::new(move || {
-            read_extra(&path, &cells).map_err(|e| e.to_string())
+            read_extra(&paths, &cells).map_err(|e| e.to_string())
         }));
         extra.start();
         self.data.loads.extra = Some(extra.clone());

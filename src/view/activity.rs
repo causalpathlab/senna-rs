@@ -564,7 +564,7 @@ impl Activity {
         self.loads
             .extra
             .as_ref()
-            .ok_or("no extra data file is open (E opens one)")?
+            .ok_or("no extra data file is open (ctrl+e opens one)")?
             .answer(self.patient)
     }
 
@@ -1269,14 +1269,18 @@ pub(crate) fn read_run_data(m: &RunManifest, dir: &Path) -> anyhow::Result<RunRe
     Ok(RunRead { observed, batches })
 }
 
-/// Read a data file the run was not fitted on, its cells matched to the
-/// run's `cells` ([`match_cells`]), and each cell's totals with it. Refuses
-/// a file with none of the run's cells.
-pub(crate) fn read_extra(path: &Path, cells: &[Box<str>]) -> anyhow::Result<ExtraRead> {
-    let name = super::files::name(path);
+/// Read data files the run was not fitted on, their cells together (on the
+/// features they share) matched to the run's `cells` ([`match_cells`]), and
+/// each cell's totals with them. Refuses files with none of the run's cells.
+pub(crate) fn read_extra(paths: &[PathBuf], cells: &[Box<str>]) -> anyhow::Result<ExtraRead> {
+    let name = match paths {
+        [] => anyhow::bail!("no extra data file given"),
+        [one] => super::files::name(one),
+        [first, rest @ ..] => format!("{} + {} more", super::files::name(first), rest.len()),
+    };
     info!("view: opening {name} as extra counts");
     let SparseDataWithBatch { data, .. } = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: vec![path.to_string_lossy().into()],
+        data_files: paths.iter().map(|p| p.to_string_lossy().into()).collect(),
         keep_empty_barcodes: true,
         ..Default::default()
     })?;
@@ -1850,7 +1854,7 @@ mod tests {
         // column not the run's.
         counts_file(&path, &["c2", "c0", "zz", "c1"]);
         let run = boxed(&["c0@lib", "c1@lib", "c2@lib", "c3@lib"]);
-        let read = read_extra(&path, &run).unwrap();
+        let read = read_extra(&[path], &run).unwrap();
         assert_eq!((read.matched(), read.of, &*read.name), (3, 4, "other.zarr"));
 
         let mut a = Activity::new(
@@ -1890,11 +1894,25 @@ mod tests {
     }
 
     #[test]
+    fn several_extra_files_are_read_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.zarr"), dir.path().join("b.zarr"));
+        counts_file(&a, &["c0", "c1"]);
+        counts_file(&b, &["c2", "zz"]);
+        let run = boxed(&["c0", "c1", "c2", "c3"]);
+        let read = read_extra(&[a, b], &run).unwrap();
+        assert_eq!(
+            (read.matched(), read.of, &*read.name),
+            (3, 4, "a.zarr + 1 more")
+        );
+    }
+
+    #[test]
     fn a_file_with_none_of_the_run_s_cells_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("other.zarr");
         counts_file(&path, &["q0", "q1"]);
-        let Err(e) = read_extra(&path, &boxed(&["c0", "c1"])) else {
+        let Err(e) = read_extra(&[path], &boxed(&["c0", "c1"])) else {
             panic!("a file with none of the run's cells was read");
         };
         assert!(e.to_string().contains("none of the run's 2 cells"), "{e}");
@@ -1911,7 +1929,7 @@ mod tests {
             RunManifest::new(senna::run_manifest::RunKind::Svd, "r"),
             dir.path().to_path_buf(),
         ));
-        s.open_extra(&path);
+        s.open_extra(&[path]);
         // Shown at once, as each cell's total.
         assert_eq!(s.source, Source::Extra);
         assert_eq!(s.pick, Some(Pick::Stat(Stat::Total)));
@@ -1937,7 +1955,7 @@ mod tests {
         let path = dir.path().join("run.zarr");
         counts_file(&path, &["c0", "c1"]);
         let cells = boxed(&["c0", "c1"]);
-        let observed = read_extra(&path, &cells).unwrap().observed;
+        let observed = read_extra(&[path], &cells).unwrap().observed;
         // Read but not yet summed: `read_extra` sums its own file at once.
         let observed = Observed::new(observed.data, observed.cell_index).unwrap();
         let mut loads = RunLoads::none();
