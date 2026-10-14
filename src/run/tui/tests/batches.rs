@@ -9,6 +9,7 @@ fn pair(name: &str, batch: Batch, cells: Option<usize>) -> Pair {
         cells,
         tags: None,
         two_tracks: None,
+        tracks_only: None,
     }
 }
 

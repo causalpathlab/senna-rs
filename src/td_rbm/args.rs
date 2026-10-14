@@ -16,7 +16,6 @@ pub struct TdRbmArgs {
                      the machine is fitted on samples of them and then reads every\n\
                      cell."
     )]
-    #[serde(alias = "tracks", deserialize_with = "one_or_many")]
     pub(crate) data_files: Vec<Box<str>>,
 
     #[arg(
@@ -82,7 +81,7 @@ pub struct TdRbmArgs {
         help = "Cells (one barcode a line) where time starts: their cluster roots its tree, instead of the splicing choosing",
         long_help = "Cells (one barcode a line) where time starts. The cluster holding\n\
                      most of them is its tree's root; the other trees' roots are chosen\n\
-                     from the splicing. A barcode matches with or without its `@` tag."
+                     from the splicing. A barcode matches with or without its `@` tags."
     )]
     pub root: Option<String>,
 
@@ -145,7 +144,6 @@ pub struct TdRbmArgs {
         alias = "batch",
         help = "Pseudobulk samples per minibatch"
     )]
-    #[serde(alias = "batch")]
     pub minibatch_size: usize,
 
     #[arg(
@@ -161,7 +159,6 @@ pub struct TdRbmArgs {
         alias = "sweeps",
         help = "Gibbs sweeps per training step"
     )]
-    #[serde(alias = "sweeps")]
     pub gibbs_sweeps: usize,
 
     #[arg(
@@ -170,7 +167,6 @@ pub struct TdRbmArgs {
         alias = "lr",
         help = "Adam learning rate"
     )]
-    #[serde(alias = "lr")]
     pub learning_rate: f64,
 
     #[arg(
@@ -245,21 +241,3 @@ pub struct TdRbmArgs {
     #[command(flatten)]
     pub(crate) qc: QcArgs,
 }
-
-/// A file list, or the one file a run recorded before td-rbm took several.
-fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Box<str>>, D::Error> {
-    #[derive(serde::Deserialize)]
-    #[serde(untagged)]
-    enum Files {
-        One(Box<str>),
-        Many(Vec<Box<str>>),
-    }
-    Ok(match serde::Deserialize::deserialize(d)? {
-        Files::One(f) => vec![f],
-        Files::Many(v) => v,
-    })
-}
-
-#[cfg(test)]
-#[path = "tests/args.rs"]
-mod tests;

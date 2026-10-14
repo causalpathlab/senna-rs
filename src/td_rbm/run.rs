@@ -48,13 +48,11 @@ fn write(
 /// The cells as the shared loader reads them, and their pseudobulks.
 struct Loaded {
     data: SparseIoVec,
-    /// Every cell's pseudobulk at every level, coarse to fine.
-    levels: Vec<Vec<Option<usize>>>,
     /// The cells written out (QC's near-empty cells left out), when QC ran.
     keep: Option<Vec<usize>>,
     inputs: Inputs,
     proj_kn: Mat,
-    /// The collapse's own membership, finest last, for `{out}.cell_to_pb`.
+    /// Every cell's pseudobulk at every level, coarse to fine.
     cell_to_pb: Vec<Vec<usize>>,
     pb_tree: Option<data_beans::alg::collapse_data::PbTree>,
 }
@@ -73,7 +71,7 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
     let inherited = args
         .from
         .as_deref()
-        .map(senna::run_manifest::inherit_from)
+        .map(senna::run_manifest::inherit_data_from)
         .transpose()?;
     InheritedFromManifest::ensure_replayable(inherited.as_ref(), "td-rbm")?;
     let data_files = InheritedFromManifest::resolve_data(inherited.as_ref(), &args.data_files)?;
@@ -125,12 +123,8 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
         cnv_clones: args.collapse.cnv_clones.as_deref(),
         multiome: None,
     })?;
-    let cell_to_pb = cell_to_pb_per_level.expect("the collapse keeps its hierarchy");
     Ok(Loaded {
-        levels: cell_to_pb
-            .iter()
-            .map(|level| level.iter().map(|&pb| Some(pb)).collect())
-            .collect(),
+        cell_to_pb: cell_to_pb_per_level.expect("the collapse keeps its hierarchy"),
         data: data_vec,
         keep: output_keep_idx,
         inputs: Inputs {
@@ -138,7 +132,6 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
             batch_files,
         },
         proj_kn,
-        cell_to_pb,
         pb_tree,
     })
 }
@@ -159,24 +152,32 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     let dev = args.device.to_device(args.device_no)?;
     let Loaded {
         data,
-        levels,
         keep,
         inputs,
         proj_kn,
         cell_to_pb,
         pb_tree,
     } = load(args)?;
-    let mut cells = data.column_names()?;
-    let member = levels.last().expect("at least one level").clone();
-    let pbs = pb_tracks(&data, &levels)?;
-    let finest = pbs.last().expect("at least one level");
-    let genes = select_genes(finest, args.min_reads, args.max_genes);
+    let all_cells = data.column_names()?;
+    let levels = &cell_to_pb;
+    let member = levels.last().expect("at least one level");
+    let finest = pb_tracks(&data, member)?;
+    let genes = select_genes(&finest, args.min_reads, args.max_genes);
     anyhow::ensure!(!genes.is_empty(), "no gene left to fit");
     let (g, n_pb) = (genes.len(), finest.cells.len());
+    // Cells per pseudobulk at every level.
+    let level_cells: Vec<Vec<f32>> = levels
+        .iter()
+        .map(|member| {
+            let mut n = vec![0f32; member.iter().max().map_or(0, |&m| m + 1)];
+            member.iter().for_each(|&p| n[p] += 1.0);
+            n
+        })
+        .collect();
     let f = 2 * g;
     info!(
         "td-rbm: {} cells from {} files; {} levels, {n_pb} finest pseudobulks; {} genes with both tracks, {g} fitted",
-        cells.len(),
+        all_cells.len(),
         inputs.data_files.len(),
         levels.len(),
         finest.genes.len(),
@@ -186,7 +187,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     // anew between the tracks at the gene's overall unspliced share (the
     // negative control: no splicing dynamics, the same either way in time).
     let names: Vec<Box<str>> = genes.iter().map(|&j| finest.genes[j].clone()).collect();
-    let mut x = Vec::with_capacity(cells.len() * f);
+    let mut x = Vec::with_capacity(all_cells.len() * f);
     for_cell_blocks(&data, &names, args.block_size, |_, u, s| {
         for i in 0..u.nrows() {
             x.extend((0..g).map(|j| u[(i, j)]));
@@ -194,7 +195,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         }
         Ok(())
     })?;
-    let c = cells.len();
+    let c = all_cells.len();
     if let Some(seed) = args.steady_unspliced {
         let mut rng = StdRng::seed_from_u64(seed);
         for j in 0..g {
@@ -216,11 +217,10 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     // cells' reads.
     let rows: Vec<Vec<f32>> = levels
         .iter()
-        .zip(&pbs)
-        .map(|(member, t)| {
-            let mut r = vec![0f32; t.cells.len() * f];
-            for (i, p) in member.iter().enumerate() {
-                let p = p.expect("the collapse places every cell");
+        .zip(&level_cells)
+        .map(|(member, n)| {
+            let mut r = vec![0f32; n.len() * f];
+            for (i, &p) in member.iter().enumerate() {
                 r[p * f..(p + 1) * f]
                     .iter_mut()
                     .zip(&x[i * f..(i + 1) * f])
@@ -231,16 +231,18 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         .collect();
     // The cells read out: QC keeps near-empty cells in the pseudobulks but
     // not in the outputs.
-    let (x, member) = match &keep {
+    let (cells, of_cell): (Vec<Box<str>>, Vec<usize>) = match &keep {
         Some(keep) => {
-            cells = keep.iter().map(|&i| cells[i].clone()).collect();
-            let x = keep
-                .iter()
-                .flat_map(|&i| x[i * f..(i + 1) * f].to_vec())
-                .collect();
-            (x, keep.iter().map(|&i| member[i]).collect::<Vec<_>>())
+            // In place, every kept row moved forward.
+            for (to, &from) in keep.iter().enumerate() {
+                x.copy_within(from * f..(from + 1) * f, to * f);
+            }
+            x.truncate(keep.len() * f);
+            keep.iter()
+                .map(|&i| (all_cells[i].clone(), member[i]))
+                .unzip()
         }
-        None => (x, member),
+        None => (all_cells.clone(), member.clone()),
     };
 
     // Where the fit starts: a forest over clusters of the finest
@@ -251,10 +253,6 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     let fin = rows.last().expect("a level");
     let states = row_states(fin, f, STATE_DIMS);
     let forest = Forest::new(&states, args.clusters, args.knn, args.seed);
-    let of_cell: Vec<usize> = member
-        .iter()
-        .map(|p| p.expect("the collapse places every cell"))
-        .collect();
     let mut roots: Vec<usize> = (0..forest.trees.len()).map(|t| forest.far_end(t)).collect();
     let mut given = vec![false; forest.trees.len()];
     if let Some(path) = &args.root {
@@ -267,7 +265,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         // A cell is named as written out or by its barcode alone, before
         // the `@` tag.
         for (i, c) in cells.iter().enumerate() {
-            let barcode = c.rsplit_once('@').map_or(c.as_ref(), |(b, _)| b);
+            let barcode = c.split_once('@').map_or(c.as_ref(), |(b, _)| b);
             if wanted.contains(c.as_ref()) || wanted.contains(barcode) {
                 votes[forest.cluster[of_cell[i]]] += 1;
             }
@@ -334,11 +332,8 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     };
     let levels_in: Vec<Level> = rows
         .into_iter()
-        .zip(&pbs)
-        .map(|(x, t)| Level {
-            x,
-            cells: t.cells.clone(),
-        })
+        .zip(level_cells)
+        .map(|(x, cells)| Level { x, cells })
         .collect();
     let mut begin = begin;
     let curve = std::mem::take(&mut begin.curve);
@@ -574,7 +569,6 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         &curve,
     )?;
     // What `senna view` and a later `--from` / `--pb-from` read.
-    let all_cells = data.column_names()?;
     let keep = keep.as_deref();
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &all_cells, keep)?;
     crate::postprocess::viz_prep::write_cell_to_pb(&args.out, &cell_to_pb, &all_cells, keep)?;

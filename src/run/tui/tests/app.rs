@@ -118,6 +118,7 @@ fn data(dir: &Path, names: &[&str]) -> Vec<Pair> {
                 cells: Some(3),
                 tags: None,
                 two_tracks: None,
+                tracks_only: None,
             }
         })
         .collect()
@@ -987,6 +988,34 @@ fn td_rbm_runs_on_files_whose_genes_have_both_tracks() {
     assert!(p.job.result().ends_with("td-rbm.senna.json"));
     std::fs::write(dir.path().join("td-rbm.senna.json"), "{}").unwrap();
     assert!(problem(&a).unwrap().contains("exists"));
+}
+
+/// An embedding pointed at files of count tracks alone is warned; files
+/// with other rows too are not, nor is td-rbm.
+#[test]
+fn an_embedding_on_track_files_alone_is_warned() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    let topic = METHODS.iter().position(|m| *m == "topic").unwrap();
+    let td = METHODS.iter().position(|m| *m == TD_RBM).unwrap();
+    a.rows[topic].on = true;
+    a.rows[td].on = true;
+    a.pairs = data(dir.path(), &["d1.zarr", "d2.zarr"]);
+    for p in &mut a.pairs {
+        p.tracks_only = Some(true);
+        p.two_tracks = Some(10);
+    }
+    let warning = |a: &App, m: &str| {
+        a.plan()
+            .into_iter()
+            .find(|p| p.job.method == m)
+            .unwrap()
+            .warning
+    };
+    assert!(warning(&a, "topic").unwrap().contains("td-rbm reads them"));
+    assert_eq!(warning(&a, TD_RBM), None);
+    a.pairs[1].tracks_only = Some(false);
+    assert_eq!(warning(&a, "topic"), None, "d2 has other rows");
 }
 
 #[test]

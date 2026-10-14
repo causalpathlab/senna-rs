@@ -122,6 +122,8 @@ pub struct Pair {
     /// How many genes have both an unspliced and a spliced row, what
     /// td-rbm fits; `None` when unknown.
     pub two_tracks: Option<usize>,
+    /// Whether every row is a gene's count track; `None` when unknown.
+    pub tracks_only: Option<bool>,
 }
 
 impl Pair {
@@ -134,6 +136,7 @@ impl Pair {
             cells: None,
             tags: None,
             two_tracks: None,
+            tracks_only: None,
         }
     }
 
@@ -143,6 +146,7 @@ impl Pair {
         self.cells = d.cells;
         self.tags = d.tags;
         self.two_tracks = d.two_tracks;
+        self.tracks_only = d.tracks_only;
     }
 }
 
@@ -154,6 +158,7 @@ pub struct Described {
     pub cells: Option<usize>,
     pub tags: Option<Vec<String>>,
     pub two_tracks: Option<usize>,
+    pub tracks_only: Option<bool>,
 }
 
 /// Its size, its barcodes' `@batch` tags and how many genes are in both
@@ -186,10 +191,13 @@ pub fn describe(path: &Path) -> Described {
             .collect()
     });
     // td-rbm's own reading of the row grammar decides.
-    let two_tracks = m
-        .row_names()
-        .ok()
-        .map(|names| crate::td_rbm::counts::two_track_genes(&names));
+    let names = m.row_names().ok();
+    let two_tracks = names.as_deref().map(crate::td_rbm::counts::two_track_genes);
+    let tracks_only = names.as_deref().map(|names| {
+        names
+            .iter()
+            .all(|n| data_beans::aux::feature_rows::split_count_row(n).is_some())
+    });
     let info = match two_tracks {
         Some(n) if n > 0 => format!("{info}; {n} genes in two tracks"),
         _ => info,
@@ -199,6 +207,7 @@ pub fn describe(path: &Path) -> Described {
         cells,
         tags,
         two_tracks,
+        tracks_only,
     }
 }
 

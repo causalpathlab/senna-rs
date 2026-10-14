@@ -97,13 +97,9 @@ pub fn for_cell_blocks(
     Ok(())
 }
 
-/// Sum `data` into every level's pseudobulks in one pass: `levels[l][c]` is
-/// cell `c`'s pseudobulk at level `l`, in `data`'s column order. Cells
-/// without a pseudobulk are skipped; genes with only one track are dropped.
-pub fn pb_tracks(
-    data: &SparseIoVec,
-    levels: &[Vec<Option<usize>>],
-) -> anyhow::Result<Vec<PbTracks>> {
+/// Sum `data` into its pseudobulks: `member[c]` is cell `c`'s pseudobulk,
+/// in `data`'s column order. Genes with only one track are dropped.
+pub fn pb_tracks(data: &SparseIoVec, member: &[usize]) -> anyhow::Result<PbTracks> {
     let rows = data.row_names()?;
     let (genes, role) = track_rows(&rows);
     anyhow::ensure!(
@@ -112,37 +108,30 @@ pub fn pb_tracks(
     );
     let n = data.num_columns();
     anyhow::ensure!(
-        levels.iter().all(|l| l.len() == n),
-        "every level must place each of the {n} cells"
+        member.len() == n,
+        "the partition must place each of the {n} cells"
     );
-    let g = genes.len();
-    let mut out: Vec<PbTracks> = levels
-        .iter()
-        .map(|member| {
-            let p = member.iter().flatten().max().map_or(0, |&m| m + 1);
-            let mut cells = vec![0f32; p];
-            member.iter().flatten().for_each(|&pb| cells[pb] += 1.0);
-            PbTracks {
-                genes: genes.iter().map(|&s| Box::from(s)).collect(),
-                unspliced: DMatrix::<f32>::zeros(p, g),
-                spliced: DMatrix::<f32>::zeros(p, g),
-                cells,
-            }
-        })
-        .collect();
+    let (g, p) = (genes.len(), member.iter().max().map_or(0, |&m| m + 1));
+    let mut cells = vec![0f32; p];
+    member.iter().for_each(|&pb| cells[pb] += 1.0);
+    let mut out = PbTracks {
+        genes: genes.iter().map(|&s| Box::from(s)).collect(),
+        unspliced: DMatrix::<f32>::zeros(p, g),
+        spliced: DMatrix::<f32>::zeros(p, g),
+        cells,
+    };
     let bar = new_progress_bar(n.div_ceil(COLUMNS_PER_READ) as u64).with_message("pseudobulks");
     for start in (0..n).step_by(COLUMNS_PER_READ) {
         bar.inc(1);
         let end = (start + COLUMNS_PER_READ).min(n);
         data.for_each_triplet(start..end, COLUMNS_PER_READ, |row, col, v| {
-            let Some((j, u)) = role[row as usize] else {
-                return;
-            };
-            for (t, member) in out.iter_mut().zip(levels) {
-                if let Some(pb) = member[start + col as usize] {
-                    let m = if u { &mut t.unspliced } else { &mut t.spliced };
-                    m[(pb, j)] += v;
-                }
+            if let Some((j, u)) = role[row as usize] {
+                let m = if u {
+                    &mut out.unspliced
+                } else {
+                    &mut out.spliced
+                };
+                m[(member[start + col as usize], j)] += v;
             }
         })?;
     }

@@ -1354,8 +1354,8 @@ impl App {
         if r.form.name == TD_RBM {
             return None;
         }
-        let known: Vec<usize> = self.pairs.iter().filter_map(|p| p.two_tracks).collect();
-        if !known.is_empty() && known.iter().all(|&n| n > 0) {
+        let known: Vec<bool> = self.pairs.iter().filter_map(|p| p.tracks_only).collect();
+        if !known.is_empty() && known.iter().all(|&t| t) {
             Some(
                 "these files hold {gene}/count/spliced and /unspliced rows: td-rbm reads them"
                     .into(),

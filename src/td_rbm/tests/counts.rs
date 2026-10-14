@@ -51,25 +51,20 @@ fn backend(dir: &std::path::Path) -> String {
 }
 
 #[test]
-fn sums_cells_into_every_levels_pseudobulks_on_both_tracks() {
+fn sums_cells_into_their_pseudobulks_on_both_tracks() {
     let dir = tempfile::tempdir().unwrap();
     let path = backend(dir.path());
-    // Coarse: every cell in one; fine: c3 alone, c1 + c2, c4 in none.
-    let levels = vec![vec![Some(0); 4], vec![Some(1), Some(1), Some(0), None]];
-    let t = pb_tracks(&open_tracks(&[path.into()]), &levels).unwrap();
+    // c3 alone, c1 + c2, c4 alone.
+    let t = pb_tracks(&open_tracks(&[path.into()]), &[1, 1, 0, 2]).unwrap();
     assert_eq!(
-        t[1].genes,
+        t.genes,
         vec![Box::<str>::from("A")],
         "only A has both tracks"
     );
-    assert_eq!(t[0].cells, vec![4.0]);
-    assert_eq!(t[0].spliced[(0, 0)], 10.0);
-    assert_eq!(t[0].unspliced[(0, 0)], 3.0);
-    assert_eq!(t[1].cells, vec![1.0, 2.0]);
-    assert_eq!(t[1].spliced[(0, 0)], 3.0);
-    assert_eq!(t[1].unspliced[(0, 0)], 0.0);
-    assert_eq!(t[1].spliced[(1, 0)], 3.0);
-    assert_eq!(t[1].unspliced[(1, 0)], 1.0);
+    assert_eq!(t.cells, vec![1.0, 2.0, 1.0]);
+    assert_eq!((t.spliced[(0, 0)], t.unspliced[(0, 0)]), (3.0, 0.0));
+    assert_eq!((t.spliced[(1, 0)], t.unspliced[(1, 0)]), (3.0, 1.0));
+    assert_eq!((t.spliced[(2, 0)], t.unspliced[(2, 0)]), (4.0, 2.0));
 }
 
 /// Every cell's reads on the named genes, block by block, rows in the
@@ -143,12 +138,11 @@ fn several_files_read_together_on_their_shared_genes() {
         "{cells:?}"
     );
     // Every cell alone; the second file's two cells together.
-    let levels = vec![vec![Some(0), Some(1), Some(2), Some(3), Some(4), Some(4)]];
-    let t = pb_tracks(&data, &levels).unwrap();
-    assert_eq!(t[0].genes, vec![Box::<str>::from("A")], "D is in one file");
-    assert_eq!(t[0].spliced[(4, 0)], 30.0);
-    assert_eq!(t[0].unspliced[(4, 0)], 1.0);
-    assert_eq!(t[0].spliced[(3, 0)], 4.0);
+    let t = pb_tracks(&data, &[0, 1, 2, 3, 4, 4]).unwrap();
+    assert_eq!(t.genes, vec![Box::<str>::from("A")], "D is in one file");
+    assert_eq!(t.spliced[(4, 0)], 30.0);
+    assert_eq!(t.unspliced[(4, 0)], 1.0);
+    assert_eq!(t.spliced[(3, 0)], 4.0);
     let mut seen = Vec::new();
     for_cell_blocks(&data, &[Box::from("A")], 4096, |start, u, s| {
         for c in 0..u.nrows() {

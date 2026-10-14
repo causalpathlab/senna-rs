@@ -1360,8 +1360,18 @@ impl RunManifest {
     pub fn load(path: &Path) -> anyhow::Result<(Self, PathBuf)> {
         let raw = fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
-        let mut m: Self = serde_json::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+        let mut m: Self = serde_json::from_str(&raw).map_err(|e| {
+            let kind = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("kind")?.as_str().map(str::to_string));
+            match kind.as_deref() {
+                Some("gem") => anyhow::anyhow!(
+                    "{} is a `senna gem` run; gem is retired and its runs no longer open",
+                    path.display()
+                ),
+                _ => anyhow::anyhow!("parse {}: {e}", path.display()),
+            }
+        })?;
         m.lift_v1_feature_slots();
         if m.version > MANIFEST_VERSION {
             log::warn!(
@@ -1820,19 +1830,34 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         | RunKind::JointTopic
         | RunKind::Vae
         | RunKind::Simba
-        | RunKind::Rbm
-        | RunKind::TdRbm => {}
+        | RunKind::Rbm => {}
         RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
              use a bge / fne / topic-family run as the source",
             m.kind
         ),
+        RunKind::TdRbm => anyhow::bail!(
+            "--from: a td-rbm run fits two-track counts and is not a source to inherit; \
+             use a bge / fne / topic-family run"
+        ),
     }
-    let to_box = |s: &str| -> Box<str> { resolve(&dir, s).to_string_lossy().into_owned().into() };
-    let data_files = m.data_inputs(&dir);
-    let batch_files = m.data_batches(&dir);
+    inherited(m, &dir)
+}
+
+/// The data, batches and partition alone from any run that records them,
+/// td-rbm's among them: for a command that takes no feature table from
+/// its source (`senna td-rbm --from`).
+pub fn inherit_data_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest> {
+    let (m, dir) = RunManifest::load(Path::new(manifest_path))?;
+    inherited(m, &dir)
+}
+
+fn inherited(m: RunManifest, dir: &Path) -> anyhow::Result<InheritedFromManifest> {
+    let to_box = |s: &str| -> Box<str> { resolve(dir, s).to_string_lossy().into_owned().into() };
+    let data_files = m.data_inputs(dir);
+    let batch_files = m.data_batches(dir);
     let feature_embedding_prefix: Box<str> = to_box(&m.prefix);
-    let cell_to_pb_path: Option<Box<str>> = m.cell_to_pb_path(&dir).map(Into::into);
+    let cell_to_pb_path: Option<Box<str>> = m.cell_to_pb_path(dir).map(Into::into);
     let reload =
         crate::multiome_layout::recorded_layout(m.data.multiome.as_ref(), m.data.input.len())?;
     Ok(InheritedFromManifest {
