@@ -188,13 +188,7 @@ impl App {
         }
 
         let tall = usize::from(map.height).saturating_sub(2);
-        let browsing = match &self.modal {
-            Some(Modal::MarkersFile(b)) => Some(b.lines(tall)),
-            Some(Modal::DataFile(b, _)) => Some(b.lines(tall)),
-            Some(Modal::ExtraFile(b)) => Some(b.lines(tall)),
-            _ => None,
-        };
-        if let Some(lines) = browsing {
+        if let Some(lines) = self.modal.as_ref().and_then(|m| m.browser_lines(tall)) {
             popup(f, map, lines, 100, At::Middle, color::TEXT);
         }
 

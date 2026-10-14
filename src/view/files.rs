@@ -30,6 +30,16 @@ pub fn siblings(path: &Path, suffix: &str) -> Vec<PathBuf> {
     out
 }
 
+/// `a.zarr`, or `a.zarr + 2 more` for several files.
+#[must_use]
+pub fn names(paths: &[PathBuf]) -> String {
+    match paths {
+        [] => String::new(),
+        [one] => name(one),
+        [first, rest @ ..] => format!("{} + {} more", name(first), rest.len()),
+    }
+}
+
 /// The JSON document at `path`, if it reads and parses.
 #[must_use]
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {

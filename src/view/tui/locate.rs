@@ -142,7 +142,7 @@ impl App {
         }
     }
 
-    /// Browse for a data file to show beside the run's (ctrl+e).
+    /// Browse for data files to show beside the run's (ctrl+e).
     pub(super) fn ask_extra(&mut self) {
         if self.scene.data.run.is_none() {
             self.message = Some("no run to match a data file's cells to".into());
@@ -167,10 +167,7 @@ impl App {
             Outcome::Chosen(c) => {
                 self.modal = None;
                 let paths = c.files();
-                self.message = Some(match paths.as_slice() {
-                    [one] => format!("opening {}…", files::name(one)),
-                    many => format!("opening {} data files…", many.len()),
-                });
+                self.message = Some(format!("opening {}…", files::names(&paths)));
                 self.change_source(|s| s.open_extra(&paths));
             }
         }

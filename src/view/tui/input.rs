@@ -709,12 +709,19 @@ mod tests {
     #[test]
     fn ctrl_e_asks_for_an_extra_file_and_e_alone_opens_the_menu() {
         let mut a = app();
-        a.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        a.key(ctrl_e);
+        assert!(a.message.as_deref().unwrap().starts_with("no run"));
+        a.scene.data.run = Some((
+            senna::run_manifest::RunManifest::new(senna::run_manifest::RunKind::Svd, "r"),
+            std::env::temp_dir(),
+        ));
+        a.key(ctrl_e);
         assert!(a.menu.is_none());
-        match a.scene.data.run {
-            Some(_) => assert!(matches!(a.modal, Some(Modal::ExtraFile(_)))),
-            None => assert!(a.message.as_deref().unwrap().starts_with("no run")),
-        }
+        let Some(m) = &a.modal else {
+            panic!("no browser")
+        };
+        assert!(matches!(m, Modal::ExtraFile(_)) && m.browser_lines(20).is_some());
         a.modal = None;
         press(&mut a, 'e');
         assert!(a.menu.is_some());

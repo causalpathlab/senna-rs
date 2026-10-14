@@ -52,6 +52,27 @@ impl Modal {
             | Modal::ExtraFile(_) => return None,
         })
     }
+
+    /// The file browser's popup, when this is one.
+    pub(super) fn browser_lines(&self, tall: usize) -> Option<Vec<Line<'static>>> {
+        match self {
+            Modal::MarkersFile(b) => Some(b.lines(tall)),
+            Modal::DataFile(b, _) => Some(b.lines(tall)),
+            Modal::ExtraFile(b) => Some(b.lines(tall)),
+            Modal::Search(..) | Modal::Prompt(_) | Modal::Submit(_) | Modal::Recompute(..) => None,
+        }
+    }
+
+    /// Show a file browser's folder once listed on the side. Returns
+    /// whether it was, or is still being listed (its spinner ticks).
+    pub(super) fn poll_browser(&mut self) -> bool {
+        match self {
+            Modal::MarkersFile(b) => b.poll() || b.listing().is_some(),
+            Modal::DataFile(b, _) => b.poll() || b.listing().is_some(),
+            Modal::ExtraFile(b) => b.poll() || b.listing().is_some(),
+            Modal::Search(..) | Modal::Prompt(_) | Modal::Submit(_) | Modal::Recompute(..) => false,
+        }
+    }
 }
 
 impl App {
