@@ -131,9 +131,9 @@ fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
             .0,
         )
     };
-    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut rank3(), &mut None, &mut []).is_err());
+    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut rank3(), &mut None).is_err());
     assert_eq!(
-        resolve_dim(ge::EmbeddingDim::Fixed(8), &mut rank3(), &mut None, &mut []).unwrap(),
+        resolve_dim(ge::EmbeddingDim::Fixed(8), &mut rank3(), &mut None).unwrap(),
         8
     );
 }
@@ -461,7 +461,7 @@ fn the_width_is_the_larger_of_the_flag_and_the_table() {
     };
     let mut p = preset();
     let mut c = Some(carried_fixture());
-    let h = resolve_dim(ge::EmbeddingDim::Fixed(5), &mut p, &mut c, &mut []).unwrap();
+    let h = resolve_dim(ge::EmbeddingDim::Fixed(5), &mut p, &mut c).unwrap();
     assert_eq!(h, 5);
     assert_eq!(
         p.unwrap().rows,
@@ -476,13 +476,13 @@ fn the_width_is_the_larger_of_the_flag_and_the_table() {
 
     for flag in [ge::EmbeddingDim::Fixed(2), ge::EmbeddingDim::Auto] {
         let mut p = preset();
-        assert_eq!(resolve_dim(flag, &mut p, &mut None, &mut []).unwrap(), 3);
+        assert_eq!(resolve_dim(flag, &mut p, &mut None).unwrap(), 3);
         assert_eq!(p.unwrap().rows.len(), 6);
     }
     // Without a table the flag is the width, and `auto` has nothing to take.
     assert_eq!(
-        resolve_dim(ge::EmbeddingDim::Fixed(7), &mut None, &mut None, &mut []).unwrap(),
+        resolve_dim(ge::EmbeddingDim::Fixed(7), &mut None, &mut None).unwrap(),
         7
     );
-    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut None, &mut None, &mut []).is_err());
+    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut None, &mut None).is_err());
 }

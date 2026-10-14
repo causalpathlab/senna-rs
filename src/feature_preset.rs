@@ -18,16 +18,13 @@
 //! `feature_types.parquet` naming every row's type, so a run on a narrow
 //! feature axis (a panel) still hands on the full table it was given.
 
-use data_beans::aux::feature_types::{FeatureType, GENE_TYPE};
-use data_beans::aux::frozen_features::{
-    load_frozen_feature_host_matching, FrozenLoadArgs, SourceNameMap,
-};
+use data_beans::aux::feature_types::FeatureType;
+use data_beans::aux::frozen_features::{load_frozen_feature_host_matching, FrozenLoadArgs};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::info;
-use rustc_hash::FxHashSet;
 use senna::carried_rows::matchable_rows;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 
 pub(crate) use senna::carried_rows::CarriedRows;
 
@@ -51,55 +48,27 @@ pub(crate) fn load_preset_genes(
     feature_names: &[Box<str>],
     kind: &ge::FeatureNameKind,
 ) -> anyhow::Result<(ge::PresetRows, Option<CarriedRows>)> {
-    load_preset_rows(prefix, mode, feature_names, kind, None)
-}
-
-/// [`load_preset_genes`] with `rename_source`: when given, every gene row of
-/// the source (a row its types table calls a gene, or every row when it wrote
-/// none) is renamed by it before the match, and comes out so named among the
-/// carried rows — how `senna gem` reads a plain gene table onto its row
-/// grammar. The result's ids index `feature_names`.
-pub(crate) fn load_preset_rows(
-    prefix: &str,
-    mode: PresetMode,
-    feature_names: &[Box<str>],
-    kind: &ge::FeatureNameKind,
-    rename_source: Option<SourceNameMap<'_>>,
-) -> anyhow::Result<(ge::PresetRows, Option<CarriedRows>)> {
     let flag = crate::feature_embedding_args::flag_name(mode);
     let (dictionary_path, _bias) = senna::run_manifest::resolve_feature_embedding(prefix)
         .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
 
     // The source's row types, when it wrote them for this table: only its
     // gene and region rows may match (a term, word or cell type may share a
-    // gene's name), and only its genes are lifted into the row grammar.
+    // gene's name).
     let ctx = |e: anyhow::Error| anyhow::anyhow!("{flag} {prefix}: {e}");
     let written = senna::run_manifest::feature_types_beside(&dictionary_path).map_err(ctx)?;
     let checked: Cell<Option<&[FeatureType]>> = Cell::new(None);
-    let genes: RefCell<Option<FxHashSet<&str>>> = RefCell::new(None);
-    let rename_gene = |n: &str| -> Box<str> {
-        match rename_source {
-            Some(f) if genes.borrow().as_ref().is_none_or(|g| g.contains(n)) => f(n),
-            _ => n.into(),
-        }
-    };
     let host = load_frozen_feature_host_matching(
         FrozenLoadArgs {
             dictionary_path: &dictionary_path,
             bias_path: None,
             target_feature_names: feature_names,
             name_kind: kind.clone(),
-            source_name_map: rename_source.map(|_| &rename_gene as SourceNameMap<'_>),
+            source_name_map: None,
         },
         |names| {
             let (marks, types) = matchable_rows(written.as_deref(), names, &dictionary_path);
             checked.set(types);
-            *genes.borrow_mut() = types.map(|t| {
-                t.iter()
-                    .filter(|(_, ty)| ty.as_ref() == GENE_TYPE)
-                    .map(|(n, _)| n.as_ref())
-                    .collect()
-            });
             Ok(marks)
         },
     )
@@ -131,15 +100,14 @@ pub(crate) fn load_preset_rows(
 /// The width H of a run given `preset`: the larger of `--embedding-dim`
 /// (`auto` is the table's own width) and the table's width, so a table
 /// narrower than the command's default never refuses the run. A table
-/// narrower than H has its rows — given, carried and per-track offsets —
-/// widened with zero columns: under `--init-` and `--lora-` those columns
+/// narrower than H has its rows — given and carried — widened with zero
+/// columns: under `--init-` and `--lora-` those columns
 /// train like the rest; under `--freeze-` a pinned gene keeps zeros there,
 /// and the extra dimensions are the cells' and the free genes'.
 pub(crate) fn resolve_dim(
     cli_embedding_dim: ge::EmbeddingDim,
     preset: &mut Option<ge::PresetRows>,
     carried: &mut Option<CarriedRows>,
-    offsets: &mut [ge::PresetOffsets],
 ) -> anyhow::Result<usize> {
     let Some(h) = preset.as_ref().map(ge::PresetRows::width) else {
         return cli_embedding_dim.resolve(None)?.ok_or_else(|| {
@@ -178,9 +146,6 @@ pub(crate) fn resolve_dim(
     }
     if let Some(p) = preset.as_mut() {
         p.rows = zero_pad_rows(&p.rows, h, width);
-    }
-    for o in offsets.iter_mut() {
-        o.rows = zero_pad_rows(&o.rows, h, width);
     }
     if let Some(c) = carried.as_mut() {
         let rows = std::mem::replace(&mut c.rows, nalgebra::DMatrix::zeros(0, 0));

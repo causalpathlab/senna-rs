@@ -99,8 +99,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         &feature_names,
         &ge::FeatureNameKind::Gene { delim: '_' },
     )?;
-    let dim =
-        crate::feature_preset::resolve_dim(args.embedding_dim, &mut preset, &mut carried, &mut [])?;
+    let dim = crate::feature_preset::resolve_dim(args.embedding_dim, &mut preset, &mut carried)?;
     let cfg = SimbaConfig {
         dim,
         epochs: args.train.epochs,
@@ -228,9 +227,6 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         softmax_dictionary_suffix: None,
         cell_embedding_suffix: Some("cell_embedding.parquet"),
         cell_encoder_suffix: None,
-        feature_contrast_suffix: None,
-        feature_contrast_bias_suffix: None,
-        track_encoder_suffixes: vec![],
         default_colour_by: "cluster",
         has_latent: false,
         has_cell_to_pb: false,

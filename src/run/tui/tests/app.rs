@@ -129,7 +129,6 @@ fn data(dir: &Path, names: &[&str]) -> Vec<Pair> {
                 info: String::new(),
                 cells: Some(3),
                 tags: None,
-                gene_counts: None,
                 two_tracks: None,
             }
         })

@@ -8,7 +8,6 @@ fn pair(name: &str, batch: Batch, cells: Option<usize>) -> Pair {
         info: String::new(),
         cells,
         tags: None,
-        gene_counts: None,
         two_tracks: None,
     }
 }

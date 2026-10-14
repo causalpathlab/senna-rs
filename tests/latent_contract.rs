@@ -117,12 +117,7 @@ fn masked_vae_kind_round_trips_through_json() {
 /// makes the ANSWER a test failure rather than a silent reclassification.
 #[test]
 fn every_kind_declares_its_cell_space() {
-    for k in [
-        RunKind::Bge,
-        RunKind::Fne,
-        RunKind::ResolveEmbeddingSpace,
-        RunKind::Gem,
-    ] {
+    for k in [RunKind::Bge, RunKind::Fne, RunKind::ResolveEmbeddingSpace] {
         assert_eq!(
             k.cell_space(),
             CellSpace::Embedding,
@@ -144,52 +139,4 @@ fn every_kind_declares_its_cell_space() {
     ] {
         assert_eq!(k.cell_space(), CellSpace::Signed, "{k} is signed scores");
     }
-}
-
-/// `gem`'s own classification on both axes, whose absence from these
-/// predicates was the original defect.
-///
-/// `gem` writes a Euclidean `cell_embedding` and no latent at all, so `exp()`-ing
-/// it is meaningless, and it has no topic axis. A kind can be Euclidean on its
-/// geometry table while still being log-simplex on its latent (or vice versa) —
-/// the two predicates do not imply each other — so each is asserted here rather
-/// than assumed from the other.
-#[test]
-fn gem_kinds_are_classified_on_both_axes() {
-    assert!(
-        !RunKind::Gem.latent_is_log_simplex(),
-        "gem writes no latent; exp() of its cell embedding is meaningless"
-    );
-    assert!(!RunKind::Gem.is_topic_family(), "gem has no topic axis");
-}
-
-/// `senna gem` reads exactly like `senna bge` for the frozen-table
-/// predicates: same reader (`BgeEmbedding`), same requirement for a
-/// per-gene bias, so `predict` / `probe` / `deconvolve` route it down the
-/// bge path unchanged.
-#[test]
-fn gem_scores_like_bge() {
-    assert!(
-        RunKind::Gem.has_frozen_gene_table(),
-        "gem's whole gene side is a frozen (ρ, b_feat) table, same as bge"
-    );
-    assert!(
-        RunKind::Gem.has_gene_bias(),
-        "gem fits a per-gene bias exactly as bge does"
-    );
-}
-
-/// The wire strings are a compatibility surface: renaming a variant without
-/// changing them orphans every manifest already on disk.
-#[test]
-fn gem_kinds_round_trip_through_json() {
-    let (k, wire) = (RunKind::Gem, "gem");
-    assert_eq!(k.as_str(), wire);
-    let json = serde_json::to_string(&k).unwrap();
-    assert!(
-        json.contains(wire),
-        "{k} serializes as {json}, expected {wire}"
-    );
-    let back: RunKind = serde_json::from_str(&json).unwrap();
-    assert_eq!(back, k);
 }

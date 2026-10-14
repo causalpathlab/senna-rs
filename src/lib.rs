@@ -18,8 +18,6 @@ pub mod clone_strata;
 pub mod cluster;
 pub mod cluster_aggregation;
 pub mod embed_common;
-#[path = "gem/marker_embedding.rs"]
-pub mod marker_embedding;
 pub mod marker_support;
 pub mod multiome_layout;
 pub mod output_helpers;
