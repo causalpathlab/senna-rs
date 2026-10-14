@@ -134,6 +134,7 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
         prebuilt_partition,
         cnv_clones: args.collapse.cnv_clones.as_deref(),
         multiome: None,
+        reuse: args.pb_from.pb_from.as_deref(),
     })?;
     let cell_to_pb = cell_to_pb_per_level.expect("the collapse keeps its hierarchy");
     let (finest_counts, _) = collapsed_levels

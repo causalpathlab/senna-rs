@@ -931,6 +931,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         prebuilt_partition,
         cnv_clones: args.collapse.cnv_clones.as_deref(),
         multiome: None,
+        reuse: args.pb_from.pb_from.as_deref(),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

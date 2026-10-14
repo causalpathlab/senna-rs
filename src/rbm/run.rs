@@ -149,6 +149,7 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
                 feature: p.modality.clone(),
                 barcode: p.barcode_suffix(),
             }),
+        reuse: args.pb_from.pb_from.as_deref(),
     })?;
 
     let row_names = data_vec.row_names()?;
