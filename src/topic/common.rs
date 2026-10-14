@@ -544,6 +544,13 @@ pub struct LoadProjectArgs<'a> {
     pub feature_kind: Option<data_beans::aux::feature_names::FeatureNameKind>,
     /// The suffixes of a multiome load; `None` for a plain one.
     pub multiome: Option<MultiomeSuffixes>,
+    /// Where this run keeps its preprocessing ([`crate::topic::prep`]) for
+    /// a later fit of the same data; `None` keeps none.
+    pub out: Option<&'a str>,
+    /// An earlier run whose kept preprocessing this one reads instead of
+    /// computing (it collapses on that run's partition, built with the same
+    /// shaping settings); `None`, or a record that does not fit, computes it.
+    pub reuse: Option<&'a str>,
 }
 
 /// Per-file suffixes of a multiome load (see `ge::MultiomePlan`): every
@@ -560,6 +567,133 @@ pub struct MultiomeSuffixes {
 /// and [`LoadCollapseArgs::feature_mask_fn`] to physically subset rows
 /// (via `SparseIoVec::mask_rows`) before projection / collapse / training.
 pub type FeatureMaskFn = dyn Fn(&[Box<str>]) -> anyhow::Result<Vec<bool>>;
+
+/// How [`load_and_project`] reads the files, with QC `qc`.
+fn read_args(
+    args: &LoadProjectArgs,
+    qc: Option<data_beans::qc_lib::QcConfig>,
+) -> ReadSharedRowsArgs {
+    ReadSharedRowsArgs {
+        data_files: args.data_files.to_vec(),
+        batch_files: args.batch_files.clone(),
+        preload: args.preload,
+        row_alignment: args.row_alignment,
+        column_alignment: args.column_alignment,
+        feature_kind: args.feature_kind.clone(),
+        qc,
+        // The carried pseudobulks are training inputs, not cells: a column
+        // standing for hundreds of cells is a legitimate depth outlier, and
+        // as the reference grows across rounds the cell/carried mixture
+        // eventually splits the MAD band — QC then drops columns and the
+        // positional weighting refuses the shifted tail. Exempt the
+        // reference file (always loaded last) from bands and verdicts.
+        qc_exempt_files: args.pb_reference.map(|_| {
+            let n = args.data_files.len();
+            (0..n).map(|i| i == n - 1).collect()
+        }),
+        qc_block_size: args.qc_block_size,
+        qc_report_out: args.qc_report_out.map(Box::<str>::from),
+        per_file_feature_suffix: args.multiome.as_ref().map(|m| m.feature.clone()),
+        per_file_barcode_suffix: args.multiome.as_ref().and_then(|m| m.barcode.clone()),
+        keep_empty_barcodes: false,
+    }
+}
+
+/// The run at `run`'s kept preprocessing ([`crate::topic::prep`]) applied to
+/// this one's files: read without QC, the rows and cells QC kept there kept
+/// here, its HVG selection and projection taken as they are. `None` when it
+/// kept none, or it does not fit this run's files and sketch width.
+fn reuse_preprocessing(args: &LoadProjectArgs, run: &str) -> anyhow::Result<Option<ProjectedData>> {
+    let (m, dir) = senna::run_manifest::load_for(run)?;
+    let prefix = senna::run_manifest::resolve(&dir, &m.prefix);
+    let Some(prep) = crate::topic::prep::Prep::read(&prefix.to_string_lossy())? else {
+        return Ok(None);
+    };
+    if prep.proj_kn.nrows() != args.proj_dim {
+        return Ok(None);
+    }
+    let SparseDataWithBatch {
+        data: mut data_vec,
+        batch: mut batch_membership,
+        ..
+    } = read_data_on_shared_rows(read_args(args, None))?;
+    let by_name = |names: &[Box<str>], kept: &[Box<str>]| -> Vec<bool> {
+        let kept: std::collections::HashSet<&str> = kept.iter().map(AsRef::as_ref).collect();
+        names.iter().map(|n| kept.contains(n.as_ref())).collect()
+    };
+    let rows = data_vec.row_names()?;
+    if rows != prep.rows {
+        data_vec.mask_rows(&by_name(&rows, &prep.rows))?;
+        if data_vec.row_names()? != prep.rows {
+            return Ok(None);
+        }
+    }
+    let cells = data_vec.column_names()?;
+    if cells != prep.cells {
+        let keep = by_name(&cells, &prep.cells);
+        data_vec.mask_columns(&keep)?;
+        batch_membership = data_beans::qc_lib::filter_by_keep(&batch_membership, &keep);
+        if data_vec.column_names()? != prep.cells {
+            return Ok(None);
+        }
+    }
+    if args.ignore_batch {
+        senna::senna_input::collapse_to_single_batch(&mut batch_membership);
+    }
+    let selected_features = prep.hvg.map(|names| {
+        let at: std::collections::HashMap<&str, usize> = prep
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.as_ref(), i))
+            .collect();
+        let selected_indices: Vec<usize> = names
+            .iter()
+            .filter_map(|n| at.get(n.as_ref()).copied())
+            .collect();
+        let index_map = selected_indices
+            .iter()
+            .enumerate()
+            .map(|(new_i, &old_i)| (old_i, new_i))
+            .collect();
+        HvgSelection {
+            selected_indices,
+            selected_names: names,
+            index_map,
+        }
+    });
+    info!(
+        "Preprocessing of {run}: {} cells, {} rows, its HVG selection and projection reused",
+        prep.cells.len(),
+        prep.rows.len()
+    );
+    Ok(Some(ProjectedData {
+        data_vec,
+        batch_membership,
+        proj_kn: prep.proj_kn,
+        selected_features,
+        output_keep_idx: prep.output,
+    }))
+}
+
+/// Keep `done`'s preprocessing at `args.out` for a later fit (not with
+/// carried pseudobulks, whose columns are not cells).
+fn keep_preprocessing(args: &LoadProjectArgs, done: &ProjectedData) -> anyhow::Result<()> {
+    let Some(out) = args.out.filter(|_| args.pb_reference.is_none()) else {
+        return Ok(());
+    };
+    crate::topic::prep::Prep {
+        cells: done.data_vec.column_names()?,
+        rows: done.data_vec.row_names()?,
+        hvg: done
+            .selected_features
+            .as_ref()
+            .map(|s| s.selected_names.clone()),
+        output: done.output_keep_idx.clone(),
+        proj_kn: done.proj_kn.clone(),
+    }
+    .write(out)
+}
 
 /// Read sparse files, resolve batch membership, optionally pick HVGs,
 /// then run the random projection. Used by `load_and_collapse` and by
@@ -579,34 +713,26 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
          re-collapse."
     );
 
+    if let Some(done) = args
+        .reuse
+        .filter(|_| {
+            args.pb_reference.is_none()
+                && args.feature_mask_fn.is_none()
+                && args.qc_report_out.is_none()
+        })
+        .map(|run| reuse_preprocessing(args, run))
+        .transpose()?
+        .flatten()
+    {
+        keep_preprocessing(args, &done)?;
+        return Ok(done);
+    }
+
     let SparseDataWithBatch {
         data: mut data_vec,
         batch: mut batch_membership,
         output_keep_idx,
-    } = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.to_vec(),
-        batch_files: args.batch_files.clone(),
-        preload: args.preload,
-        row_alignment: args.row_alignment,
-        column_alignment: args.column_alignment,
-        feature_kind: args.feature_kind.clone(),
-        qc: args.qc.clone(),
-        // The carried pseudobulks are training inputs, not cells: a column
-        // standing for hundreds of cells is a legitimate depth outlier, and
-        // as the reference grows across rounds the cell/carried mixture
-        // eventually splits the MAD band — QC then drops columns and the
-        // positional weighting refuses the shifted tail. Exempt the
-        // reference file (always loaded last) from bands and verdicts.
-        qc_exempt_files: args.pb_reference.map(|_| {
-            let n = args.data_files.len();
-            (0..n).map(|i| i == n - 1).collect()
-        }),
-        qc_block_size: args.qc_block_size,
-        qc_report_out: args.qc_report_out.map(Box::<str>::from),
-        per_file_feature_suffix: args.multiome.as_ref().map(|m| m.feature.clone()),
-        per_file_barcode_suffix: args.multiome.as_ref().and_then(|m| m.barcode.clone()),
-        keep_empty_barcodes: false,
-    })?;
+    } = read_data_on_shared_rows(read_args(args, args.qc.clone()))?;
     if args.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch");
         senna::senna_input::collapse_to_single_batch(&mut batch_membership);
@@ -695,13 +821,15 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
 
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
 
-    Ok(ProjectedData {
+    let done = ProjectedData {
         data_vec,
         batch_membership,
         proj_kn,
         selected_features,
         output_keep_idx,
-    })
+    };
+    keep_preprocessing(args, &done)?;
+    Ok(done)
 }
 
 pub struct LoadCollapseArgs<'a> {
@@ -777,6 +905,9 @@ pub struct LoadCollapseArgs<'a> {
     pub cnv_clones: Option<&'a str>,
     /// The suffixes of a multiome load; `None` for a plain one.
     pub multiome: Option<MultiomeSuffixes>,
+    /// The `--pb-from` run whose kept preprocessing this one reads (see
+    /// [`LoadProjectArgs::reuse`]).
+    pub reuse: Option<&'a str>,
 }
 
 /// Read `{out}.clones.parquet` and align to `data_vec` column names.
@@ -796,6 +927,63 @@ pub fn load_cnv_cell_strata(
         cell_to_stratum.len()
     );
     Ok(cell_to_stratum)
+}
+
+/// The multilevel collapse of a pseudobulk fit, keeping every cell's
+/// pseudobulk at every level: cut by CNV clone (`cnv_clones`), on another
+/// run's partition (`partition`, aligned to `data_vec`'s cells by name; the
+/// cell reassignment, the pb tree and the refinement are skipped), or built
+/// afresh. Levels and memberships come back finest first, as `data_beans`
+/// returns them.
+pub fn collapse_multilevel(
+    data_vec: &mut SparseIoVec,
+    proj_kn: &Mat,
+    batch_membership: &[Box<str>],
+    params: &MultilevelParams,
+    cnv_clones: Option<&str>,
+    partition: Option<senna::run_manifest::InheritedPartition>,
+) -> anyhow::Result<MultilevelCollapseOut> {
+    match (cnv_clones, partition) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "--cnv-clones cannot be combined with an inherited `--from` cell→pb partition: \
+             strata are a parent cut on a fresh collapse, not a skipped-refine partition"
+        ),
+        (Some(clones_path), None) => {
+            let cell_to_stratum = load_cnv_cell_strata(clones_path, data_vec)?;
+            collapse_columns_multilevel_with_strata(
+                data_vec,
+                proj_kn,
+                batch_membership,
+                params,
+                &cell_to_stratum,
+            )
+        }
+        (None, Some((partition_src, cell_names_src))) => {
+            // Aligned by cell name (bails on a cell-set mismatch), finest
+            // last as a run records it; `data_beans` takes it finest first.
+            let mut partition =
+                senna::run_manifest::InheritedFromManifest::align_cell_to_pb_to_cells(
+                    partition_src,
+                    &cell_names_src,
+                    &data_vec.column_names()?,
+                )?;
+            partition.reverse();
+            info!(
+                "Inheriting cell→pb membership for {} levels (skipping BBKNN + DC-SBM refinement)",
+                partition.len()
+            );
+            data_beans::alg::collapse_data::collapse_columns_multilevel_with_partition(
+                data_vec,
+                proj_kn,
+                batch_membership,
+                params,
+                &partition,
+            )
+        }
+        (None, None) => {
+            collapse_columns_multilevel_with_hierarchy(data_vec, proj_kn, batch_membership, params)
+        }
+    }
 }
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
@@ -829,6 +1017,8 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
         multiome: args.multiome.clone(),
+        out: Some(args.out),
+        reuse: args.reuse,
     })?;
 
     info!("Multi-level collapsing with pb-samples ...");
@@ -862,72 +1052,24 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
     // `collapsed_levels`. When `prebuilt_partition` is supplied we
     // route through `collapse_columns_multilevel_with_partition` which
     // skips the BBKNN + Poisson DC-SBM refinement.
-    let want_hierarchy = args.want_hierarchy || args.prebuilt_partition.is_some();
+    let want_hierarchy =
+        args.want_hierarchy || args.prebuilt_partition.is_some() || args.cnv_clones.is_some();
     let (mut collapsed_levels, cell_to_pb_per_level, pb_tree): (
         Vec<CollapsedOut>,
         Option<Vec<Vec<usize>>>,
         Option<data_beans::alg::collapse_data::PbTree>,
-    ) = if args.cnv_clones.is_some() && args.prebuilt_partition.is_some() {
-        anyhow::bail!(
-            "--cnv-clones cannot be combined with an inherited `--from` cell→pb partition: \
-             strata are a parent cut on a fresh collapse, not a skipped-refine partition"
-        );
-    } else if let Some(clones_path) = args.cnv_clones {
-        let cell_to_stratum = load_cnv_cell_strata(clones_path, &data_vec)?;
+    ) = if want_hierarchy {
         let MultilevelCollapseOut {
             levels,
             mut cell_to_pb_per_level,
             pb_tree,
-        } = collapse_columns_multilevel_with_strata(
+        } = collapse_multilevel(
             &mut data_vec,
             &proj_kn,
             &batch_membership,
             &ml_params,
-            &cell_to_stratum,
-        )?;
-        cell_to_pb_per_level.reverse();
-        (levels, Some(cell_to_pb_per_level), pb_tree)
-    } else if let Some((partition_src, cell_names_src)) = args.prebuilt_partition.clone() {
-        let data_cell_names = data_vec.column_names()?;
-        // Align by cell name (handles row-order differences /
-        // bails on cell-set mismatch). The aligned partition is
-        // returned finest-last; data_beans::alg expects finest-
-        // first, so reverse before the call.
-        let aligned_finest_last =
-            senna::run_manifest::InheritedFromManifest::align_cell_to_pb_to_cells(
-                partition_src,
-                &cell_names_src,
-                &data_cell_names,
-            )?;
-        let mut partition_finest_first = aligned_finest_last;
-        partition_finest_first.reverse();
-        info!(
-            "Inheriting cell→pb membership for {} levels (skipping BBKNN + DC-SBM refinement)",
-            partition_finest_first.len()
-        );
-        let MultilevelCollapseOut {
-            levels,
-            mut cell_to_pb_per_level,
-            pb_tree,
-        } = data_beans::alg::collapse_data::collapse_columns_multilevel_with_partition(
-            &mut data_vec,
-            &proj_kn,
-            &batch_membership,
-            &ml_params,
-            &partition_finest_first,
-        )?;
-        cell_to_pb_per_level.reverse();
-        (levels, Some(cell_to_pb_per_level), pb_tree)
-    } else if want_hierarchy {
-        let MultilevelCollapseOut {
-            levels,
-            mut cell_to_pb_per_level,
-            pb_tree,
-        } = collapse_columns_multilevel_with_hierarchy(
-            &mut data_vec,
-            &proj_kn,
-            &batch_membership,
-            &ml_params,
+            args.cnv_clones,
+            args.prebuilt_partition.clone(),
         )?;
         cell_to_pb_per_level.reverse();
         (levels, Some(cell_to_pb_per_level), pb_tree)

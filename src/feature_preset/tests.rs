@@ -91,7 +91,7 @@ fn no_matching_gene_is_an_error() {
 }
 
 #[test]
-fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
+fn the_mode_is_carried_and_a_rank_as_wide_as_the_table_is_taken() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), true);
     let axis: Vec<Box<str>> = vec![Box::from("ENSG3_TP53")];
@@ -113,8 +113,8 @@ fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
             mode
         );
     }
-    // The table is H = 3 wide: rank 3 is no residual at that width, but is
-    // low-rank once the run trains wider.
+    // The table is H = 3 wide: a residual of rank 3 is as wide as it, and
+    // still taken (anchored to the table and shrunk by the ridge).
     let rank3 = || {
         Some(
             load_preset_genes(
@@ -131,7 +131,10 @@ fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
             .0,
         )
     };
-    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut rank3(), &mut None).is_err());
+    assert_eq!(
+        resolve_dim(ge::EmbeddingDim::Auto, &mut rank3(), &mut None).unwrap(),
+        3
+    );
     assert_eq!(
         resolve_dim(ge::EmbeddingDim::Fixed(8), &mut rank3(), &mut None).unwrap(),
         8

@@ -377,10 +377,10 @@ fn masked_topic_anchors_rho_with_a_low_rank_residual_and_folds_it_before_saving(
     }
 }
 
-/// The LoRA settings are checked against the width the table fixes, as on every
-/// other engine: a residual as wide as the table is no low-rank residual.
+/// The LoRA rank may reach the width the table fixes, as on every other
+/// engine: the residual stays anchored to the table, shrunk by its ridge.
 #[test]
-fn a_lora_rank_as_wide_as_the_table_is_refused() {
+fn a_lora_rank_as_wide_as_the_table_is_taken() {
     let dir = tempfile::tempdir().unwrap();
     let data = planted_zarr(dir.path());
     let first = dir.path().join("first").to_string_lossy().into_owned();
@@ -410,9 +410,8 @@ fn a_lora_rank_as_wide_as_the_table_is_refused() {
         "4",
     ];
     argv.extend_from_slice(&common);
-    let err = fit_masked_topic_model(&parse_masked(&argv))
-        .expect_err("rank 4 on a width-4 table must be refused");
-    assert!(err.to_string().contains("rank"), "{err}");
+    fit_masked_topic_model(&parse_masked(&argv))
+        .expect("a rank as wide as the table is taken: the residual stays anchored to it");
 }
 
 /// A pinned table wider than the data: its unmatched rows come out after the

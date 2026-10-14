@@ -20,6 +20,7 @@ fn job(
         labels: Vec::new(),
         clones: None,
         pb_from: None,
+        lane: 0,
     }
 }
 
@@ -278,4 +279,58 @@ fn a_fit_collapsing_on_an_unfinished_fit_does_not_start() {
     }
     drop(s);
     assert!(!dir.path().join("vae.cmd.sh").exists());
+}
+
+/// Two lanes run side by side; a fit collapsing on another's partition in
+/// the other lane waits for it.
+#[cfg(unix)]
+#[test]
+fn lanes_run_side_by_side_and_a_partition_is_waited_for() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("fake-senna");
+    // Sleeps, then marks its result.
+    std::fs::write(
+        &fake,
+        "#!/bin/sh
+sleep 1
+while [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let in_lane = |m: &str, lane: usize| {
+        let mut j = job(dir.path(), Tool::Senna, &fake, m, &[m, "--out", m]);
+        j.lane = lane;
+        j
+    };
+    let started = std::time::Instant::now();
+    let q = Queue::start(vec![in_lane("vae", 0), in_lane("svd", 1)]);
+    while !q.finished() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1900),
+        "side by side"
+    );
+    assert_eq!(q.states(), [State::Done, State::Done]);
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let job2 = |m: &str, lane: usize| {
+        let mut j = job(dir2.path(), Tool::Senna, &fake, m, &[m, "--out", m]);
+        j.dir = dir2.path().to_path_buf();
+        j.lane = lane;
+        j
+    };
+    let mut after = job2("rbm", 1);
+    after.pb_from = Some("topic.senna.json".into());
+    let started = std::time::Instant::now();
+    let q = Queue::start(vec![job2("topic", 0), after]);
+    while !q.finished() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1900),
+        "waited"
+    );
+    assert_eq!(q.states(), [State::Done, State::Done]);
 }

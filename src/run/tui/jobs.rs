@@ -1,6 +1,8 @@
-//! The queued fits, run one after another on a worker thread: each writes
-//! its `{out}.cmd.sh`, then starts senna (or mung) in the script's folder
-//! with the same command, its log kept for the screen.
+//! The queued fits, run one after another in each lane: each writes its
+//! `{out}.cmd.sh`, then starts senna (or mung) in the script's folder with
+//! the same command, its log kept for the screen. Lanes run side by side,
+//! one per GPU the fits are spread over; a fit collapsing on another's
+//! partition waits for it whichever lane it is in.
 //!
 //! A `mung clones` step goes first. Once it is done the queue waits for
 //! the user, who has seen its clones, to keep `--cnv-clones` on the fits
@@ -74,6 +76,31 @@ pub enum Keep {
     Stop,
 }
 
+/// The GPUs fits can be spread over: those `CUDA_VISIBLE_DEVICES` names,
+/// else those `nvidia-smi -L` lists; 1 when neither tells (no spreading).
+#[must_use]
+pub fn gpus() -> usize {
+    if let Ok(visible) = std::env::var("CUDA_VISIBLE_DEVICES") {
+        return visible
+            .split(',')
+            .filter(|d| !d.trim().is_empty())
+            .count()
+            .max(1);
+    }
+    Command::new("nvidia-smi")
+        .arg("-L")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map_or(1, |o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| l.starts_with("GPU "))
+                .count()
+                .max(1)
+        })
+}
+
 /// One fit to run.
 #[derive(Clone, Debug)]
 pub struct Job {
@@ -97,6 +124,9 @@ pub struct Job {
     /// The manifest of a fit queued before it whose pseudobulk partition it
     /// collapses on, as passed: relative to `dir`.
     pub pb_from: Option<String>,
+    /// The lane it runs in: its GPU when the fits are spread over several,
+    /// else 0.
+    pub lane: usize,
 }
 
 impl Job {
@@ -173,13 +203,15 @@ pub type Told = Result<(Vec<String>, &'static str), String>;
 pub struct Queue {
     pub jobs: Vec<Job>,
     pub shared: Arc<Mutex<Shared>>,
-    stopper: Arc<Stopper>,
+    /// One per lane.
+    stoppers: Vec<Arc<Stopper>>,
     answers: Sender<Keep>,
-    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl Queue {
-    /// Start `jobs` in order, each with its program.
+    /// Start `jobs` in order, each with its program, every lane on its own
+    /// worker.
     pub fn start(jobs: Vec<Job>) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
             states: vec![State::Waiting; jobs.len()],
@@ -187,63 +219,37 @@ impl Queue {
             progress: vec![None; jobs.len()],
             ..Shared::default()
         }));
-        let stopper = Arc::new(Stopper::default());
         let (answers, answered) = std::sync::mpsc::channel();
-        let (s, st, mut js) = (shared.clone(), stopper.clone(), jobs.clone());
-        let worker = std::thread::spawn(move || {
-            // Why the fits that wanted the clones cannot have them.
-            let mut no_clones: Option<String> = None;
-            // The results of fits that did not finish, and their names: a
-            // fit collapsing on one of their partitions cannot run.
-            let mut unfinished: Vec<(std::path::PathBuf, String)> = Vec::new();
-            for i in 0..js.len() {
-                let job = &js[i];
-                let missing = job.pb_from.as_ref().and_then(|run| {
-                    let run = super::script::normalize(&job.dir.join(run));
-                    unfinished.iter().find(|(r, _)| *r == run)
-                });
-                let state = if st.is_stopped() {
-                    State::Stopped
-                } else if let (Some(_), Some(why)) = (&job.clones, &no_clones) {
-                    State::Failed(why.clone())
-                } else if let Some((_, method)) = missing {
-                    State::Failed(format!(
-                        "{method} did not finish: no pseudobulks to collapse on"
-                    ))
-                } else {
-                    set(&s, i, State::Running);
-                    run_job(job, i, &s, &st)
-                };
-                let done = state == State::Done;
-                if !done {
-                    unfinished.push((super::script::normalize(&job.result()), job.method.clone()));
-                }
-                set(&s, i, state);
-                if !job.asks() {
-                    continue;
-                }
-                if !done {
-                    no_clones = Some(format!("{} did not finish", job.method));
-                    continue;
-                }
-                match ask(&s, &answered, told(job)) {
-                    Keep::Use => {}
-                    Keep::Without => js[i + 1..].iter_mut().for_each(|j| j.clones = None),
-                    Keep::Stop => {
-                        st.stop();
+        // A queue asking about clones runs as one lane: the fits after the
+        // step wait on the answer.
+        let lanes = if jobs.iter().any(Job::asks) {
+            1
+        } else {
+            jobs.iter().map(|j| j.lane + 1).max().unwrap_or(1)
+        };
+        let stoppers: Vec<Arc<Stopper>> = (0..lanes).map(|_| Arc::default()).collect();
+        let open = Arc::new(std::sync::atomic::AtomicUsize::new(lanes));
+        let answered = Arc::new(Mutex::new(answered));
+        let workers = (0..lanes)
+            .map(|lane| {
+                let (s, st, js) = (shared.clone(), stoppers[lane].clone(), jobs.clone());
+                let (open, answered) = (open.clone(), answered.clone());
+                std::thread::spawn(move || {
+                    run_lane(&js, lane, lanes, &s, &st, &answered);
+                    if open.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                        if let Ok(mut s) = s.lock() {
+                            s.finished = true;
+                        }
                     }
-                }
-            }
-            if let Ok(mut s) = s.lock() {
-                s.finished = true;
-            }
-        });
+                })
+            })
+            .collect();
         Queue {
             jobs,
             shared,
-            stopper,
+            stoppers,
             answers,
-            worker: Mutex::new(Some(worker)),
+            workers: Mutex::new(workers),
         }
     }
 
@@ -258,10 +264,12 @@ impl Queue {
         let _ = self.answers.send(keep);
     }
 
-    /// Interrupt the fit running, as Ctrl+C would, and start none after
-    /// it; asked again, kill it. Returns whether this stop kills.
+    /// Interrupt the fits running, as Ctrl+C would, and start none after
+    /// them; asked again, kill them. Returns whether this stop kills.
     pub fn stop(&self) -> bool {
-        let kill = self.stopper.stop();
+        // Every lane, so not `any`: it would stop at the first.
+        let kills: Vec<bool> = self.stoppers.iter().map(|st| st.stop()).collect();
+        let kill = kills.contains(&true);
         // A queue waiting on the clones stops waiting.
         self.answer(Keep::Stop);
         kill
@@ -276,22 +284,26 @@ impl Queue {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         if !self.worker_done() {
-            self.stopper.kill();
+            self.stoppers.iter().for_each(|st| st.kill());
         }
         self.join();
     }
 
     fn worker_done(&self) -> bool {
-        self.worker.lock().map_or(true, |w| {
-            w.as_ref().is_none_or(std::thread::JoinHandle::is_finished)
-        })
+        self.workers
+            .lock()
+            .map_or(true, |w| w.iter().all(std::thread::JoinHandle::is_finished))
     }
 
-    /// Wait for the worker to finish: after [`Queue::stop`], until the fit
-    /// it may have been starting is killed too.
+    /// Wait for the workers to finish: after [`Queue::stop`], until the
+    /// fits they may have been starting are killed too.
     pub fn join(&self) {
-        let worker = self.worker.lock().ok().and_then(|mut w| w.take());
-        if let Some(w) = worker {
+        let workers = self
+            .workers
+            .lock()
+            .map(|mut w| std::mem::take(&mut *w))
+            .unwrap_or_default();
+        for w in workers {
             let _ = w.join();
         }
     }
@@ -319,6 +331,76 @@ impl Queue {
             .filter(|(j, s)| j.tool == Tool::Senna && *s == State::Done && j.result().exists())
             .map(|(j, _)| j.result())
             .collect()
+    }
+}
+
+/// Run lane `lane`'s jobs of `js` in order (every job when there is one
+/// lane). A job collapsing on another's partition waits for it, and fails
+/// when it did not finish.
+fn run_lane(
+    js: &[Job],
+    lane: usize,
+    lanes: usize,
+    s: &Mutex<Shared>,
+    st: &Stopper,
+    answered: &Mutex<Receiver<Keep>>,
+) {
+    let mut js = js.to_vec();
+    // Why the fits that wanted the clones cannot have them.
+    let mut no_clones: Option<String> = None;
+    for i in 0..js.len() {
+        if lanes > 1 && js[i].lane != lane {
+            continue;
+        }
+        let job = &js[i];
+        // The fit whose partition it collapses on, once that one is through.
+        let source = job.pb_from.as_ref().and_then(|run| {
+            let run = super::script::normalize(&job.dir.join(run));
+            js.iter()
+                .position(|j| super::script::normalize(&j.result()) == run)
+        });
+        let source_state = source.map(|k| loop {
+            let state = s
+                .lock()
+                .map(|s| s.states[k].clone())
+                .unwrap_or(State::Stopped);
+            if !matches!(state, State::Waiting | State::Running) || st.is_stopped() {
+                break state;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+        let state = if st.is_stopped() {
+            State::Stopped
+        } else if let (Some(_), Some(why)) = (&job.clones, &no_clones) {
+            State::Failed(why.clone())
+        } else if let Some(k) = source.filter(|_| source_state.as_ref() != Some(&State::Done)) {
+            State::Failed(format!(
+                "{} did not finish: no pseudobulks to collapse on",
+                js[k].method
+            ))
+        } else {
+            set(s, i, State::Running);
+            run_job(job, i, lanes > 1, s, st)
+        };
+        let done = state == State::Done;
+        set(s, i, state);
+        if !job.asks() {
+            continue;
+        }
+        if !done {
+            no_clones = Some(format!("{} did not finish", job.method));
+            continue;
+        }
+        let answer = answered
+            .lock()
+            .map_or(Keep::Stop, |a| ask(s, &a, told(&js[i])));
+        match answer {
+            Keep::Use => {}
+            Keep::Without => js[i + 1..].iter_mut().for_each(|j| j.clones = None),
+            Keep::Stop => {
+                st.stop();
+            }
+        }
     }
 }
 
@@ -362,7 +444,7 @@ fn say(s: &Mutex<Shared>, i: usize, line: String) {
     }
 }
 
-fn run_job(job: &Job, i: usize, s: &Mutex<Shared>, stopper: &Stopper) -> State {
+fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper) -> State {
     if job.result().exists() {
         return State::Failed(format!("{} exists", job.result().display()));
     }
@@ -389,7 +471,9 @@ fn run_job(job: &Job, i: usize, s: &Mutex<Shared>, stopper: &Stopper) -> State {
     if std::env::var_os("RUST_LOG").is_none() {
         command.env("RUST_LOG", script::LOG_LEVEL);
     }
+    // Side by side, every line says whose it is.
     let each = |said| match said {
+        Said::Line(line) if tag => say(s, i, format!("[{}] {line}", job.method)),
         Said::Line(line) => say(s, i, line),
         Said::Progress(p) => {
             if let Ok(mut s) = s.lock() {

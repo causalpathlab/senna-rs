@@ -145,6 +145,8 @@ pub(crate) struct App {
     header: String,
     /// `mung` as described by itself, or why it is not there.
     mung: Result<clap::Command, String>,
+    /// The GPUs fits on `--device cuda` are spread over, one lane each.
+    gpus: usize,
     /// The programs the jobs start: senna itself, and mung.
     senna_program: PathBuf,
     mung_program: PathBuf,
@@ -315,6 +317,7 @@ impl App {
         let mut app = App {
             cli,
             mung,
+            gpus: jobs::gpus(),
             header: String::new(),
             senna_program: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("senna")),
             mung_program: mung_program(),
@@ -1229,6 +1232,8 @@ impl App {
         // Each partition a queued fit builds: the first fit to build it, by
         // its manifest and name.
         let mut builders: Vec<(Vec<(String, String)>, Builder)> = Vec::new();
+        // The GPU the next fit on `--device cuda` takes.
+        let mut next_gpu = 0;
         for (i, r) in self.rows.iter().enumerate().filter(|(_, r)| r.on) {
             let (dir, out) = self.out_of(i);
             let rel = |p: &Path| script::relative(p, &dir).to_string_lossy().into_owned();
@@ -1260,6 +1265,9 @@ impl App {
                             b.method
                         ));
                     }
+                    // bge collapses on a partition but keeps none of its own
+                    // for another fit.
+                    None if r.form.name == "bge" => {}
                     None => builders.push((
                         key,
                         Builder {
@@ -1269,6 +1277,22 @@ impl App {
                     )),
                 }
             }
+            // On several GPUs, the fits on one take them in turn (a
+            // `--device-no` given by hand stays): each GPU is a lane, its
+            // fits run in turn and the GPUs side by side.
+            let mut argv = r.form.argv(&data, &batch_files, &out);
+            let lane = match self.gpu_of(r) {
+                Some(Some(given)) => given,
+                Some(None) => {
+                    let gpu = next_gpu % self.gpus;
+                    next_gpu += 1;
+                    if gpu > 0 {
+                        argv.extend(["--device-no".to_string(), gpu.to_string()]);
+                    }
+                    gpu
+                }
+                None => 0,
+            };
             let job = Job {
                 tool: r.tool,
                 program: self.program_of(r.tool),
@@ -1276,10 +1300,11 @@ impl App {
                 method: r.label.clone(),
                 dir: dir.clone(),
                 out: out.clone(),
-                argv: r.form.argv(&data, &batch_files, &out),
+                argv,
                 labels,
                 clones,
                 pb_from,
+                lane,
             };
             let mut blamed = None;
             let problem = if self.pairs.is_empty() {
@@ -1317,6 +1342,22 @@ impl App {
             });
         }
         planned
+    }
+
+    /// Whether row `r`'s fit runs on a GPU while there are several to
+    /// spread fits over: `Some(Some(d))` when `--device-no d` is given,
+    /// `Some(None)` when it is free to take one; `None` otherwise.
+    fn gpu_of(&self, r: &Row) -> Option<Option<usize>> {
+        let value = |long: &str| r.form.fields.iter().find(|f| f.long == long);
+        if self.gpus < 2 || value("device").is_none_or(|f| f.value.trim() != "cuda") {
+            return None;
+        }
+        Some(
+            value("device-no")
+                .filter(|f| !f.is_default())
+                .and_then(|f| f.value.trim().parse().ok())
+                .filter(|&d: &usize| d < self.gpus),
+        )
     }
 
     /// Why td-rbm cannot run on the data: every file needs genes with both

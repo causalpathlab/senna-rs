@@ -196,11 +196,14 @@ pub struct RbmArgs {
 
     #[arg(
         long,
-        default_value_t = 0.005,
         alias = "lr",
-        help = "Adam learning rate"
+        help = "Adam learning rate [default: 0.005; 0.0005 for Gaussian hidden units]",
+        long_help = "Adam learning rate. Default 0.005, and ten times smaller (0.0005)\n\
+                     for Gaussian hidden units: their activity has no bound, so a large\n\
+                     step lets the weights run away (Hinton, A practical guide to\n\
+                     training restricted Boltzmann machines (2010), §13.2-13.3)."
     )]
-    pub(crate) learning_rate: f32,
+    pub(crate) learning_rate: Option<f32>,
 
     #[arg(
         long,

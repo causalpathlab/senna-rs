@@ -652,13 +652,13 @@ impl RunKind {
         match self {
             RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => ExpressionModel::Topic,
             RunKind::MaskedVae => ExpressionModel::TopicOfLogits,
-            RunKind::Vae => ExpressionModel::LatentLoadings,
+            // vae's decoder, rbm's visible units given the hidden, td-rbm's
+            // spliced reads given the place on the curves and the state.
+            RunKind::Vae | RunKind::Rbm | RunKind::TdRbm => ExpressionModel::LatentLoadings,
             RunKind::Bge | RunKind::ResolveEmbeddingSpace | RunKind::Simba => {
                 ExpressionModel::Embedding
             }
-            RunKind::Svd | RunKind::JointSvd | RunKind::Fne | RunKind::TdRbm | RunKind::Rbm => {
-                ExpressionModel::Unmodelled
-            }
+            RunKind::Svd | RunKind::JointSvd | RunKind::Fne => ExpressionModel::Unmodelled,
         }
     }
 }

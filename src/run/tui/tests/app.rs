@@ -1,6 +1,11 @@
 use super::*;
 
 fn cli() -> clap::Command {
+    cli_on_devices(false)
+}
+
+/// [`cli`], every method with `--device` and `--device-no` when `devices`.
+fn cli_on_devices(devices: bool) -> clap::Command {
     // A stand-in for senna's command: every fit takes data files, --out
     // and batch files, and one flag of its own.
     let method = |name: &'static str| {
@@ -28,6 +33,22 @@ fn cli() -> clap::Command {
                     .long("sort-dim")
                     .default_value("10"),
             );
+        // On a device, when asked.
+        let c = if !devices {
+            c
+        } else {
+            c.arg(
+                clap::Arg::new("device")
+                    .long("device")
+                    .value_parser(["cpu", "cuda"])
+                    .default_value("cpu"),
+            )
+            .arg(
+                clap::Arg::new("device_no")
+                    .long("device-no")
+                    .default_value("0"),
+            )
+        };
         // One takes an earlier run's feature table.
         let c = if name == "bge" {
             c.arg(
@@ -1117,4 +1138,75 @@ fn every_key_hint_is_whole_on_a_narrow_terminal() {
     a.help = true;
     let text = drawn(&a, 72, 16);
     assert!(text.contains("esc, q or ? close"), "{text}");
+}
+
+/// On two GPUs, four fits on cuda take them in turn, two each; one given a
+/// device keeps it; a fit on the CPU stays in lane 0.
+#[test]
+fn fits_on_cuda_take_the_gpus_in_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = App {
+        here: dir.path().to_path_buf(),
+        ..App::new(
+            cli_on_devices(true),
+            Err("no mung".into()),
+            dir.path().to_path_buf(),
+        )
+        .unwrap()
+    };
+    a.browser = None;
+    a.editor = None;
+    a.gpus = 2;
+    a.pairs = data(dir.path(), &["d1.zarr"]);
+    let set = |a: &mut App, m: &str, long: &str, v: &str| {
+        let row = a.rows.iter().position(|r| r.form.name == m).unwrap();
+        a.rows[row].on = true;
+        let f = a.rows[row]
+            .form
+            .fields
+            .iter_mut()
+            .find(|f| f.long == long)
+            .unwrap();
+        f.value = v.into();
+    };
+    for m in ["vae", "svd", "simba", "bge"] {
+        set(&mut a, m, "device", "cuda");
+    }
+    set(&mut a, "topic", "device", "cpu");
+    let plan = a.plan();
+    let by = |m: &str| plan.iter().find(|p| p.job.method == m).unwrap();
+    let lanes: Vec<(String, usize, bool)> = plan
+        .iter()
+        .map(|p| {
+            let named = p.job.argv.windows(2).any(|w| w == ["--device-no", "1"]);
+            (p.job.method.clone(), p.job.lane, named)
+        })
+        .collect();
+    let on = |gpu: usize| {
+        lanes
+            .iter()
+            .filter(|(m, l, _)| *l == gpu && m != "topic")
+            .count()
+    };
+    assert_eq!((on(0), on(1)), (2, 2), "{lanes:?}");
+    assert!(
+        lanes.iter().all(|(_, l, named)| (*l == 1) == *named),
+        "{lanes:?}"
+    );
+    assert_eq!(by("topic").job.lane, 0);
+
+    // A device given by hand stays, and decides the lane.
+    set(&mut a, "simba", "device-no", "1");
+    let plan = a.plan();
+    let simba = plan.iter().find(|p| p.job.method == "simba").unwrap();
+    assert_eq!(simba.job.lane, 1);
+    assert_eq!(
+        simba
+            .job
+            .argv
+            .iter()
+            .filter(|a| *a == "--device-no")
+            .count(),
+        1
+    );
 }

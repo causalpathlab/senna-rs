@@ -187,7 +187,7 @@ pub struct ViewArgs {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Also open this data file (.zarr, .zarr.zip, .h5), one the run was not fitted on: its cells matched to the run's by name, shown as the extra source (O in the view)"
+        help = "Also open this data file (.zarr, .zarr.zip, .h5), one the run was not fitted on: its cells matched to the run's by name, shown as the extra source (E opens one in the view)"
     )]
     pub extra: Option<std::path::PathBuf>,
 

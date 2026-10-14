@@ -149,6 +149,7 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
                 feature: p.modality.clone(),
                 barcode: p.barcode_suffix(),
             }),
+        reuse: args.pb_from.pb_from.as_deref(),
     })?;
 
     let row_names = data_vec.row_names()?;
@@ -323,13 +324,23 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         }
     };
     let hidden = Hidden::new(args.hidden, args.trials, args.max_count);
+    // Unbounded Gaussian activities need a far smaller step than bounded
+    // units (Hinton (2010), §13.2-13.3).
+    let learning_rate = args.learning_rate.unwrap_or_else(|| {
+        if matches!(args.hidden, super::hidden::HiddenArg::Gaussian) {
+            info!("rbm: Gaussian hidden units train at learning rate 0.0005 (--learning-rate sets it)");
+            0.0005
+        } else {
+            0.005
+        }
+    });
     let stop = setup_stop_handler();
     let cfg = TrainConfig {
         epochs: args.epochs,
         batch: args.minibatch_size,
         chains: args.chains.unwrap_or(args.minibatch_size),
         sweeps: args.gibbs_sweeps,
-        lr: f64::from(args.learning_rate),
+        lr: f64::from(learning_rate),
         lora_lr_ratio: f64::from(lora.lr_ratio),
         lora_ridge: f64::from(lora.ridge),
         embedding_l2: f64::from(args.embedding_l2),

@@ -1,7 +1,5 @@
 use crate::hvg::HvgCliArgs;
-use crate::topic::common::{
-    load_and_project, load_cnv_cell_strata, LoadProjectArgs, ProjectedData,
-};
+use crate::topic::common::{collapse_multilevel, load_and_project, LoadProjectArgs, ProjectedData};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 use senna::embed_common::*;
 
@@ -9,14 +7,20 @@ use senna::embed_common::*;
 #[serde(default = "senna::embed_common::clap_defaults")]
 pub struct SvdArgs {
     #[arg(
-        required = true,
         value_delimiter = ',',
-        help = "Input data files (.zarr or .h5)",
+        help = "Input data files (.zarr or .h5; optional when --from is given)",
         long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
                      Multiple files may be passed, comma- or space-separated,\n\
-                     and are concatenated column-wise on a shared feature set."
+                     and are concatenated column-wise on a shared feature set.\n\
+                     Optional when --from is given."
     )]
     data_files: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Chain data, batch and cell→pb partition from a prior run"
+    )]
+    from: Option<Box<str>>,
 
     #[arg(
         long,
@@ -47,6 +51,10 @@ pub struct SvdArgs {
 
     #[command(flatten)]
     collapse: crate::refine_weighting::CollapseArgs,
+
+    #[command(flatten)]
+    #[serde(flatten)]
+    pb_from: crate::refine_weighting::PbFromArgs,
 
     /// The parent's carried pseudobulks, when `senna update` chose to reuse
     /// them instead of re-reading its cells. Derived per invocation, so it is
@@ -109,6 +117,25 @@ pub struct SvdArgs {
 pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
+    let inherited = args
+        .from
+        .as_deref()
+        .map(senna::run_manifest::inherit_from)
+        .transpose()?;
+    senna::run_manifest::InheritedFromManifest::ensure_replayable(inherited.as_ref(), "svd")?;
+    let data_files = senna::run_manifest::InheritedFromManifest::resolve_data(
+        inherited.as_ref(),
+        &args.data_files,
+    )?;
+    let batch_files = senna::run_manifest::InheritedFromManifest::resolve_batch(
+        inherited.as_ref(),
+        args.batch_files.as_deref(),
+    );
+    let partition = args.pb_from.partition(
+        inherited.as_ref(),
+        &crate::refine_weighting::partition_settings(args),
+    )?;
+
     let proj_dim = args.collapse.proj_dim.max(args.n_latent_topics);
     let ProjectedData {
         mut data_vec,
@@ -117,8 +144,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         selected_features,
         output_keep_idx,
     } = load_and_project(&LoadProjectArgs {
-        data_files: &args.data_files,
-        batch_files: &args.batch_files,
+        data_files: &data_files,
+        batch_files: &batch_files,
         preload: args.preload_data,
         proj_dim,
         block_size: args.block_size,
@@ -135,6 +162,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
         multiome: None,
+        out: Some(&args.out),
+        reuse: args.pb_from.pb_from.as_deref(),
     })?;
 
     // 3. Batch-adjusted collapsing (pseudobulk)
@@ -166,26 +195,22 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         pb_tree: args.collapse.pb_tree_params(),
         strata: None,
     };
-    let mut multilevel = if let Some(path) = args.collapse.cnv_clones.as_deref() {
-        let cell_to_stratum = load_cnv_cell_strata(path, &data_vec)?;
-        data_beans::alg::collapse_data::collapse_columns_multilevel_with_strata(
-            &mut data_vec,
-            &proj_kn,
-            &batch_membership,
-            &ml_params,
-            &cell_to_stratum,
-        )?
-    } else {
-        data_beans::alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
-            &mut data_vec,
-            &proj_kn,
-            &batch_membership,
-            &ml_params,
-        )?
-    };
+    let mut multilevel = collapse_multilevel(
+        &mut data_vec,
+        &proj_kn,
+        &batch_membership,
+        &ml_params,
+        args.collapse.cnv_clones.as_deref(),
+        partition,
+    )?;
     anyhow::ensure!(!multilevel.levels.is_empty(), "collapse returned no levels");
     let collapse_out = multilevel.levels.swap_remove(0);
-    let finest_membership = multilevel.cell_to_pb_per_level.swap_remove(0);
+    // Every level's membership, finest last as a run records it, for a
+    // later fit's `--pb-from`.
+    let mut cell_to_pb = std::mem::take(&mut multilevel.cell_to_pb_per_level);
+    cell_to_pb.reverse();
+    let finest_membership = cell_to_pb.last().expect("a level").clone();
+    let pb_tree = multilevel.pb_tree.take();
     drop(multilevel);
 
     // 4. batch-adjusted data
@@ -298,13 +323,26 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         args.pb_reference.as_ref(),
     )?;
 
-    let input: Vec<String> = args
-        .data_files
+    // The partition, for a later fit's `--pb-from` and `senna view`.
+    let cell_names = data_vec.column_names()?;
+    crate::postprocess::viz_prep::write_cell_to_pb(
+        &args.out,
+        &cell_to_pb,
+        &cell_names,
+        output_keep_idx.as_deref(),
+    )?;
+    let has_pb_tree = pb_tree
+        .as_ref()
+        .map(|tree| {
+            crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &data_vec.row_names()?)
+        })
+        .transpose()?
+        .is_some();
+    let input: Vec<String> = data_files
         .iter()
         .map(std::string::ToString::to_string)
         .collect();
-    let batch: Vec<String> = args
-        .batch_files
+    let batch: Vec<String> = batch_files
         .as_ref()
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
@@ -336,8 +374,8 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         // `cluster` is the natural default.
         default_colour_by: "cluster",
         has_latent: true,
-        has_cell_to_pb: false,
-        has_pb_tree: false,
+        has_cell_to_pb: true,
+        has_pb_tree,
     })?;
 
     Ok(())

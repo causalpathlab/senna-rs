@@ -102,6 +102,15 @@ impl App {
             Setting::Layout => self.step_method(d, true),
             Setting::Map => self.step_view(d),
             Setting::Colour => self.change(|sc| sc.step_colour(d)),
+            // Past the counts, with no extra file open, the next value is
+            // one: the browser opens for it.
+            Setting::Values
+                if d > 0
+                    && self.scene.source == crate::view::activity::Source::Observed
+                    && self.scene.data.loads.extra.is_none() =>
+            {
+                self.ask_extra();
+            }
             Setting::Values => self.change_source(Scene::cycle_source),
             Setting::Labels => {
                 self.change_text(|sc| sc.step_labels(d));

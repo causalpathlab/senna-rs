@@ -160,6 +160,9 @@ pub struct Summary {
     pub state: Vec<Vec<f32>>,
     /// `[N × H]` the velocity `ż`, averaged over the row's posterior.
     pub velocity: Vec<Vec<f32>>,
+    /// `[N × H]` the place on the curves `z`, averaged over the row's
+    /// posterior: with the state, what its spliced reads are read from.
+    pub position: Vec<Vec<f32>>,
 }
 
 /// Rows read at a time at the end.
@@ -188,6 +191,7 @@ impl Model {
             tau_sd: Vec::with_capacity(n),
             state: Vec::with_capacity(n),
             velocity: Vec::with_capacity(n),
+            position: Vec::with_capacity(n),
         };
         let bar = new_progress_bar(n.div_ceil(BLOCK) as u64).with_message("td-rbm cells");
         for start in (0..n).step_by(BLOCK) {
@@ -204,6 +208,7 @@ impl Model {
             let (p, state) = posterior(&block, &t)?;
             out.velocity
                 .extend(p.matmul(&t.velocity)?.to_vec2::<f32>()?);
+            out.position.extend(p.matmul(&t.curve)?.to_vec2::<f32>()?);
             out.state.extend(state.to_vec2::<f32>()?);
             for row in p.to_vec2::<f32>()? {
                 let pl: Vec<f32> = (0..l)
