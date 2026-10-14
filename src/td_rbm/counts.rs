@@ -1,15 +1,12 @@
-//! Pseudobulk reads on both tracks: a count backend's `{gene}/count/spliced`
-//! and `{gene}/count/unspliced` rows summed over the cells of each pseudobulk
-//! of every level, the genes the kinetics are fitted on, and the cells' own
-//! reads block by block.
+//! Reads on both tracks: the count backends' `{gene}/count/spliced` and
+//! `{gene}/count/unspliced` rows of the finest pseudobulks, the genes the
+//! kinetics are fitted on, and the cells' own reads block by block.
 
+use crate::logging::new_progress_bar;
 use data_beans::aux::feature_rows::split_count_row;
-use data_beans::sparse_io::open_sparse_matrix_by_path;
+use data_beans::sparse_io_vector::SparseIoVec;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
-
-/// Columns read per call.
-const COLUMNS_PER_READ: usize = 4096;
 
 /// Every pseudobulk's reads of every gene that has both tracks.
 pub struct PbTracks {
@@ -19,8 +16,6 @@ pub struct PbTracks {
     /// `[P × G]`.
     pub unspliced: DMatrix<f32>,
     pub spliced: DMatrix<f32>,
-    /// Cells per pseudobulk.
-    pub cells: Vec<f32>,
 }
 
 /// A backend row's (gene column, unspliced?), if it is a track of a gene.
@@ -51,21 +46,22 @@ fn track_rows(rows: &[Box<str>]) -> (Vec<&str>, Vec<Role>) {
 }
 
 /// How many genes of `rows` have both an unspliced and a spliced row
-/// (`{gene}/count/unspliced`, `{gene}/count/spliced`): the genes td-rbm
-/// can fit.
-pub fn two_track_genes(rows: &[Box<str>]) -> usize {
-    track_rows(rows).0.len()
+/// (`{gene}/count/unspliced`, `{gene}/count/spliced`), the genes td-rbm
+/// can fit; and whether every row is one of these tracks.
+pub fn two_track_genes(rows: &[Box<str>]) -> (usize, bool) {
+    let (genes, role) = track_rows(rows);
+    (genes.len(), role.iter().all(Option::is_some))
 }
 
-/// The backend at `path` cell by cell, in blocks of its columns: `f(first
-/// column, unspliced, spliced)` with each block's `[B × G]` reads on the
-/// genes named `genes`, in that order.
+/// The cells of `data` one block of columns at a time: `f(first column,
+/// unspliced, spliced)` with each block's `[B × G]` reads on the genes
+/// named `genes`, in that order.
 pub fn for_cell_blocks(
-    path: &str,
+    data: &SparseIoVec,
     genes: &[Box<str>],
+    block: usize,
     mut f: impl FnMut(usize, DMatrix<f32>, DMatrix<f32>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let data = open_sparse_matrix_by_path(path)?;
     let rows = data.row_names()?;
     let (all, role) = track_rows(&rows);
     let column: HashMap<&str, usize> = genes
@@ -78,69 +74,46 @@ pub fn for_cell_blocks(
         .iter()
         .map(|r| r.and_then(|(j, u)| column.get(all[j]).map(|&c| (c, u))))
         .collect();
-    let n = data.column_names()?.len();
-    for start in (0..n).step_by(COLUMNS_PER_READ) {
-        let end = (start + COLUMNS_PER_READ).min(n);
+    let n = data.num_columns();
+    let bar = new_progress_bar(n.div_ceil(block.max(1)) as u64).with_message("reading cells");
+    for start in (0..n).step_by(block.max(1)) {
+        bar.inc(1);
+        let end = (start + block).min(n);
         let mut unspliced = DMatrix::<f32>::zeros(end - start, genes.len());
         let mut spliced = DMatrix::<f32>::zeros(end - start, genes.len());
-        let (_, _, triplets) = data.read_triplets_by_columns((start..end).collect())?;
-        for (row, col, v) in triplets {
-            match role[row as usize] {
-                Some((c, true)) => unspliced[(col as usize, c)] += v,
-                Some((c, false)) => spliced[(col as usize, c)] += v,
-                None => {}
-            }
-        }
+        data.for_each_triplet(start..end, block, |row, col, v| match role[row as usize] {
+            Some((c, true)) => unspliced[(col as usize, c)] += v,
+            Some((c, false)) => spliced[(col as usize, c)] += v,
+            None => {}
+        })?;
         f(start, unspliced, spliced)?;
     }
+    bar.finish_and_clear();
     Ok(())
 }
 
-/// Sum the backend at `path` into every level's pseudobulks in one pass:
-/// `levels[l][c]` is cell `c`'s pseudobulk at level `l`, in the backend's
-/// column order. Cells without a pseudobulk are skipped; genes with only one
-/// track are dropped.
-pub fn pb_tracks(path: &str, levels: &[Vec<Option<usize>>]) -> anyhow::Result<Vec<PbTracks>> {
-    let data = open_sparse_matrix_by_path(path)?;
-    let rows = data.row_names()?;
-    let (genes, role) = track_rows(&rows);
+/// The pseudobulks' reads `counts` `[D × P]` on `data`'s rows `rows`, as
+/// tracks of the genes that have both. Rows of other kinds are dropped.
+pub fn pb_tracks(rows: &[Box<str>], counts: &DMatrix<f32>) -> anyhow::Result<PbTracks> {
+    let (genes, role) = track_rows(rows);
     anyhow::ensure!(
         !genes.is_empty(),
-        "{path}: no gene has both `/count/spliced` and `/count/unspliced` rows"
+        "no gene has both `/count/spliced` and `/count/unspliced` rows in every file"
     );
-    let n = data.column_names()?.len();
-    anyhow::ensure!(
-        levels.iter().all(|l| l.len() == n),
-        "{path}: every level must place each of the {n} cells"
-    );
-    let g = genes.len();
-    let mut out: Vec<PbTracks> = levels
-        .iter()
-        .map(|member| {
-            let p = member.iter().flatten().max().map_or(0, |&m| m + 1);
-            let mut cells = vec![0f32; p];
-            member.iter().flatten().for_each(|&pb| cells[pb] += 1.0);
-            PbTracks {
-                genes: genes.iter().map(|&s| Box::from(s)).collect(),
-                unspliced: DMatrix::<f32>::zeros(p, g),
-                spliced: DMatrix::<f32>::zeros(p, g),
-                cells,
-            }
-        })
-        .collect();
-    for start in (0..n).step_by(COLUMNS_PER_READ) {
-        let end = (start + COLUMNS_PER_READ).min(n);
-        let (_, _, triplets) = data.read_triplets_by_columns((start..end).collect())?;
-        for (row, col, v) in triplets {
-            let Some((j, u)) = role[row as usize] else {
-                continue;
+    let (g, p) = (genes.len(), counts.ncols());
+    let mut out = PbTracks {
+        genes: genes.iter().map(|&s| Box::from(s)).collect(),
+        unspliced: DMatrix::<f32>::zeros(p, g),
+        spliced: DMatrix::<f32>::zeros(p, g),
+    };
+    for (r, role) in role.iter().enumerate() {
+        if let Some((j, u)) = *role {
+            let m = if u {
+                &mut out.unspliced
+            } else {
+                &mut out.spliced
             };
-            for (t, member) in out.iter_mut().zip(levels) {
-                if let Some(pb) = member[start + col as usize] {
-                    let m = if u { &mut t.unspliced } else { &mut t.spliced };
-                    m[(pb, j)] += v;
-                }
-            }
+            m.column_mut(j).copy_from(&counts.row(r).transpose());
         }
     }
     Ok(out)

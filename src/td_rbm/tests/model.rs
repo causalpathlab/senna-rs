@@ -138,6 +138,7 @@ fn states_never_touch_the_unspliced_share_nor_the_curves_span() {
             curve: &curve,
             beta: 2.0,
             gamma: 1.0,
+            given: None,
         },
         3,
         &Device::Cpu,
@@ -225,6 +226,7 @@ fn a_lineages_speed_scales_its_velocity_and_only_ratios_count() {
             curve: &curve,
             beta: 2.0,
             gamma: 1.0,
+            given: None,
         },
         3,
         &Device::Cpu,
@@ -280,6 +282,7 @@ fn mirroring_a_lineage_runs_its_curve_backwards_exactly() {
             curve: &curve,
             beta: 2.0,
             gamma: 1.0,
+            given: None,
         },
         3,
         &Device::Cpu,
@@ -319,4 +322,74 @@ fn mirroring_a_lineage_runs_its_curve_backwards_exactly() {
         .flatten()
         .zip(c0.iter().flatten())
         .all(|(x, y)| (x - y).abs() < 1e-6));
+}
+
+/// A given table's rows under each mode, one optimiser step on a loss that
+/// moves every row: `Freeze` holds them, `Lora` starts at them and moves
+/// only through its residual, `Init` lets them train; free rows always do.
+#[test]
+fn a_given_tables_rows_are_held_as_its_mode_says() {
+    use legume_numeric::candle::candle_nn::Optimizer;
+    let shape = Shape {
+        genes: G,
+        embedding: H,
+        knots: 4,
+        states: 2,
+        lineages: 1,
+    };
+    let (base, rho) = (vec![0f32; G], rho_values());
+    let curve = vec![0.1f32; 4 * H];
+    // Genes 0 and 2 come from the table.
+    let mut mask = vec![0f32; G];
+    mask[0] = 1.0;
+    mask[2] = 1.0;
+    let step = |pinned: bool, lora_rank: Option<usize>| -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let e = Energy::new(
+            shape,
+            &Init0 {
+                rho: &rho,
+                base: &base,
+                curve: &curve,
+                beta: 2.0,
+                gamma: 1.0,
+                given: Some(GivenRho {
+                    mask: &mask,
+                    pinned,
+                    lora_rank,
+                }),
+            },
+            3,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let before = e.rho().unwrap().to_vec2::<f32>().unwrap();
+        let mut vars = e.vars();
+        vars.extend(e.lora_shared());
+        let mut opt = crate::rbm_core::adam(vars, 0.1).unwrap();
+        let loss = (e.rho().unwrap() - 10.0)
+            .unwrap()
+            .sqr()
+            .unwrap()
+            .sum_all()
+            .unwrap();
+        opt.backward_step(&loss).unwrap();
+        (before, e.rho().unwrap().to_vec2::<f32>().unwrap())
+    };
+    let moved = |a: &[f32], b: &[f32]| a.iter().zip(b).any(|(x, y)| (x - y).abs() > 1e-6);
+    let given: Vec<Vec<f32>> = rho.chunks(H).map(<[f32]>::to_vec).collect();
+
+    let (before, after) = step(true, None);
+    assert_eq!(before, given, "starts at the table");
+    assert!(
+        !moved(&after[0], &given[0]) && !moved(&after[2], &given[2]),
+        "frozen rows held"
+    );
+    assert!(moved(&after[1], &before[1]), "a free row trains");
+
+    let (before, after) = step(true, Some(2));
+    assert_eq!(before, given, "the residual starts at zero");
+    assert!(moved(&after[0], &given[0]), "the residual moves a held row");
+
+    let (_, after) = step(false, None);
+    assert!(moved(&after[0], &given[0]), "an init row trains");
 }

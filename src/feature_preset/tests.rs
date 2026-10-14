@@ -131,9 +131,9 @@ fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
             .0,
         )
     };
-    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut rank3(), &mut None, &mut []).is_err());
+    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut rank3(), &mut None).is_err());
     assert_eq!(
-        resolve_dim(ge::EmbeddingDim::Fixed(8), &mut rank3(), &mut None, &mut []).unwrap(),
+        resolve_dim(ge::EmbeddingDim::Fixed(8), &mut rank3(), &mut None).unwrap(),
         8
     );
 }
@@ -461,7 +461,7 @@ fn the_width_is_the_larger_of_the_flag_and_the_table() {
     };
     let mut p = preset();
     let mut c = Some(carried_fixture());
-    let h = resolve_dim(ge::EmbeddingDim::Fixed(5), &mut p, &mut c, &mut []).unwrap();
+    let h = resolve_dim(ge::EmbeddingDim::Fixed(5), &mut p, &mut c).unwrap();
     assert_eq!(h, 5);
     assert_eq!(
         p.unwrap().rows,
@@ -476,13 +476,86 @@ fn the_width_is_the_larger_of_the_flag_and_the_table() {
 
     for flag in [ge::EmbeddingDim::Fixed(2), ge::EmbeddingDim::Auto] {
         let mut p = preset();
-        assert_eq!(resolve_dim(flag, &mut p, &mut None, &mut []).unwrap(), 3);
+        assert_eq!(resolve_dim(flag, &mut p, &mut None).unwrap(), 3);
         assert_eq!(p.unwrap().rows.len(), 6);
     }
     // Without a table the flag is the width, and `auto` has nothing to take.
     assert_eq!(
-        resolve_dim(ge::EmbeddingDim::Fixed(7), &mut None, &mut None, &mut []).unwrap(),
+        resolve_dim(ge::EmbeddingDim::Fixed(7), &mut None, &mut None).unwrap(),
         7
     );
-    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut None, &mut None, &mut []).is_err());
+    assert!(resolve_dim(ge::EmbeddingDim::Auto, &mut None, &mut None).is_err());
+}
+
+/// A table of `names`, row `i` all `i`.
+fn write_table(dir: &std::path::Path, names: &[&str]) -> String {
+    let prefix = dir.join("table").to_string_lossy().into_owned();
+    let names: Vec<Box<str>> = names.iter().map(|s| Box::from(*s)).collect();
+    let e = DMatrix::<f32>::from_fn(names.len(), 2, |i, _| i as f32);
+    e.to_parquet_with_names(
+        &format!("{prefix}.feature_embedding.parquet"),
+        (Some(&names), Some("feature")),
+        None,
+    )
+    .unwrap();
+    prefix
+}
+
+/// A plain gene table on an axis of count tracks: both tracks of a gene
+/// take the gene's row.
+#[test]
+fn track_rows_take_their_genes_row_from_a_plain_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = write_table(dir.path(), &["GENE1", "GENE2"]);
+    let axis: Vec<Box<str>> = [
+        "ENSG1_GENE2/count/spliced",
+        "ENSG1_GENE2/count/unspliced",
+        "ENSG3_GENE3/count/spliced",
+    ]
+    .iter()
+    .map(|s| Box::from(*s))
+    .collect();
+    let kind = ge::FeatureNameKind::Gene { delim: '_' };
+    let f = load_preset_genes(&prefix, PresetMode::Init, &axis, &kind)
+        .unwrap()
+        .0;
+    assert_eq!(f.ids, vec![0, 1]);
+    assert_eq!(f.rows, vec![1.0, 1.0, 1.0, 1.0], "GENE2's row twice");
+}
+
+/// A table of tracks matches tracks by their full names.
+#[test]
+fn a_table_of_tracks_matches_track_for_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = write_table(
+        dir.path(),
+        &["GENE1/count/spliced", "GENE1/count/unspliced"],
+    );
+    let axis: Vec<Box<str>> = ["GENE1/count/unspliced", "GENE1/count/spliced"]
+        .iter()
+        .map(|s| Box::from(*s))
+        .collect();
+    let kind = ge::FeatureNameKind::Gene { delim: '_' };
+    let f = load_preset_genes(&prefix, PresetMode::Init, &axis, &kind)
+        .unwrap()
+        .0;
+    assert_eq!(f.ids, vec![0, 1]);
+    assert_eq!(f.rows, vec![1.0, 1.0, 0.0, 0.0], "each track its own row");
+}
+
+/// Permissive: a gene spelt in another case still finds its row.
+#[test]
+fn a_gene_spelt_in_another_case_finds_its_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = write_table(dir.path(), &["Gene1", "Gene2"]);
+    let axis: Vec<Box<str>> = ["ENSG2_GENE2", "ENSG1_GENE1/count/spliced"]
+        .iter()
+        .map(|s| Box::from(*s))
+        .collect();
+    let kind = ge::FeatureNameKind::Gene { delim: '_' };
+    let f = load_preset_genes(&prefix, PresetMode::Init, &axis, &kind)
+        .unwrap()
+        .0;
+    assert_eq!(f.ids, vec![0, 1]);
+    assert_eq!(f.rows, vec![1.0, 1.0, 0.0, 0.0]);
 }

@@ -214,12 +214,6 @@ fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
                  have no query-side projection here"
             )
         }
-        // gem DOES have a query-side projection now, the same frozen-table
-        // projection `senna predict` places a query through; impute's own
-        // matching machinery has just not been extended to a track axis yet.
-        RunKind::Gem => anyhow::bail!(
-            "impute is not wired for gem runs; use `senna predict` against this axis instead"
-        ),
     }
 }
 

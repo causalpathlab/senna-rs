@@ -2,7 +2,8 @@
 //! phase is the rows' free energy, the negative phase that of persistent
 //! Gibbs chains ([`Chains`]); every parameter is fitted with the states.
 
-use super::{adam, pass_reads, Level, TrainConfig};
+use super::{adam, pass_reads, stopped, with_lora_ridge, Level, TrainConfig};
+use crate::logging::new_progress_bar;
 use crate::td_rbm::curve::Spline;
 use crate::td_rbm::model::Energy;
 use crate::td_rbm::rbm::{free_energy, Chains, Reads};
@@ -32,6 +33,8 @@ pub(super) fn fit_states(
     // the states alone leaves the velocity markedly worse in simulation).
     let mut vars = energy.vars();
     vars.push(energy.load_var());
+    // A given table's LoRA shared factor is held here: PCD's gradient is
+    // too noisy for its own, faster rate.
     let mut opt = adam(vars, cfg.lr)?;
     let pass_reads = pass_reads(levels, cfg.state_depth);
     let p = levels[finest].cells.len();
@@ -40,7 +43,13 @@ pub(super) fn fit_states(
         .flat_map(|j| drawn[(j % p) * f..(j % p + 1) * f].to_vec())
         .collect();
     let mut chains = Chains::new(x0, f, dev, cfg.seed.wrapping_add(1))?;
+    let bar = new_progress_bar((cfg.epochs - cfg.time_epochs) as u64).with_message("td-rbm states");
     for epoch in cfg.time_epochs..cfg.epochs {
+        if stopped() {
+            info!("td-rbm states: stopping at epoch {epoch}");
+            break;
+        }
+        bar.inc(1);
         let (mut gap, mut steps) = (0f64, 0usize);
         for lv in levels {
             let rows = lv.cells.len();
@@ -59,7 +68,8 @@ pub(super) fn fit_states(
                     - free_energy(&fantasy, &t)?.mean_all()?)?
                     / cfg.state_depth as f64)?;
                 let prior = (energy.roughness()? * (cfg.smooth / pass_reads))?;
-                opt.backward_step(&(&loss + prior)?)?;
+                let total = with_lora_ridge(&(&loss + prior)?, energy, cfg)?;
+                opt.backward_step(&total)?;
                 gap += f64::from(loss.to_scalar::<f32>()?);
                 steps += 1;
                 // The chains move under the tables this step was taken at,
@@ -78,5 +88,6 @@ pub(super) fn fit_states(
             );
         }
     }
+    bar.finish_and_clear();
     Ok(())
 }

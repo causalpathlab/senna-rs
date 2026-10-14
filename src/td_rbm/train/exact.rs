@@ -1,7 +1,8 @@
 //! Step 1: every lineage and its time by the exact likelihood, the
 //! lineages drawn by collapsed Gibbs under a truncated Dirichlet process.
 
-use super::{adam, pass_reads, Level, TrainConfig};
+use super::{adam, lora_adam, pass_reads, stopped, with_lora_ridge, Level, TrainConfig};
+use crate::logging::new_progress_bar;
 use crate::td_rbm::curve::Spline;
 use crate::td_rbm::model::Energy;
 use crate::td_rbm::rbm::{lineage_log_likelihood, Reads};
@@ -68,7 +69,14 @@ impl Phase<'_> {
         let zero = vec![0f32; l];
         let pass_reads = pass_reads(self.levels, cfg.depth);
         let mut opt = adam(self.energy.vars(), cfg.lr)?;
+        let mut shared = lora_adam(self.energy, cfg)?;
+        let bar = new_progress_bar(epochs as u64).with_message(format!("td-rbm {label}"));
         for epoch in 0..epochs {
+            if stopped() {
+                info!("td-rbm {label}: stopping at epoch {epoch}");
+                break;
+            }
+            bar.inc(1);
             let (mut nll, mut reads) = (0f64, 0f64);
             let drawn: Vec<Reads> = self
                 .levels
@@ -117,7 +125,12 @@ impl Phase<'_> {
                     let ll = assigned_log_likelihood(&lineage_log_likelihood(&batch, &t)?, &ids)?;
                     let loss = (ll.neg()? / (chunk.len() as f64 * cfg.depth as f64))?;
                     let prior = (self.energy.roughness()? * (cfg.smooth / pass_reads))?;
-                    opt.backward_step(&(&loss + prior)?)?;
+                    let total = with_lora_ridge(&(&loss + prior)?, self.energy, cfg)?;
+                    let grads = total.backward()?;
+                    opt.step(&grads)?;
+                    if let Some(o) = shared.as_mut() {
+                        o.step(&grads)?;
+                    }
                     nll += f64::from(loss.to_scalar::<f32>()?) * chunk.len() as f64;
                     reads += chunk.len() as f64;
                 }
@@ -137,6 +150,7 @@ impl Phase<'_> {
                 );
             }
         }
+        bar.finish_and_clear();
         Ok(())
     }
 }

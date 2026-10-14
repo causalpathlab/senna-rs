@@ -1,9 +1,5 @@
-//! Regression guard for the shared bge driver: `senna bge` must keep writing
-//! the same output-file set and manifest `kind` once its body moves into
-//! [`super::fit_embed_family`]. Written before the extraction (see the task
-//! report for the honest RED/GREEN ordering — the crate did not compile at
-//! all until the extraction was finished, so "RED" here is a compile
-//! failure, not a failing assertion).
+//! Regression guard for the bge driver: `senna bge` writes its output-file
+//! set and a manifest of kind `bge`.
 
 use clap::Parser;
 use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};

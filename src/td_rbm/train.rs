@@ -27,6 +27,7 @@ mod states;
 pub use direction::Direction;
 pub use roots::RootCall;
 
+use crate::logging::new_progress_bar;
 use crate::rbm_core::adam;
 use crate::td_rbm::curve::{grid_times, Spline};
 use crate::td_rbm::model::{Energy, Init0, Shape, Tables, EMPTY};
@@ -34,6 +35,7 @@ use crate::td_rbm::rbm::{posterior, Reads};
 use crate::td_rbm::start::Start;
 use crate::td_rbm::tree::{Forest, Path};
 use legume_numeric::candle::candle_core::{Device, Result, Tensor};
+use legume_numeric::candle::candle_nn::AdamW;
 use log::info;
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
@@ -83,6 +85,10 @@ pub struct TrainConfig {
     pub sweeps: usize,
     pub lr: f64,
     pub seed: u64,
+    /// A given table's LoRA residual: its shared factor's learning rate over
+    /// `lr`, and its ridge per held row.
+    pub lora_lr_ratio: f64,
+    pub lora_ridge: f64,
 }
 
 impl Default for TrainConfig {
@@ -108,6 +114,8 @@ impl Default for TrainConfig {
             sweeps: 1,
             lr: 1e-2,
             seed: 1,
+            lora_lr_ratio: 1.0,
+            lora_ridge: 0.0,
         }
     }
 }
@@ -181,7 +189,9 @@ impl Model {
             state: Vec::with_capacity(n),
             velocity: Vec::with_capacity(n),
         };
+        let bar = new_progress_bar(n.div_ceil(BLOCK) as u64).with_message("td-rbm cells");
         for start in (0..n).step_by(BLOCK) {
+            bar.inc(1);
             let w = BLOCK.min(n - start);
             let mut rows = x[start * f..(start + w) * f].to_vec();
             for row in rows.chunks_mut(f) {
@@ -212,6 +222,7 @@ impl Model {
                 out.p_lineage.push(pl);
             }
         }
+        bar.finish_and_clear();
         Ok(out)
     }
 }
@@ -236,6 +247,29 @@ fn log_weights(counts: &[f64], concentration: f64) -> Vec<f32> {
 /// per-read loss averages over, so a prior in nats is divided by it.
 fn pass_reads(levels: &[Level], depth: u64) -> f64 {
     levels.iter().map(|lv| lv.cells.len()).sum::<usize>() as f64 * depth as f64
+}
+
+/// Whether Ctrl+C asked the fit to stop: every training phase then ends and
+/// the cells are read with the machine as it is.
+fn stopped() -> bool {
+    legume_numeric::matrix::stop::stop_flag().load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The optimiser of a given table's LoRA shared factor, at its own rate
+/// (LoRA+); `None` without one.
+fn lora_adam(energy: &Energy, cfg: &TrainConfig) -> Result<Option<AdamW>> {
+    energy
+        .lora_shared()
+        .map(|v| adam(vec![v], cfg.lr * cfg.lora_lr_ratio))
+        .transpose()
+}
+
+/// `loss` with a given table's LoRA ridge added.
+fn with_lora_ridge(loss: &Tensor, energy: &Energy, cfg: &TrainConfig) -> Result<Tensor> {
+    match energy.lora_penalty()? {
+        Some(pen) => loss + (pen * cfg.lora_ridge)?,
+        None => Ok(loss.clone()),
+    }
 }
 
 /// Fit the machine on pseudobulks of every level (`levels`, coarse to fine),

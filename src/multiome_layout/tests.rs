@@ -209,14 +209,14 @@ fn a_partially_tagged_model_axis_is_single_modality() {
     );
 }
 
-/// faba/gem rows are `{gene}/{modality}/{channel}` — two separators, and the
+/// faba rows are `{gene}/{modality}/{channel}` — two separators, and the
 /// trailing field is a splice channel, not a modality. Reading that as
-/// multiome would re-scope a gem model's whole feature axis on query.
+/// multiome would re-scope such a model's whole feature axis on query.
 #[test]
-fn a_gem_splice_axis_is_not_a_multiome_model() {
-    let gem = boxed(&["G1/count/spliced", "G1/count/unspliced", "G2/count/spliced"]);
-    assert!(trained_modalities(&gem).is_empty());
-    assert!(query_layout(&boxed(&["a.zarr", "b.zarr"]), &gem)
+fn a_splice_axis_is_not_a_multiome_model() {
+    let tracks = boxed(&["G1/count/spliced", "G1/count/unspliced", "G2/count/spliced"]);
+    assert!(trained_modalities(&tracks).is_empty());
+    assert!(query_layout(&boxed(&["a.zarr", "b.zarr"]), &tracks)
         .unwrap()
         .is_none());
 }

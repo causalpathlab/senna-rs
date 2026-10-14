@@ -51,7 +51,6 @@ mod eval_topic;
 mod feature_embedding_args;
 mod feature_preset;
 mod fne;
-mod gem;
 mod geometry;
 mod hvg;
 mod impute;
@@ -95,8 +94,6 @@ use docs::{run_docs, DocsArgs};
 use embed_diag::*;
 use eval_topic::*;
 use fne::{fit_fne, FneArgs};
-use gem::args::GemArgs;
-use gem::run::run_gem_embedding;
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
 use masked_topic::*;
@@ -192,7 +189,7 @@ fn print_logo() {
                   senna deconvolve --from bge.senna.json --annotation A --bulk bulk.parquet\n\
                   \n\
                   CNV-aware collapse: `mung clones` writes `{out}.clones.parquet`;\n\
-                  pass `--cnv-clones` on topic / masked-* / vae / svd / bge / gem /\n\
+                  pass `--cnv-clones` on topic / masked-* / vae / svd / bge /\n\
                   joint-* so donor-private CN stays out of batch δ.\n\
                   \n\
                   Artifact naming: a slot name fixes the axis, never the numeric scale.\n\
@@ -492,7 +489,8 @@ enum Commands {
     #[command(
         name = "td-rbm",
         about = "Every cell's lineage, time, state and velocity: an RBM on two-track counts",
-        long_about = "A restricted Boltzmann machine on a two-track count backend: the\n\
+        long_about = "A restricted Boltzmann machine on two-track count backends (one or\n\
+                      several files, read together on their shared genes): the\n\
                       visible units are a cell's reads over (gene, track), the hidden units\n\
                       a (lineage, time) unit on a grid and Gaussian state units. Every\n\
                       lineage's trajectory in the genes' embedding sets which gene; its\n\
@@ -552,7 +550,7 @@ enum Commands {
 
     #[command(
         name = "resolve-topics",
-        about = "Topics for an embedding run that has none (simba, gem, bge --skip-etm): one per cell cluster.",
+        about = "Topics for an embedding run that has none (simba, bge --skip-etm): one per cell cluster.",
         long_about = "Resolves topics for a finished embedding run the way `senna bge` does\n\
                       its own: one topic per cell cluster, no training.\n\
                       α = each cluster's normalised centroid in the cell embedding Z;\n\
@@ -564,45 +562,6 @@ enum Commands {
                       Topic T{c} is cluster c. `senna view` offers it in the r menu."
     )]
     ResolveTopics(ResolveTopicsArgs),
-
-    #[command(
-        name = "gem",
-        aliases = ["gem-embedding"],
-        about = "GEM: joint gene-count and modality-track embedding over the shared bge engine",
-        long_about = "Joint embedding of gene counts and any co-measured modality tracks,\n\
-                      over the exact same graph_embedding_util engine and driver\n\
-                      `senna bge` runs: the bilinear score e_feat·e_cell + b_feat + b_cell,\n\
-                      phase-1 multilevel-pseudobulk training,\n\
-                      phase-2 analytical per-cell projection.\n\
-                      \n\
-                      Positional GENES files hold count rows, `{gene}/count/{spliced|unspliced}`.\n\
-                      --modality files each hold one co-measured modality's two channel rows,\n\
-                      `{gene}/{m6a,atoi,apa}/{channel}`; the modality is read from the rows,\n\
-                      never the file name. Every row is one TRACK:\n\
-                      the base count row shares a gene's loading outright,\n\
-                      and every other track adds a ridge-shrunk offset to it (--offset-l2).\n\
-                      Rows match across files by exact name;\n\
-                      cells match by barcode within a sample (--genes-sample-strip).\n\
-                      \n\
-                      Optional `--cnv-clones` (from `mung clones`) keeps donor-private CNV\n\
-                      out of batch δ during the shared bge collapse path.\n\
-                      \n\
-                      Writes the same output set `senna bge` does,\n\
-                      plus {out}.feature_contrast.parquet (one row per gene and modality,\n\
-                      columns h0..h{H-1}):\n\
-                      {out}.senna.json, {out}.{cell_embedding,feature_embedding,feature_coembedding,\n\
-                      feature_bias,cell_bias,pb_embedding,pb_batch}.parquet,\n\
-                      plus {out}.{latent,dictionary,topic_embedding}.parquet from the resolved ETM.",
-        after_long_help = "\
-	Example:\n\
-  senna gem out/rep1_count.zarr.zip -o out/gem\n\n\
-  With a co-measured modality, one file per sample, matched by sample id:\n\n\
-  senna gem out/*_count.zarr.zip --modality out/*_m6a.zarr.zip -o out/gem\n\n\
-  Multiple gene samples, pass them positionally so shell globs work.\n\
-  Each sample becomes a batch via its barcodes' `@batch` tag.\n\n\
-  senna gem out/rep1_count.zarr.zip out/rep2_count.zarr.zip -o out/gem\n\
-  senna gem out/*_count.zarr.zip -o out/gem")]
-    Gem(GemArgs),
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
@@ -895,7 +854,7 @@ enum Commands {
                       \n\
                       Pick the data files and the batch labels of each, queue one or\n\
                       more of topic, masked-topic, masked-vae, masked-sbp, vae, svd,\n\
-                      bge, simba, gem, rbm and td-rbm, and change their flags. Every\n\
+                      bge, simba, rbm and td-rbm, and change their flags. Every\n\
                       flag a method has is listed with its help, its own flags first;\n\
                       hidden ones under `a`. Flags the queued fits share are set\n\
                       together on the shared page. `?` lists every key.\n\
@@ -1022,7 +981,6 @@ fn main() -> anyhow::Result<()> {
             fit_joint_svd(args)?;
         }
         Commands::Docs(args) => run_docs(args)?,
-        Commands::Gem(args) => run_gem_embedding(args)?,
         Commands::Layout { cmd } => match cmd {
             LayoutCmd::Tsne(args) => {
                 fit_layout_tsne(args)?;

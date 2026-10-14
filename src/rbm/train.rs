@@ -310,7 +310,9 @@ pub fn fit(
     }
     let mut q = Tensor::full(cfg.sparsity_target as f32, (1, k), dev)?;
 
+    let bar = crate::logging::new_progress_bar(cfg.epochs as u64).with_message("rbm");
     'epochs: for epoch in 0..cfg.epochs {
+        bar.inc(1);
         weights.set_frozen(epoch < cfg.module_warmup);
         // Summed on the device and read once an epoch.
         let mut gap = Tensor::zeros((), DType::F32, dev)?;
@@ -418,6 +420,7 @@ pub fn fit(
             );
         }
     }
+    bar.finish_and_clear();
     Ok(Fitted {
         weights,
         b,

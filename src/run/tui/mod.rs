@@ -31,7 +31,7 @@ use std::time::Duration;
 
 /// The methods `senna run` sets up, in the order listed: the embeddings
 /// (rbm among them), then td-rbm (lineages and time on two-track counts).
-pub const METHODS: [&str; 11] = [
+pub const METHODS: [&str; 10] = [
     "topic",
     "masked-topic",
     "masked-vae",
@@ -40,7 +40,6 @@ pub const METHODS: [&str; 11] = [
     "svd",
     "bge",
     "simba",
-    "gem",
     "rbm",
     TD_RBM,
 ];
@@ -1320,47 +1319,47 @@ impl App {
         planned
     }
 
-    /// Why td-rbm cannot run on the data: it reads one file, whose genes
-    /// need both an unspliced and a spliced row. `None` for other methods,
-    /// or while the file is still being read.
+    /// Why td-rbm cannot run on the data: every file needs genes with both
+    /// an unspliced and a spliced row. `None` for other methods, or while
+    /// the files are still being read.
     fn two_track_problem(&self, r: &Row) -> Option<String> {
         if r.tool != Tool::Senna || r.form.name != TD_RBM {
             return None;
         }
-        if self.pairs.len() != 1 {
-            return Some(format!(
-                "td-rbm reads one data file: {} chosen",
-                self.pairs.len()
-            ));
-        }
-        match self.pairs[0].two_tracks {
-            Some(0) => Some(
-                "td-rbm needs {gene}/count/unspliced and {gene}/count/spliced rows: no gene has both"
-                    .into(),
-            ),
-            _ => None,
-        }
+        let none: Vec<String> = self
+            .pairs
+            .iter()
+            .filter(|p| p.two_tracks == Some(0))
+            .map(|p| {
+                p.data.file_name().map_or_else(
+                    || p.data.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        (!none.is_empty()).then(|| {
+            format!(
+                "td-rbm needs {{gene}}/count/unspliced and {{gene}}/count/spliced rows: no gene has both in {}",
+                none.join(", ")
+            )
+        })
     }
 
-    /// Whether the data look like what `method` reads: gem wants
-    /// `{gene}/count/…` rows, the others plain features.
+    /// Whether the data look like what `method` reads: files whose rows are
+    /// all two-track counts are td-rbm's, not another method's.
     fn shape_warning(&self, r: &Row) -> Option<String> {
         if r.tool != Tool::Senna {
             return None;
         }
-        let method = r.form.name.as_str();
-        if method == TD_RBM {
+        if r.form.name == TD_RBM {
             return None;
         }
-        let known: Vec<bool> = self.pairs.iter().filter_map(|p| p.gene_counts).collect();
-        if known.is_empty() {
-            return None;
-        }
-        let gene = known.iter().filter(|g| **g).count();
-        if method == "gem" && gene < known.len() {
-            Some("gem reads {gene}/count/{spliced|unspliced} rows; some files have none".into())
-        } else if method != "gem" && gene == known.len() {
-            Some("these files hold gem's gene-count rows".into())
+        let known: Vec<bool> = self.pairs.iter().filter_map(|p| p.tracks_only).collect();
+        if !known.is_empty() && known.iter().all(|&t| t) {
+            Some(
+                "these files hold {gene}/count/spliced and /unspliced rows: td-rbm reads them"
+                    .into(),
+            )
         } else {
             None
         }

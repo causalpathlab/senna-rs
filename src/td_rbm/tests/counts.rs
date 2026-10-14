@@ -1,5 +1,23 @@
 use super::*;
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
+use data_beans::aux::feature_names::FeatureNameKind;
 use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
+use data_beans::sparse_io_vector::{ColumnAlignment, RowAlignment};
+
+/// The backends at `paths` read with td-rbm's settings: every file's cells
+/// in turn, tagged `@{file}` when there are several, on the rows every file
+/// has, matched by their full names.
+fn open_tracks(paths: &[Box<str>]) -> SparseIoVec {
+    read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: paths.to_vec(),
+        feature_kind: Some(FeatureNameKind::Exact),
+        row_alignment: RowAlignment::Intersect,
+        column_alignment: ColumnAlignment::Disjoint,
+        ..Default::default()
+    })
+    .unwrap()
+    .data
+}
 
 /// Rows: A spliced, B spliced, A unspliced, C unspliced (C has one track
 /// only); cells c1..c4.
@@ -31,26 +49,34 @@ fn backend(dir: &std::path::Path) -> String {
     path
 }
 
+/// The pseudobulks' counts split into the two tracks of every gene that
+/// has both; a gene with one track is dropped.
 #[test]
-fn sums_cells_into_every_levels_pseudobulks_on_both_tracks() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = backend(dir.path());
-    // Coarse: every cell in one; fine: c3 alone, c1 + c2, c4 in none.
-    let levels = vec![vec![Some(0); 4], vec![Some(1), Some(1), Some(0), None]];
-    let t = pb_tracks(&path, &levels).unwrap();
+fn counts_split_into_both_tracks_of_every_gene_with_both() {
+    let rows: Vec<Box<str>> = [
+        "A/count/spliced",
+        "B/count/spliced",
+        "A/count/unspliced",
+        "C/count/unspliced",
+    ]
+    .into_iter()
+    .map(Box::from)
+    .collect();
+    #[rustfmt::skip]
+    let counts = DMatrix::<f32>::from_row_slice(4, 3, &[
+        3.0, 3.0, 4.0,
+        7.0, 11.0, 8.0,
+        0.0, 1.0, 2.0,
+        9.0, 18.0, 9.0,
+    ]);
+    let t = pb_tracks(&rows, &counts).unwrap();
     assert_eq!(
-        t[1].genes,
+        t.genes,
         vec![Box::<str>::from("A")],
         "only A has both tracks"
     );
-    assert_eq!(t[0].cells, vec![4.0]);
-    assert_eq!(t[0].spliced[(0, 0)], 10.0);
-    assert_eq!(t[0].unspliced[(0, 0)], 3.0);
-    assert_eq!(t[1].cells, vec![1.0, 2.0]);
-    assert_eq!(t[1].spliced[(0, 0)], 3.0);
-    assert_eq!(t[1].unspliced[(0, 0)], 0.0);
-    assert_eq!(t[1].spliced[(1, 0)], 3.0);
-    assert_eq!(t[1].unspliced[(1, 0)], 1.0);
+    assert_eq!(t.spliced.column(0).as_slice(), &[3.0, 3.0, 4.0]);
+    assert_eq!(t.unspliced.column(0).as_slice(), &[0.0, 1.0, 2.0]);
 }
 
 /// Every cell's reads on the named genes, block by block, rows in the
@@ -60,18 +86,83 @@ fn cell_blocks_read_each_cells_tracks_on_the_named_genes() {
     let dir = tempfile::tempdir().unwrap();
     let path = backend(dir.path());
     let mut seen = Vec::new();
-    for_cell_blocks(&path, &[Box::from("A")], |start, u, s| {
-        assert_eq!((u.ncols(), s.ncols()), (1, 1));
+    for_cell_blocks(
+        &open_tracks(&[path.into()]),
+        &[Box::from("A")],
+        // Blocks of three: the fourth cell starts a second.
+        3,
+        |start, u, s| {
+            assert_eq!((u.ncols(), s.ncols()), (1, 1));
+            for c in 0..u.nrows() {
+                seen.push((start + c, u[(c, 0)], s[(c, 0)]));
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        seen,
+        vec![(0, 0.0, 1.0), (1, 1.0, 2.0), (2, 0.0, 3.0), (3, 2.0, 4.0)]
+    );
+}
+
+/// A second file with its rows in another order, one gene the first lacks
+/// and cells c1, c2.
+fn second_backend(dir: &std::path::Path) -> String {
+    let path = dir.join("more.zarr").to_string_lossy().into_owned();
+    #[rustfmt::skip]
+    let m = DMatrix::<f32>::from_row_slice(4, 2, &[
+        1.0, 0.0,
+        10.0, 20.0,
+        5.0, 5.0,
+        7.0, 7.0,
+    ]);
+    let mut b = create_sparse_from_dmatrix(&m, Some(&path), Some(&SparseIoBackend::Zarr)).unwrap();
+    let rows: Vec<Box<str>> = [
+        "A/count/unspliced",
+        "A/count/spliced",
+        "D/count/spliced",
+        "D/count/unspliced",
+    ]
+    .into_iter()
+    .map(Box::from)
+    .collect();
+    let cols: Vec<Box<str>> = ["c1", "c2"].into_iter().map(Box::from).collect();
+    b.register_row_names_vec(&rows);
+    b.register_column_names_vec(&cols);
+    path
+}
+
+/// Several files read as one: every file's cells in turn, tagged by file,
+/// on the genes every file has (rows matched by name, not position).
+#[test]
+fn several_files_read_together_on_their_shared_genes() {
+    let dir = tempfile::tempdir().unwrap();
+    let files: Vec<Box<str>> = vec![
+        backend(dir.path()).into(),
+        second_backend(dir.path()).into(),
+    ];
+    let data = open_tracks(&files);
+    let cells = data.column_names().unwrap();
+    assert_eq!(cells.len(), 6);
+    assert!(
+        cells[0].ends_with("@tracks") && cells[4].ends_with("@more"),
+        "{cells:?}"
+    );
+    assert_eq!(
+        data.row_names().unwrap().len(),
+        2,
+        "A's two tracks; D is in one file"
+    );
+    let mut seen = Vec::new();
+    for_cell_blocks(&data, &[Box::from("A")], 4096, |start, u, s| {
         for c in 0..u.nrows() {
             seen.push((start + c, u[(c, 0)], s[(c, 0)]));
         }
         Ok(())
     })
     .unwrap();
-    assert_eq!(
-        seen,
-        vec![(0, 0.0, 1.0), (1, 1.0, 2.0), (2, 0.0, 3.0), (3, 2.0, 4.0)]
-    );
+    assert_eq!(seen[4..], [(4, 1.0, 10.0), (5, 0.0, 20.0)]);
 }
 
 #[test]
@@ -98,7 +189,6 @@ fn select_genes_drops_thin_tracks_and_keeps_the_most_variable() {
         genes,
         unspliced,
         spliced,
-        cells: vec![1.0; 4],
     };
     assert_eq!(
         select_genes(&t, 20.0, 10),
@@ -121,6 +211,11 @@ fn two_track_genes_counts_genes_with_both_rows() {
     .iter()
     .map(|r| (*r).into())
     .collect();
-    assert_eq!(two_track_genes(&rows), 1);
-    assert_eq!(two_track_genes(&rows[2..]), 0);
+    assert_eq!(two_track_genes(&rows), (1, false));
+    assert_eq!(two_track_genes(&rows[2..]), (0, false));
+    assert_eq!(
+        two_track_genes(&rows[..2]),
+        (1, true),
+        "GENE1's two tracks alone"
+    );
 }

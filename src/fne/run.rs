@@ -193,12 +193,8 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         &gene_names,
         &args.name_kind(),
     )?;
-    let dim = crate::feature_preset::resolve_dim(
-        args.embedding_dim,
-        &mut preset_genes,
-        &mut carried,
-        &mut [],
-    )?;
+    let dim =
+        crate::feature_preset::resolve_dim(args.embedding_dim, &mut preset_genes, &mut carried)?;
     let preset = preset_genes.map(|p| p.map_ids(|g| gene_nodes[g as usize]));
     let stop = setup_stop_handler();
     let cfg = FneConfig {
@@ -267,9 +263,6 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         softmax_dictionary_suffix: None,
         cell_embedding_suffix: None,
         cell_encoder_suffix: None,
-        feature_contrast_suffix: None,
-        feature_contrast_bias_suffix: None,
-        track_encoder_suffixes: vec![],
         default_colour_by: "cluster",
         has_latent: false,
         has_cell_to_pb: false,

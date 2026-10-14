@@ -143,6 +143,7 @@ fn fit_sim_from(
             curve: &curve,
             beta: BETA0,
             gamma: GAMMA0,
+            given: None,
         },
         begin,
         &forest,
@@ -175,7 +176,7 @@ fn the_fit_orders_held_out_cells_and_reads_their_velocity() {
     let truth: Vec<f32> = held.iter().map(|&i| sim.tau[i]).collect();
     let begun: Vec<f32> = held.iter().map(|&i| start[i]).collect();
     let (r, r0) = (spearman(&tau, &truth), spearman(&begun, &truth));
-    let emb = model.energy.rho().to_vec2::<f32>().unwrap();
+    let emb = model.energy.rho().unwrap().to_vec2::<f32>().unwrap();
     let vel: f64 = held
         .iter()
         .map(|&i| {
@@ -435,6 +436,7 @@ fn direction_called_only_with_splicing() {
             curve: &curve,
             beta: 4.0,
             gamma: 1.0,
+            given: None,
         },
         1,
         &dev,
@@ -566,7 +568,7 @@ fn diagnostic_velocity_against_start_and_smoothness() {
             let held: Vec<usize> = (1500..sim.n_cells).collect();
             let tau: Vec<f32> = held.iter().map(|&i| out.tau[i]).collect();
             let truth: Vec<f32> = held.iter().map(|&i| sim.tau[i]).collect();
-            let emb = model.energy.rho().to_vec2::<f32>().unwrap();
+            let emb = model.energy.rho().unwrap().to_vec2::<f32>().unwrap();
             let vel: f64 = held
                 .iter()
                 .map(|&i| {
@@ -616,7 +618,7 @@ fn diagnostic_states_at_a_depth() {
         let on: Vec<usize> = (1500..sim.n_cells).filter(|&i| !sim.bystander[i]).collect();
         let tau: Vec<f32> = on.iter().map(|&i| out.tau[i]).collect();
         let truth: Vec<f32> = on.iter().map(|&i| sim.tau[i]).collect();
-        let emb = model.energy.rho().to_vec2::<f32>().unwrap();
+        let emb = model.energy.rho().unwrap().to_vec2::<f32>().unwrap();
         let vel: f64 = on
             .iter()
             .map(|&i| {
