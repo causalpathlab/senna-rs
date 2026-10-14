@@ -18,13 +18,15 @@
 //! `feature_types.parquet` naming every row's type, so a run on a narrow
 //! feature axis (a panel) still hands on the full table it was given.
 
+use data_beans::aux::feature_rows::parse_feature_row;
 use data_beans::aux::feature_types::FeatureType;
 use data_beans::aux::frozen_features::{load_frozen_feature_host_matching, FrozenLoadArgs};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::info;
 use senna::carried_rows::matchable_rows;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 pub(crate) use senna::carried_rows::CarriedRows;
 
@@ -58,21 +60,64 @@ pub(crate) fn load_preset_genes(
     let ctx = |e: anyhow::Error| anyhow::anyhow!("{flag} {prefix}: {e}");
     let written = senna::run_manifest::feature_types_beside(&dictionary_path).map_err(ctx)?;
     let checked: Cell<Option<&[FeatureType]>> = Cell::new(None);
-    let host = load_frozen_feature_host_matching(
-        FrozenLoadArgs {
-            dictionary_path: &dictionary_path,
-            bias_path: None,
-            target_feature_names: feature_names,
-            name_kind: kind.clone(),
-            source_name_map: None,
-        },
-        |names| {
-            let (marks, types) = matchable_rows(written.as_deref(), names, &dictionary_path);
-            checked.set(types);
-            Ok(marks)
-        },
-    )
-    .map_err(ctx)?;
+    // The table's own names, as the first load reads them.
+    let source: RefCell<Vec<Box<str>>> = RefCell::new(Vec::new());
+    let load = |targets: &[Box<str>]| {
+        load_frozen_feature_host_matching(
+            FrozenLoadArgs {
+                dictionary_path: &dictionary_path,
+                bias_path: None,
+                target_feature_names: targets,
+                name_kind: kind.clone(),
+                source_name_map: None,
+            },
+            |names| {
+                source.replace(names.to_vec());
+                let (marks, types) = matchable_rows(written.as_deref(), names, &dictionary_path);
+                checked.set(types);
+                Ok(marks)
+            },
+        )
+    };
+    let is_track = |n: &str| parse_feature_row(n).is_some();
+    let any_tracks = feature_names.iter().any(|n| is_track(n));
+    let host = match load(feature_names) {
+        Ok(host)
+            if !any_tracks
+                || host
+                    .keep_target_indices
+                    .iter()
+                    .any(|&t| is_track(&feature_names[t])) =>
+        {
+            host
+        }
+        // Permissive: a track row (`{gene}/{modality}/{channel}`) by its
+        // gene, and any gene by the table's spelling of it, case aside.
+        _ => {
+            let spelling: HashMap<String, Box<str>> = source
+                .borrow()
+                .iter()
+                .map(|n| {
+                    let c = kind.canonicalize(n);
+                    (c.to_uppercase(), c)
+                })
+                .collect();
+            let lenient: Vec<Box<str>> = feature_names
+                .iter()
+                .map(|n| {
+                    let unit = parse_feature_row(n).map_or_else(|| n.clone(), |r| r.unit());
+                    let c = kind.canonicalize(&unit);
+                    spelling.get(&c.to_uppercase()).cloned().unwrap_or(unit)
+                })
+                .collect();
+            let host = load(&lenient).map_err(ctx)?;
+            info!(
+                "{flag} {prefix}: {} features matched by their gene, case aside",
+                host.keep_target_indices.len()
+            );
+            host
+        }
+    };
     let src_types: &[FeatureType] = checked.get().unwrap_or(&[]);
 
     let h = host.e_feat.ncols();

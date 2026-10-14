@@ -77,12 +77,30 @@ pub struct Init0<'a> {
     pub curve: &'a [f32],
     pub beta: f64,
     pub gamma: f64,
+    /// Rows of `rho` an earlier run's table gave, and how they are held.
+    pub given: Option<GivenRho<'a>>,
+}
+
+/// The rows of `ρ` a given table set (`--{init,freeze,lora}-feature-embedding`).
+#[derive(Clone, Copy)]
+pub struct GivenRho<'a> {
+    /// `[G]` `1` on a given row, `0` on a free one.
+    pub mask: &'a [f32],
+    /// `Freeze`/`Lora` hold the given rows; `Init` only started from them.
+    pub pinned: bool,
+    /// The rank of the trained residual `U V` on the held rows (`Lora`).
+    pub lora_rank: Option<usize>,
 }
 
 /// The energy's parameters.
 pub struct Energy {
-    /// `[G × H]` the gene embedding.
+    /// `[G × H]` the gene embedding (its free rows, when a table holds some).
     rho: Var,
+    /// A given table `ρ₀` `[G × H]` and its rows' mask `[G × 1]`, when its
+    /// rows are held.
+    held: Option<(Tensor, Tensor)>,
+    /// The low-rank residual `U` `[G × r]`, `V` `[r × H]` on the held rows.
+    lora: Option<(Var, Var)>,
     /// `[L·M × H]` every lineage's curve coefficients, `[L·M × 1]` its size
     /// curve's.
     coef: Var,
@@ -164,8 +182,27 @@ impl Energy {
             Var::from_tensor(&(Tensor::ones(shape, DType::F32, dev)? * x)?)
         };
         let rate = |r: f64| constant((1, g), unbounded(r.ln(), LOG_RATE));
+        let rho0 = Tensor::from_slice(init.rho, (g, h), dev)?;
+        let held = match init.given {
+            Some(given) if given.pinned => {
+                Some((rho0.clone(), Tensor::from_slice(given.mask, (g, 1), dev)?))
+            }
+            _ => None,
+        };
+        let lora = match init.given.and_then(|given| given.lora_rank) {
+            Some(rank) => {
+                let v: Vec<f32> = (0..rank * h).map(|_| normal.sample(&mut rng)).collect();
+                Some((
+                    Var::zeros((g, rank), DType::F32, dev)?,
+                    Var::from_tensor(&Tensor::from_vec(v, (rank, h), dev)?)?,
+                ))
+            }
+            None => None,
+        };
         Ok(Self {
-            rho: Var::from_tensor(&Tensor::from_slice(init.rho, (g, h), dev)?)?,
+            rho: Var::from_tensor(&rho0)?,
+            held,
+            lora,
             coef: Var::from_tensor(&Tensor::from_slice(init.curve, (l * m, h), dev)?)?,
             size: constant((l * m, 1), 0.0)?,
             base: Var::from_tensor(&Tensor::from_slice(init.base, (1, g), dev)?)?,
@@ -196,9 +233,10 @@ impl Energy {
         self.motion.set(if on { 1.0 } else { 0.0 });
     }
 
-    /// Every parameter the exact phases fit: all but the states' loadings.
+    /// Every parameter the exact phases fit: all but the states' loadings
+    /// and the LoRA residual's shared factor ([`Self::lora_shared`]).
     pub fn vars(&self) -> Vec<Var> {
-        vec![
+        let mut vars = vec![
             self.rho.clone(),
             self.coef.clone(),
             self.size.clone(),
@@ -206,7 +244,34 @@ impl Energy {
             self.beta.clone(),
             self.gamma.clone(),
             self.speed.clone(),
-        ]
+        ];
+        if let Some((u, _)) = self.lora.as_ref() {
+            vars.push(u.clone());
+        }
+        vars
+    }
+
+    /// The LoRA residual's shared factor, trained at its own rate (LoRA+).
+    pub fn lora_shared(&self) -> Option<Var> {
+        self.lora.as_ref().map(|(_, v)| v.clone())
+    }
+
+    /// The LoRA residual's ridge `Σ_g ‖U_g V‖²` over the held rows, per held
+    /// row.
+    pub fn lora_penalty(&self) -> Result<Option<Tensor>> {
+        match (self.lora.as_ref(), self.held.as_ref()) {
+            (Some((u, v)), Some((_, mask))) => {
+                let rows = f64::from(mask.sum_all()?.to_scalar::<f32>()?).max(1.0);
+                let pen = u
+                    .as_tensor()
+                    .matmul(v.as_tensor())?
+                    .broadcast_mul(mask)?
+                    .sqr()?
+                    .sum_all()?;
+                Ok(Some((pen / rows)?))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Set every gene's splicing and degradation rates (`[1 × G]` natural
@@ -325,9 +390,18 @@ impl Energy {
         )
     }
 
-    /// `[G × H]` the gene embedding.
-    pub fn rho(&self) -> &Tensor {
-        self.rho.as_tensor()
+    /// `[G × H]` the gene embedding: the free rows, and the held rows a
+    /// given table pins (plus their LoRA residual).
+    pub fn rho(&self) -> Result<Tensor> {
+        let rho = self.rho.as_tensor();
+        let Some((rho0, mask)) = self.held.as_ref() else {
+            return Ok(rho.clone());
+        };
+        let mut held = rho0.clone();
+        if let Some((u, v)) = self.lora.as_ref() {
+            held = (held + u.as_tensor().matmul(v.as_tensor())?)?;
+        }
+        rho.broadcast_mul(&mask.affine(-1.0, 1.0)?)? + held.broadcast_mul(mask)?
     }
 
     /// `[1 × G]` the spliced baselines.
@@ -390,7 +464,7 @@ impl Energy {
     pub fn tables(&self, spline: &Spline, states: bool, log_weight: &[f32]) -> Result<Tables> {
         let (l, m) = (self.lineages, self.knots);
         let k = spline.values.dim(0)?;
-        let rho = self.rho.as_tensor();
+        let rho = &self.rho()?;
         let (beta, gamma) = (self.beta()?, self.gamma()?);
         let speed = self.speed(Some(log_weight))?;
         // Every lineage at once: `[L × K × M]` bases on `[L × M × H]`
@@ -454,7 +528,7 @@ impl Energy {
     /// the direction of time.
     pub fn velocity_readout(&self, spline: &Spline, l: usize) -> Result<Tensor> {
         let m = self.knots;
-        let rho = self.rho.as_tensor();
+        let rho = &self.rho()?;
         let coef = self.coef.narrow(0, l * m, m)?;
         let curve = spline.values.matmul(&coef)?;
         let velocity = spline.slopes.matmul(&coef)?;

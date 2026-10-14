@@ -35,6 +35,7 @@ use crate::td_rbm::rbm::{posterior, Reads};
 use crate::td_rbm::start::Start;
 use crate::td_rbm::tree::{Forest, Path};
 use legume_numeric::candle::candle_core::{Device, Result, Tensor};
+use legume_numeric::candle::candle_nn::AdamW;
 use log::info;
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
@@ -84,6 +85,10 @@ pub struct TrainConfig {
     pub sweeps: usize,
     pub lr: f64,
     pub seed: u64,
+    /// A given table's LoRA residual: its shared factor's learning rate over
+    /// `lr`, and its ridge per held row.
+    pub lora_lr_ratio: f64,
+    pub lora_ridge: f64,
 }
 
 impl Default for TrainConfig {
@@ -109,6 +114,8 @@ impl Default for TrainConfig {
             sweeps: 1,
             lr: 1e-2,
             seed: 1,
+            lora_lr_ratio: 1.0,
+            lora_ridge: 0.0,
         }
     }
 }
@@ -240,6 +247,23 @@ fn log_weights(counts: &[f64], concentration: f64) -> Vec<f32> {
 /// per-read loss averages over, so a prior in nats is divided by it.
 fn pass_reads(levels: &[Level], depth: u64) -> f64 {
     levels.iter().map(|lv| lv.cells.len()).sum::<usize>() as f64 * depth as f64
+}
+
+/// The optimiser of a given table's LoRA shared factor, at its own rate
+/// (LoRA+); `None` without one.
+fn lora_adam(energy: &Energy, cfg: &TrainConfig) -> Result<Option<AdamW>> {
+    energy
+        .lora_shared()
+        .map(|v| adam(vec![v], cfg.lr * cfg.lora_lr_ratio))
+        .transpose()
+}
+
+/// `loss` with a given table's LoRA ridge added.
+fn with_lora_ridge(loss: &Tensor, energy: &Energy, cfg: &TrainConfig) -> Result<Tensor> {
+    match energy.lora_penalty()? {
+        Some(pen) => loss + (pen * cfg.lora_ridge)?,
+        None => Ok(loss.clone()),
+    }
 }
 
 /// Fit the machine on pseudobulks of every level (`levels`, coarse to fine),

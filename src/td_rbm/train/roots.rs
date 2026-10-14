@@ -207,8 +207,8 @@ impl Phase<'_> {
     ) -> anyhow::Result<Start> {
         let finest = self.levels.len() - 1;
         let (f, cfg) = (self.f, self.cfg);
-        let rho = self.energy.rho().flatten_all()?.to_vec1::<f32>()?;
-        let h = self.energy.rho().dim(1)?;
+        let rho = self.energy.rho()?.flatten_all()?.to_vec1::<f32>()?;
+        let h = self.energy.rho()?.dim(1)?;
         let values = self.spline.values.flatten_all()?.to_vec1::<f32>()?;
         let x = &self.levels[finest].x;
         let start = start_along(

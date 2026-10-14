@@ -2,7 +2,7 @@
 //! phase is the rows' free energy, the negative phase that of persistent
 //! Gibbs chains ([`Chains`]); every parameter is fitted with the states.
 
-use super::{adam, pass_reads, Level, TrainConfig};
+use super::{adam, lora_adam, pass_reads, with_lora_ridge, Level, TrainConfig};
 use crate::logging::new_progress_bar;
 use crate::td_rbm::curve::Spline;
 use crate::td_rbm::model::Energy;
@@ -34,6 +34,7 @@ pub(super) fn fit_states(
     let mut vars = energy.vars();
     vars.push(energy.load_var());
     let mut opt = adam(vars, cfg.lr)?;
+    let mut shared = lora_adam(energy, cfg)?;
     let pass_reads = pass_reads(levels, cfg.state_depth);
     let p = levels[finest].cells.len();
     let drawn = resample(&levels[finest].x, f, cfg.state_depth, rng);
@@ -62,7 +63,12 @@ pub(super) fn fit_states(
                     - free_energy(&fantasy, &t)?.mean_all()?)?
                     / cfg.state_depth as f64)?;
                 let prior = (energy.roughness()? * (cfg.smooth / pass_reads))?;
-                opt.backward_step(&(&loss + prior)?)?;
+                let total = with_lora_ridge(&(&loss + prior)?, energy, cfg)?;
+                let grads = total.backward()?;
+                opt.step(&grads)?;
+                if let Some(o) = shared.as_mut() {
+                    o.step(&grads)?;
+                }
                 gap += f64::from(loss.to_scalar::<f32>()?);
                 steps += 1;
                 // The chains move under the tables this step was taken at,

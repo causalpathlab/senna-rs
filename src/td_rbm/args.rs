@@ -122,7 +122,11 @@ pub struct TdRbmArgs {
     )]
     pub states: usize,
 
-    #[arg(long, default_value_t = 16, help = "Width of the gene embedding")]
+    #[arg(
+        long,
+        default_value_t = 16,
+        help = "Width of the gene embedding (a given feature embedding's own width instead)"
+    )]
     pub embedding_dim: usize,
 
     #[arg(
@@ -236,6 +240,9 @@ pub struct TdRbmArgs {
         hide = true
     )]
     pub(crate) preload_data: bool,
+
+    #[command(flatten)]
+    pub(crate) feature_embedding: crate::feature_embedding_args::FeatureEmbeddingArgs,
 
     #[command(flatten)]
     pub(crate) hvg: crate::hvg::HvgCliArgs,

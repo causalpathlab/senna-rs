@@ -7,7 +7,7 @@
 use super::args::TdRbmArgs;
 use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
 use super::curve::{grid_times, Spline};
-use super::model::Init0;
+use super::model::{GivenRho, Init0};
 use super::start::{base_start, rho_start, row_states, start_along, STATE_DIMS};
 use super::train::{fit, Level, TrainConfig, BETA0, GAMMA0};
 use super::tree::Forest;
@@ -207,6 +207,13 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     // anew between the tracks at the gene's overall unspliced share (the
     // negative control: no splicing dynamics, the same either way in time).
     let names: Vec<Box<str>> = genes.iter().map(|&j| finest.genes[j].clone()).collect();
+    // An earlier run's gene table (`--{init,freeze,lora}-feature-embedding`):
+    // its rows of the fitted genes, matched by name.
+    let (preset, _) = crate::feature_preset::resolve_preset(
+        args.feature_embedding.resolve()?,
+        &names,
+        &graph_embedding_util::FeatureNameKind::Gene { delim: '_' },
+    )?;
     let mut x = Vec::with_capacity(all_cells.len() * f);
     for_cell_blocks(&data, &names, args.block_size, |_, u, s| {
         for i in 0..u.nrows() {
@@ -306,8 +313,16 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         fin.chunks(f).flat_map(|r| r[..g].to_vec()).collect(),
         fin.chunks(f).flat_map(|r| r[g..].to_vec()).collect(),
     );
-    let h = args.embedding_dim.min(n_pb.saturating_sub(1)).max(1);
-    let rho = rho_start(&pu, &ps, n_pb, g, h);
+    // The embedding's width: the given table's, or `--embedding-dim`.
+    let h = match preset.as_ref() {
+        Some(p) => p.width(),
+        None => args.embedding_dim.min(n_pb.saturating_sub(1)).max(1),
+    };
+    let mut rho = rho_start(&pu, &ps, n_pb, g, h);
+    let mut mask = vec![0f32; g];
+    if let Some(p) = preset.as_ref() {
+        given_rows(&mut rho, &mut mask, p, h);
+    }
     let base = base_start(&ps, n_pb, g);
     let (k, m) = (args.grid as usize, args.knots as usize);
     let values = Spline::new(m, &grid_times(k), &Device::Cpu)?
@@ -327,6 +342,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     );
     let l = begin.paths.len();
 
+    let lora = args.feature_embedding.lora.spec();
     let cfg = TrainConfig {
         grid: k,
         knots: m,
@@ -348,6 +364,8 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         sweeps: args.gibbs_sweeps,
         lr: args.learning_rate,
         seed: args.seed,
+        lora_lr_ratio: f64::from(lora.lr_ratio),
+        lora_ridge: f64::from(lora.ridge),
     };
     let levels_in: Vec<Level> = rows
         .into_iter()
@@ -365,6 +383,11 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
             curve: &curve,
             beta: BETA0,
             gamma: GAMMA0,
+            given: preset.as_ref().map(|p| GivenRho {
+                mask: &mask,
+                pinned: p.mode.pins(),
+                lora_rank: p.mode.lora().map(|s| s.rank),
+            }),
         },
         begin,
         &forest,
@@ -376,7 +399,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     )?;
 
     let out = model.summarise(&x, f, args.depth as f32, &dev)?;
-    let rho_rows = model.energy.rho().to_vec2::<f32>()?;
+    let rho_rows = model.energy.rho()?.to_vec2::<f32>()?;
     let (map, map_velocity) = map_space(&x, f, &rho_rows, &out.velocity)?;
     drop(x);
 
@@ -562,7 +585,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         &format!("{}.feature_embedding.parquet", args.out),
         "gene",
         &names,
-        &columns("rho", &e.rho().to_vec2::<f32>()?, h),
+        &columns("rho", &e.rho()?.to_vec2::<f32>()?, h),
     )?;
     let t = model.tables(true)?;
     write(
@@ -654,6 +677,31 @@ fn write_manifest(args: &TdRbmArgs, inputs: &Inputs, has_pb_tree: bool) -> anyho
     m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
     m.outputs.cell_state = Some(format!("{base}.cell_state.parquet"));
     m.save(&path)
+}
+
+/// Put a given table's rows into `rho` (`[G × H]` row-major) and mark them
+/// in `mask`. The free rows, started from the expression, are scaled per
+/// column to the given rows' spread, so the two start alike.
+fn given_rows(rho: &mut [f32], mask: &mut [f32], p: &graph_embedding_util::PresetRows, h: usize) {
+    let rms = |rows: &mut dyn Iterator<Item = f32>| {
+        let (s, n) = rows.fold((0f64, 0usize), |(s, n), v| (s + f64::from(v * v), n + 1));
+        (s / n.max(1) as f64).sqrt()
+    };
+    for d in 0..h {
+        let given = rms(&mut (0..p.ids.len()).map(|i| p.rows[i * h + d]));
+        let free = rms(&mut (0..mask.len()).map(|j| rho[j * h + d]));
+        let scale = if free > 1e-12 {
+            (given / free) as f32
+        } else {
+            0.0
+        };
+        (0..mask.len()).for_each(|j| rho[j * h + d] *= scale);
+    }
+    for (i, &id) in p.ids.iter().enumerate() {
+        let j = id as usize;
+        rho[j * h..(j + 1) * h].copy_from_slice(&p.rows[i * h..(i + 1) * h]);
+        mask[j] = 1.0;
+    }
 }
 
 /// Principal components of the map space.
