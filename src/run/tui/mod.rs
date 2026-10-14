@@ -1319,26 +1319,30 @@ impl App {
         planned
     }
 
-    /// Why td-rbm cannot run on the data: it reads one file, whose genes
-    /// need both an unspliced and a spliced row. `None` for other methods,
-    /// or while the file is still being read.
+    /// Why td-rbm cannot run on the data: every file needs genes with both
+    /// an unspliced and a spliced row. `None` for other methods, or while
+    /// the files are still being read.
     fn two_track_problem(&self, r: &Row) -> Option<String> {
         if r.tool != Tool::Senna || r.form.name != TD_RBM {
             return None;
         }
-        if self.pairs.len() != 1 {
-            return Some(format!(
-                "td-rbm reads one data file: {} chosen",
-                self.pairs.len()
-            ));
-        }
-        match self.pairs[0].two_tracks {
-            Some(0) => Some(
-                "td-rbm needs {gene}/count/unspliced and {gene}/count/spliced rows: no gene has both"
-                    .into(),
-            ),
-            _ => None,
-        }
+        let none: Vec<String> = self
+            .pairs
+            .iter()
+            .filter(|p| p.two_tracks == Some(0))
+            .map(|p| {
+                p.data.file_name().map_or_else(
+                    || p.data.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        (!none.is_empty()).then(|| {
+            format!(
+                "td-rbm needs {{gene}}/count/unspliced and {{gene}}/count/spliced rows: no gene has both in {}",
+                none.join(", ")
+            )
+        })
     }
 
     /// Whether the data look like what `method` reads: files whose rows are

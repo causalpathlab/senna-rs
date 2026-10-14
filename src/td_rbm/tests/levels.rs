@@ -20,7 +20,11 @@ fn levels_keep_apart_cells_of_different_expression() {
     let cols: Vec<Box<str>> = (0..n).map(|c| format!("c{c}").into()).collect();
     b.register_row_names_vec(&rows);
     b.register_column_names_vec(&cols);
-    let levels = pb_levels(&path, 3).unwrap();
+    let levels = pb_levels(
+        &super::super::counts::open_tracks(&[path.into()]).unwrap(),
+        3,
+    )
+    .unwrap();
     assert_eq!(levels.len(), 3);
     let count = |l: &[Option<usize>]| l.iter().flatten().max().map_or(0, |&m| m + 1);
     for w in levels.windows(2) {

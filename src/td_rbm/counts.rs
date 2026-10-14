@@ -1,12 +1,15 @@
-//! Pseudobulk reads on both tracks: a count backend's `{gene}/count/spliced`
+//! Pseudobulk reads on both tracks: the count backends' `{gene}/count/spliced`
 //! and `{gene}/count/unspliced` rows summed over the cells of each pseudobulk
 //! of every level, the genes the kinetics are fitted on, and the cells' own
 //! reads block by block.
 
 use data_beans::aux::feature_rows::split_count_row;
 use data_beans::sparse_io::open_sparse_matrix_by_path;
+use data_beans::sparse_io_vector::{RowAlignment, SparseIoVec};
+use legume_numeric::matrix::common_io::basename;
 use nalgebra::DMatrix;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Columns read per call.
 const COLUMNS_PER_READ: usize = 4096;
@@ -57,15 +60,35 @@ pub fn two_track_genes(rows: &[Box<str>]) -> usize {
     track_rows(rows).0.len()
 }
 
-/// The backend at `path` cell by cell, in blocks of its columns: `f(first
-/// column, unspliced, spliced)` with each block's `[B × G]` reads on the
-/// genes named `genes`, in that order.
+/// The backends at `paths` as one: every file's cells in turn (each
+/// barcode tagged `@{file}` when there are several files), on the rows
+/// every file has.
+pub fn open_tracks(paths: &[Box<str>]) -> anyhow::Result<SparseIoVec> {
+    anyhow::ensure!(!paths.is_empty(), "no count backend given");
+    let names: Vec<Box<str>> = paths
+        .iter()
+        .map(|p| basename(p))
+        .collect::<anyhow::Result<_>>()?;
+    let mut seen = std::collections::HashSet::new();
+    if let Some(twice) = names.iter().find(|n| !seen.insert(*n)) {
+        anyhow::bail!("two files are named {twice}: a cell's tag would not say which");
+    }
+    let mut data = SparseIoVec::new().with_row_alignment(RowAlignment::Intersect)?;
+    for (path, name) in paths.iter().zip(names) {
+        let name = (paths.len() > 1).then_some(name);
+        data.push(Arc::from(open_sparse_matrix_by_path(path)?), name)?;
+    }
+    Ok(data)
+}
+
+/// The cells of `data` one block of columns at a time: `f(first column,
+/// unspliced, spliced)` with each block's `[B × G]` reads on the genes
+/// named `genes`, in that order.
 pub fn for_cell_blocks(
-    path: &str,
+    data: &SparseIoVec,
     genes: &[Box<str>],
     mut f: impl FnMut(usize, DMatrix<f32>, DMatrix<f32>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let data = open_sparse_matrix_by_path(path)?;
     let rows = data.row_names()?;
     let (all, role) = track_rows(&rows);
     let column: HashMap<&str, usize> = genes
@@ -78,40 +101,40 @@ pub fn for_cell_blocks(
         .iter()
         .map(|r| r.and_then(|(j, u)| column.get(all[j]).map(|&c| (c, u))))
         .collect();
-    let n = data.column_names()?.len();
+    let n = data.num_columns();
     for start in (0..n).step_by(COLUMNS_PER_READ) {
         let end = (start + COLUMNS_PER_READ).min(n);
         let mut unspliced = DMatrix::<f32>::zeros(end - start, genes.len());
         let mut spliced = DMatrix::<f32>::zeros(end - start, genes.len());
-        let (_, _, triplets) = data.read_triplets_by_columns((start..end).collect())?;
-        for (row, col, v) in triplets {
+        data.for_each_triplet(start..end, COLUMNS_PER_READ, |row, col, v| {
             match role[row as usize] {
                 Some((c, true)) => unspliced[(col as usize, c)] += v,
                 Some((c, false)) => spliced[(col as usize, c)] += v,
                 None => {}
             }
-        }
+        })?;
         f(start, unspliced, spliced)?;
     }
     Ok(())
 }
 
-/// Sum the backend at `path` into every level's pseudobulks in one pass:
-/// `levels[l][c]` is cell `c`'s pseudobulk at level `l`, in the backend's
-/// column order. Cells without a pseudobulk are skipped; genes with only one
-/// track are dropped.
-pub fn pb_tracks(path: &str, levels: &[Vec<Option<usize>>]) -> anyhow::Result<Vec<PbTracks>> {
-    let data = open_sparse_matrix_by_path(path)?;
+/// Sum `data` into every level's pseudobulks in one pass: `levels[l][c]` is
+/// cell `c`'s pseudobulk at level `l`, in `data`'s column order. Cells
+/// without a pseudobulk are skipped; genes with only one track are dropped.
+pub fn pb_tracks(
+    data: &SparseIoVec,
+    levels: &[Vec<Option<usize>>],
+) -> anyhow::Result<Vec<PbTracks>> {
     let rows = data.row_names()?;
     let (genes, role) = track_rows(&rows);
     anyhow::ensure!(
         !genes.is_empty(),
-        "{path}: no gene has both `/count/spliced` and `/count/unspliced` rows"
+        "no gene has both `/count/spliced` and `/count/unspliced` rows in every file"
     );
-    let n = data.column_names()?.len();
+    let n = data.num_columns();
     anyhow::ensure!(
         levels.iter().all(|l| l.len() == n),
-        "{path}: every level must place each of the {n} cells"
+        "every level must place each of the {n} cells"
     );
     let g = genes.len();
     let mut out: Vec<PbTracks> = levels
@@ -130,10 +153,9 @@ pub fn pb_tracks(path: &str, levels: &[Vec<Option<usize>>]) -> anyhow::Result<Ve
         .collect();
     for start in (0..n).step_by(COLUMNS_PER_READ) {
         let end = (start + COLUMNS_PER_READ).min(n);
-        let (_, _, triplets) = data.read_triplets_by_columns((start..end).collect())?;
-        for (row, col, v) in triplets {
+        data.for_each_triplet(start..end, COLUMNS_PER_READ, |row, col, v| {
             let Some((j, u)) = role[row as usize] else {
-                continue;
+                return;
             };
             for (t, member) in out.iter_mut().zip(levels) {
                 if let Some(pb) = member[start + col as usize] {
@@ -141,7 +163,7 @@ pub fn pb_tracks(path: &str, levels: &[Vec<Option<usize>>]) -> anyhow::Result<Ve
                     m[(pb, j)] += v;
                 }
             }
-        }
+        })?;
     }
     Ok(out)
 }

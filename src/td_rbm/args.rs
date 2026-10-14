@@ -5,13 +5,18 @@ use senna::embed_common::*;
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TdRbmArgs {
     #[arg(
-        help = "Count backend with {gene}/count/spliced and {gene}/count/unspliced rows",
-        long_help = "Count backend whose rows are `{gene}/count/spliced` and\n\
-                     `{gene}/count/unspliced` (as `faba count` writes). Its cells are\n\
-                     grouped into multilevel pseudobulks; the machine is fitted on\n\
-                     samples of them and then reads every cell."
+        required = true,
+        num_args = 1..,
+        help = "Count backends with {gene}/count/spliced and {gene}/count/unspliced rows",
+        long_help = "Count backends whose rows are `{gene}/count/spliced` and\n\
+                     `{gene}/count/unspliced` (as `faba count` writes). Their cells are\n\
+                     read together, on the genes every file has, and grouped into\n\
+                     multilevel pseudobulks (every file a batch); the machine is\n\
+                     fitted on samples of them and then reads every cell. With\n\
+                     several files, every barcode is tagged `@{file}`."
     )]
-    pub tracks: Box<str>,
+    #[serde(deserialize_with = "one_or_many")]
+    pub tracks: Vec<Box<str>>,
 
     #[arg(short, long, help = "Output prefix")]
     pub out: Box<str>,
@@ -63,7 +68,7 @@ pub struct TdRbmArgs {
         help = "Cells (one barcode a line) where time starts: their cluster roots its tree, instead of the splicing choosing",
         long_help = "Cells (one barcode a line) where time starts. The cluster holding\n\
                      most of them is its tree's root; the other trees' roots are chosen\n\
-                     from the splicing."
+                     from the splicing. A barcode matches with or without its `@` tag."
     )]
     pub root: Option<String>,
 
@@ -181,3 +186,21 @@ pub struct TdRbmArgs {
     #[arg(long, default_value_t = 0, help = "Device number")]
     pub device_no: usize,
 }
+
+/// A file list, or the one file a run recorded before td-rbm took several.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Box<str>>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Files {
+        One(Box<str>),
+        Many(Vec<Box<str>>),
+    }
+    Ok(match serde::Deserialize::deserialize(d)? {
+        Files::One(f) => vec![f],
+        Files::Many(v) => v,
+    })
+}
+
+#[cfg(test)]
+#[path = "tests/args.rs"]
+mod tests;

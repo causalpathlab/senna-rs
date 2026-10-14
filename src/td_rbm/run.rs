@@ -1,18 +1,17 @@
-//! `senna td-rbm`: read a two-track count backend, collapse its cells into
+//! `senna td-rbm`: read two-track count backends, collapse its cells into
 //! multilevel pseudobulks, pick the genes, start the genes' embedding and the
 //! curve from the finest pseudobulks in their expression order (as `senna
 //! time` starts), fit the machine on samples of every level
 //! ([`super::train`]) and read every cell.
 
 use super::args::TdRbmArgs;
-use super::counts::{for_cell_blocks, pb_tracks, select_genes};
+use super::counts::{for_cell_blocks, open_tracks, pb_tracks, select_genes};
 use super::curve::{grid_times, Spline};
 use super::levels::pb_levels;
 use super::model::Init0;
 use super::start::{base_start, rho_start, row_states, start_along, STATE_DIMS};
 use super::train::{fit, Level, TrainConfig, BETA0, GAMMA0};
 use super::tree::Forest;
-use data_beans::sparse_io::open_sparse_matrix_by_path;
 use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::matrix::parquet::{write_named_table, Column};
 use log::info;
@@ -59,18 +58,20 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         "--states must be positive and --epochs exceed --time-epochs, so the states are fitted"
     );
     let dev = args.device.to_device(args.device_no)?;
-    let cells = open_sparse_matrix_by_path(&args.tracks)?.column_names()?;
-    let levels = pb_levels(&args.tracks, args.levels as usize)?;
+    let data = open_tracks(&args.tracks)?;
+    let cells = data.column_names()?;
+    let levels = pb_levels(&data, args.levels as usize)?;
     let member = levels.last().expect("at least one level").clone();
-    let pbs = pb_tracks(&args.tracks, &levels)?;
+    let pbs = pb_tracks(&data, &levels)?;
     let finest = pbs.last().expect("at least one level");
     let genes = select_genes(finest, args.min_reads, args.max_genes);
     anyhow::ensure!(!genes.is_empty(), "no gene left to fit");
     let (g, n_pb) = (genes.len(), finest.cells.len());
     let f = 2 * g;
     info!(
-        "td-rbm: {} cells; {} levels, {n_pb} finest pseudobulks; {} genes with both tracks, {g} fitted",
+        "td-rbm: {} cells in {} files; {} levels, {n_pb} finest pseudobulks; {} genes with both tracks, {g} fitted",
         cells.len(),
+        args.tracks.len(),
         levels.len(),
         finest.genes.len(),
     );
@@ -80,7 +81,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     // negative control: no splicing dynamics, the same either way in time).
     let names: Vec<Box<str>> = genes.iter().map(|&j| finest.genes[j].clone()).collect();
     let mut x = Vec::with_capacity(cells.len() * f);
-    for_cell_blocks(&args.tracks, &names, |_, u, s| {
+    for_cell_blocks(&data, &names, |_, u, s| {
         for i in 0..u.nrows() {
             x.extend((0..g).map(|j| u[(i, j)]));
             x.extend((0..g).map(|j| s[(i, j)]));
@@ -144,8 +145,11 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
             .filter(|l| !l.is_empty())
             .collect();
         let mut votes = vec![0usize; forest.clusters];
+        // A cell is named as written out or by its barcode alone, before
+        // the `@` tag.
         for (i, c) in cells.iter().enumerate() {
-            if wanted.contains(c.as_ref()) {
+            let barcode = c.rsplit_once('@').map_or(c.as_ref(), |(b, _)| b);
+            if wanted.contains(c.as_ref()) || wanted.contains(barcode) {
                 votes[forest.cluster[of_cell[i]]] += 1;
             }
         }

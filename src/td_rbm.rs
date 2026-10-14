@@ -1,6 +1,6 @@
 //! `senna td-rbm`: every cell's time, its states and its velocity in a gene
 //! embedding, from which gene and which track (unspliced or spliced) every
-//! read of a two-track count backend is on: a restricted Boltzmann machine
+//! read of two-track count backends is on: a restricted Boltzmann machine
 //! with no encoder.
 //!
 //! The visible units are a cell's reads over (gene, track); the hidden units

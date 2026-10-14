@@ -2,12 +2,13 @@ use super::*;
 
 fn cli() -> clap::Command {
     // A stand-in for senna's command: every embedding takes data files,
-    // --out and batch files, and one flag of its own; td-rbm one file.
+    // --out and batch files, and one flag of its own; td-rbm files and
+    // --out only.
     let method = |name: &'static str| {
         if name == TD_RBM {
             return clap::Command::new(name)
                 .about("time")
-                .arg(clap::Arg::new("tracks").required(true))
+                .arg(clap::Arg::new("tracks").required(true).num_args(1..))
                 .arg(clap::Arg::new("out").long("out").required(true))
                 .arg(
                     clap::Arg::new("grid")
@@ -293,9 +294,9 @@ fn every_method_of_senna_parses_from_an_untouched_form() {
         let form = Method::new(&cli, m).unwrap();
         assert!(!form.fields.is_empty(), "{m} has no flags");
         if m == TD_RBM {
-            // One two-track file, no batches.
+            // Two-track files, no batches.
             assert!(!form.takes_batches());
-            let argv = form.argv(&["d.zarr".into()], &[], "o");
+            let argv = form.argv(&["d1.zarr".into(), "d2.zarr".into()], &[], "o");
             assert_eq!(form::check(&cli, &argv), Ok(()), "{m}: {argv:?}");
             continue;
         }
@@ -977,7 +978,7 @@ fn fits_with_the_same_collapse_share_one_partition() {
 }
 
 #[test]
-fn td_rbm_runs_on_one_file_whose_genes_have_both_tracks() {
+fn td_rbm_runs_on_files_whose_genes_have_both_tracks() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
     let row = METHODS.iter().position(|m| *m == TD_RBM).unwrap();
@@ -985,20 +986,23 @@ fn td_rbm_runs_on_one_file_whose_genes_have_both_tracks() {
     let problem = |a: &App| a.plan()[0].problem.clone();
 
     a.pairs = data(dir.path(), &["d1.zarr", "d2.zarr"]);
-    assert!(problem(&a).unwrap().contains("one data file"));
-
-    a.pairs.truncate(1);
-    a.pairs[0].two_tracks = Some(0);
-    assert!(problem(&a).unwrap().contains("no gene has both"));
+    a.pairs[0].two_tracks = Some(50);
+    a.pairs[1].two_tracks = Some(0);
+    let p = problem(&a).unwrap();
+    assert!(p.contains("no gene has both in d2.zarr"), "{p}");
     // Still being read: nothing to say yet.
-    a.pairs[0].two_tracks = None;
+    a.pairs[1].two_tracks = None;
     assert_eq!(problem(&a), None);
 
-    a.pairs[0].two_tracks = Some(50);
+    a.pairs[1].two_tracks = Some(40);
     let p = &a.plan()[0];
     assert_eq!(p.problem, None);
     assert_eq!(p.warning, None, "no embedding's shape warning");
-    assert_eq!(p.job.argv, [TD_RBM, "d1.zarr", "--out", TD_RBM]);
+    assert_eq!(
+        p.job.argv,
+        [TD_RBM, "d1.zarr", "d2.zarr", "--out", TD_RBM],
+        "every file, in order"
+    );
     // Its manifest, like every fit's; one there stops a run over it.
     assert!(p.job.result().ends_with("td-rbm.senna.json"));
     std::fs::write(dir.path().join("td-rbm.senna.json"), "{}").unwrap();

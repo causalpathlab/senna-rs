@@ -489,7 +489,8 @@ enum Commands {
     #[command(
         name = "td-rbm",
         about = "Every cell's lineage, time, state and velocity: an RBM on two-track counts",
-        long_about = "A restricted Boltzmann machine on a two-track count backend: the\n\
+        long_about = "A restricted Boltzmann machine on two-track count backends (one or\n\
+                      several files, read together on their shared genes): the\n\
                       visible units are a cell's reads over (gene, track), the hidden units\n\
                       a (lineage, time) unit on a grid and Gaussian state units. Every\n\
                       lineage's trajectory in the genes' embedding sets which gene; its\n\
