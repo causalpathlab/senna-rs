@@ -246,25 +246,58 @@ pub(crate) fn bayes(
         .iter()
         .map(|(u, s)| Ok((u.to_vec2::<f32>()?, s.to_vec2::<f32>()?)))
         .collect::<Result<_>>()?;
-    let (fwd, bwd) = evidence_host(&host, &xv, &rest, &reach);
+    // Only the root genes are scored: they call the roots and directions,
+    // and their rates are read; every other gene keeps the rates the fit
+    // gives it (all genes enter only the machine's own fit).
+    let votes = |j: usize| cfg.root_genes.get(j).copied().unwrap_or(true);
+    let scored: Vec<usize> = (0..g).filter(|&j| votes(j)).collect();
+    let pick = |m: &[Vec<f32>]| -> Vec<Vec<f32>> {
+        m.iter()
+            .map(|r| scored.iter().map(|&j| r[j]).collect())
+            .collect()
+    };
+    let host: Vec<HostTable> = host.iter().map(|(u, s)| (pick(u), pick(s))).collect();
+    let (rest, reach): (Vec<f32>, Vec<f32>) = scored.iter().map(|&j| (rest[j], reach[j])).unzip();
+    let (fwd, bwd) = evidence_host(&host, &pick(&xv), &rest, &reach);
     let share = 1.0 / draws as f64;
+    // Every gene's log rates as the fit has them; the scored genes' are
+    // their posterior means, summed over the draws below.
+    let now = |r: Tensor| -> Result<Vec<f64>> {
+        let mut v: Vec<f64> = r
+            .log()?
+            .flatten_all()?
+            .to_vec1::<f32>()?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        scored.iter().for_each(|&j| v[j] = 0.0);
+        Ok(v)
+    };
     let mut out = Bayes {
         lbf: Vec::with_capacity(draws),
         genes: vec![0.0; g],
-        rates: (vec![0.0; g], vec![0.0; g]),
+        rates: (now(energy.beta()?)?, now(energy.gamma()?)?),
         z: wake.iter().map(|w| w.0).collect(),
-        log_abf: wake.iter().map(|w| w.1).sum(),
+        log_abf: wake
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| votes(*j))
+            .map(|(_, w)| w.1)
+            .sum(),
     };
     for i in 0..draws {
         let (data, null) = (2 * i, 2 * i + 1);
         let mut total = 0f64;
-        for j in 0..g {
-            let v = (fwd[data].log_e[j] - bwd[data].log_e[j])
-                - (fwd[null].log_e[j] - bwd[null].log_e[j]);
+        for (i, &j) in scored.iter().enumerate() {
+            out.rates.0[j] += fwd[data].log_beta[i] * share;
+            out.rates.1[j] += fwd[data].log_gamma[i] * share;
+            if !votes(j) {
+                continue;
+            }
+            let v = (fwd[data].log_e[i] - bwd[data].log_e[i])
+                - (fwd[null].log_e[i] - bwd[null].log_e[i]);
             out.genes[j] += v * share;
             total += v;
-            out.rates.0[j] += fwd[data].log_beta[j] * share;
-            out.rates.1[j] += fwd[data].log_gamma[j] * share;
         }
         out.lbf.push(total);
     }

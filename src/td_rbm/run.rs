@@ -5,21 +5,24 @@
 //! ([`super::train`]) and read every cell.
 
 use super::args::TdRbmArgs;
-use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
+use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes, PbTracks};
 use super::curve::{grid_times, Spline};
-use super::model::{GivenRho, Init0};
+use super::model::{GivenRho, Init0, ModulesInit};
 use super::start::{base_start, rho_start, row_states, start_along, STATE_DIMS};
-use super::train::{fit, Level, TrainConfig, BETA0, GAMMA0};
+use super::train::{fit, Level, Summary, TrainConfig, BETA0, GAMMA0};
+
+/// Gene modules unless `--feature-modules` says (as rbm).
+const DEFAULT_GENE_MODULES: usize = 50;
 use super::tree::Forest;
 use data_beans::sparse_io_vector::SparseIoVec;
 use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::matrix::parquet::{write_named_table, Column};
+use legume_numeric::param::traits::Inference;
 use log::info;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Binomial, Distribution};
 use senna::embed_common::Mat;
-use std::borrow::Cow;
 
 /// Columns `0..n` of `rows` (`[N × n]` row-major) as named columns.
 fn columns(prefix: &str, rows: &[Vec<f32>], n: usize) -> Vec<(Box<str>, Vec<f32>)> {
@@ -55,8 +58,8 @@ struct Loaded {
     proj_kn: Mat,
     /// Every cell's pseudobulk at every level, coarse to fine.
     cell_to_pb: Vec<Vec<usize>>,
-    /// The finest pseudobulks' reads `[D × P]` on every row of `data`.
-    finest_counts: nalgebra::DMatrix<f32>,
+    /// The collapse's levels, coarse to fine.
+    collapsed: Vec<data_beans::alg::collapse_data::CollapsedOut>,
     pb_tree: Option<data_beans::alg::collapse_data::PbTree>,
 }
 
@@ -137,13 +140,9 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
         reuse: args.pb_from.pb_from.as_deref(),
     })?;
     let cell_to_pb = cell_to_pb_per_level.expect("the collapse keeps its hierarchy");
-    let (finest_counts, _) = collapsed_levels
-        .last()
-        .expect("at least one level")
-        .observed_counts(cell_to_pb.last().expect("at least one level"))?;
     Ok(Loaded {
         cell_to_pb,
-        finest_counts,
+        collapsed: collapsed_levels,
         data: data_vec,
         keep: output_keep_idx,
         inputs: Inputs {
@@ -178,16 +177,11 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         inputs,
         proj_kn,
         cell_to_pb,
-        finest_counts,
+        collapsed,
         pb_tree,
     } = load(args)?;
     let all_cells = data.column_names()?;
     let member = cell_to_pb.last().expect("at least one level");
-    let finest = pb_tracks(&data.row_names()?, &finest_counts)?;
-    drop(finest_counts);
-    let genes = select_genes(&finest, args.min_reads, args.max_genes);
-    anyhow::ensure!(!genes.is_empty(), "no gene left to fit");
-    let (g, n_pb) = (genes.len(), finest.spliced.nrows());
     // Cells per pseudobulk at every level.
     let level_cells: Vec<Vec<f32>> = cell_to_pb
         .iter()
@@ -197,93 +191,117 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
             n
         })
         .collect();
+    // Every level's pseudobulks on both tracks of every gene, as the
+    // collapse has them (batch-adjusted when there are batches): rates
+    // times cells.
+    let row_names = data.row_names()?;
+    let tracks: Vec<PbTracks> = collapsed
+        .iter()
+        .zip(&level_cells)
+        .map(|(c, n)| {
+            let mut counts = c
+                .mu_adjusted
+                .as_ref()
+                .unwrap_or(&c.mu_observed)
+                .posterior_mean()
+                .clone();
+            anyhow::ensure!(counts.ncols() == n.len(), "a pseudobulk per rate column");
+            for (j, mut col) in counts.column_iter_mut().enumerate() {
+                col *= n[j];
+            }
+            pb_tracks(&row_names, &counts)
+        })
+        .collect::<anyhow::Result<_>>()?;
+    // The finest level's batch effects `[D × batches]`, when there are
+    // batches: what the cells are adjusted by as they are read.
+    let delta = collapsed
+        .last()
+        .and_then(|c| c.delta.as_ref())
+        .map(|d| d.posterior_mean().clone());
+    drop(collapsed);
+    let finest = tracks.last().expect("at least one level");
+    let names: Vec<Box<str>> = finest.genes.clone();
+    let (g, n_pb) = (names.len(), finest.spliced.nrows());
     let f = 2 * g;
+    // The most variable genes start the fit and call the roots.
+    let top = select_genes(finest, args.min_reads, args.max_genes);
+    anyhow::ensure!(!top.is_empty(), "no gene to start from");
+    let t = top.len();
     info!(
-        "td-rbm: {} cells from {} files; {} levels, {n_pb} finest pseudobulks; {} genes with both tracks, {g} fitted",
+        "td-rbm: {} cells from {} files; {} levels, {n_pb} finest pseudobulks; {g} genes with both tracks in the model, the {t} most variable start it and call the roots",
         all_cells.len(),
         inputs.data_files.len(),
         cell_to_pb.len(),
-        finest.genes.len(),
     );
-    // Every cell's reads on the fitted genes, `[C × F]` (unspliced genes
-    // first); with `--steady-unspliced`, every cell's reads of a gene split
-    // anew between the tracks at the gene's overall unspliced share (the
-    // negative control: no splicing dynamics, the same either way in time).
-    let names: Vec<Box<str>> = genes.iter().map(|&j| finest.genes[j].clone()).collect();
+    // Every level's pseudobulks, `[P × F]` (unspliced genes first), coarse
+    // to fine; with `--steady-unspliced`, every gene's reads split anew
+    // between the tracks at its overall unspliced share (the negative
+    // control: no splicing dynamics, the same either way in time).
+    let mut rows: Vec<Vec<f32>> = tracks
+        .iter()
+        .map(|tr| {
+            (0..tr.spliced.nrows())
+                .flat_map(|p| {
+                    (0..g)
+                        .map(move |j| tr.unspliced[(p, j)])
+                        .chain((0..g).map(move |j| tr.spliced[(p, j)]))
+                })
+                .collect()
+        })
+        .collect();
+    if let Some(seed) = args.steady_unspliced {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let share: Vec<f64> = (0..g)
+            .map(|j| {
+                let u: f64 = finest
+                    .unspliced
+                    .column(j)
+                    .iter()
+                    .map(|&v| f64::from(v))
+                    .sum();
+                let s: f64 = finest.spliced.column(j).iter().map(|&v| f64::from(v)).sum();
+                u / (u + s).max(1.0)
+            })
+            .collect();
+        for x in &mut rows {
+            for row in x.chunks_mut(f) {
+                for j in 0..g {
+                    let n = (row[j] + row[g + j]).round() as u64;
+                    let a = Binomial::new(n, share[j]).map_or(0, |b| b.sample(&mut rng));
+                    row[j] = a as f32;
+                    row[g + j] = (n - a) as f32;
+                }
+            }
+        }
+        info!("td-rbm: every gene's reads split at its overall unspliced share (seed {seed})");
+    }
+    drop(tracks);
     // An earlier run's gene table (`--{init,freeze,lora}-feature-embedding`):
-    // its rows of the fitted genes, matched by name.
+    // its rows of the model's genes, matched by name.
     let (preset, _) = crate::feature_preset::resolve_preset(
         args.feature_embedding.resolve()?,
         &names,
         &graph_embedding_util::FeatureNameKind::Gene { delim: '_' },
     )?;
-    let mut x = Vec::with_capacity(all_cells.len() * f);
-    for_cell_blocks(&data, &names, args.block_size, |_, u, s| {
-        for i in 0..u.nrows() {
-            x.extend((0..g).map(|j| u[(i, j)]));
-            x.extend((0..g).map(|j| s[(i, j)]));
-        }
-        Ok(())
-    })?;
-    let c = all_cells.len();
-    if let Some(seed) = args.steady_unspliced {
-        let mut rng = StdRng::seed_from_u64(seed);
-        for j in 0..g {
-            let (u, t) = (0..c).fold((0f64, 0f64), |(u, t), i| {
-                let (a, b) = (f64::from(x[i * f + j]), f64::from(x[i * f + g + j]));
-                (u + a, t + a + b)
-            });
-            let share = u / t.max(1.0);
-            for i in 0..c {
-                let n = (x[i * f + j] + x[i * f + g + j]).round() as u64;
-                let a = Binomial::new(n, share).map_or(0, |b| b.sample(&mut rng));
-                x[i * f + j] = a as f32;
-                x[i * f + g + j] = (n - a) as f32;
-            }
-        }
-        info!("td-rbm: every gene's reads split at its overall unspliced share (seed {seed})");
-    }
-    // Every level's pseudobulks, `[P × F]`, coarse to fine: sums of their
-    // cells' reads.
-    let rows: Vec<Vec<f32>> = cell_to_pb
-        .iter()
-        .zip(&level_cells)
-        .map(|(member, n)| {
-            let mut r = vec![0f32; n.len() * f];
-            for (i, &p) in member.iter().enumerate() {
-                r[p * f..(p + 1) * f]
-                    .iter_mut()
-                    .zip(&x[i * f..(i + 1) * f])
-                    .for_each(|(a, b)| *a += b);
-            }
-            r
+
+    // Where the fit starts, on the most variable genes: a forest over
+    // clusters of the finest pseudobulks, every tree provisionally rooted at
+    // one end of its longest path (or where `--root` says), the lineages its
+    // root-to-leaf paths; the genes' embedding from every finest pseudobulk,
+    // every lineage's curve through its pseudobulks in their order from the
+    // root.
+    let fin = rows.last().expect("a level");
+    let ft = 2 * t;
+    let fin_top: Vec<f32> = fin
+        .chunks(f)
+        .flat_map(|r| {
+            top.iter()
+                .map(|&j| r[j])
+                .chain(top.iter().map(|&j| r[g + j]))
+                .collect::<Vec<_>>()
         })
         .collect();
-    // The cells read out: QC keeps near-empty cells in the pseudobulks but
-    // not in the outputs.
-    let (cells, of_cell): (Cow<[Box<str>]>, Cow<[usize]>) = match &keep {
-        Some(keep) => {
-            // In place, every kept row moved forward.
-            for (to, &from) in keep.iter().enumerate() {
-                x.copy_within(from * f..(from + 1) * f, to * f);
-            }
-            x.truncate(keep.len() * f);
-            let (cells, of_cell): (Vec<_>, Vec<_>) = keep
-                .iter()
-                .map(|&i| (all_cells[i].clone(), member[i]))
-                .unzip();
-            (cells.into(), of_cell.into())
-        }
-        None => (all_cells.as_slice().into(), member.as_slice().into()),
-    };
-
-    // Where the fit starts: a forest over clusters of the finest
-    // pseudobulks, every tree provisionally rooted at one end of its longest
-    // path (or where `--root` says), the lineages its root-to-leaf paths; the
-    // genes' embedding and baselines from every finest pseudobulk, every
-    // lineage's curve through its pseudobulks in their order from the root.
-    let fin = rows.last().expect("a level");
-    let states = row_states(fin, f, STATE_DIMS);
+    let states = row_states(&fin_top, ft, STATE_DIMS);
     let forest = Forest::new(&states, args.clusters, args.knn, args.seed);
     let mut roots: Vec<usize> = (0..forest.trees.len()).map(|t| forest.far_end(t)).collect();
     let mut given = vec![false; forest.trees.len()];
@@ -296,15 +314,18 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
             .collect();
         // Named as written out, or by a barcode that names one cell.
         let mut votes = vec![0usize; forest.clusters];
-        for &i in crate::view::match_cells(&wanted, &cells).values() {
-            votes[forest.cluster[of_cell[i as usize]]] += 1;
+        for &i in crate::view::match_cells(&wanted, &all_cells).values() {
+            votes[forest.cluster[member[i as usize]]] += 1;
         }
-        let top = (0..forest.clusters)
+        let top_cluster = (0..forest.clusters)
             .max_by_key(|&c| votes[c])
             .expect("a cluster");
-        anyhow::ensure!(votes[top] > 0, "none of the --root cells is in the data");
-        roots[forest.tree[top]] = top;
-        given[forest.tree[top]] = true;
+        anyhow::ensure!(
+            votes[top_cluster] > 0,
+            "none of the --root cells is in the data"
+        );
+        roots[forest.tree[top_cluster]] = top_cluster;
+        given[forest.tree[top_cluster]] = true;
     }
     info!(
         "td-rbm: {} clusters in {} trees ({} with one cluster)",
@@ -312,20 +333,76 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         forest.trees.len(),
         forest.trees.iter().filter(|t| t.len() == 1).count()
     );
-    let (pu, ps): (Vec<f32>, Vec<f32>) = (
-        fin.chunks(f).flat_map(|r| r[..g].to_vec()).collect(),
-        fin.chunks(f).flat_map(|r| r[g..].to_vec()).collect(),
+    let ps: Vec<f32> = fin.chunks(f).flat_map(|r| r[g..].to_vec()).collect();
+    let (pu_top, ps_top): (Vec<f32>, Vec<f32>) = (
+        fin_top.chunks(ft).flat_map(|r| r[..t].to_vec()).collect(),
+        fin_top.chunks(ft).flat_map(|r| r[t..].to_vec()).collect(),
     );
     // The embedding's width: the given table's, or `--embedding-dim`.
     let h = match preset.as_ref() {
         Some(p) => p.width(),
         None => args.embedding_dim.min(n_pb.saturating_sub(1)).max(1),
     };
-    let mut rho = rho_start(&pu, &ps, n_pb, g, h);
+    // The most variable genes' start; every other gene's comes from its
+    // module (or a given table), else starts at zero.
+    let rho_top = rho_start(&pu_top, &ps_top, n_pb, t, h);
+    let mut rho = vec![0f32; g * h];
+    for (i, &j) in top.iter().enumerate() {
+        rho[j * h..(j + 1) * h].copy_from_slice(&rho_top[i * h..(i + 1) * h]);
+    }
     let mut mask = vec![0f32; g];
     if let Some(p) = preset.as_ref() {
         given_rows(&mut rho, &mut mask, p, h);
     }
+    // Gene modules, as bge and rbm have them, unless a table is given.
+    let module_cfg = if args.no_feature_modules {
+        None
+    } else if preset.is_some() && args.modules.feature_modules.is_none() {
+        info!("td-rbm: a given feature embedding has per-gene rows; gene modules are off");
+        None
+    } else {
+        args.modules.resolve(Some(DEFAULT_GENE_MODULES))?
+    };
+    let modules = match module_cfg.as_ref() {
+        None => None,
+        Some(mc) => {
+            let totals = nalgebra::DMatrix::<f32>::from_fn(g, n_pb, |j, p| {
+                fin[p * f + j] + fin[p * f + g + j]
+            });
+            let sizes: Vec<f32> = level_cells.last().expect("a level").clone();
+            let labels =
+                graph_embedding_util::partition_modules(&totals, &sizes, mc.n_modules, args.seed)?;
+            let n = labels.iter().max().map_or(1, |&m| m as usize + 1);
+            // A module starts at the mean of its most variable genes'
+            // starts; those genes keep theirs as residuals, every other
+            // gene starts at its module.
+            let mut mu = vec![0f32; n * h];
+            let mut size = vec![0f32; n];
+            for &j in &top {
+                let m = labels[j] as usize;
+                size[m] += 1.0;
+                for d in 0..h {
+                    mu[m * h + d] += rho[j * h + d];
+                }
+            }
+            for m in 0..n {
+                for d in 0..h {
+                    mu[m * h + d] /= size[m].max(1.0);
+                }
+            }
+            for j in 0..g {
+                let m = labels[j] as usize;
+                for d in 0..h {
+                    rho[j * h + d] -= mu[m * h + d];
+                }
+            }
+            for j in (0..g).filter(|j| top.binary_search(j).is_err()) {
+                rho[j * h..(j + 1) * h].iter_mut().for_each(|v| *v = 0.0);
+            }
+            info!("td-rbm: {n} gene module(s) over {g} genes");
+            Some((labels, mu))
+        }
+    };
     let base = base_start(&ps, n_pb, g);
     let (k, m) = (args.grid as usize, args.knots as usize);
     let values = Spline::new(m, &grid_times(k), &Device::Cpu)?
@@ -333,19 +410,21 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         .flatten_all()?
         .to_vec1::<f32>()?;
     let begin = start_along(
-        fin,
-        f,
+        &fin_top,
+        ft,
         &states,
         &forest,
         &roots,
-        &rho,
+        &rho_top,
         &values,
-        (g, h, k, m),
+        (t, h, k, m),
         args.knn,
     );
     let l = begin.paths.len();
 
     let lora = args.feature_embedding.lora.spec();
+    let mut root_genes = vec![false; g];
+    top.iter().for_each(|&j| root_genes[j] = true);
     let cfg = TrainConfig {
         grid: k,
         knots: m,
@@ -369,7 +448,14 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         seed: args.seed,
         lora_lr_ratio: f64::from(lora.lr_ratio),
         lora_ridge: f64::from(lora.ridge),
+        module_ridge: module_cfg
+            .as_ref()
+            .map_or(0.0, |m| f64::from(m.residual_l2)),
+        root_genes,
     };
+    // The map's space: the leading principal components of the finest
+    // pseudobulks' expression on the most variable genes.
+    let basis = MapBasis::new(&fin_top, ft)?;
     let levels_in: Vec<Level> = rows
         .into_iter()
         .zip(level_cells)
@@ -391,6 +477,9 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
                 pinned: p.mode.pins(),
                 lora_rank: p.mode.lora().map(|s| s.rank),
             }),
+            modules: modules
+                .as_ref()
+                .map(|(labels, mu)| ModulesInit { labels, mu }),
         },
         begin,
         &forest,
@@ -400,17 +489,50 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         &cfg,
         &dev,
     )?;
+    drop(levels_in);
 
-    let out = model.summarise(&x, f, args.depth as f32, &dev)?;
+    // Every cell read once, a block at a time, sparse until a block is read
+    // (batch-adjusted when there are batches); QC's near-empty cells stay out.
     let rho_rows = model.energy.rho()?.to_vec2::<f32>()?;
-    let (map, map_velocity) = map_space(&x, f, &rho_rows, &out.velocity)?;
-    // Every cell's reads as the read-out saw them (capped at the training
-    // depth): the state reaches the reads per read, `W h / N`.
-    let reads: Vec<f32> = x
-        .chunks(f)
-        .map(|r| r.iter().sum::<f32>().clamp(1.0, args.depth as f32))
+    let rho_top_fit: Vec<Vec<f32>> = top.iter().map(|&j| rho_rows[j].clone()).collect();
+    let kept: Option<std::collections::HashSet<usize>> =
+        keep.as_ref().map(|k| k.iter().copied().collect());
+    let mut out = Summary::default();
+    let (mut cells, mut of_cell, mut reads, mut map) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for_cell_blocks(
+        &data,
+        &names,
+        args.block_size,
+        delta.as_ref(),
+        |start, u, s| {
+            let rows: Vec<usize> = (0..u.nrows())
+                .filter(|i| kept.as_ref().is_none_or(|k| k.contains(&(start + i))))
+                .collect();
+            let mut x = Vec::with_capacity(rows.len() * f);
+            let mut x_top = Vec::with_capacity(rows.len() * ft);
+            for &i in &rows {
+                x.extend((0..g).map(|j| u[(i, j)]));
+                x.extend((0..g).map(|j| s[(i, j)]));
+                x_top.extend(top.iter().map(|&j| u[(i, j)]));
+                x_top.extend(top.iter().map(|&j| s[(i, j)]));
+                cells.push(all_cells[start + i].clone());
+                of_cell.push(member[start + i]);
+            }
+            reads.extend(
+                x.chunks(f)
+                    .map(|r| r.iter().sum::<f32>().clamp(1.0, args.depth as f32)),
+            );
+            map.extend(x_top.chunks(ft).map(|r| basis.place(r)));
+            out.extend(model.summarise(&x, f, args.depth as f32, &dev)?);
+            Ok(())
+        },
+    )?;
+    let map_velocity: Vec<Vec<f32>> = out
+        .velocity
+        .iter()
+        .map(|v| basis.velocity(&rho_top_fit, v))
         .collect();
-    drop(x);
 
     // The start as the chosen roots have it, so its lineages are the
     // fitted ones' paths.
@@ -570,11 +692,24 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
         })
         .collect();
     if !vote_cols.is_empty() {
+        // The genes that called the directions.
+        let top_names: Vec<Box<str>> = top.iter().map(|&j| names[j].clone()).collect();
+        let top_cols: Vec<(Box<str>, Vec<f32>)> = vote_cols
+            .into_iter()
+            .map(|(n, v)| {
+                (
+                    n,
+                    top.iter()
+                        .map(|&j| v.get(j).copied().unwrap_or(0.0))
+                        .collect(),
+                )
+            })
+            .collect();
         write(
             &format!("{}.gene_direction.parquet", args.out),
             "gene",
-            &names,
-            &vote_cols,
+            &top_names,
+            &top_cols,
         )?;
     }
 
@@ -771,53 +906,78 @@ fn given_rows(rho: &mut [f32], mask: &mut [f32], p: &graph_embedding_util::Prese
 /// Principal components of the map space.
 const MAP_PCS: usize = 30;
 
-/// Every cell's place in the map space, and its velocity there.
-type MapSpace = (Vec<Vec<f32>>, Vec<Vec<f32>>);
+/// The map space, as scVelo has it: `log1p` reads per 10⁴ on the most
+/// variable genes (both tracks summed), centred, on the leading principal
+/// components of the finest pseudobulks; a cell is placed on them as it is
+/// read, its velocity read out per gene (`ρ_g · v`, a `d log s_g/dt`,
+/// centred over the genes) through the same components.
+struct MapBasis {
+    /// `[T]` the pseudobulks' mean expression per gene.
+    mean: Vec<f32>,
+    /// `[T × k]` the components.
+    v: nalgebra::DMatrix<f32>,
+}
 
-/// The cells' map space and their velocity in it, as scVelo has them:
-/// every cell's `log1p` reads per 10⁴ (both tracks summed) on the fitted
-/// genes, centred, on its leading principal components; and every cell's
-/// velocity read out per gene (`ρ_g · v`, a `d log s_g/dt`, centred over
-/// the genes) taken through the same components. `x` is `[C × F]`, `rho`
-/// `[G × H]`, `velocity` `[C × H]`.
-fn map_space(
-    x: &[f32],
-    f: usize,
-    rho: &[Vec<f32>],
-    velocity: &[Vec<f32>],
-) -> anyhow::Result<MapSpace> {
-    use legume_numeric::matrix::traits::RandomizedAlgs;
-    let g = f / 2;
-    let c = x.len() / f;
-    let mut m = nalgebra::DMatrix::<f32>::zeros(c, g);
-    for (i, row) in x.chunks(f).enumerate() {
-        let total: f32 = row.iter().sum::<f32>().max(1.0);
-        for j in 0..g {
-            m[(i, j)] = ((row[j] + row[g + j]) / total * 1e4).ln_1p();
+impl MapBasis {
+    /// From rows `x` (`[P × F]`, unspliced genes first).
+    fn new(x: &[f32], f: usize) -> anyhow::Result<Self> {
+        use legume_numeric::matrix::traits::RandomizedAlgs;
+        let g = f / 2;
+        let p = x.len() / f;
+        let mut m = nalgebra::DMatrix::<f32>::zeros(p, g);
+        for (i, row) in x.chunks(f).enumerate() {
+            let e = expression(row);
+            m.row_mut(i).copy_from_slice(&e);
         }
+        let mean: Vec<f32> = (0..g).map(|j| m.column(j).mean()).collect();
+        for (j, &mu) in mean.iter().enumerate() {
+            m.column_mut(j).add_scalar_mut(-mu);
+        }
+        let k = MAP_PCS.min(p.saturating_sub(1)).min(g).max(1);
+        let (_, _, v) = m.rsvd(k)?;
+        Ok(Self { mean, v })
     }
-    for j in 0..g {
-        let mean = m.column(j).mean();
-        m.column_mut(j).add_scalar_mut(-mean);
+
+    /// A row's (`[F]`) place on the components.
+    fn place(&self, row: &[f32]) -> Vec<f32> {
+        let e = expression(row);
+        (0..self.v.ncols())
+            .map(|c| {
+                e.iter()
+                    .zip(&self.mean)
+                    .enumerate()
+                    .map(|(j, (a, b))| (a - b) * self.v[(j, c)])
+                    .sum()
+            })
+            .collect()
     }
-    let k = MAP_PCS.min(c.saturating_sub(1)).min(g).max(1);
-    let (u, s, v) = m.rsvd(k)?; // [C × k], [k], [G × k]
-    let k = s.len();
-    let scores: Vec<Vec<f32>> = (0..c)
-        .map(|i| (0..k).map(|j| u[(i, j)] * s[j]).collect())
-        .collect();
-    let moved: Vec<Vec<f32>> = velocity
-        .iter()
-        .map(|vc| {
-            let per_gene: Vec<f32> = rho
-                .iter()
-                .map(|r| r.iter().zip(vc).map(|(a, b)| a * b).sum())
-                .collect();
-            let mean = per_gene.iter().sum::<f32>() / g.max(1) as f32;
-            (0..k)
-                .map(|j| (0..g).map(|q| (per_gene[q] - mean) * v[(q, j)]).sum())
-                .collect()
-        })
-        .collect();
-    Ok((scores, moved))
+
+    /// A velocity `v` (`[H]`) through the genes' `rho` (`[T][H]`) on the
+    /// components.
+    fn velocity(&self, rho: &[Vec<f32>], v: &[f32]) -> Vec<f32> {
+        let per_gene: Vec<f32> = rho
+            .iter()
+            .map(|r| r.iter().zip(v).map(|(a, b)| a * b).sum())
+            .collect();
+        let mean = per_gene.iter().sum::<f32>() / per_gene.len().max(1) as f32;
+        (0..self.v.ncols())
+            .map(|c| {
+                per_gene
+                    .iter()
+                    .enumerate()
+                    .map(|(j, x)| (x - mean) * self.v[(j, c)])
+                    .sum()
+            })
+            .collect()
+    }
+}
+
+/// A row's (`[F]`, unspliced genes first) `log1p` reads per 10⁴ per gene,
+/// both tracks summed.
+fn expression(row: &[f32]) -> Vec<f32> {
+    let g = row.len() / 2;
+    let total: f32 = row.iter().sum::<f32>().max(1.0);
+    (0..g)
+        .map(|j| ((row[j] + row[g + j]) / total * 1e4).ln_1p())
+        .collect()
 }

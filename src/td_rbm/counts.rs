@@ -55,11 +55,14 @@ pub fn two_track_genes(rows: &[Box<str>]) -> (usize, bool) {
 
 /// The cells of `data` one block of columns at a time: `f(first column,
 /// unspliced, spliced)` with each block's `[B × G]` reads on the genes
-/// named `genes`, in that order.
+/// named `genes`, in that order. With `delta` (`[D × batches]`, `data`'s
+/// rows), every cell's reads are divided by its batch's effect and scaled
+/// back to its own reads on these genes.
 pub fn for_cell_blocks(
     data: &SparseIoVec,
     genes: &[Box<str>],
     block: usize,
+    delta: Option<&DMatrix<f32>>,
     mut f: impl FnMut(usize, DMatrix<f32>, DMatrix<f32>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let rows = data.row_names()?;
@@ -81,11 +84,29 @@ pub fn for_cell_blocks(
         let end = (start + block).min(n);
         let mut unspliced = DMatrix::<f32>::zeros(end - start, genes.len());
         let mut spliced = DMatrix::<f32>::zeros(end - start, genes.len());
-        data.for_each_triplet(start..end, block, |row, col, v| match role[row as usize] {
-            Some((c, true)) => unspliced[(col as usize, c)] += v,
-            Some((c, false)) => spliced[(col as usize, c)] += v,
-            None => {}
+        let batch = delta.map(|_| data.get_batch_membership(start..end));
+        let mut raw = vec![0f32; end - start];
+        data.for_each_triplet(start..end, block, |row, col, v| {
+            let Some((c, u)) = role[row as usize] else {
+                return;
+            };
+            raw[col as usize] += v;
+            let v = match (delta, batch.as_ref()) {
+                (Some(d), Some(b)) => v / d[(row as usize, b[col as usize])].max(1e-8),
+                _ => v,
+            };
+            let m = if u { &mut unspliced } else { &mut spliced };
+            m[(col as usize, c)] += v;
         })?;
+        if delta.is_some() {
+            for (i, &n) in raw.iter().enumerate() {
+                let now = unspliced.row(i).sum() + spliced.row(i).sum();
+                if now > 0.0 {
+                    unspliced.row_mut(i).scale_mut(n / now);
+                    spliced.row_mut(i).scale_mut(n / now);
+                }
+            }
+        }
         f(start, unspliced, spliced)?;
     }
     bar.finish_and_clear();

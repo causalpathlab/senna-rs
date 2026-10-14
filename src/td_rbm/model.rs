@@ -79,6 +79,20 @@ pub struct Init0<'a> {
     pub gamma: f64,
     /// Rows of `rho` an earlier run's table gave, and how they are held.
     pub given: Option<GivenRho<'a>>,
+    /// Gene modules: `rho` is then every gene's residual from its module's
+    /// vector.
+    pub modules: Option<ModulesInit<'a>>,
+}
+
+/// Gene modules for `ρ` (as bge and rbm have them): every gene is its
+/// module's vector plus a residual of its own, shrunk by a ridge, so a gene
+/// with few reads sits near its module.
+#[derive(Clone, Copy)]
+pub struct ModulesInit<'a> {
+    /// `[G]` every gene's module.
+    pub labels: &'a [u32],
+    /// `[M × H]` the modules' starting vectors, row-major.
+    pub mu: &'a [f32],
 }
 
 /// The rows of `ρ` a given table set (`--{init,freeze,lora}-feature-embedding`).
@@ -101,6 +115,9 @@ pub struct Energy {
     held: Option<(Tensor, Tensor)>,
     /// The low-rank residual `U` `[G × r]`, `V` `[r × H]` on the held rows.
     lora: Option<(Var, Var)>,
+    /// Gene modules: every gene's membership `[G × M]` (one-hot) and the
+    /// modules' vectors `[M × H]`; `rho` is then the residual.
+    modules: Option<(Tensor, Var)>,
     /// `[L·M × H]` every lineage's curve coefficients, `[L·M × 1]` its size
     /// curve's.
     coef: Var,
@@ -199,10 +216,25 @@ impl Energy {
             }
             None => None,
         };
+        let modules = match init.modules {
+            Some(m) => {
+                let n = m.mu.len() / h.max(1);
+                let mut hot = vec![0f32; g * n];
+                for (j, &label) in m.labels.iter().enumerate() {
+                    hot[j * n + label as usize] = 1.0;
+                }
+                Some((
+                    Tensor::from_vec(hot, (g, n), dev)?,
+                    Var::from_tensor(&Tensor::from_slice(m.mu, (n, h), dev)?)?,
+                ))
+            }
+            None => None,
+        };
         Ok(Self {
             rho: Var::from_tensor(&rho0)?,
             held,
             lora,
+            modules,
             coef: Var::from_tensor(&Tensor::from_slice(init.curve, (l * m, h), dev)?)?,
             size: constant((l * m, 1), 0.0)?,
             base: Var::from_tensor(&Tensor::from_slice(init.base, (1, g), dev)?)?,
@@ -248,7 +280,19 @@ impl Energy {
         if let Some((u, _)) = self.lora.as_ref() {
             vars.push(u.clone());
         }
+        if let Some((_, mu)) = self.modules.as_ref() {
+            vars.push(mu.clone());
+        }
         vars
+    }
+
+    /// The residuals' ridge with gene modules: every gene's `‖r_g‖²`, the
+    /// mean over the genes.
+    pub fn module_penalty(&self) -> Result<Option<Tensor>> {
+        match self.modules {
+            Some(_) => Ok(Some(self.rho.as_tensor().sqr()?.sum(1)?.mean_all()?)),
+            None => Ok(None),
+        }
     }
 
     /// The LoRA residual's shared factor, trained at its own rate (LoRA+).
@@ -390,9 +434,13 @@ impl Energy {
         )
     }
 
-    /// `[G × H]` the gene embedding: the free rows, and the held rows a
+    /// `[G × H]` the gene embedding: every gene's module vector plus its
+    /// residual with gene modules; else the free rows, and the held rows a
     /// given table pins (plus their LoRA residual).
     pub fn rho(&self) -> Result<Tensor> {
+        if let Some((hot, mu)) = self.modules.as_ref() {
+            return hot.matmul(mu.as_tensor())? + self.rho.as_tensor();
+        }
         let rho = self.rho.as_tensor();
         let Some((rho0, mask)) = self.held.as_ref() else {
             return Ok(rho.clone());

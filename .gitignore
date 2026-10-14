@@ -9,7 +9,7 @@
 temp*/
 *.parquet
 *.safetensors
-/target-cuda/
+/target-cuda*/
 
 # Local working notes, not published
 docs/text-anchored-gene-space-plan.md
@@ -18,3 +18,4 @@ docs/peer-critique-plan.md
 # Not tracked; resolved fresh on each build
 Cargo.lock
 .senna-view/
+/target-*/

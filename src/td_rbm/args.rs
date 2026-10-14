@@ -245,6 +245,22 @@ pub struct TdRbmArgs {
     pub(crate) feature_embedding: crate::feature_embedding_args::FeatureEmbeddingArgs,
 
     #[command(flatten)]
+    pub(crate) modules: graph_embedding_util::FeatureModuleArgs,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with = "feature_modules",
+        help = "Free per-gene rows of ρ instead of gene modules",
+        long_help = "Gene modules are on by default (M = 50): every gene's row of ρ is\n\
+                     its module's vector plus a small residual of its own, so a gene with\n\
+                     few reads sits near its module. This trains one free row per gene\n\
+                     instead. Modules are also off when a feature embedding is given\n\
+                     (--freeze/--init/--lora-feature-embedding)."
+    )]
+    pub(crate) no_feature_modules: bool,
+
+    #[command(flatten)]
     pub(crate) hvg: crate::hvg::HvgCliArgs,
 
     #[command(flatten)]

@@ -91,6 +91,7 @@ fn cell_blocks_read_each_cells_tracks_on_the_named_genes() {
         &[Box::from("A")],
         // Blocks of three: the fourth cell starts a second.
         3,
+        None,
         |start, u, s| {
             assert_eq!((u.ncols(), s.ncols()), (1, 1));
             for c in 0..u.nrows() {
@@ -155,7 +156,7 @@ fn several_files_read_together_on_their_shared_genes() {
         "A's two tracks; D is in one file"
     );
     let mut seen = Vec::new();
-    for_cell_blocks(&data, &[Box::from("A")], 4096, |start, u, s| {
+    for_cell_blocks(&data, &[Box::from("A")], 4096, None, |start, u, s| {
         for c in 0..u.nrows() {
             seen.push((start + c, u[(c, 0)], s[(c, 0)]));
         }
@@ -163,6 +164,30 @@ fn several_files_read_together_on_their_shared_genes() {
     })
     .unwrap();
     assert_eq!(seen[4..], [(4, 1.0, 10.0), (5, 0.0, 20.0)]);
+}
+
+/// With batch effects, a cell's reads are divided by its batch's and
+/// scaled back to the reads it had on the genes.
+#[test]
+fn cell_blocks_adjust_by_the_batch_effect_and_keep_the_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut data = open_tracks(&[backend(dir.path()).into()]);
+    data.register_batch_membership(&[0u32, 0, 1, 1]);
+    // Rows: A spliced, B spliced, A unspliced, C unspliced; batch 1 has
+    // twice the spliced reads of A.
+    let delta = DMatrix::<f32>::from_row_slice(4, 2, &[1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    let mut seen = Vec::new();
+    for_cell_blocks(&data, &[Box::from("A")], 4096, Some(&delta), |_, u, s| {
+        for c in 0..u.nrows() {
+            seen.push((u[(c, 0)], s[(c, 0)]));
+        }
+        Ok(())
+    })
+    .unwrap();
+    // c1 (batch 0) as it is; c4 (batch 1): u 2, s 4 → s 2, then scaled
+    // back to 6 reads: u 3, s 3.
+    assert_eq!(seen[0], (0.0, 1.0));
+    assert_eq!(seen[3], (3.0, 3.0));
 }
 
 #[test]

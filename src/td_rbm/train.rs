@@ -89,6 +89,11 @@ pub struct TrainConfig {
     /// `lr`, and its ridge per held row.
     pub lora_lr_ratio: f64,
     pub lora_ridge: f64,
+    /// The ridge on every gene's residual from its module (with modules).
+    pub module_ridge: f64,
+    /// `[G]` the genes whose splicing evidence calls the roots and
+    /// directions (the most variable); empty for every gene.
+    pub root_genes: Vec<bool>,
 }
 
 impl Default for TrainConfig {
@@ -116,6 +121,8 @@ impl Default for TrainConfig {
             seed: 1,
             lora_lr_ratio: 1.0,
             lora_ridge: 0.0,
+            module_ridge: 0.0,
+            root_genes: Vec::new(),
         }
     }
 }
@@ -149,6 +156,7 @@ pub struct Model {
 }
 
 /// Every row's lineage, time, its spread, state and velocity.
+#[derive(Default)]
 pub struct Summary {
     /// The likeliest lineage, and the posterior over lineages `[N × L]`.
     pub lineage: Vec<usize>,
@@ -163,6 +171,19 @@ pub struct Summary {
     /// `[N × H]` the place on the curves `z`, averaged over the row's
     /// posterior: with the state, what its spliced reads are read from.
     pub position: Vec<Vec<f32>>,
+}
+
+impl Summary {
+    /// `other`'s rows after these.
+    pub fn extend(&mut self, other: Summary) {
+        self.lineage.extend(other.lineage);
+        self.p_lineage.extend(other.p_lineage);
+        self.tau.extend(other.tau);
+        self.tau_sd.extend(other.tau_sd);
+        self.state.extend(other.state);
+        self.velocity.extend(other.velocity);
+        self.position.extend(other.position);
+    }
 }
 
 /// Rows read at a time at the end.
@@ -269,12 +290,17 @@ fn lora_adam(energy: &Energy, cfg: &TrainConfig) -> Result<Option<AdamW>> {
         .transpose()
 }
 
-/// `loss` with a given table's LoRA ridge added.
+/// `loss` with the ridges on `ρ` added: a given table's LoRA residual's, or
+/// the genes' residuals from their modules.
 fn with_lora_ridge(loss: &Tensor, energy: &Energy, cfg: &TrainConfig) -> Result<Tensor> {
-    match energy.lora_penalty()? {
-        Some(pen) => loss + (pen * cfg.lora_ridge)?,
-        None => Ok(loss.clone()),
+    let mut loss = loss.clone();
+    if let Some(pen) = energy.lora_penalty()? {
+        loss = (loss + (pen * cfg.lora_ridge)?)?;
     }
+    if let Some(pen) = energy.module_penalty()? {
+        loss = (loss + (pen * cfg.module_ridge)?)?;
+    }
+    Ok(loss)
 }
 
 /// Fit the machine on pseudobulks of every level (`levels`, coarse to fine),
