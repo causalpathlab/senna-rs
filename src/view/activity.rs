@@ -1273,11 +1273,8 @@ pub(crate) fn read_run_data(m: &RunManifest, dir: &Path) -> anyhow::Result<RunRe
 /// features they share) matched to the run's `cells` ([`match_cells`]), and
 /// each cell's totals with them. Refuses files with none of the run's cells.
 pub(crate) fn read_extra(paths: &[PathBuf], cells: &[Box<str>]) -> anyhow::Result<ExtraRead> {
-    let name = match paths {
-        [] => anyhow::bail!("no extra data file given"),
-        [one] => super::files::name(one),
-        [first, rest @ ..] => format!("{} + {} more", super::files::name(first), rest.len()),
-    };
+    anyhow::ensure!(!paths.is_empty(), "no extra data file given");
+    let name = super::files::names(paths);
     info!("view: opening {name} as extra counts");
     let SparseDataWithBatch { data, .. } = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: paths.iter().map(|p| p.to_string_lossy().into()).collect(),
