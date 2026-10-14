@@ -1,7 +1,7 @@
 //! Step 1: every lineage and its time by the exact likelihood, the
 //! lineages drawn by collapsed Gibbs under a truncated Dirichlet process.
 
-use super::{adam, lora_adam, pass_reads, with_lora_ridge, Level, TrainConfig};
+use super::{adam, lora_adam, pass_reads, stopped, with_lora_ridge, Level, TrainConfig};
 use crate::logging::new_progress_bar;
 use crate::td_rbm::curve::Spline;
 use crate::td_rbm::model::Energy;
@@ -72,6 +72,10 @@ impl Phase<'_> {
         let mut shared = lora_adam(self.energy, cfg)?;
         let bar = new_progress_bar(epochs as u64).with_message(format!("td-rbm {label}"));
         for epoch in 0..epochs {
+            if stopped() {
+                info!("td-rbm {label}: stopping at epoch {epoch}");
+                break;
+            }
             bar.inc(1);
             let (mut nll, mut reads) = (0f64, 0f64);
             let drawn: Vec<Reads> = self

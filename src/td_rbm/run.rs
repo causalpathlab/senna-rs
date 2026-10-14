@@ -156,6 +156,8 @@ fn load(args: &TdRbmArgs) -> anyhow::Result<Loaded> {
 
 pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
     senna::embed_common::mkdir_parent(&args.out)?;
+    // Ctrl+C ends training; the cells are then read and everything written.
+    let _ = legume_numeric::matrix::stop::stop_flag();
     anyhow::ensure!(
         args.minibatch_size > 0 && args.chains > 0 && args.block_size > 0,
         "--minibatch-size, --chains and --block-size must be positive"

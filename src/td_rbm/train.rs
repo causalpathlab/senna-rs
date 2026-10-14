@@ -249,6 +249,12 @@ fn pass_reads(levels: &[Level], depth: u64) -> f64 {
     levels.iter().map(|lv| lv.cells.len()).sum::<usize>() as f64 * depth as f64
 }
 
+/// Whether Ctrl+C asked the fit to stop: every training phase then ends and
+/// the cells are read with the machine as it is.
+fn stopped() -> bool {
+    legume_numeric::matrix::stop::stop_flag().load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The optimiser of a given table's LoRA shared factor, at its own rate
 /// (LoRA+); `None` without one.
 fn lora_adam(energy: &Energy, cfg: &TrainConfig) -> Result<Option<AdamW>> {

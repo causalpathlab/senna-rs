@@ -115,6 +115,23 @@ pub(crate) fn load_preset_genes(
                 "{flag} {prefix}: {} features matched by their gene, case aside",
                 host.keep_target_indices.len()
             );
+            // Pinned, a gene's tracks keep one row each and the same row:
+            // the embedding cannot tell them apart.
+            if matches!(mode, PresetMode::Freeze) {
+                let mut seen = std::collections::HashSet::new();
+                let shared: std::collections::HashSet<usize> = host
+                    .keep_src_indices
+                    .iter()
+                    .filter(|&&i| !seen.insert(i))
+                    .copied()
+                    .collect();
+                if !shared.is_empty() {
+                    log::warn!(
+                        "{flag} {prefix}: {} genes pin several of their tracks to one row;                          --lora-feature-embedding lets each track differ",
+                        shared.len()
+                    );
+                }
+            }
             host
         }
     };
