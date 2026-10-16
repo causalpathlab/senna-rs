@@ -34,6 +34,7 @@ use anyhow::Context;
 use legume_numeric::matrix::knn::all_pairs::knn_rows_l2;
 use legume_numeric::matrix::knn::metric::l2_sq;
 use legume_numeric::matrix::parquet::{write_named_table, Column};
+use legume_numeric::matrix::table::TableReader;
 use log::warn;
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
@@ -149,9 +150,10 @@ pub struct CritiqueArgs {
     #[arg(
         long,
         requires = "label_column",
-        help = "Per-cell labels to check the critique against (TSV, may be gzipped)",
-        long_help = "A tab-separated table with a header (gzipped is fine); the first\n\
-                     column names the cell, as in the partition. Each pseudobulk is\n\
+        help = "Per-cell labels to check the critique against (parquet, TSV or CSV; may be gzipped)",
+        long_help = "A table with a header: parquet, or tab- or comma-separated text\n\
+                     (gzipped is fine). The first column names the cell, as in the\n\
+                     partition; empty, NA and NaN labels are left out. Each pseudobulk is\n\
                      described by its label composition, and each pair by the overlap\n\
                      of the two compositions: 1 for the same mix of labels, 0 for no\n\
                      label in common. A merge is borne out when its pair's overlap is\n\
@@ -389,33 +391,28 @@ pub(crate) fn unique_names(bases: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// `cell → label` from a delimited table with a header: the first column names
-/// the cell, `column` holds the label. Empty and `NA` labels are left out.
-pub(crate) fn parse_cell_labels(
-    reader: impl std::io::BufRead,
-    column: &str,
-) -> anyhow::Result<FxHashMap<Box<str>, Box<str>>> {
-    let mut lines = reader.lines();
-    let header = lines
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("the label table is empty"))??;
-    let at = header
-        .split('\t')
-        .position(|h| h.trim() == column)
-        .ok_or_else(|| anyhow::anyhow!("no column `{column}` in the label table's header"))?;
-    let mut out = FxHashMap::default();
-    for line in lines {
-        let line = line?;
-        let fields: Vec<&str> = line.split('\t').collect();
-        let (Some(cell), Some(label)) = (fields.first(), fields.get(at)) else {
-            continue;
-        };
-        let label = label.trim();
-        if !label.is_empty() && label != "NA" {
-            out.insert(Box::from(cell.trim()), Box::from(label));
-        }
-    }
-    Ok(out)
+/// `cell → label` from a table with a header (parquet, or delimited text,
+/// gzip or not): the first column names the cell, `column` (else the second
+/// column) holds the label. Missing labels (empty, `NA`, `NaN`) are left out.
+pub(crate) fn read_cell_labels<M: FromIterator<(Box<str>, Box<str>)>>(
+    path: &str,
+    column: Option<&str>,
+) -> anyhow::Result<M> {
+    let table = TableReader::open(path)?;
+    let at = match column {
+        Some(c) => table.select(&[c])?[0],
+        None => 1,
+    };
+    table
+        .rows(&[0, at])?
+        .filter_map(|row| {
+            row.map(|row| {
+                let [cell, label]: [Box<str>; 2] = row.try_into().expect("two columns asked for");
+                (!matches!(&*label, "" | "NA" | "NaN")).then_some((cell, label))
+            })
+            .transpose()
+        })
+        .collect()
 }
 
 /// Per pseudobulk, the fraction of its labelled cells carrying each label;
@@ -472,10 +469,7 @@ fn load_cell_labels(
     column: &str,
     part_cells: &[Box<str>],
 ) -> anyhow::Result<CellLabels> {
-    let map = parse_cell_labels(
-        legume_numeric::matrix::common_io::open_buf_reader(path)?,
-        column,
-    )?;
+    let map: FxHashMap<Box<str>, Box<str>> = read_cell_labels(path, Some(column))?;
     let mut vocab: Vec<Box<str>> = map.values().cloned().collect();
     vocab.sort_unstable();
     vocab.dedup();

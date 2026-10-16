@@ -84,3 +84,47 @@ fn a_scene_takes_the_batches_once_its_run_s_data_files_are_read() {
     // Taken once.
     assert!(!s.take_batches());
 }
+
+/// `annotate.argmax` as tsv, tsv.gz or parquet (cell, cell_type, probability)
+/// gives the same labels; a NaN probability, as a marker score writes, is fine,
+/// and a cell without a label is left out.
+#[test]
+fn argmax_reads_from_text_or_parquet() {
+    use legume_numeric::matrix::common_io::open_buf_writer;
+    use legume_numeric::matrix::parquet::{write_table, Column};
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let at = |f: &str| dir.path().join(f);
+    let tsv = "cell\tcell_type\tprobability\nc1\tCT1\t0.9\nc2\tCT2\tNaN\nc3\t\tNaN\n";
+    for f in ["a.argmax.tsv", "a.argmax.tsv.gz"] {
+        let mut w = open_buf_writer(at(f).to_str().unwrap()).unwrap();
+        w.write_all(tsv.as_bytes()).unwrap();
+        w.flush().unwrap();
+    }
+    let s = |v: &[&str]| v.iter().map(|&x| Box::from(x)).collect::<Vec<Box<str>>>();
+    write_table(
+        at("a.argmax.parquet").to_str().unwrap(),
+        &[
+            ("cell".into(), Column::Str(&s(&["c1", "c2", "c3"]))),
+            ("cell_type".into(), Column::Str(&s(&["CT1", "CT2", ""]))),
+            (
+                "probability".into(),
+                Column::F32(&[0.9, f32::NAN, f32::NAN]),
+            ),
+        ],
+    )
+    .unwrap();
+
+    let want: HashMap<Box<str>, Box<str>> = [("c1", "CT1"), ("c2", "CT2")]
+        .map(|(c, l)| (c.into(), l.into()))
+        .into_iter()
+        .collect();
+    for f in ["a.argmax.tsv", "a.argmax.tsv.gz", "a.argmax.parquet"] {
+        assert_eq!(
+            super::super::rounds::read_argmax(&at(f)).unwrap(),
+            want,
+            "{f}"
+        );
+    }
+}
