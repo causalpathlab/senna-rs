@@ -458,9 +458,12 @@ where
             }
 
             let n_mb = data_loader.num_minibatch() as f32;
-            kl_trace.push(kl_tot / n_mb);
-            llik_trace.push(llik_tot / n_mb);
+            let (llik_mean, kl_mean) = (llik_tot / n_mb, kl_tot / n_mb);
+            kl_trace.push(kl_mean);
+            llik_trace.push(llik_mean);
 
+            // The score first, so it and the step arrive in one frame.
+            prog_bar.set_message(format!("llik={llik_mean:.1} kl={kl_mean:.1}"));
             prog_bar.inc(1);
 
             info!(
@@ -468,8 +471,8 @@ where
                 level + 1,
                 num_levels,
                 epoch,
-                llik_tot / n_mb,
-                kl_tot / n_mb
+                llik_mean,
+                kl_mean
             );
 
             if config.stop.load(Ordering::SeqCst) {

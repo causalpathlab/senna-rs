@@ -392,8 +392,10 @@ pub fn fit(
         let steps = steps.max(1) as f64;
         let gap = f64::from(gap.to_scalar::<f32>()?);
         let recon = f64::from(recon.to_scalar::<f32>()?);
-        trace.gap.push((gap / steps) as f32);
-        trace.reconstruction.push((recon / steps) as f32);
+        let (gap, recon) = (gap / steps, recon / steps);
+        bar.set_message(format!("rbm gap={gap:.4} recon={recon:.4}"));
+        trace.gap.push(gap as f32);
+        trace.reconstruction.push(recon as f32);
         let now = machine(weights.w(&blocks.ranges)?, &lambda).detach();
         let per_read =
             |x: &Tensor| -> Result<f32> { now.free_energy_per_read(x)?.mean_all()?.to_scalar() };

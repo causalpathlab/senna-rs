@@ -118,3 +118,21 @@ fn a_second_stop_kills_a_child_that_ignores_the_interrupt() {
     assert_eq!(run_one(command, &stopper, |_| {}), Err(Failed::Stopped));
     assert!(start.elapsed() < std::time::Duration::from_secs(10));
 }
+
+#[test]
+fn a_bar_message_carries_its_first_number_as_the_score() {
+    let said = |what: &str| {
+        Progress {
+            what: what.into(),
+            ..Progress::default()
+        }
+        .score()
+    };
+    assert_eq!(said("rbm gap=0.412 recon=0.3"), Some(0.412));
+    assert_eq!(said("llik=-1843.2 kl=12.3"), Some(-1843.2));
+    assert_eq!(said("td-rbm CT1 nll=2.5"), Some(2.5));
+    assert_eq!(said("td-rbm 3 nll=2.5"), Some(2.5));
+    assert_eq!(said("td-rbm 3"), None);
+    assert_eq!(said("nll=inf nll=1.5"), Some(1.5));
+    assert_eq!(said("reading cells"), None);
+}
