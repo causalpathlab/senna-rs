@@ -75,12 +75,11 @@ pub struct RbmArgs {
         long,
         value_enum,
         default_value = "bernoulli",
-        help = "Hidden unit kind (bernoulli|binomial|poisson|gaussian)",
+        help = "Hidden unit kind (bernoulli|binomial|poisson)",
         long_help = "The hidden units' distribution given a cell's reads.\n\
                      bernoulli: on/off units.\n\
                      binomial: counts 0..--trials.\n\
-                     poisson: counts truncated at --max-count.\n\
-                     gaussian: unit-variance real units."
+                     poisson: counts truncated at --max-count."
     )]
     pub(crate) hidden: HiddenArg,
 
@@ -140,7 +139,7 @@ pub struct RbmArgs {
                      A running estimate q of every unit's mean activation (on the unit's\n\
                      0..1 scale) is held near this target by a cross-entropy penalty at\n\
                      --sparsity-cost, so no unit dies or saturates and a cell is read as a\n\
-                     combination of units. Not applied to Gaussian units."
+                     combination of units."
     )]
     pub(crate) sparsity_target: f32,
 
@@ -197,13 +196,10 @@ pub struct RbmArgs {
     #[arg(
         long,
         alias = "lr",
-        help = "Adam learning rate [default: 0.005; 0.0005 for Gaussian hidden units]",
-        long_help = "Adam learning rate. Default 0.005, and ten times smaller (0.0005)\n\
-                     for Gaussian hidden units: their activity has no bound, so a large\n\
-                     step lets the weights run away (Hinton, A practical guide to\n\
-                     training restricted Boltzmann machines (2010), §13.2-13.3)."
+        default_value_t = 0.005,
+        help = "Adam learning rate"
     )]
-    pub(crate) learning_rate: Option<f32>,
+    pub(crate) learning_rate: f32,
 
     #[arg(
         long,

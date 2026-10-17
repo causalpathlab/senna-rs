@@ -195,7 +195,6 @@ fn trained_on_pseudobulks_the_cells_separate_by_type() {
         Hidden::Bernoulli,
         Hidden::Binomial { trials: 3 },
         Hidden::Poisson { max: 6 },
-        Hidden::Gaussian,
     ] {
         let fitted = train(&s, hidden, 4, 6, false, 100);
         let z = latent(&fitted, &s.blocks, &s.cells);
@@ -257,7 +256,6 @@ fn diagnostic_every_kind() {
         Hidden::Bernoulli,
         Hidden::Binomial { trials: 3 },
         Hidden::Poisson { max: 6 },
-        Hidden::Gaussian,
     ] {
         for (d, lr, l2) in [(20.0, 0.01, 1e-2), (20.0, 0.02, 1e-2), (20.0, 0.005, 1e-2)] {
             let mut out = Vec::new();

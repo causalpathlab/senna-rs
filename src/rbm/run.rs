@@ -324,16 +324,7 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         }
     };
     let hidden = Hidden::new(args.hidden, args.trials, args.max_count);
-    // Unbounded Gaussian activities need a far smaller step than bounded
-    // units (Hinton (2010), §13.2-13.3).
-    let learning_rate = args.learning_rate.unwrap_or_else(|| {
-        if matches!(args.hidden, super::hidden::HiddenArg::Gaussian) {
-            info!("rbm: Gaussian hidden units train at learning rate 0.0005 (--learning-rate sets it)");
-            0.0005
-        } else {
-            0.005
-        }
-    });
+    let learning_rate = args.learning_rate;
     let stop = setup_stop_handler();
     let cfg = TrainConfig {
         epochs: args.epochs,

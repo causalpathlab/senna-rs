@@ -8,17 +8,14 @@
 //! | Bernoulli | {0, 1} | 1 | softplus(a) |
 //! | Binomial(n) | {0..n} | C(n, h) | n softplus(a) |
 //! | Poisson ≤ M | {0..M} | 1/h! | log Σ_{h≤M} e^{a h}/h! |
-//! | Gaussian | ℝ | N(0, 1) | a²/2 |
 //!
-//! The Poisson unit is truncated at `M` so the partition stays finite for any
-//! `a`; the Gaussian's unit variance does the same.
+//! The Poisson unit is truncated at `M` so the partition stays finite for any `a`.
 
 use crate::rbm_core::softplus;
 use legume_numeric::candle::candle_core::{Result, Tensor, D};
 use legume_numeric::candle::candle_nn::ops::{sigmoid, softmax};
 use rand::rngs::StdRng;
 use rand::RngExt;
-use rand_distr::{Distribution, Normal};
 
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
@@ -28,7 +25,6 @@ pub enum HiddenArg {
     Bernoulli,
     Binomial,
     Poisson,
-    Gaussian,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,7 +32,6 @@ pub enum Hidden {
     Bernoulli,
     Binomial { trials: u32 },
     Poisson { max: u32 },
-    Gaussian,
 }
 
 impl Hidden {
@@ -45,7 +40,6 @@ impl Hidden {
             HiddenArg::Bernoulli => Self::Bernoulli,
             HiddenArg::Binomial => Self::Binomial { trials },
             HiddenArg::Poisson => Self::Poisson { max: max_count },
-            HiddenArg::Gaussian => Self::Gaussian,
         }
     }
 
@@ -55,7 +49,6 @@ impl Hidden {
             Self::Bernoulli => softplus(a),
             Self::Binomial { trials } => softplus(a)? * f64::from(trials),
             Self::Poisson { max } => poisson_logits(a, max)?.1.log_sum_exp(D::Minus1),
-            Self::Gaussian => a.sqr()? * 0.5,
         }
     }
 
@@ -70,23 +63,21 @@ impl Hidden {
                     .broadcast_mul(&h)?
                     .sum(D::Minus1)
             }
-            Self::Gaussian => Ok(a.clone()),
         }
     }
 
-    /// The scale that puts a unit's mean on `0..1`, `None` for the Gaussian.
-    pub fn unit_scale(&self) -> Option<f64> {
+    /// The scale that puts a unit's mean on `0..1`.
+    pub fn unit_scale(&self) -> f64 {
         match *self {
-            Self::Bernoulli => Some(1.0),
-            Self::Binomial { trials } => Some(f64::from(trials.max(1))),
-            Self::Poisson { max } => Some(f64::from(max.max(1))),
-            Self::Gaussian => None,
+            Self::Bernoulli => 1.0,
+            Self::Binomial { trials } => f64::from(trials.max(1)),
+            Self::Poisson { max } => f64::from(max.max(1)),
         }
     }
 
-    /// One draw of `h | a` `[N × K]` on `a`'s device. The few uniforms (or
-    /// normals) a draw needs come from `rng`, so a sweep replays from its seed;
-    /// the rest is elementwise work on the device.
+    /// One draw of `h | a` `[N × K]` on `a`'s device. The few uniforms a draw
+    /// needs come from `rng`, so a sweep replays from its seed; the rest is
+    /// elementwise work on the device.
     pub fn sample(&self, a: &Tensor, rng: &mut StdRng) -> Result<Tensor> {
         let dev = a.device();
         let shape = a.dims().to_vec();
@@ -118,11 +109,6 @@ impl Hidden {
                 ushape.push(1);
                 let u = Tensor::from_vec(uniform(n, rng), ushape, dev)?;
                 u.broadcast_ge(&cum)?.to_dtype(a.dtype())?.sum(D::Minus1)
-            }
-            Self::Gaussian => {
-                let normal = Normal::new(0f32, 1.0).expect("a valid sd");
-                let z: Vec<f32> = (0..n).map(|_| normal.sample(rng)).collect();
-                a + Tensor::from_vec(z, shape, dev)?
             }
         }
     }
