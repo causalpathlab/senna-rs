@@ -1169,7 +1169,7 @@ pub struct RunAnnotate {
     /// `{annotate_out}.annotation.parquet` — N × C cell posterior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation: Option<String>,
-    /// `{annotate_out}.argmax.tsv` — per-cell label + max probability.
+    /// `{annotate_out}.argmax.tsv` or `.argmax.parquet` — per-cell label + max probability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argmax: Option<String>,
     /// `{annotate_out}.cluster_celltype_q.parquet` — nClusters × C FDR-sparse

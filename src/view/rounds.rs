@@ -7,7 +7,7 @@
 //! Lupin's fields are read through the manifest's pass-through keys, so
 //! senna's schema does not carry them.
 
-use super::data::{read_pairs, LabelKind, Labels};
+use super::data::{LabelKind, Labels};
 use super::files::{self, read_json, same_file, siblings};
 use rustc_hash::FxHashMap as HashMap;
 use senna::run_manifest::{self, RunManifest};
@@ -29,9 +29,10 @@ pub(crate) fn label_key(s: &str) -> String {
 /// Label a round gives a cell it did not assign.
 pub(super) const UNASSIGNED: &str = "unassigned";
 
-/// `cell<TAB>label<TAB>…` with a header, as `annotate.argmax` holds it.
+/// `cell → label` from the first two columns of a table with a header (parquet
+/// or delimited text), as `annotate.argmax` holds it; missing labels are left out.
 pub fn read_argmax(path: &Path) -> anyhow::Result<HashMap<Box<str>, Box<str>>> {
-    Ok(read_pairs(path)?.into_iter().collect())
+    crate::critique::read_cell_labels(&path.to_string_lossy(), None)
 }
 
 pub(super) fn annotate_str<'a>(m: &'a RunManifest, key: &str) -> Option<&'a str> {

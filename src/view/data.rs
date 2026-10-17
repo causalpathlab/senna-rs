@@ -7,7 +7,6 @@
 //! are joined to points by name, so a layout and a label table written by
 //! different commands still line up.
 
-use legume_numeric::matrix::common_io::read_lines_of_words_delim;
 use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
 use senna::run_manifest::{self, LayoutEntry, RunManifest};
@@ -359,20 +358,6 @@ fn read_xy(path: &Path) -> anyhow::Result<Points> {
         .map(|i| [mat[(i, cx)], mat[(i, cy)]])
         .collect();
     Ok(Points::new(rows, xy))
-}
-
-/// `(first, second)` columns of a tab-separated table (gzip allowed), header
-/// row skipped.
-pub(super) fn read_pairs(path: &Path) -> anyhow::Result<Vec<(Box<str>, Box<str>)>> {
-    let lines = read_lines_of_words_delim(&path.to_string_lossy(), &['\t'][..], -1)?.lines;
-    Ok(lines
-        .into_iter()
-        .skip(1)
-        .filter_map(|r| {
-            let mut it = r.into_iter();
-            Some((it.next()?, it.next()?))
-        })
-        .collect())
 }
 
 /// Column of the largest entry in row `i`.

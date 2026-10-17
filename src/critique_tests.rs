@@ -228,14 +228,56 @@ fn non_finite_rows_leave_the_view() {
 
 // ---- Cell labels: a known answer to check the critique against -----------------
 
+/// One label table as tsv, tsv.gz and parquet (lupin's argmax moves to parquet);
+/// a parquet NaN reads as `NaN` and is missing, as `NA` and empty are.
 #[test]
-fn cell_labels_read_the_named_column() {
+fn cell_labels_read_the_named_column_from_text_or_parquet() {
+    use legume_numeric::matrix::common_io::open_buf_writer;
+    use legume_numeric::matrix::parquet::{write_table, Column};
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let at = |f: &str| dir.path().join(f).to_string_lossy().into_owned();
     let tsv = "barcode\tsample\tCellType\nc1\tS1\tCT1\nc2\tS1\tNA\nc3\tS1\tCT2\nc4\tS1\t\n";
-    let m = parse_cell_labels(tsv.as_bytes(), "CellType").unwrap();
-    assert_eq!(m.get("c1").map(AsRef::as_ref), Some("CT1"));
-    assert_eq!(m.get("c3").map(AsRef::as_ref), Some("CT2"));
-    assert_eq!(m.len(), 2, "NA and empty labels are left out");
-    assert!(parse_cell_labels(tsv.as_bytes(), "Missing").is_err());
+    for f in ["l.tsv", "l.tsv.gz"] {
+        let mut w = open_buf_writer(&at(f)).unwrap();
+        w.write_all(tsv.as_bytes()).unwrap();
+        w.flush().unwrap();
+    }
+    write_table(
+        &at("l.parquet"),
+        &[
+            (
+                "barcode".into(),
+                Column::Str(&names(&["c1", "c2", "c3", "c4"])),
+            ),
+            ("sample".into(), Column::Str(&names(&["S1"; 4]))),
+            (
+                "CellType".into(),
+                Column::Str(&names(&["CT1", "NA", "CT2", ""])),
+            ),
+            ("Score".into(), Column::F32(&[1.0, f32::NAN, 2.0, f32::NAN])),
+        ],
+    )
+    .unwrap();
+
+    type Map = FxHashMap<Box<str>, Box<str>>;
+    for f in ["l.tsv", "l.tsv.gz", "l.parquet"] {
+        let m: Map = read_cell_labels(&at(f), Some("CellType")).unwrap();
+        assert_eq!(m.get("c1").map(AsRef::as_ref), Some("CT1"), "{f}");
+        assert_eq!(m.get("c3").map(AsRef::as_ref), Some("CT2"), "{f}");
+        assert_eq!(m.len(), 2, "{f}: NA and empty labels are left out");
+        assert!(
+            read_cell_labels::<Map>(&at(f), Some("Missing")).is_err(),
+            "{f}"
+        );
+        let second: Map = read_cell_labels(&at(f), None).unwrap();
+        assert_eq!(second.len(), 4, "{f}: no column named reads the second");
+    }
+    let scores: Map = read_cell_labels(&at("l.parquet"), Some("Score")).unwrap();
+    let mut kept: Vec<&str> = scores.keys().map(AsRef::as_ref).collect();
+    kept.sort_unstable();
+    assert_eq!(kept, ["c1", "c3"], "NaN labels are left out");
 }
 
 /// pb 0 holds CT1, CT1, CT2; pb 1 holds CT2; pb 2's one cell has no label.
