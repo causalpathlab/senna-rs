@@ -12,13 +12,16 @@ impl App {
         let Some(Modal::Prompt(p)) = self.modal.as_mut() else {
             return false;
         };
+        if k.code != KeyCode::Tab {
+            p.cycle = None;
+        }
         match k.code {
             KeyCode::Esc => {
                 self.modal = None;
                 self.message = Some("decision cancelled".into());
             }
             KeyCode::Tab if !p.why => {
-                let Some(k) = p.completions().next().map(String::from) else {
+                let Some(k) = p.next_completion() else {
                     return false;
                 };
                 p.input = k;
@@ -170,6 +173,9 @@ pub(super) struct Prompt {
     pub(super) known: Vec<Box<str>>,
     /// What the rationale starts as, once the label is in.
     pub(super) why_prefill: String,
+    /// The prefix a run of Tabs started from and the candidate it is on, so
+    /// the list does not narrow to the label just filled in.
+    pub(super) cycle: Option<(String, usize)>,
 }
 
 impl Prompt {
@@ -185,14 +191,43 @@ impl Prompt {
         }
     }
 
-    /// Known labels the typed label could complete to, matched as lupin
-    /// matches type names.
-    fn completions(&self) -> impl Iterator<Item = &str> {
-        let typed = label_key(&self.input);
+    /// Known labels the typed label could complete to: keyed as lupin keys
+    /// type names, the prefix matched without regard to case so a lower-case
+    /// start still finds them.
+    fn completions_of<'a>(&'a self, prefix: &str) -> impl Iterator<Item = &'a str> {
+        let typed = fold(prefix);
         self.known
             .iter()
-            .filter(move |k| label_key(k).starts_with(&typed))
+            .filter(move |k| fold(k).starts_with(&typed))
             .map(AsRef::as_ref)
+    }
+
+    fn completions(&self) -> impl Iterator<Item = &str> {
+        self.completions_of(&self.input)
+    }
+
+    /// The completion a Tab moves to. A run of Tabs keeps the prefix it began
+    /// with and steps through every match, labels that differ only in case
+    /// included; the first Tab goes on from the label already typed.
+    fn next_completion(&mut self) -> Option<String> {
+        let (prefix, at) = match &self.cycle {
+            Some((p, i)) => (p.clone(), Some(*i)),
+            None => (self.input.clone(), None),
+        };
+        let all: Vec<&str> = self.completions_of(&prefix).collect();
+        if all.is_empty() {
+            return None;
+        }
+        let next = match at {
+            Some(i) => (i + 1) % all.len(),
+            None => all
+                .iter()
+                .position(|k| *k == self.input)
+                .map_or(0, |i| (i + 1) % all.len()),
+        };
+        let label = all[next].to_string();
+        self.cycle = Some((prefix, next));
+        Some(label)
     }
 
     pub(super) fn line(&self) -> String {
@@ -211,5 +246,45 @@ impl Prompt {
                 hint.join(" · ")
             )
         }
+    }
+}
+
+/// A label as completion compares it: keyed, then case-folded.
+fn fold(s: &str) -> String {
+    label_key(s).to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_steps_through_labels_that_differ_only_in_case() {
+        let mut p = Prompt {
+            decision: Decision {
+                action: Action::Label,
+                clusters: vec![1],
+                features: Vec::new(),
+                label: String::new(),
+                rationale: String::new(),
+                evidence: Vec::new(),
+            },
+            why: false,
+            input: "t".into(),
+            known: ["T cell", "T cell memory", "t cell", "B cell"]
+                .map(Box::from)
+                .to_vec(),
+            why_prefill: String::new(),
+            cycle: None,
+        };
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            p.input = p.next_completion().unwrap();
+            seen.push(p.input.clone());
+        }
+        assert_eq!(seen, ["T cell", "T cell memory", "t cell", "T cell"]);
+        p.cycle = None;
+        p.input = "zzz".into();
+        assert_eq!(p.next_completion(), None);
     }
 }

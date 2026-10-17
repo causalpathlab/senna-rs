@@ -14,16 +14,16 @@ use senna::run_manifest::{self, RunManifest};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// A cell type label in one canonical form for comparing: lower case, with
-/// spaces, commas and underscores all read as one separator (lupin writes
-/// `CT_1_a` for `CT 1, a`).
+/// A cell type label in one canonical form for comparing, as lupin and pinto
+/// key it: words split on whitespace, commas and underscores and joined by
+/// `_`, case kept (lupin writes `CT_1_a` for `CT 1, a`). A label made of
+/// separators only keys to the empty string, which callers drop.
 #[must_use]
 pub(crate) fn label_key(s: &str) -> String {
-    s.split([' ', ',', '_'])
+    s.split(|c: char| c.is_whitespace() || c == ',' || c == '_')
         .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
         .join("_")
-        .to_lowercase()
 }
 
 /// Label a round gives a cell it did not assign.
@@ -506,6 +506,14 @@ pub fn comparisons(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_label_key_splits_words_and_keeps_case() {
+        assert_eq!(label_key("CT 1, a"), "CT_1_a");
+        assert_eq!(label_key("CT\t1__a"), "CT_1_a");
+        assert_ne!(label_key("T cell"), label_key("t cell"));
+        assert_eq!(label_key(" , _ "), "", "separators only key to nothing");
+    }
+
     fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);
         std::fs::write(&p, body).unwrap();
@@ -583,7 +591,8 @@ mod tests {
         );
         let (m, d) = RunManifest::load(&path).unwrap();
         let round = Round::load(&m, &d, &path);
-        assert_eq!(round.members_of("g1").unwrap(), ["CT1", "CT2"]);
+        assert_eq!(round.members_of("G1").unwrap(), ["CT1", "CT2"]);
+        assert!(round.members_of("g1").is_none());
         assert!(round.evidence("5").unwrap().agrees);
         assert!(round.evidence("6").unwrap().agrees);
         assert!(round.members_of("CT3").is_none());

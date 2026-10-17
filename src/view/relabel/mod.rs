@@ -36,8 +36,8 @@ const PROPOSE_DROP: f32 = 0.1;
 /// when that fit is at least this good.
 const SUGGEST_FIT: f32 = 0.3;
 
-/// Type names compare as lupin compares them: case-insensitive, with spaces
-/// and underscores the same.
+/// Type names compare as lupin compares them: case kept, with spaces,
+/// commas and underscores the same.
 fn same_type(a: &str, b: &str) -> bool {
     super::rounds::label_key(a) == super::rounds::label_key(b)
 }
@@ -587,7 +587,8 @@ mod tests {
 
     #[test]
     fn type_names_match_across_spaces_commas_and_underscores() {
-        assert!(same_type("CT_1", "ct 1"));
+        assert!(same_type("CT_1", "CT 1"));
+        assert!(!same_type("CT_1", "ct 1"), "case is part of a type");
         assert!(same_type("CT 1, a", "CT_1_a"));
         assert!(!same_type("CT 1", "CT 1 a"));
     }

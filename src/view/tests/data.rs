@@ -148,5 +148,9 @@ fn marker_types_keep_their_commas() {
         l.members_like("B_cell_naive"),
         [Box::from("CD79A"), "MS4A1".into()]
     );
-    assert_eq!(l.members_like("t cell"), [Box::<str>::from("CD3E")]);
+    assert_eq!(l.members_like("T cell"), [Box::<str>::from("CD3E")]);
+    assert!(
+        l.members_like("t cell").is_empty(),
+        "case is part of a type"
+    );
 }

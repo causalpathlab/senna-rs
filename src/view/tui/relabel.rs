@@ -182,6 +182,7 @@ impl App {
             input: if why { prefill.clone() } else { target },
             known: self.scene.known_labels(),
             why_prefill: prefill,
+            cycle: None,
         }));
     }
 
