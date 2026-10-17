@@ -8,12 +8,11 @@ use rand::SeedableRng;
 const K: usize = 2;
 const N: usize = 3;
 
-fn kinds() -> [Hidden; 4] {
+fn kinds() -> [Hidden; 3] {
     [
         Hidden::Bernoulli,
         Hidden::Binomial { trials: 2 },
         Hidden::Poisson { max: 3 },
-        Hidden::Gaussian,
     ]
 }
 
@@ -81,7 +80,7 @@ fn ln_choose(n: u32, k: u32) -> f64 {
     lf(n) - lf(k) - lf(n - k)
 }
 
-/// The hidden support with its log base measure (a grid for the Gaussian).
+/// The hidden support with its log base measure.
 fn support(hidden: Hidden) -> Vec<(f64, f64)> {
     match hidden {
         Hidden::Bernoulli => vec![(0.0, 0.0), (1.0, 0.0)],
@@ -96,15 +95,6 @@ fn support(hidden: Hidden) -> Vec<(f64, f64)> {
                 )
             })
             .collect(),
-        Hidden::Gaussian => {
-            let dh = 0.02;
-            (0..800)
-                .map(|i| {
-                    let h = -8.0 + dh * f64::from(i);
-                    (h, -0.5 * h * h + dh.ln())
-                })
-                .collect()
-        }
     }
 }
 
