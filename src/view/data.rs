@@ -245,9 +245,9 @@ impl Labels {
         labels
     }
 
-    /// Points whose level is `group`, matched loosely (case, and spaces, commas
-    /// and underscores, which annotation tools rewrite), over every level that
-    /// matches; sorted.
+    /// Points whose level is `group`, matched loosely (spaces, commas and
+    /// underscores, which annotation tools rewrite; case is kept), over
+    /// every level that matches; sorted.
     pub(crate) fn members_like(&self, group: &str) -> Vec<Box<str>> {
         let key = super::rounds::label_key(group);
         let hit: Vec<bool> = self

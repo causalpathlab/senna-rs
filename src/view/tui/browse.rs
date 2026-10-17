@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::tui::browse::{is_data, size_of, Browser, Header, Outcome, Wanted};
+use crate::view::rounds::label_key;
 use data_beans::utilities::name_matching::GeneIndex;
 use senna::run_manifest::RunManifest;
 use std::borrow::Cow;
@@ -241,8 +242,9 @@ fn describe_run(path: &Path) -> String {
     }
 }
 
-/// `path` as a marker panel: `gene<TAB>type` or `gene,type` lines, read as
-/// lupin reads them. `None` for a file that is not one.
+/// `path` as a marker panel: `gene<TAB>type` or `gene,type` lines, read by the
+/// shared two-column reader (counts are what the picker shows, and may differ
+/// from lupin on labels that hold commas). `None` for a file that is not one.
 fn read_panel(path: &Path, genes: Option<&GeneIndex>) -> Option<Panel> {
     let ext = path
         .extension()
@@ -255,37 +257,23 @@ fn read_panel(path: &Path, genes: Option<&GeneIndex>) -> Option<Panel> {
     if !meta.is_file() || meta.len() > PANEL_MAX_BYTES {
         return None;
     }
-    let lines = legume_numeric::matrix::common_io::read_lines(&path.to_string_lossy()).ok()?;
+    // The shared two-column rule, without its warnings: the picker reads every
+    // file in a folder.
+    let got = data_beans::aux::gene_sets::membership_rows(&path.to_string_lossy()).ok()?;
     let mut types = std::collections::HashSet::new();
     let mut seen = std::collections::HashSet::new();
     let mut found = 0;
     let mut numeric = true;
-    for line in &lines {
-        let line = line.trim();
-        let Some((gene, label)) = line.split_once('\t').or_else(|| line.split_once(',')) else {
-            continue;
-        };
-        let (gene, label) = (
-            gene.trim(),
-            label.split('\t').next().unwrap_or(label).trim(),
-        );
-        if gene.is_empty()
-            || label.is_empty()
-            || gene.starts_with('#')
-            || matches!(gene.to_lowercase().as_str(), "gene" | "symbol")
-        {
+    for (gene, label) in &got.rows {
+        // One type however its words are separated; a label of separators
+        // only is no type.
+        let key = label_key(label);
+        if key.is_empty() {
             continue;
         }
         numeric &= label.parse::<f64>().is_ok();
-        // One type however its words are separated, as lupin's `label_key`.
-        types.insert(
-            label
-                .split(|c: char| c.is_whitespace() || c == ',' || c == '_')
-                .filter(|w| !w.is_empty())
-                .collect::<Vec<_>>()
-                .join("_"),
-        );
-        if seen.insert(gene.to_string()) && genes.is_some_and(|g| g.match_gene(gene).is_some()) {
+        types.insert(key);
+        if seen.insert(gene.clone()) && genes.is_some_and(|g| g.match_gene(gene).is_some()) {
             found += 1;
         }
     }
@@ -346,6 +334,21 @@ mod tests {
 
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    #[test]
+    fn a_panel_is_read_by_the_shared_rule_and_types_keep_their_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        // A quoted label keeps its comma; case makes two types; a label of
+        // separators only is no type and its gene no marker.
+        write(
+            d,
+            "p.csv",
+            "gene,type\nGENE1,\"CT1, a\"\nGENE2,CT1_a\nGENE3,ct2\nGENE4,CT2\nGENE5, _ \n",
+        );
+        let p = read_panel(&d.join("p.csv"), None).unwrap();
+        assert_eq!((p.types, p.genes), (3, 4));
     }
 
     #[test]
