@@ -245,6 +245,26 @@ impl Labels {
         labels
     }
 
+    /// Points whose level is `group`, matched loosely (case, and spaces, commas
+    /// and underscores, which annotation tools rewrite), over every level that
+    /// matches; sorted.
+    pub(crate) fn members_like(&self, group: &str) -> Vec<Box<str>> {
+        let key = super::rounds::label_key(group);
+        let hit: Vec<bool> = self
+            .levels
+            .iter()
+            .map(|l| super::rounds::label_key(l) == key)
+            .collect();
+        let mut out: Vec<Box<str>> = self
+            .by_name
+            .iter()
+            .filter(|&(_, &g)| hit[g as usize])
+            .map(|(n, _)| n.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Clusters of `kind` from `(point, id)` pairs, named `C{id}` and
     /// ordered by id.
     pub(crate) fn clusters<I: IntoIterator<Item = (Box<str>, i64)>>(

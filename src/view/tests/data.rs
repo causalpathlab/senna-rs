@@ -128,3 +128,25 @@ fn argmax_reads_from_text_or_parquet() {
         );
     }
 }
+
+/// A tab-separated marker panel keeps a comma inside a cell type's name, and
+/// the marker lookup finds that type's genes under the annotation's spelling,
+/// across every spelling the panel uses for it.
+#[test]
+fn marker_types_keep_their_commas() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("markers.tsv");
+    std::fs::write(
+        &path,
+        "gene\tcell_type\nMS4A1\tB cell, naive\nCD79A\tB cell naive\nCD3E\tT cell\n",
+    )
+    .unwrap();
+    let l = read_marker_labels(&path).unwrap();
+    assert_eq!(l.by_name.len(), 3, "the header is no marker");
+    assert_eq!(level(&l, "MS4A1"), "B cell, naive");
+    assert_eq!(
+        l.members_like("B_cell_naive"),
+        [Box::from("CD79A"), "MS4A1".into()]
+    );
+    assert_eq!(l.members_like("t cell"), [Box::<str>::from("CD3E")]);
+}
