@@ -92,8 +92,8 @@ with weights factored through a feature embedding, `W = ρ αᵀ`: a cell reache
 the hidden units only through where its reads sit in `ρ`. Visible units are a
 multinomial per modality block at the cell's own depth; multiome inputs are
 detected as `senna bge` detects them, and a cell missing a modality is read
-exactly from the blocks it has. Hidden units are Bernoulli, binomial,
-truncated Poisson or Gaussian (`--hidden`). Fitted on pseudobulks by
+exactly from the blocks it has. Hidden units are Bernoulli, binomial
+or truncated Poisson (`--hidden`). Fitted on pseudobulks by
 persistent contrastive divergence (Adam on candle's backward of the
 free-energy gap), read out on every cell with no encoder. `senna docs rbm`
 has the model, the two phases of the gradient and the role of `--depth`.

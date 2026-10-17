@@ -14,7 +14,7 @@ senna rbm counts.zarr -o out --freeze-feature-embedding prior_run
 ## The model
 
 A cell's reads `v` are the visible units: one multinomial per modality block
-`m`, at the cell's own depth `N_m`. The hidden units `h` are one of four kinds
+`m`, at the cell's own depth `N_m`. The hidden units `h` are one of three kinds
 (`--hidden`):
 
 | kind | support | log-partition `A(a)` | `E[h | a]` |
@@ -22,7 +22,6 @@ A cell's reads `v` are the visible units: one multinomial per modality block
 | bernoulli | {0, 1} | softplus(a) | σ(a) |
 | binomial | {0..n} (`--trials`) | n softplus(a) | n σ(a) |
 | poisson | {0..M} (`--max-count`) | log Σ_{h≤M} e^{a h}/h! | its mean |
-| gaussian | ℝ, unit variance | a²/2 | a |
 
 The energy, with `s_f = D_m / N_m` on block `m`'s features (a cell is read per
 unit depth against the training depth `D`):
@@ -84,8 +83,7 @@ Boltzmann Machines* (2010), where it applies:
 - **Distributed codes need every unit in use.** `--sparsity-target p`
   (default 0.1) and `--sparsity-cost` hold a running estimate of every unit's
   mean activation near `p` by a cross-entropy penalty, so no unit dies or
-  saturates and a cell is a combination of units. Not applied to Gaussian
-  units.
+  saturates and a cell is a combination of units.
 - **Many units.** `-t` defaults to 64.
 - **Weight decay on weights, not biases:** an L2 on the rows of `ρ` (or the
   module vectors) and of `α`, per row so its weight means the same at any
@@ -122,9 +120,8 @@ stalls with several cell states sharing one code, or diverges. Cells are read
 against the same `D` (`s = D / N`), so a cell's latent does not depend on its
 depth, and larger `D` gives sharper posteriors.
 
-Count-type hidden units (binomial, poisson) are the most sensitive to the
-learning rate; lower `--learning-rate` if the log shows the free-energy gap
-swinging widely.
+Lower `--learning-rate` if the log shows the free-energy gap swinging
+widely, most often with binomial or poisson units.
 
 ## Starting point
 

@@ -303,11 +303,6 @@ pub fn fit(
     };
     let (heldout_x, probe_x) = (pick(&heldout)?, pick(&probe)?);
     let unit_scale = hidden.unit_scale();
-    if cfg.sparsity_cost > 0.0 && unit_scale.is_none() {
-        log::warn!(
-            "rbm: Gaussian hidden units have no activation scale; the sparsity target is off"
-        );
-    }
     let mut q = Tensor::full(cfg.sparsity_target as f32, (1, k), dev)?;
 
     let bar = crate::logging::new_progress_bar(cfg.epochs as u64).with_message("rbm");
@@ -345,10 +340,10 @@ pub fn fit(
                 gap = (gap + loss.detach())?;
                 loss = (loss
                     + weights.penalty(cfg.embedding_l2, cfg.module_balance, cfg.module_ridge)?)?;
-                if let (Some(scale), true) = (unit_scale, cfg.sparsity_cost > 0.0) {
+                if cfg.sparsity_cost > 0.0 {
                     // Cross-entropy of the target against the running estimate,
                     // the current minibatch's share live (Hinton's recipe).
-                    let now = (mean_batch.mean_keepdim(0)? / scale)?;
+                    let now = (mean_batch.mean_keepdim(0)? / unit_scale)?;
                     let est = ((q.detach() * SPARSITY_DECAY)? + (now * (1.0 - SPARSITY_DECAY))?)?
                         .clamp(1e-6, 1.0 - 1e-6)?;
                     let p = cfg.sparsity_target;
@@ -403,7 +398,7 @@ pub fn fit(
             (Some(h), Some(t)) => per_read(h)? - per_read(t)?,
             _ => f32::NAN,
         };
-        let act = (now.posterior_mean(&finest_x)? / unit_scale.unwrap_or(1.0))?;
+        let act = (now.posterior_mean(&finest_x)? / unit_scale)?;
         let sd: Vec<f32> = act
             .broadcast_sub(&act.mean_keepdim(0)?)?
             .sqr()?

@@ -516,7 +516,7 @@ enum Commands {
                       a multinomial per modality block at the cell's own depth; multiome\n\
                       inputs are detected as `senna bge` detects them, and a cell missing a\n\
                       modality is read from the blocks it has. Hidden units are Bernoulli,\n\
-                      binomial, truncated Poisson or Gaussian. The machine is fitted on\n\
+                      binomial or truncated Poisson. The machine is fitted on\n\
                       pseudobulks by persistent contrastive divergence (Adam on the\n\
                       backward of the free-energy gap) and read out on every cell exactly.\n\
                       Writes {out}.latent, pb_latent, cell_score, feature_embedding,\n\
