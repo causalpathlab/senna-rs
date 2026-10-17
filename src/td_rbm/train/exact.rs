@@ -135,6 +135,8 @@ impl Phase<'_> {
                     reads += chunk.len() as f64;
                 }
             }
+            let per_read = nll / reads.max(1.0);
+            bar.set_message(format!("td-rbm {label} nll={per_read:.4}"));
             if epoch % 10 == 0 || epoch + 1 == epochs {
                 let used: Vec<String> = self
                     .counts
@@ -145,7 +147,7 @@ impl Phase<'_> {
                     .collect();
                 info!(
                     "td-rbm {label} epoch {epoch}: negative log-likelihood per read {:.5}; lineages (cells) {}",
-                    nll / reads.max(1.0),
+                    per_read,
                     used.join(" ")
                 );
             }

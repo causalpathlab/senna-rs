@@ -178,6 +178,9 @@ pub enum State {
     Stopped,
 }
 
+/// Steps kept in a job's trend, at most drawn in its sparkline.
+pub const TREND: usize = 64;
+
 /// What the screen reads while the queue runs.
 #[derive(Default)]
 pub struct Shared {
@@ -190,6 +193,10 @@ pub struct Shared {
     pub last: Vec<String>,
     /// Where each job's progress bar stands, while one is drawn.
     pub progress: Vec<Option<Progress>>,
+    /// The score of each epoch a job's bar has shown, the newest last.
+    pub trend: Vec<Vec<f64>>,
+    /// The bar step each job's newest trend entry belongs to.
+    pub trend_pos: Vec<u64>,
     pub finished: bool,
     /// What the `mung clones` step waiting for [`Queue::answer`] found.
     pub asking: Option<Told>,
@@ -217,6 +224,8 @@ impl Queue {
             states: vec![State::Waiting; jobs.len()],
             last: vec![String::new(); jobs.len()],
             progress: vec![None; jobs.len()],
+            trend: vec![Vec::new(); jobs.len()],
+            trend_pos: vec![0; jobs.len()],
             ..Shared::default()
         }));
         let (answers, answered) = std::sync::mpsc::channel();
@@ -477,6 +486,30 @@ fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper)
         Said::Line(line) => say(s, i, line),
         Said::Progress(p) => {
             if let Ok(mut s) = s.lock() {
+                // A new bar (none before, or it restarted or changed length)
+                // starts a new trend: its scores are not on the last one's scale.
+                let new_bar = s.progress[i]
+                    .as_ref()
+                    .is_none_or(|q| p.pos < q.pos || p.len != q.len);
+                if new_bar {
+                    s.trend[i].clear();
+                }
+                if let Some(v) = p.score() {
+                    // One score per step: a later frame of the same step is
+                    // the step's own score, replacing the one that lagged.
+                    let st = &mut *s;
+                    let t = &mut st.trend[i];
+                    match t.last_mut() {
+                        Some(last) if st.trend_pos[i] == p.pos => *last = v,
+                        _ => {
+                            if t.len() >= TREND {
+                                t.remove(0);
+                            }
+                            t.push(v);
+                            st.trend_pos[i] = p.pos;
+                        }
+                    }
+                }
                 s.progress[i] = Some(p);
             }
         }
@@ -484,6 +517,7 @@ fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper)
     let ran = run_one(command, stopper, each);
     if let Ok(mut s) = s.lock() {
         s.progress[i] = None;
+        s.trend[i].clear();
     }
     match ran {
         Ok(()) => State::Done,

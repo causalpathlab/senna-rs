@@ -1210,3 +1210,15 @@ fn fits_on_cuda_take_the_gpus_in_turn() {
         1
     );
 }
+
+#[test]
+fn a_trend_is_drawn_over_its_own_range() {
+    use super::draw::spark;
+    assert_eq!(spark(&[1.0], 9), "");
+    assert_eq!(spark(&[3.0, 3.0], 9), "▁▁");
+    assert_eq!(spark(&[0.0, 0.5, 1.0], 9), "▁▅█");
+    let long: Vec<f64> = (0..100).map(f64::from).collect();
+    assert_eq!(spark(&long, 10).chars().count(), 10);
+    assert_eq!(spark(&long, 500).chars().count(), super::jobs::TREND);
+    assert_eq!(spark(&long, 1), "");
+}

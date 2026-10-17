@@ -1,7 +1,7 @@
 //! Drawing `senna run`: a tab line, the screen, a message and the keys.
 //! Same page and popups as `senna view`.
 
-use super::jobs::{State, Tool, CLONES_FLAG};
+use super::jobs::{State, Tool, CLONES_FLAG, TREND};
 use super::{batches, App, Batch, Kind, Screen, Target};
 use crate::tui::child::Progress;
 use crate::tui::style::{
@@ -13,20 +13,43 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 /// A progress bar `width` cells wide with its count and what it counts;
-/// a spinner, with no count, as what it is doing.
-fn gauge(p: &Progress, width: usize) -> String {
+/// a spinner, with no count, as what it is doing. The trend is drawn in
+/// what is left of `room` cells.
+fn gauge(p: &Progress, width: usize, trend: &[f64], room: usize) -> String {
     if p.len == 0 {
         return format!("… {}", p.what);
     }
     let filled = (width as u64 * p.pos.min(p.len) / p.len) as usize;
-    format!(
+    let bar = format!(
         "{}{} {}/{} {}",
         "█".repeat(filled),
         "░".repeat(width - filled),
         p.pos,
         p.len,
         p.what
-    )
+    );
+    match spark(trend, room.saturating_sub(bar.chars().count() + 2)) {
+        s if s.is_empty() => bar,
+        s => format!("{bar}  {s}"),
+    }
+}
+
+/// The last `n` (at most [`TREND`]) scores as blocks, lowest to highest
+/// over their own range; nothing until there are two.
+pub(super) fn spark(v: &[f64], n: usize) -> String {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let v = &v[v.len().saturating_sub(n.min(TREND))..];
+    if v.len() < 2 {
+        return String::new();
+    }
+    let lo = v.iter().copied().fold(f64::INFINITY, f64::min);
+    let range = v.iter().copied().fold(f64::NEG_INFINITY, f64::max) - lo;
+    v.iter()
+        .map(|&x| {
+            let r = if range > 0.0 { (x - lo) / range } else { 0.0 };
+            BLOCKS[((r * 7.0).round() as usize).min(7)]
+        })
+        .collect()
 }
 
 fn rule() -> Style {
@@ -749,7 +772,7 @@ impl App {
         let rows = usize::from(area.height).saturating_sub(q.jobs.len() + 3);
         self.log_rows.set(rows);
         // Copied out, so the worker writing the log is not held up.
-        let (states, last, progress, finished, log, top) = {
+        let (states, last, progress, trend, finished, log, top) = {
             let Ok(s) = q.shared.lock() else { return };
             let end = s.dropped + s.log.len();
             // Followed to its end, or from the line scrolled to.
@@ -768,6 +791,7 @@ impl App {
                 s.states.clone(),
                 s.last.clone(),
                 s.progress.clone(),
+                s.trend.clone(),
                 s.finished,
                 log,
                 (top, end, at_end),
@@ -797,7 +821,14 @@ impl App {
             }
         };
         let mut lines = vec![Line::from(Span::styled(head, bold())), Line::from("")];
-        for (((j, state), last), progress) in q.jobs.iter().zip(&states).zip(&last).zip(&progress) {
+        for ((((j, state), last), progress), trend) in q
+            .jobs
+            .iter()
+            .zip(&states)
+            .zip(&last)
+            .zip(&progress)
+            .zip(&trend)
+        {
             let name = format!(
                 " {:<13} {:<24} ",
                 j.method,
@@ -806,7 +837,10 @@ impl App {
             let (said, style) = match state {
                 State::Waiting => ("waiting".to_string(), hint()),
                 State::Running => match progress {
-                    Some(p) => (gauge(p, 24), bold()),
+                    Some(p) => (
+                        gauge(p, 24, trend, w.saturating_sub(name.chars().count())),
+                        bold(),
+                    ),
                     None => (format!("running  {last}"), bold()),
                 },
                 State::Done => ("done".to_string(), Style::default()),

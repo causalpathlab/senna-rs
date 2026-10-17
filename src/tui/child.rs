@@ -106,6 +106,18 @@ pub(crate) struct Progress {
     pub what: String,
 }
 
+impl Progress {
+    /// The score the bar's message carries: the first finite `key=number`
+    /// word, as in `rbm gap=0.412 recon=0.3` (a bare number, such as one in
+    /// a label, is not a score). None while the message has none.
+    pub fn score(&self) -> Option<f64> {
+        self.what.split_whitespace().find_map(|w| {
+            let (_, v) = w.split_once('=')?;
+            v.parse::<f64>().ok().filter(|v| v.is_finite())
+        })
+    }
+}
+
 /// The columns a child's terminal has: wide enough that a bar and its
 /// label are not cut.
 #[cfg(unix)]
