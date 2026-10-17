@@ -187,7 +187,8 @@ pub struct FneArgs {
         help = "Membership file(s), `type=path`: gene <TAB> label → gene:<type> edges (friend)",
         long_help = "Membership / affiliation files, `type=path`, comma-separated or repeated,\n\
                      e.g. `cell_type=markers.tsv` or `cell_line=essentials.tsv`.\n\
-                     Every row is `gene <TAB> label`, tab or comma delimited;\n\
+                     Every row is `gene <TAB> label` (commas kept in the label),\n\
+                     or `gene,label` on a line with no tab;\n\
                      a header and `#` rows are skipped.\n\
                      The labels become nodes of the given type\n\
                      and the rows the relation `gene:<type>/<file stem>`.\n\

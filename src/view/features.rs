@@ -159,24 +159,10 @@ impl Scene {
         Some(&self.data.labels[self.label_index(LabelKind::Markers)?])
     }
 
-    /// Marker features of `group`, matched loosely (case, and spaces, commas
-    /// and underscores, which annotation tools rewrite).
+    /// Marker features of `group`, matched loosely ([`data::Labels::members_like`]).
     pub(super) fn marker_features(&self, group: &str) -> Vec<Box<str>> {
-        let norm = rounds::label_key;
-        let Some(m) = self.markers() else {
-            return Vec::new();
-        };
-        let Some(id) = m.levels.iter().position(|l| norm(l) == norm(group)) else {
-            return Vec::new();
-        };
-        let mut out: Vec<Box<str>> = m
-            .by_name
-            .iter()
-            .filter(|&(_, &g)| g as usize == id)
-            .map(|(n, _)| n.clone())
-            .collect();
-        out.sort();
-        out
+        self.markers()
+            .map_or_else(Vec::new, |m| m.members_like(group))
     }
 
     /// Rank features for the view on screen: what distinguishes the focused
