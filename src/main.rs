@@ -850,7 +850,7 @@ enum Commands {
                       labels as text) and exits.\n\
                       \n\
                       {}",
-            session_help(&[("Started again with nothing named, it offers", "`senna view` with no -f offers")])
+            session_help(None, "`senna view` with no -f")
         )
     )]
     View(view::ViewArgs),
@@ -876,10 +876,7 @@ enum Commands {
                       When the fits finish, `v` opens them in `senna view`.\n\
                       \n\
                       {}",
-            session_help(&[
-                ("its work goes on", "the fits go on"),
-                ("Started again with nothing named, it offers", "`senna run` with no folder offers"),
-            ])
+            session_help(Some("the fits go on"), "`senna run` with no folder")
         )
     )]
     Run(run::RunArgs),
@@ -887,14 +884,17 @@ enum Commands {
     #[cfg(feature = "view")]
     #[command(
         about = "Return to a detached `senna run` or `senna view`",
-        long_about = senna_help(
-            &legume_tui::cli::about(tui::TOOL.name()).attach,
-            &[
-                ("a detached `senna` session", "a detached `senna run` or `senna view`"),
-                ("ctrl+alt+d unless LEGUME_TUI_DETACH_KEY sets another", "ctrl+alt+d unless LEGUME_TUI_DETACH_KEY sets another; `?` shows it"),
-            ],
-            " --no-detach on either starts it plain.",
-        )
+        long_about = "Return to a detached `senna run` or `senna view` in this terminal.\n\
+                      \n\
+                      A session keeps running when the terminal goes (a dropped connection,\n\
+                      or the detach key: ctrl+alt+d unless LEGUME_TUI_DETACH_KEY sets\n\
+                      another; `?` shows it) and is picked up again here, or by starting it\n\
+                      again with nothing named. The first detach by the key asks for a label\n\
+                      (Enter keeps the id); `senna rename` or `r` in the picker changes it\n\
+                      later. A session is found by its label or its id; with one live the\n\
+                      name is optional, with several a picker opens. `senna sessions` lists\n\
+                      them. Inside one, ctrl+alt+s (or LEGUME_TUI_SWITCH_KEY) switches to\n\
+                      another. --no-detach on either starts it plain."
     )]
     Attach(legume_tui::cli::AttachArgs),
 
@@ -922,67 +922,20 @@ enum Commands {
 }
 
 /// The session paragraph of `senna run`'s and `senna view`'s long help:
-/// legume-tui's shared text with `edits` made, its subcommands named as
-/// senna's, and where `?` shows the keys.
+/// what goes on when the connection drops (the fits, or its work when
+/// None), who offers the live sessions to return to, and where `?` shows
+/// the keys.
 #[cfg(feature = "view")]
-fn session_help(edits: &[(&str, &str)]) -> String {
-    let mut edits = edits.to_vec();
-    edits.push(("; `attach`, `sessions`", "; `senna attach`, `sessions`"));
-    senna_help(
-        legume_tui::cli::SESSION_HELP,
-        &edits,
-        " `?` shows the keys in effect.",
+fn session_help(what_goes_on: Option<&str>, resume_hint: &str) -> String {
+    legume_tui::cli::session_help(
+        &tui::TOOL,
+        legume_tui::cli::SessionHelp {
+            what_goes_on,
+            resume_hint,
+            more: Some("`?` shows the keys in effect."),
+            ..Default::default()
+        },
     )
-}
-
-/// `text`, a help of legume-tui's, as senna says it: each `(from, to)` of
-/// `edits` made and `tail` added to the last paragraph, wrapped again.
-#[cfg(feature = "view")]
-fn senna_help(text: &str, edits: &[(&str, &str)], tail: &str) -> String {
-    let paragraphs: Vec<String> = text
-        .split("\n\n")
-        .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
-        .collect();
-    let mut text = paragraphs.join("\n\n");
-    for (from, to) in edits {
-        text = text.replace(from, to);
-    }
-    text.push_str(tail);
-    text.split("\n\n")
-        .map(wrapped)
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-/// `paragraph` broken into lines of at most 70 columns, between words and
-/// never inside a `quoted command`.
-#[cfg(feature = "view")]
-fn wrapped(paragraph: &str) -> String {
-    let mut units: Vec<String> = Vec::new();
-    for word in paragraph.split(' ') {
-        match units.last_mut() {
-            Some(open) if open.matches('`').count() % 2 == 1 => {
-                open.push(' ');
-                open.push_str(word);
-            }
-            _ => units.push(word.to_string()),
-        }
-    }
-    let mut out = String::new();
-    let mut width = 0;
-    for unit in units {
-        let n = unit.chars().count();
-        if width > 0 && width + 1 + n > 70 {
-            out.push('\n');
-            width = 0;
-        } else if width > 0 {
-            out.push(' ');
-            width += 1;
-        }
-        out.push_str(&unit);
-        width += n;
-    }
-    out
 }
 
 #[derive(Subcommand, Debug)]

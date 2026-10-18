@@ -293,8 +293,7 @@ fn read_panel(path: &Path, genes: Option<&GeneIndex>) -> Option<Panel> {
 pub fn pick_run(session: &legume_tui::Session) -> anyhow::Result<Option<PathBuf>> {
     let here = std::env::current_dir()?;
     let mut b = Browser::open(here, Runs, None);
-    let level = log::max_level();
-    log::set_max_level(log::LevelFilter::Off);
+    let quiet = legume_tui::logs::quiet();
     let mut terminal = session.terminal()?;
     let picked = (|| loop {
         if session.stop_requested() {
@@ -329,7 +328,7 @@ pub fn pick_run(session: &legume_tui::Session) -> anyhow::Result<Option<PathBuf>
         }
     })();
     session.restore();
-    log::set_max_level(level);
+    drop(quiet);
     picked
 }
 

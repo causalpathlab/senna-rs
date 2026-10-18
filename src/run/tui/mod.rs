@@ -251,8 +251,7 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
     let start = args.dir.clone().unwrap_or_else(|| PathBuf::from("."));
     let mung = describe_mung(&mung_program());
     let mut app = App::new(cli, mung, start)?;
-    let level = log::max_level();
-    log::set_max_level(log::LevelFilter::Off);
+    let quiet = legume_tui::logs::quiet();
     // The mouse's buttons and wheel reported, never its movement, so a
     // moving pointer wakes nothing; shift+drag still selects text in most
     // terminals.
@@ -300,7 +299,7 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
         q.stop_within(STOP_GRACE);
     }
     session.restore();
-    log::set_max_level(level);
+    drop(quiet);
     result?;
     for line in app.summary() {
         println!("{line}");

@@ -100,14 +100,15 @@ impl Deck {
     /// Drive the views on `session`'s terminal until quit, or until `senna
     /// kill` asks them to stop. While detached nothing is drawn and the
     /// views' own work (lupin, senna, files changing) goes on at a slow
-    /// poll; on attach the terminal is asked again (the protocol `forced`
-    /// where one was named) and the pictures made again as it needs
+    /// poll; on attach the terminal is asked again (the protocol
+    /// `graphics` names, where it names one) and the pictures made again
+    /// as it needs
     /// ([`Self::repick`]).
     pub(super) fn run(
         mut self,
         terminal: &mut DefaultTerminal,
         session: &legume_tui::Session,
-        forced: Option<ProtocolType>,
+        graphics: Graphics,
     ) -> anyhow::Result<()> {
         if self.apps.len() > 1 {
             self.apps[0].message = Some(format!(
@@ -148,7 +149,12 @@ impl Deck {
             let mut repick = None;
             let picker = &self.picker;
             let event = session.poll_with(terminal, self.wait(), || {
-                repick = Some(legume_tui::graphics::reprobe(session, picker, forced));
+                repick = Some(legume_tui::graphics::reprobe(
+                    session,
+                    picker,
+                    graphics,
+                    Fallback::Probe,
+                ));
                 Ok(())
             })?;
             if let Some(repick) = repick {
@@ -179,7 +185,6 @@ impl Deck {
     /// way the tiles and thumbnails are made afresh at the next round.
     fn repick(&mut self, repick: Repick) {
         match repick {
-            Repick::Same => return,
             Repick::Resend => self.apps.iter_mut().for_each(App::resend),
             Repick::Changed(picker) => {
                 self.cell = cell(&picker);
@@ -188,6 +193,8 @@ impl Deck {
                 }
                 self.picker = picker;
             }
+            // Same, or another word the crate may add: kept as they are.
+            _ => return,
         }
         self.tiles.clear();
         self.thumbs.clear();

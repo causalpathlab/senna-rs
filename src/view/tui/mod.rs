@@ -32,6 +32,7 @@ use super::{Axis, Graphics, Pick, Scene};
 use crate::tui::style::{first_row, hint, page, popup, rgb, selected, toast, At};
 use crate::tui::Pending;
 use image::DynamicImage;
+use legume_tui::graphics::Fallback;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -61,16 +62,14 @@ pub fn run(
 ) -> anyhow::Result<()> {
     // Log lines written to the terminal would land over the screen: none
     // while it is ours. What matters reaches the status line instead.
-    let level = log::max_level();
-    log::set_max_level(log::LevelFilter::Off);
+    let quiet = legume_tui::logs::quiet();
     let mut terminal = session.terminal()?;
     let result = (|| {
         // The terminal is fresh: a repaint asked for by now is this one.
         // It is asked before the mouse is on, so no click lands amid its
         // answer; the session turns the mouse on again after every attach.
         session.take_repaint();
-        let forced = forced(graphics);
-        let picker = legume_tui::graphics::probe_as(session, forced);
+        let picker = legume_tui::graphics::pick(session, graphics, Fallback::Probe);
         session.set_modes(legume_tui::Modes {
             mouse: legume_tui::Mouse::Full,
             ..Default::default()
@@ -82,25 +81,12 @@ pub fn run(
         grid::Deck::new(apps, picker, crate::view::saved::Gallery::here()).run(
             &mut terminal,
             session,
-            forced,
+            graphics,
         )
     })();
     session.restore();
-    log::set_max_level(level);
+    drop(quiet);
     result
-}
-
-/// The image protocol `--graphics` names; None to ask the terminal,
-/// which is asked again after every attach since that terminal may be
-/// another.
-fn forced(graphics: Graphics) -> Option<ProtocolType> {
-    match graphics {
-        Graphics::Auto => None,
-        Graphics::Kitty => Some(ProtocolType::Kitty),
-        Graphics::Sixel => Some(ProtocolType::Sixel),
-        Graphics::Iterm2 => Some(ProtocolType::Iterm2),
-        Graphics::Blocks => Some(ProtocolType::Halfblocks),
-    }
 }
 
 /// Pixels per terminal cell under `picker`.
@@ -843,15 +829,16 @@ pub(super) mod attach_tests {
     }
 
     #[test]
-    fn a_named_protocol_is_forced_and_blocks_never_ask() {
-        assert_eq!(forced(Graphics::Auto), None);
-        assert_eq!(forced(Graphics::Sixel), Some(ProtocolType::Sixel));
-        assert_eq!(forced(Graphics::Kitty), Some(ProtocolType::Kitty));
-        assert_eq!(forced(Graphics::Iterm2), Some(ProtocolType::Iterm2));
-        // Block characters are taken without a word to the terminal.
+    fn a_named_protocol_is_taken_and_blocks_never_ask() {
+        // Block characters are taken without a word to the terminal; a
+        // protocol named, as it is.
         let session = crate::tui::plain_session();
-        let p = legume_tui::graphics::probe_as(&session, forced(Graphics::Blocks));
+        let p = legume_tui::graphics::pick(&session, Graphics::Blocks, Fallback::Probe);
         assert_eq!(p.protocol_type(), ProtocolType::Halfblocks);
+        // Fallback::Env: a named protocol is taken either way, and the
+        // terminal running the tests is not asked.
+        let p = legume_tui::graphics::pick(&session, Graphics::Sixel, Fallback::Env);
+        assert_eq!(p.protocol_type(), ProtocolType::Sixel);
     }
 
     #[test]

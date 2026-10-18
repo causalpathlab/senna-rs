@@ -33,17 +33,8 @@ use render::{draw_labels, group_medians, Label, Paint, Tier, Viewport};
 use senna::embed_common::*;
 use text::Font;
 
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-#[clap(rename_all = "kebab-case")]
-pub enum Graphics {
-    /// Detect the terminal's image protocol; block characters if none.
-    Auto,
-    Kitty,
-    Sixel,
-    Iterm2,
-    /// Coloured half-block characters: works everywhere, lowest resolution.
-    Blocks,
-}
+/// `--graphics`: the image protocol named, else the terminal asked.
+pub use legume_tui::graphics::Graphics;
 
 #[derive(Args, Debug)]
 pub struct ViewArgs {
