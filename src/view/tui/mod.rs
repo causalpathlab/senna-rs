@@ -33,16 +33,14 @@ use crate::tui::style::{first_row, hint, page, popup, rgb, selected, toast, At};
 use crate::tui::Pending;
 use image::DynamicImage;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
-use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::DefaultTerminal;
-use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
@@ -54,9 +52,10 @@ fn here(prefix: &str) -> String {
     files::name(std::path::Path::new(prefix))
 }
 
-/// Open one session per run and hand the terminal to them.
+/// Open one view per run and hand them the terminal of `session`.
 pub fn run(
-    sessions: Vec<(Scene, std::path::PathBuf)>,
+    session: &legume_tui::Session,
+    views: Vec<(Scene, std::path::PathBuf)>,
     graphics: Graphics,
     lupin: String,
 ) -> anyhow::Result<()> {
@@ -64,37 +63,61 @@ pub fn run(
     // while it is ours. What matters reaches the status line instead.
     let level = log::max_level();
     log::set_max_level(log::LevelFilter::Off);
-    let mut terminal = ratatui::init();
+    let mut terminal = session.terminal()?;
     let result = (|| {
-        // A terminal that never answers must not stall startup; block
-        // characters need no query at all.
-        let mut picker = if graphics == Graphics::Blocks {
-            Picker::halfblocks()
-        } else {
-            let options = QueryStdioOptions {
-                timeout: Duration::from_millis(500),
-                ..Default::default()
-            };
-            Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks())
-        };
-        match graphics {
-            Graphics::Auto => {}
-            Graphics::Kitty => picker.set_protocol_type(ProtocolType::Kitty),
-            Graphics::Sixel => picker.set_protocol_type(ProtocolType::Sixel),
-            Graphics::Iterm2 => picker.set_protocol_type(ProtocolType::Iterm2),
-            Graphics::Blocks => picker.set_protocol_type(ProtocolType::Halfblocks),
-        }
-        execute!(std::io::stdout(), EnableMouseCapture)?;
-        let apps = sessions
+        // The terminal is fresh: a repaint asked for by now is this one.
+        // It is asked before the mouse is on, so no click lands amid its
+        // answer; the session turns the mouse on again after every attach.
+        session.take_repaint();
+        let forced = forced(graphics);
+        let picker = legume_tui::graphics::probe_as(session, forced);
+        session.set_modes(legume_tui::Modes {
+            mouse: legume_tui::Mouse::Full,
+            ..Default::default()
+        })?;
+        let apps = views
             .into_iter()
             .map(|(scene, from)| App::new(scene, picker.clone(), from, lupin.clone()))
             .collect();
-        grid::Deck::new(apps, picker, crate::view::saved::Gallery::here()).run(&mut terminal)
+        grid::Deck::new(apps, picker, crate::view::saved::Gallery::here()).run(
+            &mut terminal,
+            session,
+            forced,
+        )
     })();
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
-    ratatui::restore();
+    session.restore();
     log::set_max_level(level);
     result
+}
+
+/// The image protocol `--graphics` names; None to ask the terminal,
+/// which is asked again after every attach since that terminal may be
+/// another.
+fn forced(graphics: Graphics) -> Option<ProtocolType> {
+    match graphics {
+        Graphics::Auto => None,
+        Graphics::Kitty => Some(ProtocolType::Kitty),
+        Graphics::Sixel => Some(ProtocolType::Sixel),
+        Graphics::Iterm2 => Some(ProtocolType::Iterm2),
+        Graphics::Blocks => Some(ProtocolType::Halfblocks),
+    }
+}
+
+/// Pixels per terminal cell under `picker`.
+fn cell(picker: &Picker) -> (f32, f32) {
+    let f = picker.font_size();
+    (f32::from(f.width.max(1)), f32::from(f.height.max(1)))
+}
+
+/// The thinnest line drawn on the map under `picker`: one pixel of the
+/// screen when it shows the frame in coarser pixels (half blocks), as a
+/// thinner line averages away.
+fn stroke_floor(picker: &Picker) -> f32 {
+    if picker.protocol_type() == ProtocolType::Halfblocks {
+        cell(picker).0
+    } else {
+        1.0
+    }
 }
 
 /// `img` ready to draw into `area`, scaled to fit it.
@@ -177,6 +200,9 @@ struct App {
     /// change of labels only redraws them.
     base: Option<(Viewport, Frame)>,
     proto: Option<Protocol>,
+    /// The picture is to be encoded again when next drawn: a terminal
+    /// like the last lost it.
+    resend: bool,
     message: Option<String>,
     /// The `?` page: up, how far it is scrolled, and its furthest scroll as
     /// last drawn.
@@ -225,14 +251,7 @@ struct App {
 
 impl App {
     fn new(scene: Scene, picker: Picker, from: std::path::PathBuf, lupin: String) -> Self {
-        let f = picker.font_size();
-        // Half blocks show a cell's frame pixels as one pixel across: a
-        // thinner line averages away.
-        let stroke_floor = if picker.protocol_type() == ProtocolType::Halfblocks {
-            f32::from(f.width.max(1))
-        } else {
-            1.0
-        };
+        let (cell, stroke_floor) = (cell(&picker), stroke_floor(&picker));
         // Opened on an older round: say where the newest work is.
         let newer = scene
             .data
@@ -262,7 +281,7 @@ impl App {
             left: Rect::default(),
             sidebar: true,
             scene,
-            cell: (f32::from(f.width.max(1)), f32::from(f.height.max(1))),
+            cell,
             stroke_floor,
             picker,
             map: Rect::default(),
@@ -270,6 +289,7 @@ impl App {
             job: None,
             base: None,
             proto: None,
+            resend: false,
             message: newer,
             help: false,
             help_scroll: 0,
@@ -280,6 +300,29 @@ impl App {
             zooming: None,
             quit: false,
         }
+    }
+
+    /// Take `picker` for the terminal attached now: the picture is made
+    /// again in its protocol and cells, the camera framing what it framed.
+    fn repick(&mut self, picker: Picker) {
+        self.cell = cell(&picker);
+        self.stroke_floor = stroke_floor(&picker);
+        self.picker = picker;
+        self.proto = None;
+        let (w, h) = self.map_px();
+        if let Some(vp) = self.vp.as_mut().filter(|_| w > 0 && h > 0) {
+            vp.scale *= w as f32 / vp.w.max(1) as f32;
+            vp.w = w;
+            vp.h = h;
+        }
+        self.restart();
+    }
+
+    /// Encode the picture again when next drawn ([`Self::advance`]), for a
+    /// terminal like the last that lost it.
+    fn resend(&mut self) {
+        self.proto = None;
+        self.resend = true;
     }
 
     /// Work that goes on whether or not this view is on screen: a zoom
@@ -531,6 +574,11 @@ impl App {
     /// Draw one chunk of the running job and turn the composite into an
     /// image. Returns whether a new image is ready.
     fn advance(&mut self) -> anyhow::Result<bool> {
+        if std::mem::take(&mut self.resend) {
+            // From the last finished frame, no point drawn again.
+            self.redecorate();
+            return Ok(true);
+        }
         let Some(job) = self.job.as_mut() else {
             return Ok(false);
         };
@@ -763,6 +811,80 @@ mod tests {
         app.info = None;
         let lines = app.side_lines().unwrap();
         assert!(lines[0].contains("features nearest"), "{lines:?}");
+    }
+}
+
+#[cfg(test)]
+pub(super) mod attach_tests {
+    use super::*;
+
+    /// The picker of a terminal that speaks kitty images in 8 × 16 cells.
+    pub(in crate::view) fn kitty() -> Picker {
+        #[allow(deprecated)]
+        let mut p = Picker::from_fontsize(ratatui_image::FontSize::new(8, 16));
+        p.set_protocol_type(ProtocolType::Kitty);
+        p
+    }
+
+    /// A view of the test scene, made for block characters.
+    pub(super) fn view() -> App {
+        App::new(
+            crate::view::tests::scene(),
+            Picker::halfblocks(),
+            "r.senna.json".into(),
+            "lupin".into(),
+        )
+    }
+
+    fn drawn(app: &mut App) {
+        while app.job.is_some() {
+            app.advance().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_named_protocol_is_forced_and_blocks_never_ask() {
+        assert_eq!(forced(Graphics::Auto), None);
+        assert_eq!(forced(Graphics::Sixel), Some(ProtocolType::Sixel));
+        assert_eq!(forced(Graphics::Kitty), Some(ProtocolType::Kitty));
+        assert_eq!(forced(Graphics::Iterm2), Some(ProtocolType::Iterm2));
+        // Block characters are taken without a word to the terminal.
+        let session = crate::tui::plain_session();
+        let p = legume_tui::graphics::probe_as(&session, forced(Graphics::Blocks));
+        assert_eq!(p.protocol_type(), ProtocolType::Halfblocks);
+    }
+
+    #[test]
+    fn half_blocks_draw_lines_a_screen_pixel_thick() {
+        assert_eq!(
+            stroke_floor(&Picker::halfblocks()),
+            cell(&Picker::halfblocks()).0
+        );
+        assert_eq!(cell(&kitty()), (8.0, 16.0));
+        assert_eq!(stroke_floor(&kitty()), 1.0);
+    }
+
+    #[test]
+    fn after_an_attach_the_picture_is_made_again_for_the_new_terminal() {
+        let mut app = view();
+        app.layout(Rect::new(0, 0, 100, 40), STATUS_LINES);
+        drawn(&mut app);
+        assert!(matches!(app.proto, Some(Protocol::Halfblocks(_))));
+        let before = app.vp.unwrap();
+
+        app.repick(kitty());
+        assert_eq!(app.cell, (8.0, 16.0));
+        assert_eq!(app.stroke_floor, 1.0, "a pixel is a pixel on kitty");
+        assert!(app.proto.is_none(), "the old picture is not drawn again");
+        assert!(app.job.is_some(), "a new one is under way");
+        // The camera frames what it framed, in the new cells' pixels.
+        let vp = app.vp.unwrap();
+        assert_eq!((vp.cx, vp.cy), (before.cx, before.cy));
+        assert_eq!(vp.w, usize::from(app.map.width) * 8);
+        let ratio = vp.w as f32 / before.w as f32;
+        assert!((vp.scale / before.scale - ratio).abs() < 1e-5);
+        drawn(&mut app);
+        assert!(matches!(app.proto, Some(Protocol::Kitty(_))));
     }
 }
 

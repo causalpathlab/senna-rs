@@ -197,6 +197,9 @@ pub struct ViewArgs {
         help = "Start coloured by a per-cell statistic of the counts shown (the extra file's, with --extra; `u` in the view)"
     )]
     pub cell_stat: Option<CellStat>,
+
+    #[command(flatten)]
+    pub session: legume_tui::cli::SessionArgs,
 }
 
 /// A per-cell statistic to start on.
@@ -519,12 +522,20 @@ fn pick_space(data: &Dataset, method: Option<&str>, space: Option<&str>) -> usiz
 }
 
 /// Run `senna` itself with `argv` on the way into the view, its progress
-/// showing before the view opens.
-fn run_senna(why: &str, argv: &[String]) -> anyhow::Result<()> {
+/// showing before the view opens. On the way to the screen it runs in
+/// `session`, so a `senna kill` meanwhile stops it and then the view.
+fn run_senna(
+    session: Option<&legume_tui::Session>,
+    why: &str,
+    argv: &[String],
+) -> anyhow::Result<()> {
     eprintln!("senna view: {why}; running `senna {}`", argv.join(" "));
-    let status = std::process::Command::new(std::env::current_exe()?)
-        .args(argv)
-        .status()?;
+    let mut senna = std::process::Command::new(std::env::current_exe()?);
+    senna.args(argv);
+    let status = match session {
+        Some(session) => session.run_child(&mut senna)?,
+        None => senna.status()?,
+    };
     anyhow::ensure!(
         status.success(),
         "`senna {}` failed; see its messages above",
@@ -537,8 +548,12 @@ fn run_senna(why: &str, argv: &[String]) -> anyhow::Result<()> {
 /// (not for fne, which has none), of the feature embedding, and clusters of
 /// each. Outputs go beside the manifest and are recorded in it, so this runs
 /// once. Only a missing cell layout is an error; the rest warn and the view
-/// opens without them.
-fn prepare_run(args: &ViewArgs, from: &str) -> anyhow::Result<()> {
+/// opens without them. Run in `session` on the way to the screen.
+fn prepare_run(
+    args: &ViewArgs,
+    from: &str,
+    session: Option<&legume_tui::Session>,
+) -> anyhow::Result<()> {
     use recompute::{Step, Target};
     use senna::run_manifest::RunManifest;
     let load = || RunManifest::load(std::path::Path::new(from));
@@ -563,7 +578,9 @@ fn prepare_run(args: &ViewArgs, from: &str) -> anyhow::Result<()> {
             Some(w) => m.layout.methods.get(w.as_ref()).is_none_or(no_cells),
             None => !here(&m.layout.cell_coords) && m.layout.methods.values().all(no_cells),
         };
-    let run = |step: Step, method: &str, why: String| run_senna(&why, &step.argv(&target, method));
+    let run = |step: Step, method: &str, why: String| {
+        run_senna(session, &why, &step.argv(&target, method))
+    };
     let warn = |r: anyhow::Result<()>| {
         if let Err(e) = r {
             log::warn!("view: {e}; opening without it");
@@ -608,14 +625,21 @@ fn prepare_run(args: &ViewArgs, from: &str) -> anyhow::Result<()> {
 }
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
-    use rayon::prelude::*;
-    let picked: Vec<Box<str>>;
-    let from: &[Box<str>] = if args.from.is_empty() {
+    // A PDF or --relabel prints and exits; the rest is on screen.
+    if args.pdf.is_some() || args.relabel {
         anyhow::ensure!(
-            args.pdf.is_none() && !args.relabel,
+            !args.from.is_empty(),
             "--pdf and --relabel need the run: pass -f <run>.senna.json"
         );
-        let Some(path) = tui::pick_run()? else {
+        return off_screen(args, &args.from);
+    }
+    // On screen, the session first. Hosted, this process only relays the
+    // terminal from here on, and the program the host starts reads the
+    // runs; with none named, live views are offered before a new one.
+    let session = crate::tui::TOOL.session("view", &args.session.options(!args.from.is_empty()))?;
+    let picked: Vec<Box<str>>;
+    let from: &[Box<str>] = if args.from.is_empty() {
+        let Some(path) = tui::pick_run(&session)? else {
             return Ok(());
         };
         picked = vec![crate::tui::shown(&path).into()];
@@ -623,6 +647,38 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     } else {
         &args.from
     };
+    let mut scenes = read_scenes(args, from, Some(&session))?;
+    start_charts(args, &mut scenes);
+    // Killed while the runs were read, after the browser took the kill as
+    // a stop: not opened only to close.
+    if session.stop_requested() {
+        return Ok(());
+    }
+    let views = scenes
+        .into_iter()
+        .zip(from)
+        .map(|(s, f)| (s, std::path::PathBuf::from(f.as_ref())))
+        .collect();
+    tui::run(
+        &session,
+        views,
+        args.graphics,
+        args.lupin
+            .as_deref()
+            .map(String::from)
+            .or_else(|| std::env::var("SENNA_LUPIN").ok())
+            .unwrap_or_else(|| "lupin".into()),
+    )
+}
+
+/// The runs `from` read into scenes, what the view needs computed first:
+/// in `session` on the way to the screen, plain for a PDF or --relabel.
+fn read_scenes(
+    args: &ViewArgs,
+    from: &[Box<str>],
+    session: Option<&legume_tui::Session>,
+) -> anyhow::Result<Vec<Scene>> {
+    use rayon::prelude::*;
     anyhow::ensure!(
         !(args.relabel && from.len() > 1),
         "--relabel reads one run; got {} manifests",
@@ -630,7 +686,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     );
     if !args.no_compute {
         for f in from {
-            prepare_run(args, f)?;
+            prepare_run(args, f, session)?;
         }
     }
     // Reading runs is independent work; the scenes are built in order.
@@ -645,17 +701,17 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         .colour_by
         .as_deref()
         .is_some_and(|c| c.eq_ignore_ascii_case("batch"));
-    let on_screen = args.pdf.is_none() && !args.relabel && !wants_batch;
+    let aside = session.is_some() && !wants_batch;
     let mut data = crate::tui::busy::during_inline(&what, || {
         from.par_iter()
             .map(|f| Dataset::load(f))
             .collect::<anyhow::Result<Vec<_>>>()
     })?;
-    if !on_screen {
+    if !aside {
         data.iter_mut().for_each(Dataset::with_batches);
     }
     let mut scenes: Vec<Scene> = data.into_iter().map(|d| Scene::new(d, args)).collect();
-    if on_screen {
+    if aside {
         // The screen does not wait for a slow read: it starts them all now
         // and does again what needed one once it answers.
         for scene in &mut scenes {
@@ -663,7 +719,21 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
             scene.start_loads();
         }
     }
+    Ok(scenes)
+}
 
+/// The chart `--chart` asks for, started in every scene.
+fn start_charts(args: &ViewArgs, scenes: &mut [Scene]) {
+    if let Some(kind) = args.chart {
+        for scene in scenes {
+            scene.start_chart(kind);
+        }
+    }
+}
+
+/// `--relabel` or `--pdf` on the runs `from`, no screen.
+fn off_screen(args: &ViewArgs, from: &[Box<str>]) -> anyhow::Result<()> {
+    let mut scenes = read_scenes(args, from, None)?;
     if args.relabel {
         let scene = &mut scenes[0];
         match scene.enter_review() {
@@ -677,11 +747,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         scene.leave_review();
         return Ok(());
     }
-    if let Some(kind) = args.chart {
-        for scene in &mut scenes {
-            scene.start_chart(kind);
-        }
-    }
+    start_charts(args, &mut scenes);
 
     if let Some(path) = &args.pdf {
         anyhow::ensure!(
@@ -725,23 +791,8 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
             args.dpi,
             scenes.len()
         );
-        return Ok(());
     }
-
-    let sessions = scenes
-        .into_iter()
-        .zip(from)
-        .map(|(s, f)| (s, std::path::PathBuf::from(f.as_ref())))
-        .collect();
-    tui::run(
-        sessions,
-        args.graphics,
-        args.lupin
-            .as_deref()
-            .map(String::from)
-            .or_else(|| std::env::var("SENNA_LUPIN").ok())
-            .unwrap_or_else(|| "lupin".into()),
-    )
+    Ok(())
 }
 
 #[cfg(test)]
@@ -825,6 +876,7 @@ mod tests {
             no_compute: true,
             extra: Vec::new(),
             cell_stat: None,
+            session: Default::default(),
         };
         Scene::new(data, &args)
     }

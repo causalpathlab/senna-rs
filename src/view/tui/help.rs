@@ -409,6 +409,18 @@ impl App {
             }
             body.push(Line::from(""));
         }
+        let keys = crate::tui::session_keys();
+        if !keys.is_empty() {
+            body.push(Line::from(Span::styled(" Session", bold)));
+            for (key, help) in keys {
+                body.extend(
+                    crate::tui::key_lines(3, &key, 15, &help, width)
+                        .into_iter()
+                        .map(Line::from),
+                );
+            }
+            body.push(Line::from(""));
+        }
         let (mut out, stands) = crate::tui::style::page_window(
             body,
             rows.saturating_sub(1).max(3),

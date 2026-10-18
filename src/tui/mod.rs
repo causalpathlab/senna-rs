@@ -12,6 +12,29 @@ use std::path::Path;
 /// Frames of the spinners the workspace draws.
 pub(crate) const SPINNER: [char; 8] = ['⠁', '⠂', '⠄', '⡀', '⢀', '⠠', '⠐', '⠈'];
 
+/// The tool `senna run` and `senna view` sessions belong to: they are
+/// named `senna-run-1`, `senna-view-2`, and `senna attach` finds them.
+pub(crate) const TOOL: legume_tui::Tool = legume_tui::Tool::new("senna");
+
+/// The detach and switch keys for a `?` page, each with what it does, in
+/// lower case as the page shows keys; none when the screen runs plain.
+pub(crate) fn session_keys() -> Vec<(String, String)> {
+    legume_tui::help_keys()
+        .into_iter()
+        .map(|(key, help)| (key.to_lowercase(), help))
+        .collect()
+}
+
+/// A session run plain by `--no-detach`, for tests.
+#[cfg(test)]
+pub(crate) fn plain_session() -> legume_tui::Session {
+    let opts = legume_tui::Options {
+        no_detach: true,
+        ..Default::default()
+    };
+    TOOL.session("test", &opts).unwrap()
+}
+
 /// The key that runs what a screen set up, in both front ends: ctrl+r,
 /// which every terminal passes on as it is.
 pub(crate) const RUN_KEY: &str = "ctrl+r";
@@ -339,6 +362,19 @@ mod loading_tests {
     fn a_panic_in_the_work_is_an_answer() {
         let l: Loading<u32> = Loading::new(|| panic!("boom"));
         assert!(l.get().as_ref().is_err_and(|e| e.contains("panic")));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_screen_is_always_attached_and_never_hosted() {
+        let session = plain_session();
+        assert!(!session.is_hosted() && !session.offers_keys());
+        assert!(session.attached() && !session.stop_requested());
+        assert_eq!(session.name(), None);
     }
 }
 

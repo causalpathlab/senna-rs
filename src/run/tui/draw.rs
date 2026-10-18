@@ -170,22 +170,22 @@ impl App {
     /// keys in a column of their own, scrolled to fit `rows`.
     fn help_lines(&self, rows: usize, width: usize) -> Vec<Line<'static>> {
         let run = crate::tui::RUN_KEY;
-        let sections: Vec<(&str, Vec<(String, &str)>)> = vec![
+        let session = crate::tui::session_keys();
+        let mut everywhere: Vec<(String, &str)> = vec![
             (
-                "Everywhere",
-                vec![
-                    (
-                        "tab  shift+tab  1-4".into(),
-                        "next, previous or numbered screen",
-                    ),
-                    (run.to_string(), "review the commands, then run them"),
-                    ("?".into(), "this page"),
-                    ("q".into(), "quit (in a popup: back)"),
-                    ("esc".into(), "back out of a popup, filter or text"),
-                    ("ctrl+c".into(), "stop the fits and quit"),
-                    ("shift+drag".into(), "select text (the wheel scrolls)"),
-                ],
+                "tab  shift+tab  1-4".into(),
+                "next, previous or numbered screen",
             ),
+            (run.to_string(), "review the commands, then run them"),
+            ("?".into(), "this page"),
+            ("q".into(), "quit (in a popup: back)"),
+            ("esc".into(), "back out of a popup, filter or text"),
+            ("ctrl+c".into(), "stop the fits and quit"),
+            ("shift+drag".into(), "select text (the wheel scrolls)"),
+        ];
+        everywhere.extend(session.iter().map(|(k, help)| (k.clone(), help.as_str())));
+        let sections: Vec<(&str, Vec<(String, &str)>)> = vec![
+            ("Everywhere", everywhere),
             (
                 "Lists and pages",
                 vec![

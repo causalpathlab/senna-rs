@@ -75,6 +75,9 @@ mod run;
 #[cfg(test)]
 #[path = "tests/seed_replay.rs"]
 mod seed_replay_tests;
+#[cfg(all(test, feature = "view"))]
+#[path = "tests/session_cli.rs"]
+mod session_cli_tests;
 mod simba;
 mod svd;
 mod td_rbm;
@@ -834,7 +837,8 @@ enum Commands {
     #[cfg(feature = "view")]
     #[command(
         about = "Browse a run's layouts, clusters and annotation in the terminal",
-        long_about = "Interactive terminal viewer for `senna layout` results.\n\
+        long_about = format!(
+            "Interactive terminal viewer for `senna layout` results.\n\
                       \n\
                       Switch between layout methods (umap / phate / tsne) and spaces:\n\
                       cells, features placed on the cell map, and features on their own.\n\
@@ -843,14 +847,19 @@ enum Commands {
                       when the terminal supports them, block characters otherwise.\n\
                       \n\
                       `--pdf FILE` saves the starting view as a PDF (points as an image,\n\
-                      labels as text) and exits."
+                      labels as text) and exits.\n\
+                      \n\
+                      {}",
+            session_help(&[("Started again with nothing named, it offers", "`senna view` with no -f offers")])
+        )
     )]
     View(view::ViewArgs),
 
     #[cfg(feature = "view")]
     #[command(
         about = "Set up embedding fits in the terminal and run them.",
-        long_about = "Set up embedding fits in the terminal and run them.\n\
+        long_about = format!(
+            "Set up embedding fits in the terminal and run them.\n\
                       \n\
                       Pick the data files and the batch labels of each, queue one or\n\
                       more of topic, masked-topic, masked-vae, masked-sbp, vae, svd,\n\
@@ -861,12 +870,119 @@ enum Commands {
                       \n\
                       ctrl+r shows the exact commands, checked as senna would parse\n\
                       them, and runs them in turn with their log on screen.\n\
-                      Each is saved first as `{out}.cmd.sh`: run it again with\n\
-                      `bash {out}.cmd.sh`. The script refuses to run over an existing\n\
-                      `{out}.senna.json`, and senna run never writes over a script.\n\
-                      When the fits finish, `v` opens them in `senna view`."
+                      Each is saved first as `{{out}}.cmd.sh`: run it again with\n\
+                      `bash {{out}}.cmd.sh`. The script refuses to run over an existing\n\
+                      `{{out}}.senna.json`, and senna run never writes over a script.\n\
+                      When the fits finish, `v` opens them in `senna view`.\n\
+                      \n\
+                      {}",
+            session_help(&[
+                ("its work goes on", "the fits go on"),
+                ("Started again with nothing named, it offers", "`senna run` with no folder offers"),
+            ])
+        )
     )]
     Run(run::RunArgs),
+
+    #[cfg(feature = "view")]
+    #[command(
+        about = "Return to a detached `senna run` or `senna view`",
+        long_about = senna_help(
+            &legume_tui::cli::about(tui::TOOL.name()).attach,
+            &[
+                ("a detached `senna` session", "a detached `senna run` or `senna view`"),
+                ("ctrl+alt+d unless LEGUME_TUI_DETACH_KEY sets another", "ctrl+alt+d unless LEGUME_TUI_DETACH_KEY sets another; `?` shows it"),
+            ],
+            " --no-detach on either starts it plain.",
+        )
+    )]
+    Attach(legume_tui::cli::AttachArgs),
+
+    #[cfg(feature = "view")]
+    #[command(about = "List the live `senna run` and `senna view` sessions")]
+    Sessions,
+
+    #[cfg(feature = "view")]
+    #[command(
+        about = "Stop a `senna run` or `senna view` session",
+        long_about = "Stop a session as its quit key does: `senna run` stops its fits\n\
+                      and wraps them up first. --force kills it at once, and fits it\n\
+                      started may then keep running."
+    )]
+    Kill(legume_tui::cli::KillArgs),
+
+    #[cfg(feature = "view")]
+    #[command(
+        about = "Give a `senna run` or `senna view` session a label",
+        long_about = "Give a session a label, found by its label or its id. The label\n\
+                      is unique among the live sessions; `attach`, `kill` and\n\
+                      `rename` take it in place of the id, and `sessions` shows it."
+    )]
+    Rename(legume_tui::cli::RenameArgs),
+}
+
+/// The session paragraph of `senna run`'s and `senna view`'s long help:
+/// legume-tui's shared text with `edits` made, its subcommands named as
+/// senna's, and where `?` shows the keys.
+#[cfg(feature = "view")]
+fn session_help(edits: &[(&str, &str)]) -> String {
+    let mut edits = edits.to_vec();
+    edits.push(("; `attach`, `sessions`", "; `senna attach`, `sessions`"));
+    senna_help(
+        legume_tui::cli::SESSION_HELP,
+        &edits,
+        " `?` shows the keys in effect.",
+    )
+}
+
+/// `text`, a help of legume-tui's, as senna says it: each `(from, to)` of
+/// `edits` made and `tail` added to the last paragraph, wrapped again.
+#[cfg(feature = "view")]
+fn senna_help(text: &str, edits: &[(&str, &str)], tail: &str) -> String {
+    let paragraphs: Vec<String> = text
+        .split("\n\n")
+        .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let mut text = paragraphs.join("\n\n");
+    for (from, to) in edits {
+        text = text.replace(from, to);
+    }
+    text.push_str(tail);
+    text.split("\n\n")
+        .map(wrapped)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// `paragraph` broken into lines of at most 70 columns, between words and
+/// never inside a `quoted command`.
+#[cfg(feature = "view")]
+fn wrapped(paragraph: &str) -> String {
+    let mut units: Vec<String> = Vec::new();
+    for word in paragraph.split(' ') {
+        match units.last_mut() {
+            Some(open) if open.matches('`').count() % 2 == 1 => {
+                open.push(' ');
+                open.push_str(word);
+            }
+            _ => units.push(word.to_string()),
+        }
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for unit in units {
+        let n = unit.chars().count();
+        if width > 0 && width + 1 + n > 70 {
+            out.push('\n');
+            width = 0;
+        } else if width > 0 {
+            out.push(' ');
+            width += 1;
+        }
+        out.push_str(&unit);
+        width += n;
+    }
+    out
 }
 
 #[derive(Subcommand, Debug)]
@@ -894,6 +1010,11 @@ enum LayoutCmd {
 }
 
 fn main() -> anyhow::Result<()> {
+    // A session's host runs this binary again: it serves the session and
+    // exits here, before any of senna's own work.
+    #[cfg(feature = "view")]
+    legume_tui::serve_if_host();
+
     // Show logo if help is requested
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
         print_logo();
@@ -1002,8 +1123,16 @@ fn main() -> anyhow::Result<()> {
             use clap::CommandFactory;
             let mut cli = Cli::command();
             cli.build();
-            run::tui::run(cli, args.dir.clone())?;
+            run::tui::run(cli, args)?;
         }
+        #[cfg(feature = "view")]
+        Commands::Attach(args) => legume_tui::cli::attach(&tui::TOOL, args)?,
+        #[cfg(feature = "view")]
+        Commands::Sessions => legume_tui::cli::sessions(&tui::TOOL)?,
+        #[cfg(feature = "view")]
+        Commands::Kill(args) => legume_tui::cli::kill(&tui::TOOL, args)?,
+        #[cfg(feature = "view")]
+        Commands::Rename(args) => legume_tui::cli::rename(&tui::TOOL, args)?,
     }
 
     info!("Done");

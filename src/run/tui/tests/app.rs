@@ -1222,3 +1222,33 @@ fn a_trend_is_drawn_over_its_own_range() {
     assert_eq!(spark(&long, 500).chars().count(), super::jobs::TREND);
     assert_eq!(spark(&long, 1), "");
 }
+
+#[test]
+fn the_session_status_says_where_the_fits_are() {
+    use super::jobs::State;
+    let a = app(tempfile::tempdir().unwrap().path());
+    assert_eq!(a.session_status(), "setting up fits");
+    let states = [State::Done, State::Running, State::Waiting];
+    assert_eq!(fits_status(&states, false), "fits running: 1 of 3 done");
+    let states = [State::Done, State::Failed("x".into()), State::Stopped];
+    assert_eq!(
+        fits_status(&states, true),
+        "fits finished: 1 of 3 done, 1 failed, 1 stopped"
+    );
+}
+
+#[test]
+fn the_view_v_opens_runs_as_this_session_was_asked_to() {
+    let session = crate::tui::plain_session();
+    let mut cmd = view_command("senna".into(), &["r.senna.json".into()]);
+    session.command(&mut cmd);
+    let args: Vec<_> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(args, ["view", "-f", "r.senna.json"]);
+    // `--no-detach` reaches the view, which then runs plain too.
+    let env: Vec<_> = cmd.get_envs().collect();
+    let no_detach = std::ffi::OsStr::new(legume_tui::NO_DETACH_VAR);
+    assert_eq!(env, [(no_detach, Some(std::ffi::OsStr::new("1")))]);
+}
