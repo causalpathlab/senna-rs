@@ -1967,9 +1967,12 @@ mod tests {
             loads.clone(),
             false,
         );
-        // The screen does not wait: asked first, the totals are coming.
+        // The screen does not wait: asked first, the totals are coming,
+        // unless the worker has already summed so small a file.
         let first = a.stat_levels(&Stat::Total, &[], Source::Observed, 0, &cells);
-        assert_eq!(first.err().as_deref(), Some(crate::tui::LOADING));
+        if let Err(e) = &first {
+            assert_eq!(e, crate::tui::LOADING);
+        }
         assert!(loads.totals.get().is_ok());
         let total = a
             .stat_levels(&Stat::Total, &[], Source::Observed, 0, &cells)
