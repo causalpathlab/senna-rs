@@ -287,17 +287,20 @@ fn read_panel(path: &Path, genes: Option<&GeneIndex>) -> Option<Panel> {
     })
 }
 
-/// Browse for a run before the view opens: the browser alone, full screen.
-/// `None` when cancelled.
-pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
+/// Browse for a run before the view opens: the browser alone, full screen,
+/// on `session`'s terminal. `None` when cancelled, or stopped by `senna
+/// kill`.
+pub fn pick_run(session: &legume_tui::Session) -> anyhow::Result<Option<PathBuf>> {
     let here = std::env::current_dir()?;
     let mut b = Browser::open(here, Runs, None);
-    let level = log::max_level();
-    log::set_max_level(log::LevelFilter::Off);
-    let mut terminal = ratatui::init();
+    let quiet = legume_tui::logs::quiet();
+    let mut terminal = session.terminal()?;
     let picked = (|| loop {
+        if session.stop_requested() {
+            return Ok(None);
+        }
         b.poll();
-        terminal.draw(|f| {
+        session.draw(&mut terminal, |f| {
             let area = f.area();
             f.render_widget(Block::default().style(page()), area);
             let lines = b.lines(usize::from(area.height).saturating_sub(2));
@@ -305,10 +308,12 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
         })?;
         // A folder still being listed is shown once it is, the spinner
         // ticking meanwhile.
-        if b.listing().is_some() && !event::poll(std::time::Duration::from_millis(200))? {
-            continue;
-        }
-        if let Event::Key(k) = event::read()? {
+        let wanted = if b.listing().is_some() {
+            std::time::Duration::from_millis(200)
+        } else {
+            std::time::Duration::from_secs(60)
+        };
+        if let Some(Event::Key(k)) = session.poll(&mut terminal, wanted)? {
             if k.kind == KeyEventKind::Release {
                 continue;
             }
@@ -322,8 +327,8 @@ pub fn pick_run() -> anyhow::Result<Option<PathBuf>> {
             }
         }
     })();
-    ratatui::restore();
-    log::set_max_level(level);
+    session.restore();
+    drop(quiet);
     picked
 }
 

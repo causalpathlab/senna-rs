@@ -9,6 +9,7 @@ use super::*;
 use crate::view::deck;
 use crate::view::pdf;
 use crate::view::saved::{ago, Gallery};
+use legume_tui::graphics::Repick;
 use rayon::prelude::*;
 
 /// One tile of the grid: its frame on screen and its picture.
@@ -71,11 +72,10 @@ pub(super) struct Deck {
 impl Deck {
     /// The views `apps`, beside the figures saved in `gallery`.
     pub(super) fn new(apps: Vec<App>, picker: Picker, gallery: Gallery) -> Self {
-        let f = picker.font_size();
         Self {
             apps,
             at: 0,
-            cell: (f32::from(f.width.max(1)), f32::from(f.height.max(1))),
+            cell: cell(&picker),
             picker,
             grid: false,
             hover: 0,
@@ -97,7 +97,19 @@ impl Deck {
         }
     }
 
-    pub(super) fn run(mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
+    /// Drive the views on `session`'s terminal until quit, or until `senna
+    /// kill` asks them to stop. While detached nothing is drawn and the
+    /// views' own work (lupin, senna, files changing) goes on at a slow
+    /// poll; on attach the terminal is asked again (the protocol
+    /// `graphics` names, where it names one) and the pictures made again
+    /// as it needs
+    /// ([`Self::repick`]).
+    pub(super) fn run(
+        mut self,
+        terminal: &mut DefaultTerminal,
+        session: &legume_tui::Session,
+        graphics: Graphics,
+    ) -> anyhow::Result<()> {
         if self.apps.len() > 1 {
             self.apps[0].message = Some(format!(
                 "{} runs open · w shows them all · {{ }} step between them",
@@ -106,40 +118,96 @@ impl Deck {
         }
         let mut dirty = true;
         while !self.quit {
-            let size = terminal.size()?;
-            let full = Rect::new(0, 0, size.width, size.height);
-            let area = self.content(full);
-            self.prepare_thumbs(full);
-            if self.grid {
-                self.layout_grid(area);
-            } else {
-                self.apps[self.at].layout(area, App::status_lines(full.width));
+            let attached = session.attached();
+            if attached {
+                let size = terminal.size()?;
+                let full = Rect::new(0, 0, size.width, size.height);
+                let area = self.content(full);
+                self.prepare_thumbs(full);
+                if self.grid {
+                    self.layout_grid(area);
+                } else {
+                    self.apps[self.at].layout(area, App::status_lines(full.width));
+                }
             }
             dirty |= self.background();
-            dirty |= if self.grid {
-                self.advance_tiles()?
-            } else {
-                self.apps[self.at].advance()?
-            };
+            if attached {
+                dirty |= if self.grid {
+                    self.advance_tiles()?
+                } else {
+                    self.apps[self.at].advance()?
+                };
+            }
             if expired(&self.toast) {
                 self.toast = None;
                 dirty = true;
             }
-            if std::mem::take(&mut dirty) {
+            if attached && std::mem::take(&mut dirty) {
                 self.draw(terminal)?;
             }
-            if event::poll(self.wait())? {
+            session.status(&self.status());
+            let mut repick = None;
+            let picker = &self.picker;
+            let event = session.poll_with(terminal, self.wait(), || {
+                repick = Some(legume_tui::graphics::reprobe(
+                    session,
+                    picker,
+                    graphics,
+                    Fallback::Probe,
+                ));
+                Ok(())
+            })?;
+            if let Some(repick) = repick {
+                self.repick(repick);
+                dirty = true;
+            }
+            if let Some(mut ev) = event {
                 // Drain everything queued so a burst of scroll events costs
                 // one re-render, not one per event.
                 loop {
-                    dirty |= self.event(terminal, event::read()?)?;
+                    dirty |= self.event(terminal, ev)?;
                     if self.quit || !event::poll(Duration::ZERO)? {
                         break;
                     }
+                    ev = event::read()?;
                 }
             }
+            // `senna kill` stops the view as q does.
+            self.quit |= session.stop_requested();
         }
         Ok(())
+    }
+
+    /// Take what the terminal attached now needs of the pictures. One
+    /// like the last keeps them; kitty's images, dropped by the client's
+    /// reset, are encoded again as each view is next drawn. A picker of
+    /// another kind or cell size has every view made again for it. Either
+    /// way the tiles and thumbnails are made afresh at the next round.
+    fn repick(&mut self, repick: Repick) {
+        match repick {
+            Repick::Resend => self.apps.iter_mut().for_each(App::resend),
+            Repick::Changed(picker) => {
+                self.cell = cell(&picker);
+                for app in &mut self.apps {
+                    app.repick(picker.clone());
+                }
+                self.picker = picker;
+            }
+            // Same, or another word the crate may add: kept as they are.
+            _ => return,
+        }
+        self.tiles.clear();
+        self.thumbs.clear();
+    }
+
+    /// What `senna sessions` says the view is showing: the run on screen,
+    /// its layout and view, or the grid.
+    fn status(&self) -> String {
+        if self.grid {
+            return format!("grid of {} views", self.apps.len());
+        }
+        let s = self.apps[self.at].scene.current();
+        format!("{} · {} {}", self.title(self.at), s.method, s.title())
     }
 
     /// Every view's background work. A view on screen that changed needs
@@ -1514,6 +1582,104 @@ mod tests {
         // Esc hands the keys back.
         deck.strip_key(full, key(KeyCode::Esc));
         assert_eq!(deck.saved_at, None);
+    }
+
+    use super::attach_tests::{kitty, view};
+
+    #[test]
+    fn after_an_attach_every_tile_and_thumbnail_is_made_again() {
+        let work = tempfile::tempdir().unwrap();
+        let mut deck = drawn_deck(Picker::halfblocks(), work.path());
+        let full = Rect::new(0, 0, 160, 50);
+
+        deck.repick(Repick::Changed(kitty()));
+        assert_eq!(deck.cell, (8.0, 16.0));
+        assert!(deck.apps.iter().all(|a| a.cell == (8.0, 16.0)));
+        assert!(deck.tiles.is_empty() && deck.thumbs.is_empty());
+        // The next round lays the tiles out again and draws them anew.
+        deck.prepare_thumbs(full);
+        deck.layout_grid(deck.content(full));
+        assert_eq!(deck.tiles.len(), 2);
+        assert!(deck.tiles.iter().all(|t| t.job.is_some()));
+        assert!(matches!(
+            deck.thumbs.values().next(),
+            Some(Some(Protocol::Kitty(_)))
+        ));
+    }
+
+    /// A deck of two views made with `picker`: the first drawn whole, the
+    /// grid's tiles and a saved thumbnail too.
+    fn drawn_deck(picker: Picker, work: &std::path::Path) -> Deck {
+        let mut gallery = Gallery::open(&work.join(".senna-view"));
+        let pdf = work.join("a.pdf");
+        std::fs::write(&pdf, b"%PDF").unwrap();
+        let picture = image::RgbaImage::from_pixel(40, 30, image::Rgba([1, 2, 3, 255]));
+        gallery.add(&pdf, "a view", &picture).unwrap();
+        let apps = vec![view(), view()]
+            .into_iter()
+            .map(|mut a| {
+                a.repick(picker.clone());
+                a
+            })
+            .collect();
+        let mut deck = Deck::new(apps, picker, gallery);
+        let full = Rect::new(0, 0, 160, 50);
+        let area = deck.content(full);
+        deck.apps[0].layout(area, STATUS_LINES);
+        while deck.apps[0].advance().unwrap() {}
+        deck.grid = true;
+        deck.prepare_thumbs(full);
+        deck.layout_grid(deck.content(full));
+        while deck.advance_tiles().unwrap() {}
+        assert!(deck.apps[0].proto.is_some() && deck.apps[0].base.is_some());
+        assert!(deck.tiles.iter().all(|t| t.proto.is_some()));
+        assert!(!deck.thumbs.is_empty());
+        deck
+    }
+
+    #[test]
+    fn a_terminal_like_the_last_keeps_the_pictures() {
+        let work = tempfile::tempdir().unwrap();
+        let mut deck = drawn_deck(Picker::halfblocks(), work.path());
+        let vp = deck.apps[0].vp;
+        deck.repick(Repick::Same);
+        // Nothing made again: block characters are redrawn from the cells.
+        assert!(deck.apps[0].job.is_none() && deck.apps[0].proto.is_some());
+        assert_eq!(deck.apps[0].vp, vp);
+        assert!(deck
+            .tiles
+            .iter()
+            .all(|t| t.job.is_none() && t.proto.is_some()));
+        assert!(!deck.thumbs.is_empty());
+    }
+
+    #[test]
+    fn a_kitty_terminal_like_the_last_gets_its_pictures_sent_again() {
+        let work = tempfile::tempdir().unwrap();
+        let mut deck = drawn_deck(kitty(), work.path());
+        let vp = deck.apps[0].vp;
+        deck.repick(Repick::Resend);
+        // Nothing encoded yet: each view waits until it is next drawn.
+        assert!(deck.apps.iter().all(|a| a.proto.is_none()));
+        // Then encoded again from the finished frame, no point drawn again.
+        assert!(deck.apps[0].advance().unwrap());
+        let app = &deck.apps[0];
+        assert!(app.job.is_none(), "not drawn again");
+        assert!(matches!(app.proto, Some(Protocol::Kitty(_))));
+        assert_eq!(app.vp, vp);
+        // The tiles and thumbnails are made again at the next round.
+        assert!(deck.tiles.is_empty() && deck.thumbs.is_empty());
+        assert_eq!(deck.cell, (8.0, 16.0));
+    }
+
+    #[test]
+    fn the_session_status_names_what_is_on_screen() {
+        let work = tempfile::tempdir().unwrap();
+        let gallery = Gallery::open(&work.path().join(".senna-view"));
+        let mut deck = Deck::new(vec![view(), view()], Picker::halfblocks(), gallery);
+        assert_eq!(deck.status(), "r.senna.json (1) · umap cells");
+        deck.grid = true;
+        assert_eq!(deck.status(), "grid of 2 views");
     }
 
     #[test]

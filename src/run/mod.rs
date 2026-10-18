@@ -9,6 +9,17 @@ pub(crate) mod tui;
 
 #[derive(clap::Args, Debug)]
 pub struct RunArgs {
-    #[arg(default_value = ".", help = "Folder the file browser starts in")]
-    pub dir: std::path::PathBuf,
+    #[arg(help = "Folder the file browser starts in [default: .]")]
+    pub dir: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    pub session: legume_tui::cli::SessionArgs,
+}
+
+impl RunArgs {
+    /// The session to run in. A folder named starts a new one; started
+    /// with none, live sessions are offered first.
+    pub fn session(&self) -> legume_tui::Options {
+        self.session.options(self.dir.is_some())
+    }
 }

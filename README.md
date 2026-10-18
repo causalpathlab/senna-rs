@@ -4,7 +4,7 @@ Stochastic embedding with nearest-neighbourhood adjustment.
 
 **Install:** `cargo install senna-rs` (binary: `senna`).
 
-Annotation, lineage, pseudotime, and plots live in [`lupin`](https://github.com/causalpathlab/legume-rs) (soon `lupin-rs`); layout/clustering stay here.
+Annotation, lineage, pseudotime, and plots live in [`lupin`](https://github.com/causalpathlab/lupin-rs); layout/clustering stay here.
 
 **Set up fits in the terminal:** `senna run [DIR]` lets you pick data files and the batch labels of each, queue several methods (topic, masked-topic, masked-vae, masked-sbp, vae, svd, bge, simba, rbm, td-rbm), and change any of their flags. `O` sets an output header that every `--out` starts with (`exp1` gives `exp1_svd`; `results/` puts them all in that folder; any folder the header names, `~/` included, is made as soon as it is entered); `o` names one by hand. Every flag comes with its help, including the hidden ones (marked `·`; `a` hides them) and `--threads`. Ctrl+R shows the exact commands, checked as senna parses them, and Ctrl+R (or Enter) runs them. They run in turn with each one's progress and a scrollable log on screen, and `v` opens the results in `senna view`. Each command is saved first as `{out}.cmd.sh`, so `bash {out}.cmd.sh` runs it again. The script refuses to run over an existing `{out}.senna.json`, and `senna run` never writes over a script.
 

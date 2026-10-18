@@ -23,7 +23,7 @@ use data::Pick;
 use form::{Field, Kind, Method};
 use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG, TD_RBM};
 use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -211,61 +211,81 @@ type Read = (PathBuf, data::Described);
 /// A method row, its command line, and the flag clap blamed in it.
 type Blame = (usize, Vec<String>, Option<String>);
 
-/// Report the mouse's buttons and wheel to senna run, or stop. Movement is
-/// never reported, so a moving pointer wakes nothing; shift+drag still
-/// selects text in most terminals.
-fn mouse(on: bool) {
-    use std::io::Write;
-    let codes = if on {
-        "\x1b[?1000h\x1b[?1006h"
-    } else {
-        "\x1b[?1000l\x1b[?1006l"
-    };
-    let mut out = std::io::stdout();
-    let _ = out.write_all(codes.as_bytes());
-    let _ = out.flush();
+/// Where the queue stands, in a line: `fits running: 1 of 3 done`, with
+/// failures and stops when there are any.
+fn fits_status(states: &[jobs::State], finished: bool) -> String {
+    use jobs::State;
+    let count = |f: fn(&State) -> bool| states.iter().filter(|s| f(s)).count();
+    let done = count(|s| *s == State::Done);
+    let failed = count(|s| matches!(s, State::Failed(_)));
+    let stopped = count(|s| *s == State::Stopped);
+    let mut line = format!(
+        "fits {}: {done} of {} done",
+        if finished { "finished" } else { "running" },
+        states.len()
+    );
+    if failed > 0 {
+        line += &format!(", {failed} failed");
+    }
+    if stopped > 0 {
+        line += &format!(", {stopped} stopped");
+    }
+    line
+}
+
+/// `senna view` on the runs `shown`, as `v` opens them once the screens
+/// are left; [`legume_tui::Session::run_child`] runs it in this session
+/// as this one runs (plain too, when it was asked to be).
+fn view_command(exe: PathBuf, shown: &[String]) -> std::process::Command {
+    let mut view = std::process::Command::new(exe);
+    view.arg("view").arg("-f").args(shown);
+    view
 }
 
 /// Run the screens; `cli` is senna's built command, the source of every
 /// method's flags and the check of every command line.
-pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
+pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
+    // First: hosted, this process only relays the terminal from here on,
+    // and the program the host starts does the rest.
+    let session = crate::tui::TOOL.session("run", &args.session())?;
+    let start = args.dir.clone().unwrap_or_else(|| PathBuf::from("."));
     let mung = describe_mung(&mung_program());
     let mut app = App::new(cli, mung, start)?;
-    let level = log::max_level();
-    log::set_max_level(log::LevelFilter::Off);
-    let mut terminal = ratatui::init();
-    // The wheel scrolls; a panic turns the mouse back over to the terminal
-    // with the rest of it.
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        mouse(false);
-        hook(info);
-    }));
+    let quiet = legume_tui::logs::quiet();
+    // The mouse's buttons and wheel reported, never its movement, so a
+    // moving pointer wakes nothing; shift+drag still selects text in most
+    // terminals.
+    let mut terminal = session.terminal_with(legume_tui::Modes {
+        mouse: legume_tui::Mouse::Buttons,
+        ..Default::default()
+    })?;
     let result = (|| -> anyhow::Result<()> {
-        mouse(true);
         while !app.quit {
             app.poll();
-            terminal.draw(|f| app.draw(f))?;
+            // Detached, the fits are followed and nothing is drawn.
+            session.draw(&mut terminal, |f| app.draw(f))?;
+            session.status(&app.session_status());
             // Redraw often only while something changes on its own.
             let listing = app.browser.as_ref().is_some_and(|b| b.listing().is_some());
-            let wait = if app.running() || app.describing > 0 || listing {
+            let wanted = if app.running() || app.describing > 0 || listing {
                 Duration::from_millis(200)
             } else {
                 Duration::from_secs(60)
             };
-            if event::poll(wait)? {
-                match event::read()? {
-                    Event::Key(k) if k.kind != KeyEventKind::Release => app.key(k),
-                    // The wheel scrolls whatever list or page is in front,
-                    // as the arrow keys do.
-                    Event::Mouse(m) => match m.kind {
-                        MouseEventKind::ScrollUp => app.key(KeyEvent::from(KeyCode::Up)),
-                        MouseEventKind::ScrollDown => app.key(KeyEvent::from(KeyCode::Down)),
-                        _ => {}
-                    },
+            match session.poll(&mut terminal, wanted)? {
+                Some(Event::Key(k)) if k.kind != KeyEventKind::Release => app.key(k),
+                // The wheel scrolls whatever list or page is in front, as
+                // the arrow keys do.
+                Some(Event::Mouse(m)) => match m.kind {
+                    MouseEventKind::ScrollUp => app.key(KeyEvent::from(KeyCode::Up)),
+                    MouseEventKind::ScrollDown => app.key(KeyEvent::from(KeyCode::Down)),
                     _ => {}
-                }
+                },
+                _ => {}
             }
+            // `senna kill` (SIGTERM) quits as ctrl+c does: the fits running
+            // are stopped and wrapped up below.
+            app.quit |= session.stop_requested();
         }
         Ok(())
     })();
@@ -274,25 +294,22 @@ pub fn run(cli: clap::Command, start: PathBuf) -> anyhow::Result<()> {
         // fit running has a moment to wrap up, then it is killed.
         if !q.finished() {
             app.message = Some("stopping the fits…".into());
-            let _ = terminal.draw(|f| app.draw(f));
+            let _ = session.draw(&mut terminal, |f| app.draw(f));
         }
         q.stop_within(STOP_GRACE);
     }
-    mouse(false);
-    ratatui::restore();
-    log::set_max_level(level);
+    session.restore();
+    drop(quiet);
     result?;
     for line in app.summary() {
         println!("{line}");
     }
-    if !app.view.is_empty() {
-        let exe = std::env::current_exe()?;
+    // Not after a `senna kill`: it asked for the session to end.
+    if !app.view.is_empty() && !session.stop_requested() {
         let shown: Vec<String> = app.view.iter().map(|p| app.shown(p)).collect();
-        std::process::Command::new(exe)
-            .arg("view")
-            .arg("-f")
-            .args(&shown)
-            .status()?;
+        let mut view = view_command(std::env::current_exe()?, &shown);
+        // In the same session: a `senna kill` reaches it through us.
+        session.run_child(&mut view)?;
     }
     Ok(())
 }
@@ -402,6 +419,18 @@ impl App {
 
     fn running(&self) -> bool {
         self.queue.as_ref().is_some_and(|q| !q.finished())
+    }
+
+    /// One line for `senna sessions` and the resume picker.
+    fn session_status(&self) -> String {
+        match &self.queue {
+            None => "setting up fits".into(),
+            // Counted under the lock, the states not copied every round.
+            Some(q) => match q.shared.lock() {
+                Ok(s) => fits_status(&s.states, s.finished),
+                Err(_) => fits_status(&[], true),
+            },
+        }
     }
 
     /// Screens reachable now: Run once a queue has started.

@@ -75,6 +75,9 @@ mod run;
 #[cfg(test)]
 #[path = "tests/seed_replay.rs"]
 mod seed_replay_tests;
+#[cfg(all(test, feature = "view"))]
+#[path = "tests/session_cli.rs"]
+mod session_cli_tests;
 mod simba;
 mod svd;
 mod td_rbm;
@@ -834,7 +837,8 @@ enum Commands {
     #[cfg(feature = "view")]
     #[command(
         about = "Browse a run's layouts, clusters and annotation in the terminal",
-        long_about = "Interactive terminal viewer for `senna layout` results.\n\
+        long_about = format!(
+            "Interactive terminal viewer for `senna layout` results.\n\
                       \n\
                       Switch between layout methods (umap / phate / tsne) and spaces:\n\
                       cells, features placed on the cell map, and features on their own.\n\
@@ -843,14 +847,19 @@ enum Commands {
                       when the terminal supports them, block characters otherwise.\n\
                       \n\
                       `--pdf FILE` saves the starting view as a PDF (points as an image,\n\
-                      labels as text) and exits."
+                      labels as text) and exits.\n\
+                      \n\
+                      {}",
+            session_help(None, "`senna view` with no -f")
+        )
     )]
     View(view::ViewArgs),
 
     #[cfg(feature = "view")]
     #[command(
         about = "Set up embedding fits in the terminal and run them.",
-        long_about = "Set up embedding fits in the terminal and run them.\n\
+        long_about = format!(
+            "Set up embedding fits in the terminal and run them.\n\
                       \n\
                       Pick the data files and the batch labels of each, queue one or\n\
                       more of topic, masked-topic, masked-vae, masked-sbp, vae, svd,\n\
@@ -861,12 +870,72 @@ enum Commands {
                       \n\
                       ctrl+r shows the exact commands, checked as senna would parse\n\
                       them, and runs them in turn with their log on screen.\n\
-                      Each is saved first as `{out}.cmd.sh`: run it again with\n\
-                      `bash {out}.cmd.sh`. The script refuses to run over an existing\n\
-                      `{out}.senna.json`, and senna run never writes over a script.\n\
-                      When the fits finish, `v` opens them in `senna view`."
+                      Each is saved first as `{{out}}.cmd.sh`: run it again with\n\
+                      `bash {{out}}.cmd.sh`. The script refuses to run over an existing\n\
+                      `{{out}}.senna.json`, and senna run never writes over a script.\n\
+                      When the fits finish, `v` opens them in `senna view`.\n\
+                      \n\
+                      {}",
+            session_help(Some("the fits go on"), "`senna run` with no folder")
+        )
     )]
     Run(run::RunArgs),
+
+    #[cfg(feature = "view")]
+    #[command(
+        about = "Return to a detached `senna run` or `senna view`",
+        long_about = "Return to a detached `senna run` or `senna view` in this terminal.\n\
+                      \n\
+                      A session keeps running when the terminal goes (a dropped connection,\n\
+                      or the detach key: ctrl+alt+d unless LEGUME_TUI_DETACH_KEY sets\n\
+                      another; `?` shows it) and is picked up again here, or by starting it\n\
+                      again with nothing named. The first detach by the key asks for a label\n\
+                      (Enter keeps the id); `senna rename` or `r` in the picker changes it\n\
+                      later. A session is found by its label or its id; with one live the\n\
+                      name is optional, with several a picker opens. `senna sessions` lists\n\
+                      them. Inside one, ctrl+alt+s (or LEGUME_TUI_SWITCH_KEY) switches to\n\
+                      another. --no-detach on either starts it plain."
+    )]
+    Attach(legume_tui::cli::AttachArgs),
+
+    #[cfg(feature = "view")]
+    #[command(about = "List the live `senna run` and `senna view` sessions")]
+    Sessions,
+
+    #[cfg(feature = "view")]
+    #[command(
+        about = "Stop a `senna run` or `senna view` session",
+        long_about = "Stop a session as its quit key does: `senna run` stops its fits\n\
+                      and wraps them up first. --force kills it at once, and fits it\n\
+                      started may then keep running."
+    )]
+    Kill(legume_tui::cli::KillArgs),
+
+    #[cfg(feature = "view")]
+    #[command(
+        about = "Give a `senna run` or `senna view` session a label",
+        long_about = "Give a session a label, found by its label or its id. The label\n\
+                      is unique among the live sessions; `attach`, `kill` and\n\
+                      `rename` take it in place of the id, and `sessions` shows it."
+    )]
+    Rename(legume_tui::cli::RenameArgs),
+}
+
+/// The session paragraph of `senna run`'s and `senna view`'s long help:
+/// what goes on when the connection drops (the fits, or its work when
+/// None), who offers the live sessions to return to, and where `?` shows
+/// the keys.
+#[cfg(feature = "view")]
+fn session_help(what_goes_on: Option<&str>, resume_hint: &str) -> String {
+    legume_tui::cli::session_help(
+        &tui::TOOL,
+        legume_tui::cli::SessionHelp {
+            what_goes_on,
+            resume_hint,
+            more: Some("`?` shows the keys in effect."),
+            ..Default::default()
+        },
+    )
 }
 
 #[derive(Subcommand, Debug)]
@@ -894,6 +963,11 @@ enum LayoutCmd {
 }
 
 fn main() -> anyhow::Result<()> {
+    // A session's host runs this binary again: it serves the session and
+    // exits here, before any of senna's own work.
+    #[cfg(feature = "view")]
+    legume_tui::serve_if_host();
+
     // Show logo if help is requested
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
         print_logo();
@@ -1002,8 +1076,16 @@ fn main() -> anyhow::Result<()> {
             use clap::CommandFactory;
             let mut cli = Cli::command();
             cli.build();
-            run::tui::run(cli, args.dir.clone())?;
+            run::tui::run(cli, args)?;
         }
+        #[cfg(feature = "view")]
+        Commands::Attach(args) => legume_tui::cli::attach(&tui::TOOL, args)?,
+        #[cfg(feature = "view")]
+        Commands::Sessions => legume_tui::cli::sessions(&tui::TOOL)?,
+        #[cfg(feature = "view")]
+        Commands::Kill(args) => legume_tui::cli::kill(&tui::TOOL, args)?,
+        #[cfg(feature = "view")]
+        Commands::Rename(args) => legume_tui::cli::rename(&tui::TOOL, args)?,
     }
 
     info!("Done");
