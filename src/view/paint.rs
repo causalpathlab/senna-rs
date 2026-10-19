@@ -3,7 +3,6 @@
 use super::*;
 use legume_tui::map::labels::{place, Placed};
 use legume_tui::map::legend::{draw_legend, draw_ramp_key};
-use legume_tui::map::offsets::Offsets;
 use legume_tui::map::raster::{edge, ring};
 
 impl Scene {
@@ -127,7 +126,7 @@ impl Scene {
 
     /// The bold font of names on a cell map (group labels, the picked
     /// feature), for text `cell_px` from `text_px`.
-    fn label_font(&self, cell_px: f32) -> Font {
+    pub(super) fn label_font(&self, cell_px: f32) -> Font {
         Font::for_cell_height(cell_px * self.text_scale, true)
     }
 
@@ -365,15 +364,20 @@ impl Scene {
         if self.show_labels {
             labels.extend(self.labels(vp, cell_px));
         }
-        let drawn = place(frame, labels, &reserved, &Offsets::default());
-        // The label under the pointer is framed: a click there picks it.
-        let hovered = self.hover.and_then(|h| drawn.iter().find(|p| p.key == h));
-        if let Some(&Placed {
+        // Labels moved by hand sit where they were put.
+        let drawn = place(frame, labels, &reserved, &self.group_offsets());
+        // The label under the pointer is framed: a click there picks it;
+        // so is the one being moved from the keyboard.
+        let ink = color::highlight_ink();
+        let framed = [self.hover, self.editing.filter(|&e| self.hover != Some(e))];
+        for &Placed {
             rect: [x0, y0, x1, y1],
             ..
-        }) = hovered
+        } in framed
+            .into_iter()
+            .flatten()
+            .filter_map(|g| drawn.iter().find(|p| p.key == g))
         {
-            let ink = color::highlight_ink();
             for (a, b) in [
                 ((x0, y0), (x1, y0)),
                 ((x1, y0), (x1, y1)),
@@ -384,6 +388,7 @@ impl Scene {
             }
         }
         self.label_hits.borrow_mut().record(*vp, &drawn);
+        *self.label_placed.borrow_mut() = drawn;
     }
 }
 

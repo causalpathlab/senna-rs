@@ -9,6 +9,7 @@ mod deck;
 mod features;
 mod files;
 mod paint;
+mod places;
 mod recompute;
 mod relabel;
 mod render;
@@ -257,6 +258,13 @@ pub(crate) struct Scene {
     /// Where group labels were drawn in the last frame, and its camera: what
     /// a click on the map can hit.
     label_hits: std::cell::RefCell<Hits<u32>>,
+    /// Where the keyed labels of the last frame were placed, for moving
+    /// them from the keyboard.
+    label_placed: std::cell::RefCell<Vec<legume_tui::map::labels::Placed<u32>>>,
+    /// Labels moved by hand, kept beside the run.
+    pub places: places::Places,
+    /// The label chosen to move from the keyboard (`E`), framed when drawn.
+    pub editing: Option<u32>,
     /// Group id per point, and points per group, cached per (space, labels).
     groups: Option<(usize, usize, Vec<u32>, Vec<usize>)>,
     /// Resolved style per group of the current grouping.
@@ -320,6 +328,7 @@ impl Scene {
     fn new(data: Dataset, args: &ViewArgs) -> Self {
         let space = pick_space(&data, args.method.as_deref(), args.space.as_deref());
         let book = style::Book::load(&data.prefix);
+        let places = places::Places::load(&data.prefix);
         let mut scene = Self {
             data,
             space,
@@ -330,6 +339,9 @@ impl Scene {
             scale: 1.0,
             hover: None,
             label_hits: std::cell::RefCell::default(),
+            label_placed: std::cell::RefCell::default(),
+            places,
+            editing: None,
             groups: None,
             styles: Vec::new(),
             book,
@@ -440,6 +452,9 @@ impl Scene {
             chart: self.chart.as_ref().map(chart::Chart::like),
             hover: None,
             label_hits: std::cell::RefCell::default(),
+            label_placed: std::cell::RefCell::default(),
+            places: self.places.clone(),
+            editing: None,
             groups: None,
             styles: Vec::new(),
             book: self.book.clone(),

@@ -33,6 +33,9 @@ use crate::tui::style::{first_row, hint, page, popup, rgb, selected, toast, At};
 use crate::tui::Pending;
 use legume_tui::graphics::Fallback;
 use legume_tui::map::display::{cell, fit_protocol, stroke_floor};
+use legume_tui::map::pointer::{
+    EditKey, LabelEdit, MapAction, MapArea, Pointer, PointerOpts, EDIT_KEY,
+};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -123,14 +126,6 @@ struct Zooming {
     done: Pending<super::sublayout::Laid>,
 }
 
-/// A left-button press: where the pointer last was, and whether it moved
-/// (a drag pans; a press that did not move is a click).
-struct Drag {
-    col: u16,
-    row: u16,
-    moved: bool,
-}
-
 /// Feature names to search, with their lowercase forms computed once.
 struct SearchNames {
     names: Vec<Box<str>>,
@@ -172,7 +167,10 @@ struct App {
     help: bool,
     help_scroll: usize,
     help_max: std::cell::Cell<usize>,
-    drag: Option<Drag>,
+    /// The map's mouse: a drag pans or moves the label it took hold of.
+    pointer: Pointer<u32>,
+    /// Moving labels from the keyboard (`E`), when on.
+    label_edit: Option<LabelEdit<u32>>,
     /// What is being typed in the status line, if anything.
     modal: Option<Modal>,
     /// Searchable feature names, loaded on the first `/`.
@@ -257,7 +255,8 @@ impl App {
             help: false,
             help_scroll: 0,
             help_max: std::cell::Cell::new(0),
-            drag: None,
+            pointer: Pointer::new(PointerOpts::default()),
+            label_edit: None,
             names: None,
             menu: None,
             zooming: None,

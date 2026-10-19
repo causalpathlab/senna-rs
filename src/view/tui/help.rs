@@ -25,10 +25,12 @@ pub(super) enum Context {
     Recompute,
     Search,
     StyleMenu,
+    /// Moving labels from the keyboard (`E`).
+    Labels,
 }
 
 impl Context {
-    pub(super) const ALL: [Context; 11] = [
+    pub(super) const ALL: [Context; 12] = [
         Context::Browse,
         Context::Feature,
         Context::Relabel,
@@ -40,6 +42,7 @@ impl Context {
         Context::Recompute,
         Context::Search,
         Context::StyleMenu,
+        Context::Labels,
     ];
 }
 
@@ -73,6 +76,14 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             ("scroll  + -", "zoom the camera in / out"),
             ("arrows  drag", "pan"),
+            (
+                "drag a label",
+                "move a cluster's label (a line joins it to its cluster when far); kept beside the run for this map and round, at any zoom and in saved figures",
+            ),
+            (
+                "E",
+                "move labels by key: tab / shift-tab choose one, arrows move it half a line (shift: two), backspace puts it back, esc or E done",
+            ),
         ],
     ),
     (
@@ -175,8 +186,8 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("lowercase", "looks: changes what is on screen, never the run's files"),
             (
-                "R A T X",
-                "uppercase that opens a mode or writes: relabel, annotate, make topics, close a view for good",
+                "R A T X E",
+                "uppercase that opens a mode or writes: relabel, annotate, make topics, close a view for good, move labels",
             ),
             (
                 "g G  f F  z Z",
@@ -302,6 +313,8 @@ impl App {
             m.context()
         } else if self.menu.is_some() {
             Context::StyleMenu
+        } else if self.label_edit.is_some() {
+            Context::Labels
         } else if let Some(r) = &self.scene.review {
             if r.merge.is_some() {
                 Context::Merge
@@ -379,6 +392,10 @@ fn keys_of(context: Context) -> [&'static str; 2] {
             Context::StyleMenu => [
                 "↑ ↓ choose a group   ← → change the value   tab next property",
                 "space show / hide   backspace reset   enter, esc or q done",
+            ],
+            Context::Labels => [
+                "tab / shift-tab next or previous label   ← → ↑ ↓ move it half a line (shift: two lines)   backspace back on its cluster",
+                "drag a label to move it   esc or E done   ? all keys",
             ],
         }
     }
