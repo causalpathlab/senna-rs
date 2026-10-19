@@ -1,6 +1,9 @@
 //! Turning the scene into layers, labels and a finished frame.
 
 use super::*;
+use legume_tui::map::labels::{place, Placed};
+use legume_tui::map::legend::{draw_legend, draw_ramp_key};
+use legume_tui::map::raster::{edge, ring};
 
 impl Scene {
     /// Layers for the renderer: the backdrop (if any) under the points.
@@ -106,27 +109,13 @@ impl Scene {
     /// The group whose label is under pixel `(px, py)` in the frame last
     /// drawn with camera `vp`: only labels that frame showed count.
     pub fn group_at(&self, vp: &Viewport, px: f32, py: f32) -> Option<u32> {
-        let hits = self.label_hits.borrow();
-        let (at, drawn) = hits.as_ref()?;
-        if at != vp {
-            return None;
-        }
-        drawn
-            .iter()
-            .filter(|(_, [x0, y0, x1, y1])| (*x0..=*x1).contains(&px) && (*y0..=*y1).contains(&py))
-            .min_by(|a, b| {
-                let d = |r: &[f32; 4]| (0.5 * (r[0] + r[2]) - px).hypot(0.5 * (r[1] + r[3]) - py);
-                d(&a.1).total_cmp(&d(&b.1))
-            })
-            .map(|(g, _)| *g)
+        self.label_hits.borrow().at(vp, px, py)
     }
 
     /// Where group `g`'s label was drawn in the last frame, if it was.
     #[cfg(test)]
     pub fn label_rect(&self, g: u32) -> Option<[f32; 4]> {
-        let hits = self.label_hits.borrow();
-        let (_, drawn) = hits.as_ref()?;
-        drawn.iter().find(|(k, _)| *k == g).map(|(_, r)| *r)
+        self.label_hits.borrow().rect(g)
     }
 
     /// Text height on the map for a terminal cell `cell_px` tall: text grows
@@ -137,7 +126,7 @@ impl Scene {
 
     /// The bold font of names on a cell map (group labels, the picked
     /// feature), for text `cell_px` from `text_px`.
-    fn label_font(&self, cell_px: f32) -> Font {
+    pub(super) fn label_font(&self, cell_px: f32) -> Font {
         Font::for_cell_height(cell_px * self.text_scale, true)
     }
 
@@ -174,10 +163,10 @@ impl Scene {
                     x,
                     y,
                     ink: self.styles[g].ink,
-                    tier: Tier::Map,
+                    tier: Tier::Map.into(),
                     priority: size as f32,
                     font,
-                    group: Some(g as u32),
+                    key: Some(g as u32),
                 });
             }
             return out;
@@ -222,10 +211,10 @@ impl Scene {
                 x,
                 y: y - font.line_height() as f32 * 0.7,
                 ink,
-                tier: Tier::Map,
+                tier: Tier::Map.into(),
                 priority: (n - rank) as f32,
                 font,
-                group: None,
+                key: None,
             });
         }
         out
@@ -278,7 +267,7 @@ impl Scene {
     /// Labels, key and marks over a composited frame. `floor` is the
     /// thinnest stroke the frame can show: the screen's (a half-block cell
     /// is one pixel across), or 1 for a page.
-    pub fn decorate(&self, frame: &mut render::Frame, vp: &Viewport, cell_px: f32, floor: f32) {
+    pub fn decorate(&self, frame: &mut Frame, vp: &Viewport, cell_px: f32, floor: f32) {
         // The velocity field under every mark and label.
         self.draw_velocity(frame, vp, floor);
         let cell_px = self.text_px(cell_px);
@@ -339,7 +328,7 @@ impl Scene {
             placed.extend(place(cells, &near.cells, Tier::NearCell));
             if let Some((at, point)) = centre {
                 for &(_, _, to) in &placed {
-                    render::draw_edge(frame, at, to, centre_r, near_r, ink, 0.7);
+                    edge(frame, at, to, (centre_r, near_r), ink, 0.7);
                 }
                 // A centre that is the picked point is marked already.
                 if !point.is_some_and(|(k, i)| k == self.space && picked == Some(i)) {
@@ -362,35 +351,51 @@ impl Scene {
         }
         let font = Font::for_cell_height(cell_px * 0.8 * self.text_scale, false);
         if let Some(s) = self.current_shown() {
-            reserved.push(render::draw_ramp_key(frame, &s.title, &self.ramp, font));
+            reserved.push(draw_ramp_key(
+                frame,
+                &s.title,
+                &self.ramp,
+                font,
+                color::linear_rgb(color::INK),
+            ));
         } else if self.show_labels {
-            reserved.extend(render::draw_legend(frame, &self.legend(), font));
+            reserved.extend(draw_legend(frame, &self.legend(), font, None));
         }
         if self.show_labels {
             labels.extend(self.labels(vp, cell_px));
         }
-        let drawn = draw_labels(frame, labels, &reserved);
-        // The label under the pointer is framed: a click there picks it.
-        let hovered = self.hover.and_then(|h| drawn.iter().find(|(g, _)| *g == h));
-        if let Some(&(_, [x0, y0, x1, y1])) = hovered {
-            let ink = color::highlight_ink();
+        // Labels moved by hand sit where they were put.
+        let drawn = place(frame, labels, &reserved, &self.group_offsets());
+        // The label under the pointer is framed: a click there picks it;
+        // so is the one being moved from the keyboard.
+        let ink = color::highlight_ink();
+        let framed = [self.hover, self.editing.filter(|&e| self.hover != Some(e))];
+        for &Placed {
+            rect: [x0, y0, x1, y1],
+            ..
+        } in framed
+            .into_iter()
+            .flatten()
+            .filter_map(|g| drawn.iter().find(|p| p.key == g))
+        {
             for (a, b) in [
                 ((x0, y0), (x1, y0)),
                 ((x1, y0), (x1, y1)),
                 ((x1, y1), (x0, y1)),
                 ((x0, y1), (x0, y0)),
             ] {
-                render::draw_edge(frame, a, b, 0.0, 0.0, ink, 1.0);
+                edge(frame, a, b, (0.0, 0.0), ink, 1.0);
             }
         }
-        *self.label_hits.borrow_mut() = Some((*vp, drawn));
+        self.label_hits.borrow_mut().record(*vp, &drawn);
+        *self.label_placed.borrow_mut() = drawn;
     }
 }
 
 /// Ring the point at `at` (radius `r`) and name it just above the ring.
 #[allow(clippy::too_many_arguments)]
 fn mark(
-    frame: &mut render::Frame,
+    frame: &mut Frame,
     labels: &mut Vec<Label>,
     (x, y): (f32, f32),
     r: f32,
@@ -399,23 +404,23 @@ fn mark(
     (tier, priority): (Tier, f32),
     text: String,
 ) {
-    render::draw_ring(frame, x, y, r, ink);
+    ring(frame, x, y, r, ink);
     labels.push(Label {
         text,
         x,
         y: y - r - font.line_height() as f32 * 0.6,
         ink,
-        tier,
+        tier: tier.into(),
         priority,
         font,
-        group: None,
+        key: None,
     });
 }
 
 impl Scene {
     /// The run's velocity field over the cell map, as streamlines or as
     /// arrows, when shown.
-    fn draw_velocity(&self, frame: &mut render::Frame, vp: &Viewport, floor: f32) {
+    fn draw_velocity(&self, frame: &mut Frame, vp: &Viewport, floor: f32) {
         let (Some(field), Some(style)) = (self.velocity.as_ref(), self.velocity_style) else {
             return;
         };

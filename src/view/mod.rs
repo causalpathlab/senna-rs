@@ -9,17 +9,15 @@ mod deck;
 mod features;
 mod files;
 mod paint;
-mod pdf;
+mod places;
 mod recompute;
 mod relabel;
 mod render;
 mod review;
 mod rounds;
-mod saved;
 mod state;
 mod style;
 mod sublayout;
-mod text;
 mod tui;
 mod velocity;
 mod zoom;
@@ -29,9 +27,11 @@ use color::Rgb;
 use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
 use features::Centre;
-use render::{draw_labels, group_medians, Label, Paint, Tier, Viewport};
+use legume_tui::export::{Page, PageSize, PdfArgs};
+use legume_tui::map::labels::{Hits, TEXT_SCALES};
+use legume_tui::map::text::Font;
+use render::{group_medians, Frame, Label, Paint, Tier, Viewport};
 use senna::embed_common::*;
-use text::Font;
 
 /// `--graphics`: the image protocol named, else the terminal asked.
 pub use legume_tui::graphics::Graphics;
@@ -71,34 +71,16 @@ pub struct ViewArgs {
     #[arg(long, value_enum, default_value = "auto", help = "Image protocol")]
     pub graphics: Graphics,
 
-    #[arg(
-        long,
-        help = "Save the starting view to this PDF and exit (no terminal needed)",
-        long_help = "Save the starting view to a PDF and exit: the points as an image\n\
-                     at --dpi, the labels as text. Combine with --method / --space /\n\
-                     --colour-by and --width; several manifests make one grid page."
-    )]
-    pub pdf: Option<Box<str>>,
+    /// `--pdf`, `--width` and `--dpi`: the starting view saved to a PDF,
+    /// with no terminal. Several manifests make one grid page.
+    #[command(flatten)]
+    pub export: PdfArgs,
 
     #[arg(
         long,
         help = "Start on this axis: cells, features-on-cells, or features"
     )]
     pub space: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 7.0,
-        help = "Page width in inches (with --pdf); the height follows the view"
-    )]
-    pub width: f32,
-
-    #[arg(
-        long,
-        default_value_t = 300,
-        help = "Resolution of the points in dots per inch (with --pdf); text stays text"
-    )]
-    pub dpi: u32,
 
     #[arg(long, help = "Start showing this feature's activity on the cells")]
     pub feature: Option<Box<str>>,
@@ -243,9 +225,6 @@ struct Shown {
     levels: Levels,
 }
 
-/// The camera of a frame, and each group label it drew with where.
-type LabelHits = (Viewport, Vec<(u32, [f32; 4])>);
-
 /// How a run's velocity field is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum VelocityStyle {
@@ -260,9 +239,6 @@ type Moved = (usize, std::sync::Arc<Vec<[f32; 2]>>);
 
 /// Point of each name (its first, for a repeated name).
 type NameIndex = std::collections::HashMap<Box<str>, usize>;
-
-/// Text sizes on the map, as multiples of the terminal's cell height.
-const TEXT_SCALES: [f32; 4] = [1.0, 1.4, 1.8, 2.4];
 
 /// What is on screen.
 pub(crate) struct Scene {
@@ -281,7 +257,14 @@ pub(crate) struct Scene {
     pub hover: Option<u32>,
     /// Where group labels were drawn in the last frame, and its camera: what
     /// a click on the map can hit.
-    label_hits: std::cell::RefCell<Option<LabelHits>>,
+    label_hits: std::cell::RefCell<Hits<u32>>,
+    /// Where the keyed labels of the last frame were placed, for moving
+    /// them from the keyboard.
+    label_placed: std::cell::RefCell<Vec<legume_tui::map::labels::Placed<u32>>>,
+    /// Labels moved by hand, kept beside the run.
+    pub places: places::Places,
+    /// The label chosen to move from the keyboard (`E`), framed when drawn.
+    pub editing: Option<u32>,
     /// Group id per point, and points per group, cached per (space, labels).
     groups: Option<(usize, usize, Vec<u32>, Vec<usize>)>,
     /// Resolved style per group of the current grouping.
@@ -345,6 +328,7 @@ impl Scene {
     fn new(data: Dataset, args: &ViewArgs) -> Self {
         let space = pick_space(&data, args.method.as_deref(), args.space.as_deref());
         let book = style::Book::load(&data.prefix);
+        let places = places::Places::load(&data.prefix);
         let mut scene = Self {
             data,
             space,
@@ -355,6 +339,9 @@ impl Scene {
             scale: 1.0,
             hover: None,
             label_hits: std::cell::RefCell::default(),
+            label_placed: std::cell::RefCell::default(),
+            places,
+            editing: None,
             groups: None,
             styles: Vec::new(),
             book,
@@ -465,6 +452,9 @@ impl Scene {
             chart: self.chart.as_ref().map(chart::Chart::like),
             hover: None,
             label_hits: std::cell::RefCell::default(),
+            label_placed: std::cell::RefCell::default(),
+            places: self.places.clone(),
+            editing: None,
             groups: None,
             styles: Vec::new(),
             book: self.book.clone(),
@@ -617,7 +607,7 @@ fn prepare_run(
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     // A PDF or --relabel prints and exits; the rest is on screen.
-    if args.pdf.is_some() || args.relabel {
+    if args.export.pdf.is_some() || args.relabel {
         anyhow::ensure!(
             !args.from.is_empty(),
             "--pdf and --relabel need the run: pass -f <run>.senna.json"
@@ -740,51 +730,57 @@ fn off_screen(args: &ViewArgs, from: &[Box<str>]) -> anyhow::Result<()> {
     }
     start_charts(args, &mut scenes);
 
-    if let Some(path) = &args.pdf {
-        anyhow::ensure!(
-            args.width > 0.0 && args.dpi > 0,
-            "--width and --dpi must be positive"
-        );
-        let dpi = args.dpi as f32;
-        let w = (args.width * dpi).round() as usize;
-        // One map: a page of the map's own shape, as it would fill a screen
-        // of that shape. A chart, or several views: a roughly 4:3 page of
-        // 4:3 tiles.
-        let h = if let ([scene], None) = (&scenes[..], args.chart) {
-            let [x0, y0, x1, y1] = scene.current().points.bounds;
-            let aspect = ((y1 - y0) / (x1 - x0).max(1e-6)).clamp(0.4, 2.5);
-            (w as f32 * aspect).round() as usize
-        } else {
-            let (cols, rows) = deck::shape(scenes.len(), 4.0, 3.0);
-            (w as f32 * 0.75 * rows as f32 / cols as f32).round() as usize
-        };
-        anyhow::ensure!(
-            w * h <= deck::MAX_PIXELS,
-            "{w} × {h} px is too large; lower --width or --dpi"
-        );
-        // Labels about 8 pt on the page, whatever its size.
-        let cell_px = dpi * 11.0 / 72.0;
-        let page = if let [scene] = &scenes[..] {
-            let vp = Viewport::fit(scene.current().points.bounds, w, h);
-            deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
-        } else {
-            let titles: Vec<String> = from
-                .iter()
-                .map(|f| files::name(std::path::Path::new(f.as_ref())))
-                .collect();
-            let refs: Vec<&Scene> = scenes.iter().collect();
-            let cams = vec![None; scenes.len()];
-            deck::render_grid(&refs, &cams, &titles, (w, h), cell_px)
-        };
-        pdf::write(&[page], dpi, std::path::Path::new(path.as_ref()))?;
+    if let Some(path) = &args.export.pdf {
+        let titles: Vec<String> = from
+            .iter()
+            .map(|f| files::name(std::path::Path::new(f.as_ref())))
+            .collect();
+        let size = args.export.size();
+        let (page, (w, h)) = headless_page(&scenes, &titles, args.chart.is_some(), size)?;
+        legume_tui::export::write_pdf(&[page], size.dpi as f32, path)?;
         info!(
-            "Saved {path} ({w} × {h} px at {} dpi, {} run(s))",
-            args.dpi,
+            "Saved {} ({w} × {h} px at {} dpi, {} run(s))",
+            path.display(),
+            size.dpi,
             scenes.len()
         );
     }
     Ok(())
 }
+
+/// The page `--pdf` saves of `scenes` at `size`, and its size in pixels:
+/// one map alone, else a grid of them named by `titles`.
+fn headless_page(
+    scenes: &[Scene],
+    titles: &[String],
+    chart: bool,
+    size: PageSize,
+) -> anyhow::Result<(Page, (usize, usize))> {
+    // One map: a page of the map's own shape, as it would fill a screen
+    // of that shape. A chart, or several views: a roughly 4:3 page of
+    // 4:3 tiles.
+    let (w, h) = if let ([scene], false) = (scenes, chart) {
+        let [x0, y0, x1, y1] = scene.current().points.bounds;
+        size.check((y1 - y0) / (x1 - x0).max(1e-6))
+    } else {
+        size.check_grid(scenes.len())
+    }
+    .map_err(|e| anyhow::anyhow!("{e} (--width, --dpi)"))?;
+    let cell_px = size.cell_px();
+    let page = if let [scene] = scenes {
+        let vp = render::fit(scene.current().points.bounds, w, h);
+        deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
+    } else {
+        let refs: Vec<&Scene> = scenes.iter().collect();
+        let cams = vec![None; scenes.len()];
+        deck::render_grid(&refs, &cams, titles, (w, h), cell_px)
+    };
+    Ok((page, (w, h)))
+}
+
+#[cfg(test)]
+#[path = "tests/snapshot.rs"]
+mod snapshot;
 
 #[cfg(test)]
 mod tests {
@@ -850,10 +846,12 @@ mod tests {
             method: None,
             colour_by: None,
             graphics: Graphics::Blocks,
-            pdf: None,
+            export: PdfArgs {
+                pdf: None,
+                width: 7.0,
+                dpi: 300,
+            },
             space: None,
-            width: 7.0,
-            dpi: 300,
             feature: None,
             markers_of: None,
             observed: false,
@@ -870,6 +868,33 @@ mod tests {
             session: Default::default(),
         };
         Scene::new(data, &args)
+    }
+
+    #[test]
+    fn the_pdf_flags_keep_their_names_and_defaults() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            view: ViewArgs,
+        }
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["senna", "-f", "r.senna.json"];
+            argv.extend(args);
+            Cli::try_parse_from(argv).unwrap().view.export
+        };
+        let pdf = parse(&["--pdf", "fig.pdf"]);
+        assert_eq!(pdf.pdf.as_deref(), Some(std::path::Path::new("fig.pdf")));
+        assert_eq!(
+            pdf.size(),
+            legume_tui::export::PageSize {
+                width_in: 7.0,
+                dpi: 300
+            }
+        );
+        let pdf = parse(&["--pdf", "fig.pdf", "--width", "3.5", "--dpi", "600"]);
+        assert_eq!((pdf.width, pdf.dpi), (3.5, 600));
+        assert!(parse(&[]).pdf.is_none());
     }
 
     #[test]
@@ -1154,7 +1179,7 @@ mod tests {
         s.data.spaces.push(placed);
         s.show_labels = false;
         assert_eq!(s.near_spaces(), (Some(0), Some(3)));
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         let before = render_full(&s, vp, 16.0);
         s.near = Some(features::Near {
             name: "c1".into(),
@@ -1179,7 +1204,7 @@ mod tests {
     #[test]
     fn a_click_on_a_cluster_label_finds_that_cluster() {
         let s = scene();
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         // Only a frame that was drawn has labels to click.
         let (x, y) = vp.to_px(s.group_centre(1).unwrap());
         assert_eq!(s.group_at(&vp, x, y), None);
@@ -1207,7 +1232,7 @@ mod tests {
         // C0 is one cell in the frame's corner: its label would run off the
         // frame, so it is not drawn, and a click there is not C0.
         let s = scene();
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         render_full(&s, vp, 16.0);
         let (x, y) = vp.to_px(s.group_centre(0).unwrap());
         assert_ne!(s.group_at(&vp, x, y), Some(0));
@@ -1217,7 +1242,7 @@ mod tests {
     fn a_label_under_the_pointer_is_framed() {
         let mut s = scene();
         s.show_labels = true;
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         let plain = render_full(&s, vp, 16.0);
         let [x0, y0, x1, _] = s.label_rect(1).unwrap();
         s.hover = Some(1);
@@ -1240,7 +1265,7 @@ mod tests {
         placed.backdrop = Some(0);
         s.data.spaces.push(placed);
         s.show_labels = false;
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         let before = render_full(&s, vp, 16.0);
         let centre = s.group_centre(1).unwrap();
         s.near = Some(features::Near {
@@ -1273,7 +1298,7 @@ mod tests {
         assert!((dot(&s) - 1.25 * before).abs() < 1e-6);
         assert!(s.note.take().unwrap().contains("1.25"));
         // Text follows: the label box to click grows with it.
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         let (x, y) = vp.to_px(s.group_centre(1).unwrap());
         let reach = |s: &Scene| {
             render_full(s, vp, 16.0);

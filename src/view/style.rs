@@ -6,87 +6,10 @@
 //! sessions and into saved images.
 
 use super::color::{self, Rgb};
+/// A point's mark, saved by name (`"circle"`).
+pub use legume_tui::map::raster::Shape;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Shape {
-    #[default]
-    Circle,
-    Square,
-    Diamond,
-    Triangle,
-    Cross,
-}
-
-impl Shape {
-    pub const ALL: [Shape; 5] = [
-        Shape::Circle,
-        Shape::Square,
-        Shape::Diamond,
-        Shape::Triangle,
-        Shape::Cross,
-    ];
-
-    #[must_use]
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Shape::Circle => "●",
-            Shape::Square => "■",
-            Shape::Diamond => "◆",
-            Shape::Triangle => "▲",
-            Shape::Cross => "✚",
-        }
-    }
-
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Shape::Circle => "circle",
-            Shape::Square => "square",
-            Shape::Diamond => "diamond",
-            Shape::Triangle => "triangle",
-            Shape::Cross => "cross",
-        }
-    }
-
-    /// Coverage of pixel offset `(dx, dy)` by this shape at radius `r`, with a
-    /// one-pixel anti-aliased edge. Shapes are scaled to about the area of the
-    /// circle of radius `r`, so switching shape does not change visual weight.
-    #[inline]
-    #[must_use]
-    pub fn coverage(self, dx: f32, dy: f32, r: f32) -> f32 {
-        let (ax, ay) = (dx.abs(), dy.abs());
-        let d = match self {
-            Shape::Circle => (dx * dx + dy * dy).sqrt() - r,
-            Shape::Square => ax.max(ay) - 0.886 * r,
-            Shape::Diamond => (ax + ay) * std::f32::consts::FRAC_1_SQRT_2 - 0.886 * r,
-            Shape::Triangle => {
-                // Upward equilateral triangle (screen y grows downward).
-                let s = 1.35 * r;
-                let k = 3f32.sqrt();
-                let (mut px, mut py) = (ax - s, -dy + s / k);
-                if px + k * py > 0.0 {
-                    (px, py) = ((px - k * py) * 0.5, (-k * px - py) * 0.5);
-                }
-                px -= px.clamp(-2.0 * s, 0.0);
-                -(px * px + py * py).sqrt() * py.signum()
-            }
-            Shape::Cross => {
-                let (a, w) = (1.15 * r, 0.42 * r);
-                (ax - a).max(ay - w).min((ax - w).max(ay - a))
-            }
-        };
-        (0.5 - d).clamp(0.0, 1.0)
-    }
-
-    /// How far past `r` the shape reaches.
-    #[must_use]
-    pub fn reach(self, r: f32) -> f32 {
-        1.4 * r + 1.0
-    }
-}
 
 /// A user's choices for one group; unset fields fall back to the defaults.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -139,8 +62,7 @@ pub struct Resolved {
 #[must_use]
 pub fn swatches() -> &'static [[u8; 3]] {
     static SWATCHES: std::sync::LazyLock<Vec<[u8; 3]>> = std::sync::LazyLock::new(|| {
-        let enc = color::encoder();
-        let to8 = |c: Rgb| c.map(|v| enc.encode(v));
+        let to8 = color::to_srgb_senna;
         let mut out: Vec<[u8; 3]> = (0..12).map(|i| to8(color::category(i, 12))).collect();
         out.extend((0..12).map(|i| to8(color::ink_for(color::category(i, 12)))));
         out.extend([[200, 199, 196], [150, 150, 150], [90, 90, 90], [30, 30, 30]]);
@@ -246,10 +168,12 @@ mod tests {
     }
 
     #[test]
-    fn every_shape_covers_its_centre_and_not_far_outside() {
-        for s in Shape::ALL {
-            assert!(s.coverage(0.0, 0.0, 3.0) > 0.99, "{s:?} centre");
-            assert!(s.coverage(6.0, 6.0, 3.0) < 0.01, "{s:?} outside");
-        }
+    fn a_saved_shape_is_read_by_its_name() {
+        let b: Book =
+            serde_json::from_str(r#"{"annotation":{"CT1":{"shape":"triangle"}}}"#).unwrap();
+        assert_eq!(b.get("annotation", "CT1").shape, Shape::Triangle);
+        assert!(serde_json::to_string(&b)
+            .unwrap()
+            .contains(r#""shape":"triangle""#));
     }
 }

@@ -18,6 +18,9 @@ impl App {
         if self.menu.is_none() && !self.help && self.guard_recompute(k) {
             return true;
         }
+        if self.label_edit.is_some() && self.menu.is_none() && !self.help {
+            return self.label_key(k);
+        }
         if self.scene.review.is_some() && !self.help && self.menu.is_none() {
             self.message = None;
             if self.review_key(k) {
@@ -95,6 +98,7 @@ impl App {
                 self.help = true;
                 self.help_scroll = 0;
             }
+            KeyCode::Char(EDIT_KEY) => self.start_label_edit(),
             KeyCode::Tab => self.step_view(1),
             KeyCode::BackTab => self.step_view(-1),
             KeyCode::Char('m') => self.step_method(1, false),
@@ -124,10 +128,10 @@ impl App {
                 self.restart();
             }
             KeyCode::Char('+' | '=') => {
-                self.with_vp(|v| v.zoom_at(1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
+                self.with_vp(|v| v.zoom_at(1.4, 0.5 * v.w as f32, 0.5 * v.h as f32, &FREE))
             }
             KeyCode::Char('-' | '_') => {
-                self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
+                self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32, &FREE))
             }
             KeyCode::Char('T') => self.resolve_topics(),
             KeyCode::Char('H') => {
@@ -162,7 +166,7 @@ impl App {
                     _ => (0.0, -1.0),
                 };
                 let d = step(self);
-                self.with_vp(|v| v.pan_px(sx * d, sy * d));
+                self.with_vp(|v| v.pan_px(sx * d, sy * d, &FREE));
             }
             KeyCode::Char('R') => self.toggle_review(),
             KeyCode::Char('r') => self.open_recompute(),
@@ -298,52 +302,56 @@ impl App {
         }
         // A chart has no points to hover, click, pan or zoom.
         if self.scene.chart.is_some() {
+            self.pointer.cancel();
             return false;
         }
-        if let MouseEventKind::Moved = m.kind {
-            return self.hover(m.column, m.row);
-        }
-        let Some((px, py)) = self.cell_to_px(m.column, m.row) else {
-            return false;
+        let area = MapArea {
+            rect: self.map,
+            cell: self.cell,
         };
-        match m.kind {
-            MouseEventKind::ScrollUp => self.with_vp(|v| v.zoom_at(1.25, px, py)),
-            MouseEventKind::ScrollDown => self.with_vp(|v| v.zoom_at(0.8, px, py)),
-            MouseEventKind::Down(MouseButton::Left) => {
-                self.drag = Some(Drag {
-                    col: m.column,
-                    row: m.row,
-                    moved: false,
-                });
-                return false;
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some(d) = self.drag.as_mut() {
-                    let dx = (f32::from(m.column) - f32::from(d.col)) * self.cell.0;
-                    let dy = (f32::from(m.row) - f32::from(d.row)) * self.cell.1;
-                    *d = Drag {
-                        col: m.column,
-                        row: m.row,
-                        moved: true,
-                    };
-                    self.with_vp(|v| v.pan_px(dx, dy));
-                } else {
-                    return false;
+        let (vp, scene) = (self.vp, &self.scene);
+        let held = self.pointer.label();
+        let action = self.pointer.handle(&area, &m, |px, py| {
+            vp.and_then(|vp| scene.group_at(&vp, px, py))
+        });
+        // A label let go, wherever: where it was put is kept. One pressed
+        // and let go where it was is a click on it.
+        let let_go = held.filter(|_| !self.pointer.dragging());
+        if let (Some(g), false) = (let_go, matches!(action, MapAction::Click { .. })) {
+            self.scene.keep_label_places();
+            let name = &self.scene.levels()[g as usize];
+            self.message = Some(format!(
+                "{name} moved, here and in saved figures · E moves labels by key, backspace there puts one back"
+            ));
+            self.change_text(|_| {});
+            return true;
+        }
+        match action {
+            MapAction::None => return false,
+            MapAction::Hover { px, py } => return self.hover(Some((px, py))),
+            MapAction::Away => return self.hover(None),
+            MapAction::Pan { .. } | MapAction::Zoom { .. } => self.with_vp(|v| {
+                action.apply(v, &FREE);
+            }),
+            MapAction::MoveLabel { key, dx, dy } => {
+                let em = self.scene.label_em(self.cell.1);
+                self.scene.move_label(key, (dx / em, dy / em));
+                if let Some(e) = self.label_edit.as_mut() {
+                    e.at = Some(key);
+                    self.scene.editing = Some(key);
                 }
+                self.redecorate();
             }
-            // Releasing ends the drag; a press that never moved is a click.
-            MouseEventKind::Up(MouseButton::Left) if self.drag.take().is_some_and(|d| !d.moved) => {
-                self.click(px, py);
-            }
-            _ => return false,
+            MapAction::Click { px, py, .. } => self.click(px, py),
         }
         true
     }
 
-    /// Frame the cluster label under the pointer and say what a click on it
-    /// does; clear that when the pointer leaves it. Returns whether it changed.
-    fn hover(&mut self, col: u16, row: u16) -> bool {
-        let under = match (self.cell_to_px(col, row), self.vp) {
+    /// Frame the cluster label under the pointer at `at` (none: it left
+    /// the map) and say what a click on it does; clear that when the
+    /// pointer leaves it. Returns whether it changed.
+    fn hover(&mut self, at: Option<(f32, f32)>) -> bool {
+        let under = match (at, self.vp) {
             (Some((px, py)), Some(vp)) => self.scene.group_at(&vp, px, py),
             _ => None,
         };
@@ -355,7 +363,7 @@ impl App {
             Some(g) => {
                 let name = &self.scene.levels()[g as usize];
                 self.message = Some(format!(
-                    "{name} · click for the features placed nearest this cluster"
+                    "{name} · click for the features placed nearest this cluster, drag to move the label"
                 ));
             }
             // Leaving a label takes its note with it.
@@ -364,6 +372,97 @@ impl App {
         }
         self.redecorate();
         true
+    }
+
+    /// `E`: move the labels on the map from the keyboard, the first as
+    /// read chosen.
+    fn start_label_edit(&mut self) {
+        let placed = self.scene.placed_labels();
+        if self.scene.current().axis() != crate::view::Axis::Cells || placed.is_empty() {
+            self.message = Some(
+                "no labels to move here: a cell map's group labels move (t shows labels)".into(),
+            );
+            return;
+        }
+        let edit = LabelEdit::enter(&placed);
+        self.label_edit = Some(edit);
+        self.scene.editing = edit.at;
+        self.label_message();
+        if let Some(why) = &self.scene.places.refused {
+            let note = format!("moves last this session only: {why}");
+            self.message = Some(match self.message.take() {
+                Some(m) => format!("{m} · {note}"),
+                None => note,
+            });
+        }
+        self.redecorate();
+    }
+
+    /// A key while moving labels: tab chooses, arrows move, backspace puts
+    /// back, esc (or `E`) leaves. Other keys wait, `?` and `q` aside.
+    fn label_key(&mut self, k: KeyEvent) -> bool {
+        let Some(mut edit) = self.label_edit else {
+            return false;
+        };
+        let placed = self.scene.placed_labels();
+        let mut o = self.scene.group_offsets();
+        let did = if LabelEdit::<u32>::starts(&k) {
+            EditKey::Leave
+        } else {
+            edit.key(&k, &placed, &mut o)
+        };
+        match did {
+            EditKey::Changed => {
+                self.scene.set_group_offsets(&o);
+                self.scene.keep_label_places();
+            }
+            EditKey::Taken => {}
+            EditKey::Leave => {
+                self.label_edit = None;
+                self.scene.editing = None;
+                self.message = Some(format!(
+                    "labels stay where they were put · kept in {}",
+                    files::name(&crate::view::places::Places::path(&self.scene.data.prefix))
+                ));
+                self.change_text(|_| {});
+                self.redecorate();
+                return true;
+            }
+            EditKey::Pass => match k.code {
+                KeyCode::Char('?') => {
+                    self.help = true;
+                    self.help_scroll = 0;
+                    return true;
+                }
+                KeyCode::Char('q') => {
+                    self.quit = true;
+                    return true;
+                }
+                _ => {
+                    self.message =
+                        Some("moving labels: esc or E first, then the map's keys".into());
+                    return true;
+                }
+            },
+        }
+        self.label_edit = Some(edit);
+        self.scene.editing = edit.at;
+        self.label_message();
+        self.change_text(|_| {});
+        self.redecorate();
+        true
+    }
+
+    /// Which label the keys move, and how.
+    fn label_message(&mut self) {
+        let name = self
+            .scene
+            .editing
+            .and_then(|g| self.scene.levels().get(g as usize))
+            .map_or_else(|| "a label".to_string(), ToString::to_string);
+        self.message = Some(format!(
+            "moving {name} · tab next label · arrows move it · esc done"
+        ));
     }
 
     /// Focus the group of the point nearest the click, and name the point.
@@ -448,16 +547,6 @@ impl App {
         }
     }
 
-    pub(super) fn cell_to_px(&self, col: u16, row: u16) -> Option<(f32, f32)> {
-        let m = self.map;
-        (col >= m.x && row >= m.y && col < m.x + m.width && row < m.y + m.height).then(|| {
-            (
-                (f32::from(col - m.x) + 0.5) * self.cell.0,
-                (f32::from(row - m.y) + 0.5) * self.cell.1,
-            )
-        })
-    }
-
     /// A scene change that may show another source: its feature axis is
     /// the one `/` searches from now on.
     pub(super) fn change_source(&mut self, f: impl FnOnce(&mut Scene)) {
@@ -527,10 +616,7 @@ fn adjust(
     match field {
         0 => {
             let sw = swatches();
-            let enc = color::encoder();
-            let now = st
-                .colour
-                .or_else(|| current.map(|c| c.map(|v| enc.encode(v))));
+            let now = st.colour.or_else(|| current.map(color::to_srgb_senna));
             // Start from the swatch nearest the colour shown now.
             let at = now.map_or(0, |c| {
                 (0..sw.len())
@@ -740,5 +826,157 @@ mod tests {
         assert_eq!(&*hits[3], "XGENE1Y");
         assert_eq!(hits.len(), 4);
         assert!(search(&names, &lower, "").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use crate::view::places::Places;
+
+    /// A view of the test scene, its run at `dir/r`, laid out on a kitty
+    /// terminal and drawn.
+    fn drawn_in(dir: &std::path::Path) -> App {
+        let mut scene = crate::view::tests::scene();
+        scene.data.prefix = dir.join("r").to_string_lossy().into_owned();
+        scene.places = Places::load(&scene.data.prefix);
+        let mut a = App::new(
+            scene,
+            super::super::attach_tests::kitty(),
+            "r.senna.json".into(),
+            "lupin".into(),
+        );
+        a.sidebar = false;
+        a.layout(Rect::new(0, 0, 100, 40), STATUS_LINES);
+        draw(&mut a);
+        a
+    }
+
+    fn draw(a: &mut App) {
+        if a.job.is_none() && a.base.is_none() {
+            a.restart();
+        }
+        while a.job.is_some() {
+            a.advance().unwrap();
+        }
+    }
+
+    fn mouse(a: &mut App, kind: MouseEventKind, (column, row): (u16, u16)) {
+        a.mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    /// The cell at the centre of group `g`'s label.
+    fn label_cell(a: &App, g: u32) -> (u16, u16) {
+        let [x0, y0, x1, y1] = a.scene.label_rect(g).expect("label drawn");
+        (
+            a.map.x + (0.5 * (x0 + x1) / a.cell.0) as u16,
+            a.map.y + (0.5 * (y0 + y1) / a.cell.1) as u16,
+        )
+    }
+
+    fn key(a: &mut App, code: KeyCode, mods: KeyModifiers) {
+        a.key(KeyEvent::new(code, mods));
+    }
+
+    #[test]
+    fn a_dragged_label_stays_where_it_is_put_after_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = drawn_in(dir.path());
+        let before = a.vp;
+        let (col, row) = label_cell(&a, 1);
+        mouse(&mut a, MouseEventKind::Down(MouseButton::Left), (col, row));
+        mouse(
+            &mut a,
+            MouseEventKind::Drag(MouseButton::Left),
+            (col + 3, row + 2),
+        );
+        // Let go off the map, on the status lines: the drag ends all the
+        // same.
+        mouse(&mut a, MouseEventKind::Up(MouseButton::Left), (0, 39));
+        assert!(!a.pointer.dragging());
+        assert_eq!(a.vp, before, "the label moved, not the map");
+        let em = a.scene.label_em(a.cell.1);
+        let want = (3.0 * a.cell.0 / em, 2.0 * a.cell.1 / em);
+        let got = a.scene.group_offsets().get(&1).unwrap();
+        assert!((got.0 - want.0).abs() < 1e-4 && (got.1 - want.1).abs() < 1e-4);
+        // A drag of the map pans, and a later one starts afresh.
+        mouse(&mut a, MouseEventKind::Down(MouseButton::Left), (2, 2));
+        mouse(&mut a, MouseEventKind::Drag(MouseButton::Left), (4, 2));
+        mouse(&mut a, MouseEventKind::Up(MouseButton::Left), (4, 2));
+        assert_ne!(a.vp, before);
+        // A label pressed and let go where it was is clicked, not moved.
+        a.vp = before;
+        a.restart();
+        draw(&mut a);
+        let at = label_cell(&a, 1);
+        mouse(&mut a, MouseEventKind::Down(MouseButton::Left), at);
+        mouse(&mut a, MouseEventKind::Up(MouseButton::Left), at);
+        assert_eq!(a.scene.focus, Some(1));
+        let got = a.scene.group_offsets().get(&1).unwrap();
+        assert!((got.0 - want.0).abs() < 1e-4 && (got.1 - want.1).abs() < 1e-4);
+        // Opened again, the run's label is where it was put.
+        let b = drawn_in(dir.path());
+        let got = b.scene.group_offsets().get(&1).unwrap();
+        assert!((got.0 - want.0).abs() < 1e-4 && (got.1 - want.1).abs() < 1e-4);
+        assert!(b
+            .scene
+            .placed_labels()
+            .iter()
+            .any(|p| p.key == 1 && p.moved));
+    }
+
+    #[test]
+    fn shift_e_moves_labels_by_key_and_esc_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = drawn_in(dir.path());
+        let space = a.scene.space;
+        key(&mut a, KeyCode::Char('E'), KeyModifiers::SHIFT);
+        let g = a.label_edit.and_then(|e| e.at).expect("a label chosen");
+        assert_eq!(a.scene.editing, Some(g));
+        assert!(a.context() == help::Context::Labels);
+        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(a.scene.group_offsets().get(&g), Some((0.5, 0.0)));
+        key(&mut a, KeyCode::Up, KeyModifiers::SHIFT);
+        assert_eq!(a.scene.group_offsets().get(&g), Some((0.5, -2.0)));
+        // Kept at once.
+        let back = Places::load(&a.scene.data.prefix);
+        let name = a.scene.levels()[g as usize].to_string();
+        assert_eq!(
+            back.layout(&a.scene.layout_id()).get(&name),
+            Some((0.5, -2.0))
+        );
+        // Tab chooses a label here, and does not step the view.
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(a.scene.space, space);
+        assert!(a.label_edit.is_some());
+        a.label_edit = Some(LabelEdit { at: Some(g) });
+        key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(a.scene.group_offsets().get(&g), None);
+        // Other map keys wait for the mode to end.
+        let colour = a.scene.colour;
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::NONE);
+        assert_eq!(a.scene.colour, colour);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.label_edit.is_none() && a.scene.editing.is_none());
+        // Outside the mode, tab steps the view as ever.
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        assert_ne!(a.scene.space, space);
+    }
+
+    #[test]
+    fn e_with_no_labels_to_move_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = drawn_in(dir.path());
+        a.scene.show_labels = false;
+        a.restart();
+        draw(&mut a);
+        key(&mut a, KeyCode::Char('E'), KeyModifiers::SHIFT);
+        assert!(a.label_edit.is_none());
+        assert!(a.message.as_deref().unwrap().contains("no labels"));
     }
 }

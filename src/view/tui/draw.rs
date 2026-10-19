@@ -208,9 +208,8 @@ impl App {
 
     /// The style menu, docked on the right of the map.
     pub(super) fn draw_menu(&self, f: &mut ratatui::Frame, map: Rect, menu: &Menu, page: Style) {
-        let enc = color::encoder();
         let to_color = |c: color::Rgb| {
-            let [r, g, b] = c.map(|v| enc.encode(v));
+            let [r, g, b] = color::to_srgb_senna(c);
             Color::Rgb(r, g, b)
         };
         let levels = self.scene.levels();

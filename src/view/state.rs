@@ -202,6 +202,8 @@ impl Scene {
             .map(|i| self.data.labels[i].clone());
         let loads = self.data.loads.clone();
         self.data = data;
+        // Another round keeps its own moved labels.
+        self.places = super::places::Places::load(&self.data.prefix);
         if same_run {
             // One read of each per run.
             self.data.loads = loads;

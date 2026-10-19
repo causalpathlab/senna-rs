@@ -7,9 +7,10 @@
 //! arrows over a grid of the visible map.
 
 use super::data::Points;
-use super::render::{self, Frame, Viewport};
+use super::render::{Frame, Viewport};
 use super::Rgb;
 use legume_numeric::matrix::knn::{ColumnDict, SearchScratch};
+use legume_tui::map::raster::edge;
 use rayon::prelude::*;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunManifest};
@@ -244,12 +245,11 @@ pub fn draw(frame: &mut Frame, arrows: &[Arrow], ink: Rgb, floor: f32) {
         let len = dx.hypot(dy).max(1e-6);
         let (nx, ny) = (-dy / len, dx / len);
         for &o in &offsets {
-            render::draw_edge(
+            edge(
                 frame,
                 (a.0 + nx * o, a.1 + ny * o),
                 (b.0 + nx * o, b.1 + ny * o),
-                0.0,
-                0.0,
+                (0.0, 0.0),
                 ink,
                 0.85,
             );
@@ -489,12 +489,11 @@ fn stroke(frame: &mut Frame, a: (f32, f32), b: (f32, f32), width: f32, ink: Rgb,
         if o.abs() > width * 0.5 + 0.01 {
             continue;
         }
-        render::draw_edge(
+        edge(
             frame,
             (a.0 + nx * o, a.1 + ny * o),
             (b.0 + nx * o, b.1 + ny * o),
-            0.0,
-            0.0,
+            (0.0, 0.0),
             ink,
             alpha,
         );
