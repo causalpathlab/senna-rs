@@ -1239,9 +1239,14 @@ fn the_session_status_says_where_the_fits_are() {
 
 #[test]
 fn the_view_v_opens_runs_as_this_session_was_asked_to() {
-    let session = crate::tui::plain_session();
+    // Plain by `--no-detach`, which the view is told of.
+    let opts = legume_tui::Options {
+        no_detach: true,
+        ..Default::default()
+    };
+    let session = crate::tui::TOOL.session("test", &opts).unwrap();
     let mut cmd = view_command("senna".into(), &["r.senna.json".into()]);
-    session.command(&mut cmd);
+    session.command(&mut cmd, legume_tui::Group::Shared);
     let args: Vec<_> = cmd
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())

@@ -15,7 +15,7 @@ pub(super) struct Recomputing {
     /// is otherwise kept, which would hide a new method behind the old.
     show: Option<(String, crate::view::SpaceKind)>,
     progress: std::sync::Arc<std::sync::Mutex<String>>,
-    stopper: std::sync::Arc<crate::tui::child::Stopper>,
+    stopper: std::sync::Arc<legume_tui::child::Stopper>,
     done: Pending<()>,
 }
 
@@ -129,7 +129,7 @@ impl App {
             .join(", ");
         let show = chosen.iter().find_map(|(s, m)| s.shows(m));
         let progress: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
-        let stopper = std::sync::Arc::new(crate::tui::child::Stopper::default());
+        let stopper = std::sync::Arc::new(legume_tui::child::Stopper::default());
         let (shared, stops) = (progress.clone(), stopper.clone());
         let done = Pending::spawn(move || recompute::run(&target, &chosen, &shared, &stops));
         self.recomputing = Some(Recomputing {
@@ -269,7 +269,7 @@ mod tests {
     /// A view whose run senna is recomputing (a job that never answers).
     fn busy() -> (
         App,
-        std::sync::Arc<crate::tui::child::Stopper>,
+        std::sync::Arc<legume_tui::child::Stopper>,
         std::sync::mpsc::Sender<Result<(), String>>,
     ) {
         let mut app = App::new(
@@ -279,7 +279,7 @@ mod tests {
             "lupin".into(),
         );
         let (tx, rx) = std::sync::mpsc::channel();
-        let stopper = std::sync::Arc::new(crate::tui::child::Stopper::default());
+        let stopper = std::sync::Arc::new(legume_tui::child::Stopper::default());
         app.recomputing = Some(Recomputing {
             started: std::time::Instant::now(),
             what: "cell layout (umap)".into(),

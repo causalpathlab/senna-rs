@@ -107,6 +107,61 @@ fn a_stopped_queue_is_waited_for_and_its_fit_killed() {
     assert!(!dir.path().join("b.cmd.sh").exists(), "b never started");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_stop_reaches_what_a_fit_starts() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    // Not exec'd: the shell waits on its own child, which only a stop sent
+    // to the fit's whole process group interrupts.
+    let slow = dir.path().join("slow-senna");
+    std::fs::write(&slow, "#!/bin/sh\nsleep 30\necho done >&2\n").unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let q = Queue::start(vec![job(
+        dir.path(),
+        Tool::Senna,
+        &slow,
+        "a",
+        &["--out", "a"],
+    )]);
+    while q.shared.lock().unwrap().states[0] != State::Running {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let t = std::time::Instant::now();
+    assert!(!q.stop(), "one stop interrupts");
+    q.join();
+    assert!(t.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(q.shared.lock().unwrap().states, [State::Stopped]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_fit_says_how_it_ended_and_what_it_was_doing() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, body: &str| {
+        let p = dir.path().join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    };
+    let quiet = write("quiet", "echo \"[t INFO x] epoch 3\" >&2\nexit 1");
+    let explained = write("explained", "echo \"Error: no such layer\" >&2\nexit 2");
+    let q = Queue::start(vec![
+        job(dir.path(), Tool::Senna, &quiet, "a", &["--out", "a"]),
+        job(dir.path(), Tool::Senna, &explained, "b", &["--out", "b"]),
+    ]);
+    q.join();
+    assert_eq!(
+        q.shared.lock().unwrap().states,
+        [
+            State::Failed("exit status: 1, after: epoch 3".into()),
+            State::Failed("no such layer".into()),
+        ]
+    );
+}
+
 /// A stand-in program in `dir` that logs its argv and touches
 /// `{out}.<end>`.
 #[cfg(unix)]

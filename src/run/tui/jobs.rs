@@ -15,7 +15,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use super::script;
-use crate::tui::child::{run_one, Failed, Progress, Said, Stopper};
+use legume_tui::child::{run_one, Failed, Progress, Said, Stopper};
 
 /// Log lines kept for the screen.
 const KEEP: usize = 2000;
@@ -475,7 +475,9 @@ fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper)
         format!("── {} · {}", job.method, crate::tui::shown(&job.script())),
     );
     let mut command = Command::new(&job.program);
-    command.args(&argv).current_dir(&job.dir);
+    crate::tui::own_group(&mut command)
+        .args(&argv)
+        .current_dir(&job.dir);
     // The log level the script sets, so the run is the one it records.
     if std::env::var_os("RUST_LOG").is_none() {
         command.env("RUST_LOG", script::LOG_LEVEL);
@@ -513,6 +515,7 @@ fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper)
                 s.progress[i] = Some(p);
             }
         }
+        _ => {}
     };
     let ran = run_one(command, stopper, each);
     if let Ok(mut s) = s.lock() {
@@ -523,6 +526,7 @@ fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper)
         Ok(()) => State::Done,
         Err(Failed::Stopped) => State::Stopped,
         Err(Failed::Start(why) | Failed::Exit(why)) => State::Failed(why),
+        Err(other) => State::Failed(format!("{other:?}")),
     }
 }
 
