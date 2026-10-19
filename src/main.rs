@@ -899,15 +899,19 @@ enum Commands {
     Attach(legume_tui::cli::AttachArgs),
 
     #[cfg(feature = "view")]
-    #[command(about = "List the live `senna run` and `senna view` sessions")]
+    #[command(
+        about = "List the live `senna run` and `senna view` sessions",
+        long_about = legume_tui::cli::about(&tui::TOOL, legume_tui::cli::QUIT_KEY).sessions
+    )]
     Sessions,
 
     #[cfg(feature = "view")]
     #[command(
         about = "Stop a `senna run` or `senna view` session",
         long_about = "Stop a session as its quit key does: `senna run` stops its fits\n\
-                      and wraps them up first. --force kills it at once, and fits it\n\
-                      started may then keep running."
+                      and wraps them up first. Waits up to a minute for it to end, and\n\
+                      says what it left, such as the run summary. --force kills it at\n\
+                      once, and fits it started may then keep running."
     )]
     Kill(legume_tui::cli::KillArgs),
 
@@ -927,15 +931,13 @@ enum Commands {
 /// the keys.
 #[cfg(feature = "view")]
 fn session_help(what_goes_on: Option<&str>, resume_hint: &str) -> String {
-    legume_tui::cli::session_help(
-        &tui::TOOL,
-        legume_tui::cli::SessionHelp {
-            what_goes_on,
-            resume_hint,
-            more: Some("`?` shows the keys in effect."),
-            ..Default::default()
-        },
-    )
+    let mut help = legume_tui::cli::SessionHelp::new()
+        .resume_hint(Some(resume_hint))
+        .more("`?` shows the keys in effect.");
+    if let Some(what) = what_goes_on {
+        help = help.what_goes_on(what);
+    }
+    legume_tui::cli::session_help(&tui::TOOL, help)
 }
 
 #[derive(Subcommand, Debug)]

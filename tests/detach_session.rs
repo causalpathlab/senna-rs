@@ -60,11 +60,10 @@ fn run_detaches_attaches_and_is_killed_through_its_quit_path() {
 
     // Attached from another terminal: painted whole there.
     let mut second = term(&dir, &["attach"], &[]);
-    second.wait_for(PAINTED);
-    let before = second.seen_len();
+    second.wait_screen(PAINTED);
     // Keys reach the program: typed into the output header it asks first.
     second.type_(b"z");
-    second.wait_for_after(before, "z▏");
+    second.wait_screen("z▏");
     // Out of the field and the file browser after it, its `?` page lists
     // the detach key.
     for _ in 0..2 {
@@ -72,10 +71,10 @@ fn run_detaches_attaches_and_is_killed_through_its_quit_path() {
         std::thread::sleep(Duration::from_millis(300));
     }
     second.type_(b"?");
-    second.wait_for("ctrl+alt+d");
-    second.wait_for("detach:");
-    second.wait_for("ctrl+alt+s");
-    second.wait_for("switch:");
+    second.wait_screen("ctrl+alt+d");
+    second.wait_screen("detach,");
+    second.wait_screen("ctrl+alt+s");
+    second.wait_screen("switch,");
 
     // A TUI started under the session's marker, as `senna run` starts
     // `senna view` when its fits are done, runs plain: no second host, no
@@ -208,11 +207,10 @@ fn smoke_hosted_run_survives_a_lost_client() {
         height: 1000,
     };
     let mut second = dir.term_sized(&["attach", "run-1"], &[], size);
-    second.wait_for("\x1b[?1049h\x1b[H\x1b[2J");
-    let reset = second.text().find("\x1b[?1049h\x1b[H\x1b[2J").unwrap();
     for tab in ["1 Data", "2 Methods", PAINTED] {
-        second.wait_for_after(reset, tab);
+        second.wait_screen(tab);
     }
+    assert!(second.alternate());
     let w = winsize_of(pid);
     assert_eq!(
         (w.ws_row, w.ws_col, w.ws_xpixel, w.ws_ypixel),
@@ -282,6 +280,7 @@ fn an_early_failure_stays_in_sight_on_the_normal_screen() {
     assert!(text.contains("x.senna.json"), "{text:?}");
     assert!(text.contains("senna-view-1 exited"), "hosted: {text:?}");
     assert!(!text.contains("\x1b[?1049h"), "alternate screen: {text:?}");
+    assert!(t.screen().contains("x.senna.json"), "{}", t.screen());
     assert!(t.cooked(), "terminal restored");
     assert!(dir.sockets().is_empty());
     assert!(dir.is_empty(), "files left");

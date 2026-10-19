@@ -313,7 +313,7 @@ pub fn pick_run(session: &legume_tui::Session) -> anyhow::Result<Option<PathBuf>
         } else {
             std::time::Duration::from_secs(60)
         };
-        if let Some(Event::Key(k)) = session.poll(&mut terminal, wanted)? {
+        if let legume_tui::Round::Event(Event::Key(k)) = session.poll(&mut terminal, wanted)? {
             if k.kind == KeyEventKind::Release {
                 continue;
             }
@@ -327,6 +327,9 @@ pub fn pick_run(session: &legume_tui::Session) -> anyhow::Result<Option<PathBuf>
             }
         }
     })();
+    if let Err(e) = &picked {
+        let _ = session.hold_error(&mut terminal, e);
+    }
     session.restore();
     drop(quiet);
     picked

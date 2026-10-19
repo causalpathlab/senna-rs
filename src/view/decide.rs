@@ -3,7 +3,7 @@
 //! `lupin relabel --watch` on the same chain is followed via its status file.
 
 use super::files::{self, modified, read_json, same_file, siblings};
-use crate::tui::child::follow_log;
+use legume_tui::child::{run_one, Failed, Said, Stopper};
 use senna::run_manifest;
 use serde_json::Value;
 use std::io::Write;
@@ -109,7 +109,7 @@ pub fn relabel(
         Mode::Next => "--next",
         Mode::Preview => "--preview",
     };
-    let mut child = Command::new(lupin)
+    let mut child = lupin_command(lupin)
         .args(["relabel", "-f"])
         .arg(round)
         .args(["-d", "-", flag])
@@ -117,7 +117,7 @@ pub fn relabel(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| cannot_run(lupin, &e))?;
+        .map_err(|e| cannot_run(lupin, e))?;
     let mut lines = String::new();
     for d in decisions {
         lines.push_str(&serde_json::to_string(d).map_err(|e| e.to_string())?);
@@ -172,7 +172,7 @@ impl Rescore {
     /// Start lupin on `decisions` (JSON lines naming `round`).
     pub fn spawn(lupin: &str, round: &Path, decisions: &[Value]) -> Result<Self, String> {
         use std::io::Read;
-        let mut child = Command::new(lupin)
+        let mut child = lupin_command(lupin)
             .args(["relabel", "-f"])
             .arg(round)
             .args(["-d", "-", "--preview"])
@@ -180,7 +180,7 @@ impl Rescore {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| cannot_run(lupin, &e))?;
+            .map_err(|e| cannot_run(lupin, e))?;
         let mut lines = String::new();
         for d in decisions {
             lines.push_str(&serde_json::to_string(d).map_err(|e| e.to_string())?);
@@ -249,7 +249,8 @@ pub fn annotate(
     out: &Path,
     progress: &std::sync::Mutex<String>,
 ) -> Result<Reply, String> {
-    let mut child = Command::new(lupin)
+    let mut command = Command::new(lupin);
+    crate::tui::own_group(&mut command)
         .args(["annotate", "-f"])
         .arg(run)
         .arg("-m")
@@ -257,26 +258,28 @@ pub fn annotate(
         .arg("-o")
         .arg(out)
         .args(["--method", "enrichment"])
-        .args(go.then_some("--go"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| cannot_run(lupin, &e))?;
-    let last = follow_log(child.stderr.take(), |line| {
-        if let Ok(mut p) = progress.lock() {
-            *p = line.to_string();
+        .args(go.then_some("--go"));
+    // A save: the view's quit path and a hangup of senna let it finish.
+    let stopper = Stopper::saving();
+    let mut last = String::new();
+    let ran = run_one(command, &stopper, |said| {
+        if let Said::Line(line) = said {
+            if let Ok(mut p) = progress.lock() {
+                p.clone_from(&line);
+            }
+            last = line;
         }
     });
-    let status = child.wait().map_err(|e| e.to_string())?;
     let written = PathBuf::from(run_manifest::default_path(&out.to_string_lossy()));
-    if status.success() && written.exists() {
-        return Ok(Reply::Round(written));
-    }
-    let reason = if status.success() {
-        format!("lupin finished but wrote no {}", written.display())
-    } else {
-        reason_of(Some(last.as_str()).filter(|l| !l.is_empty()))
+    let reason = match ran {
+        Ok(()) if written.exists() => return Ok(Reply::Round(written)),
+        Ok(()) => format!("lupin finished but wrote no {}", written.display()),
+        Err(Failed::Start(why)) => {
+            // "cannot run <program>: <why>"
+            let why = why.split_once(": ").map_or(why.as_str(), |(_, e)| e);
+            return Err(cannot_run(lupin, why));
+        }
+        Err(_) => reason_of(Some(last.as_str()).filter(|l| !l.is_empty())),
     };
     Ok(Reply::Refused {
         reason,
@@ -284,7 +287,16 @@ pub fn annotate(
     })
 }
 
-fn cannot_run(lupin: &str, e: &std::io::Error) -> String {
+/// `lupin` set up as the session starts a child it talks to over pipes:
+/// hosted, in a process group of its own, which the host's wake after an
+/// attach and a hangup of senna do not reach.
+fn lupin_command(lupin: &str) -> Command {
+    let mut command = Command::new(lupin);
+    crate::tui::child_env().apply(&mut command, legume_tui::Group::OwnWhenHosted);
+    command
+}
+
+fn cannot_run(lupin: &str, e: impl std::fmt::Display) -> String {
     format!("cannot run `{lupin}` ({e}); pass --lupin <path> or set SENNA_LUPIN")
 }
 
@@ -558,5 +570,49 @@ mod tests {
         let stale = fake_lupin(d, "echo 'Error: not the latest round' >&2; exit 1");
         let job = Rescore::spawn(&stale, Path::new("r.senna.json"), &[json]).unwrap();
         assert_eq!(wait(&job).unwrap_err(), "not the latest round");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn annotate_follows_lupin_and_opens_the_round_or_says_why_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let (run, markers, out) = (d.join("r.senna.json"), d.join("m.tsv"), d.join("r.L1"));
+        let progress = std::sync::Mutex::new(String::new());
+        let annotate = |lupin: &str| annotate(lupin, &run, &markers, false, &out, &progress);
+        let refused = |reply| match reply {
+            Reply::Refused { reason, .. } => reason,
+            _ => panic!("not refused"),
+        };
+
+        let ok = fake_lupin(
+            d,
+            "echo '[t INFO x] scoring clusters' >&2\n\
+             while [ $# -gt 0 ]; do [ \"$1\" = -o ] && touch \"$2.senna.json\"; shift; done",
+        );
+        match annotate(&ok).unwrap() {
+            Reply::Round(p) => assert_eq!(p, d.join("r.L1.senna.json")),
+            _ => panic!("no round"),
+        }
+        assert_eq!(*progress.lock().unwrap(), "scoring clusters");
+
+        let wrote_none = fake_lupin(d, "true");
+        std::fs::remove_file(d.join("r.L1.senna.json")).unwrap();
+        assert!(refused(annotate(&wrote_none).unwrap()).contains("wrote no"));
+        let explained = fake_lupin(d, "echo 'Error: no marker matches' >&2; exit 1");
+        assert_eq!(refused(annotate(&explained).unwrap()), "no marker matches");
+        let silent = fake_lupin(d, "exit 1");
+        assert_eq!(
+            refused(annotate(&silent).unwrap()),
+            "lupin failed without a reason"
+        );
+        let missing = d.join("none").to_string_lossy().into_owned();
+        let Err(why) = annotate(&missing) else {
+            panic!("lupin ran")
+        };
+        assert!(
+            why.starts_with(&format!("cannot run `{missing}` (")) && why.ends_with("SENNA_LUPIN"),
+            "{why}"
+        );
     }
 }

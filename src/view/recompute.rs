@@ -2,7 +2,7 @@
 //! clusterings, missing ones on open and chosen ones from the `r` menu. One
 //! place builds the commands, so both run the same thing.
 
-use crate::tui::child::{run_one, Failed, Said, Stopper};
+use legume_tui::child::{run_one, Failed, Said, Stopper};
 use std::process::Command;
 
 /// Leiden resolutions the menu steps through for a clustering, 1 (the
@@ -310,7 +310,7 @@ pub(crate) fn run(
         .iter()
         .map(|&(step, setting)| {
             let mut c = Command::new(&exe);
-            c.args(step.argv(t, setting));
+            crate::tui::own_group(&mut c).args(step.argv(t, setting));
             (step.label(), c)
         })
         .collect();
@@ -343,6 +343,7 @@ fn run_commands(
             Err(Failed::Stopped) => return Err("stopped".into()),
             Err(Failed::Start(why)) => return Err(why),
             Err(Failed::Exit(why)) => return Err(format!("{label} failed: {why}")),
+            Err(other) => return Err(format!("{label} failed: {other:?}")),
         }
     }
     Ok(())

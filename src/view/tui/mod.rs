@@ -70,10 +70,7 @@ pub fn run(
         // answer; the session turns the mouse on again after every attach.
         session.take_repaint();
         let picker = legume_tui::graphics::pick(session, graphics, Fallback::Probe);
-        session.set_modes(legume_tui::Modes {
-            mouse: legume_tui::Mouse::Full,
-            ..Default::default()
-        })?;
+        session.set_modes(legume_tui::Modes::new().mouse(legume_tui::Mouse::Full))?;
         let apps = views
             .into_iter()
             .map(|(scene, from)| App::new(scene, picker.clone(), from, lupin.clone()))
@@ -84,6 +81,11 @@ pub fn run(
             graphics,
         )
     })();
+    // An error it ends with stays drawn on a screen nobody is attached to,
+    // and is said once by whoever looks next.
+    if let Err(e) = &result {
+        let _ = session.hold_error(&mut terminal, e);
+    }
     session.restore();
     drop(quiet);
     result
@@ -832,7 +834,7 @@ pub(super) mod attach_tests {
     fn a_named_protocol_is_taken_and_blocks_never_ask() {
         // Block characters are taken without a word to the terminal; a
         // protocol named, as it is.
-        let session = crate::tui::plain_session();
+        let session = legume_tui::Session::plain(&crate::tui::TOOL);
         let p = legume_tui::graphics::pick(&session, Graphics::Blocks, Fallback::Probe);
         assert_eq!(p.protocol_type(), ProtocolType::Halfblocks);
         // Fallback::Env: a named protocol is taken either way, and the

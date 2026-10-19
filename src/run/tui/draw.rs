@@ -3,10 +3,10 @@
 
 use super::jobs::{State, Tool, CLONES_FLAG, TREND};
 use super::{batches, App, Batch, Kind, Screen, Target};
-use crate::tui::child::Progress;
 use crate::tui::style::{
     bold, first_row, hint, page, page_window, popup, rgb, scrolled, selected, At, MUTED, TEXT,
 };
+use legume_tui::child::Progress;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};

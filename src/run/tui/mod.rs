@@ -22,6 +22,7 @@ use data::Pair;
 use data::Pick;
 use form::{Field, Kind, Method};
 use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG, TD_RBM};
+use legume_tui::Round;
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
@@ -255,10 +256,8 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
     // The mouse's buttons and wheel reported, never its movement, so a
     // moving pointer wakes nothing; shift+drag still selects text in most
     // terminals.
-    let mut terminal = session.terminal_with(legume_tui::Modes {
-        mouse: legume_tui::Mouse::Buttons,
-        ..Default::default()
-    })?;
+    let mut terminal =
+        session.terminal_with(legume_tui::Modes::new().mouse(legume_tui::Mouse::Buttons))?;
     let result = (|| -> anyhow::Result<()> {
         while !app.quit {
             app.poll();
@@ -273,19 +272,19 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
                 Duration::from_secs(60)
             };
             match session.poll(&mut terminal, wanted)? {
-                Some(Event::Key(k)) if k.kind != KeyEventKind::Release => app.key(k),
+                Round::Event(Event::Key(k)) if k.kind != KeyEventKind::Release => app.key(k),
                 // The wheel scrolls whatever list or page is in front, as
                 // the arrow keys do.
-                Some(Event::Mouse(m)) => match m.kind {
+                Round::Event(Event::Mouse(m)) => match m.kind {
                     MouseEventKind::ScrollUp => app.key(KeyEvent::from(KeyCode::Up)),
                     MouseEventKind::ScrollDown => app.key(KeyEvent::from(KeyCode::Down)),
                     _ => {}
                 },
+                // `senna kill` (SIGTERM) quits as ctrl+c does: the fits
+                // running are stopped and wrapped up below.
+                Round::Stopped => app.quit = true,
                 _ => {}
             }
-            // `senna kill` (SIGTERM) quits as ctrl+c does: the fits running
-            // are stopped and wrapped up below.
-            app.quit |= session.stop_requested();
         }
         Ok(())
     })();
@@ -298,11 +297,24 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
         }
         q.stop_within(STOP_GRACE);
     }
+    // An error it ends with stays drawn on a screen nobody is attached to,
+    // and is said once by whoever looks next.
+    if let Err(e) = &result {
+        let _ = session.hold_error(&mut terminal, e);
+    }
     session.restore();
     drop(quiet);
     result?;
-    for line in app.summary() {
-        println!("{line}");
+    // Hosted, the summary is left for whoever looks next: the terminal
+    // attached as the session ends, or the `senna sessions`, `attach` or
+    // `kill` after a detached one.
+    let summary = app.summary().join("\n");
+    if !summary.is_empty() {
+        if session.is_hosted() {
+            session.leave(&summary);
+        } else {
+            println!("{summary}");
+        }
     }
     // Not after a `senna kill`: it asked for the session to end.
     if !app.view.is_empty() && !session.stop_requested() {

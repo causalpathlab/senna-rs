@@ -1,10 +1,9 @@
 //! What the terminal front ends, `senna view` and `senna run`, share: the
-//! page's look and popups, a file browser, and the senna and lupin
-//! processes they start and follow.
+//! page's look and popups, a file browser, and how they start the senna
+//! and mung processes they follow (`legume_tui::child` runs them).
 
 pub(crate) mod browse;
 pub(crate) mod busy;
-pub(crate) mod child;
 pub(crate) mod style;
 
 use std::path::Path;
@@ -21,18 +20,27 @@ pub(crate) const TOOL: legume_tui::Tool = legume_tui::Tool::new("senna");
 pub(crate) fn session_keys() -> Vec<(String, String)> {
     legume_tui::help_keys()
         .into_iter()
-        .map(|(key, help)| (key.to_lowercase(), help))
+        .map(|k| (k.key.to_lowercase(), k.long))
         .collect()
 }
 
-/// A session run plain by `--no-detach`, for tests.
-#[cfg(test)]
-pub(crate) fn plain_session() -> legume_tui::Session {
-    let opts = legume_tui::Options {
-        no_detach: true,
-        ..Default::default()
-    };
-    TOOL.session("test", &opts).unwrap()
+/// How this process's session starts its children; a plain one's outside
+/// a session (in tests).
+pub(crate) fn child_env() -> legume_tui::ChildEnv {
+    legume_tui::current()
+        .map(legume_tui::Session::child_env)
+        .unwrap_or_default()
+}
+
+/// `command` set up as the session starts what
+/// [`legume_tui::child::run_one`] runs (a fit, a recompute step, a lupin
+/// annotation): in a process group of its own, so a stop reaches what it
+/// starts too. A hangup of senna (its host gone, or the terminal of a
+/// `--no-detach` run closed) is passed on to that group while it runs,
+/// ending a fit there and then; a save ([`legume_tui::child::Stopper::saving`])
+/// is spared it and finishes.
+pub(crate) fn own_group(command: &mut std::process::Command) -> &mut std::process::Command {
+    child_env().apply(command, legume_tui::Group::Own)
 }
 
 /// The key that runs what a screen set up, in both front ends: ctrl+r,
@@ -371,7 +379,7 @@ mod session_tests {
 
     #[test]
     fn a_plain_screen_is_always_attached_and_never_hosted() {
-        let session = plain_session();
+        let session = legume_tui::Session::plain(&TOOL);
         assert!(!session.is_hosted() && !session.offers_keys());
         assert!(session.attached() && !session.stop_requested());
         assert_eq!(session.name(), None);

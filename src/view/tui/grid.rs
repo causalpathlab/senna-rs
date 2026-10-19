@@ -10,6 +10,7 @@ use crate::view::deck;
 use crate::view::pdf;
 use crate::view::saved::{ago, Gallery};
 use legume_tui::graphics::Repick;
+use legume_tui::Round;
 use rayon::prelude::*;
 
 /// One tile of the grid: its frame on screen and its picture.
@@ -148,7 +149,7 @@ impl Deck {
             session.status(&self.status());
             let mut repick = None;
             let picker = &self.picker;
-            let event = session.poll_with(terminal, self.wait(), || {
+            let round = session.poll_with(terminal, self.wait(), || {
                 repick = Some(legume_tui::graphics::reprobe(
                     session,
                     picker,
@@ -159,21 +160,25 @@ impl Deck {
             })?;
             if let Some(repick) = repick {
                 self.repick(repick);
-                dirty = true;
             }
-            if let Some(mut ev) = event {
-                // Drain everything queued so a burst of scroll events costs
-                // one re-render, not one per event.
-                loop {
-                    dirty |= self.event(terminal, ev)?;
-                    if self.quit || !event::poll(Duration::ZERO)? {
-                        break;
+            match round {
+                Round::Event(mut ev) => {
+                    // Drain everything queued so a burst of scroll events
+                    // costs one re-render, not one per event.
+                    loop {
+                        dirty |= self.event(terminal, ev)?;
+                        if self.quit || !event::poll(Duration::ZERO)? {
+                            break;
+                        }
+                        ev = event::read()?;
                     }
-                    ev = event::read()?;
                 }
+                Round::Repainted => dirty = true,
+                // `senna kill` stops the view as q does; one heard by the
+                // file browser before it is said again to this screen.
+                Round::Stopped => self.quit = true,
+                _ => {}
             }
-            // `senna kill` stops the view as q does.
-            self.quit |= session.stop_requested();
         }
         Ok(())
     }
