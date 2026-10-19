@@ -34,8 +34,6 @@ view = [
     "dep:ratatui",
     "dep:ratatui-image",
     "dep:image",
-    "dep:pdf-writer",
-    "dep:miniz_oxide",
     "dep:legume-tui",
 ]
 cuda = [
@@ -62,12 +60,10 @@ base64 = { version = "0.22", optional = true }
 ratatui = { version = "0.30", optional = true }
 ratatui-image = { version = "11.1", optional = true, default-features = false, features = ["crossterm"] }
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
-pdf-writer = { version = "0.15", optional = true }
-miniz_oxide = { version = "0.8", optional = true }
 # Detachable sessions for `senna run` and `senna view`, and the map they
 # draw: colour, viewport, points, text, labels and keys, and the frame on
-# the terminal.
-legume-tui = { version = "0.3.8", optional = true, features = ["map", "map-display"] }
+# the terminal; its PDF pages, the save dialog, and the saved figures.
+legume-tui = { version = "0.3.8", optional = true, features = ["map", "map-display", "export", "save", "gallery"] }
 clap = { version = "4.5.20", features = ["derive"] }
 num_cpus = "1.16.0"
 rayon = "1.10.0"

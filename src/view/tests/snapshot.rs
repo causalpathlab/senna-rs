@@ -5,6 +5,7 @@
 use super::data::{LabelKind, Labels, Points, Space, SpaceKind};
 use super::tests::scene;
 use super::*;
+use legume_tui::export::{Page, PageSize};
 
 /// FNV-1a over `bytes`: stable across toolchains, unlike the std hasher.
 pub(super) fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
@@ -225,17 +226,22 @@ fn velocity_marks_draw_as_they_did() {
 }
 
 /// Size and digest of the PDF of `pages`, as a save writes it.
-fn pdf_digest(pages: &[pdf::Page], dpi: f32) -> (usize, u64) {
+fn pdf_digest(pages: &[Page], dpi: f32) -> (usize, u64) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("page.pdf");
-    pdf::write(pages, dpi, &path).unwrap();
+    legume_tui::export::write_pdf(pages, dpi, &path).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     (bytes.len(), fnv(bytes))
 }
 
+fn size(width_in: f32, dpi: u32) -> PageSize {
+    PageSize { width_in, dpi }
+}
+
 #[test]
 fn a_map_saved_as_a_pdf_is_as_it_was() {
-    let (page, px) = headless_page(&[with_near(crowded(3000))], &[], false, 2.0, 150).unwrap();
+    let (page, px) =
+        headless_page(&[with_near(crowded(3000))], &[], false, size(2.0, 150)).unwrap();
     assert_eq!(px, (300, 278));
     assert_eq!(pdf_digest(&[page], 150.0), (42547, 4532757784813180276));
 }
@@ -244,11 +250,11 @@ fn a_map_saved_as_a_pdf_is_as_it_was() {
 fn a_grid_saved_as_a_pdf_is_as_it_was() {
     let titles = ["run A".to_string(), "run B".to_string()];
     let scenes = [crowded(2000), with_near(scene())];
-    let (page, px) = headless_page(&scenes, &titles, false, 2.0, 150).unwrap();
+    let (page, px) = headless_page(&scenes, &titles, false, size(2.0, 150)).unwrap();
     assert_eq!(px, (300, 113));
     assert_eq!(pdf_digest(&[page], 150.0), (14982, 1032533684822131051));
     // One run with a chart asked for takes a 4:3 page.
-    let (page, px) = headless_page(&[scene()], &titles, true, 2.0, 150).unwrap();
+    let (page, px) = headless_page(&[scene()], &titles, true, size(2.0, 150)).unwrap();
     assert_eq!(px, (300, 225));
     assert_eq!(pdf_digest(&[page], 150.0), (1628, 9598306093650663253));
 }
@@ -269,7 +275,7 @@ fn views_saved_one_page_each_are_as_they_were() {
 #[test]
 fn a_page_too_large_or_empty_is_refused() {
     let s = [scene()];
-    assert!(headless_page(&s, &[], false, 0.0, 300).is_err());
-    assert!(headless_page(&s, &[], false, 7.0, 0).is_err());
-    assert!(headless_page(&s, &[], false, 100.0, 1200).is_err());
+    assert!(headless_page(&s, &[], false, size(0.0, 300)).is_err());
+    assert!(headless_page(&s, &[], false, size(7.0, 0)).is_err());
+    assert!(headless_page(&s, &[], false, size(100.0, 1200)).is_err());
 }

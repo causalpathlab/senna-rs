@@ -75,11 +75,12 @@ pub fn run(
             .into_iter()
             .map(|(scene, from)| App::new(scene, picker.clone(), from, lupin.clone()))
             .collect();
-        grid::Deck::new(apps, picker, crate::view::saved::Gallery::here()).run(
-            &mut terminal,
-            session,
-            graphics,
+        grid::Deck::new(
+            apps,
+            picker,
+            grid::open_saved(std::path::Path::new(grid::SAVED_DIR)),
         )
+        .run(&mut terminal, session, graphics)
     })();
     // An error it ends with stays drawn on a screen nobody is attached to,
     // and is said once by whoever looks next.

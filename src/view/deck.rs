@@ -1,26 +1,12 @@
-//! Several runs at once: the shape of their grid, and one image of them all.
+//! Several runs at once: their views drawn for a page, and one page of
+//! them all. The grid's shape, the page's assembly and the PDF are
+//! legume-tui's (`export`); what each tile shows is senna's.
 
 use super::color;
-use super::pdf::Page;
 use super::render::{self, Frame, Job, Paint, Viewport};
 use super::Scene;
-use image::RgbaImage;
-use legume_tui::map::text::{self, Font};
+use legume_tui::export::{self, Page};
 use rayon::prelude::*;
-
-/// Pixels past which a picture is refused (its canvas is 12 bytes a pixel).
-pub(crate) const MAX_PIXELS: usize = 80_000_000;
-
-/// Columns and rows for `n` tiles in a `w × h` area: the shape whose tiles
-/// have the longest shorter side (maps are roughly square), fewer columns on
-/// a tie.
-#[must_use]
-pub(crate) fn shape(n: usize, w: f32, h: f32) -> (usize, usize) {
-    let n = n.max(1);
-    let side = |c: usize| (w / c as f32).min(h / n.div_ceil(c) as f32);
-    let c = (1..=n).fold(1, |best, c| if side(c) > side(best) { c } else { best });
-    (c, n.div_ceil(c))
-}
 
 /// A camera for a `w × h` picture: `cam` (where the view was) scaled to
 /// cover the same part of the map, or the whole layout fit when there is no
@@ -100,67 +86,13 @@ pub(crate) fn render_grid(
     (w, h): (usize, usize),
     cell_px: f32,
 ) -> Page {
-    let (cols, rows) = shape(scenes.len(), w as f32, h as f32);
+    let (cols, rows) = export::shape(scenes.len(), w as f32, h as f32);
     let (tw, th) = (w / cols, h / rows);
     let views: Vec<(&Scene, Viewport, f32)> = scenes
         .iter()
         .zip(cams)
         .map(|(&s, &cam)| (s, camera(cam, s.current().points.bounds, tw, th), cell_px))
         .collect();
-
-    let [r, g, b] = color::BACKGROUND;
-    let mut out = RgbaImage::from_pixel(w as u32, h as u32, image::Rgba([r, g, b, 255]));
-    let font = Font::for_cell_height(cell_px, true);
-    let lh = font.line_height() as i32;
-    let ink = color::linear_rgb(color::INK);
-    let mut kept = Vec::new();
-    for (k, (mut frame, title)) in frames(&views, true).into_iter().zip(titles).enumerate() {
-        let bg = frame.background();
-        text::draw(
-            &mut frame,
-            font,
-            title,
-            lh / 2,
-            th as i32 - lh - lh / 4,
-            ink,
-            bg,
-        );
-        let (x, y) = (k % cols * tw, k / cols * th);
-        kept.extend(frame.take_text().into_iter().map(|mut t| {
-            t.x += x as f32;
-            t.y += y as f32;
-            t
-        }));
-        image::imageops::replace(&mut out, &frame.to_image(), x as i64, y as i64);
-    }
-    // Hairlines between tiles.
-    let [r, g, b] = color::MUTED;
-    let rule = image::Rgba([r, g, b, 255]);
-    for c in 1..cols {
-        let x = (c * tw) as u32;
-        (0..h as u32).for_each(|y| out.put_pixel(x.min(w as u32 - 1), y, rule));
-    }
-    for r in 1..rows {
-        let y = (r * th) as u32;
-        (0..w as u32).for_each(|x| out.put_pixel(x, y.min(h as u32 - 1), rule));
-    }
-    Page {
-        img: out,
-        text: kept,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::shape;
-
-    #[test]
-    fn the_grid_keeps_tiles_as_large_as_it_can() {
-        assert_eq!(shape(1, 100.0, 100.0), (1, 1));
-        assert_eq!(shape(4, 100.0, 100.0), (2, 2));
-        assert_eq!(shape(3, 300.0, 100.0), (3, 1));
-        assert_eq!(shape(3, 100.0, 300.0), (1, 3));
-        assert_eq!(shape(5, 160.0, 100.0), (3, 2));
-        assert_eq!(shape(0, 10.0, 10.0), (1, 1));
-    }
+    let tiles = frames(&views, true).into_iter().zip(titles.iter().cloned());
+    export::grid_page(tiles.collect(), (w, h), cell_px, &color::THEME)
 }

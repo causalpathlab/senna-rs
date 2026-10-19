@@ -9,13 +9,11 @@ mod deck;
 mod features;
 mod files;
 mod paint;
-mod pdf;
 mod recompute;
 mod relabel;
 mod render;
 mod review;
 mod rounds;
-mod saved;
 mod state;
 mod style;
 mod sublayout;
@@ -28,6 +26,7 @@ use color::Rgb;
 use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
 use features::Centre;
+use legume_tui::export::{Page, PageSize, PdfArgs};
 use legume_tui::map::labels::{Hits, TEXT_SCALES};
 use legume_tui::map::text::Font;
 use render::{group_medians, Frame, Label, Paint, Tier, Viewport};
@@ -71,34 +70,16 @@ pub struct ViewArgs {
     #[arg(long, value_enum, default_value = "auto", help = "Image protocol")]
     pub graphics: Graphics,
 
-    #[arg(
-        long,
-        help = "Save the starting view to this PDF and exit (no terminal needed)",
-        long_help = "Save the starting view to a PDF and exit: the points as an image\n\
-                     at --dpi, the labels as text. Combine with --method / --space /\n\
-                     --colour-by and --width; several manifests make one grid page."
-    )]
-    pub pdf: Option<Box<str>>,
+    /// `--pdf`, `--width` and `--dpi`: the starting view saved to a PDF,
+    /// with no terminal. Several manifests make one grid page.
+    #[command(flatten)]
+    pub export: PdfArgs,
 
     #[arg(
         long,
         help = "Start on this axis: cells, features-on-cells, or features"
     )]
     pub space: Option<Box<str>>,
-
-    #[arg(
-        long,
-        default_value_t = 7.0,
-        help = "Page width in inches (with --pdf); the height follows the view"
-    )]
-    pub width: f32,
-
-    #[arg(
-        long,
-        default_value_t = 300,
-        help = "Resolution of the points in dots per inch (with --pdf); text stays text"
-    )]
-    pub dpi: u32,
 
     #[arg(long, help = "Start showing this feature's activity on the cells")]
     pub feature: Option<Box<str>>,
@@ -611,7 +592,7 @@ fn prepare_run(
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     // A PDF or --relabel prints and exits; the rest is on screen.
-    if args.pdf.is_some() || args.relabel {
+    if args.export.pdf.is_some() || args.relabel {
         anyhow::ensure!(
             !args.from.is_empty(),
             "--pdf and --relabel need the run: pass -f <run>.senna.json"
@@ -734,57 +715,43 @@ fn off_screen(args: &ViewArgs, from: &[Box<str>]) -> anyhow::Result<()> {
     }
     start_charts(args, &mut scenes);
 
-    if let Some(path) = &args.pdf {
+    if let Some(path) = &args.export.pdf {
         let titles: Vec<String> = from
             .iter()
             .map(|f| files::name(std::path::Path::new(f.as_ref())))
             .collect();
-        let (page, (w, h)) =
-            headless_page(&scenes, &titles, args.chart.is_some(), args.width, args.dpi)?;
-        pdf::write(
-            &[page],
-            args.dpi as f32,
-            std::path::Path::new(path.as_ref()),
-        )?;
+        let size = args.export.size();
+        let (page, (w, h)) = headless_page(&scenes, &titles, args.chart.is_some(), size)?;
+        legume_tui::export::write_pdf(&[page], size.dpi as f32, path)?;
         info!(
-            "Saved {path} ({w} × {h} px at {} dpi, {} run(s))",
-            args.dpi,
+            "Saved {} ({w} × {h} px at {} dpi, {} run(s))",
+            path.display(),
+            size.dpi,
             scenes.len()
         );
     }
     Ok(())
 }
 
-/// The page `--pdf` saves of `scenes`, `width` inches wide at `dpi`, and
-/// its size in pixels: one map alone, else a grid of them named by
-/// `titles`.
+/// The page `--pdf` saves of `scenes` at `size`, and its size in pixels:
+/// one map alone, else a grid of them named by `titles`.
 fn headless_page(
     scenes: &[Scene],
     titles: &[String],
     chart: bool,
-    width: f32,
-    dpi: u32,
-) -> anyhow::Result<(pdf::Page, (usize, usize))> {
-    anyhow::ensure!(width > 0.0 && dpi > 0, "--width and --dpi must be positive");
-    let dpi = dpi as f32;
-    let w = (width * dpi).round() as usize;
+    size: PageSize,
+) -> anyhow::Result<(Page, (usize, usize))> {
     // One map: a page of the map's own shape, as it would fill a screen
     // of that shape. A chart, or several views: a roughly 4:3 page of
     // 4:3 tiles.
-    let h = if let ([scene], false) = (scenes, chart) {
+    let (w, h) = if let ([scene], false) = (scenes, chart) {
         let [x0, y0, x1, y1] = scene.current().points.bounds;
-        let aspect = ((y1 - y0) / (x1 - x0).max(1e-6)).clamp(0.4, 2.5);
-        (w as f32 * aspect).round() as usize
+        size.check((y1 - y0) / (x1 - x0).max(1e-6))
     } else {
-        let (cols, rows) = deck::shape(scenes.len(), 4.0, 3.0);
-        (w as f32 * 0.75 * rows as f32 / cols as f32).round() as usize
-    };
-    anyhow::ensure!(
-        w * h <= deck::MAX_PIXELS,
-        "{w} × {h} px is too large; lower --width or --dpi"
-    );
-    // Labels about 8 pt on the page, whatever its size.
-    let cell_px = dpi * 11.0 / 72.0;
+        size.check_grid(scenes.len())
+    }
+    .map_err(|e| anyhow::anyhow!("{e} (--width, --dpi)"))?;
+    let cell_px = size.cell_px();
     let page = if let [scene] = scenes {
         let vp = render::fit(scene.current().points.bounds, w, h);
         deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
@@ -864,10 +831,12 @@ mod tests {
             method: None,
             colour_by: None,
             graphics: Graphics::Blocks,
-            pdf: None,
+            export: PdfArgs {
+                pdf: None,
+                width: 7.0,
+                dpi: 300,
+            },
             space: None,
-            width: 7.0,
-            dpi: 300,
             feature: None,
             markers_of: None,
             observed: false,
@@ -884,6 +853,33 @@ mod tests {
             session: Default::default(),
         };
         Scene::new(data, &args)
+    }
+
+    #[test]
+    fn the_pdf_flags_keep_their_names_and_defaults() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            view: ViewArgs,
+        }
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["senna", "-f", "r.senna.json"];
+            argv.extend(args);
+            Cli::try_parse_from(argv).unwrap().view.export
+        };
+        let pdf = parse(&["--pdf", "fig.pdf"]);
+        assert_eq!(pdf.pdf.as_deref(), Some(std::path::Path::new("fig.pdf")));
+        assert_eq!(
+            pdf.size(),
+            legume_tui::export::PageSize {
+                width_in: 7.0,
+                dpi: 300
+            }
+        );
+        let pdf = parse(&["--pdf", "fig.pdf", "--width", "3.5", "--dpi", "600"]);
+        assert_eq!((pdf.width, pdf.dpi), (3.5, 600));
+        assert!(parse(&[]).pdf.is_none());
     }
 
     #[test]
