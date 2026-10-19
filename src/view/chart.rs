@@ -348,12 +348,23 @@ fn pick(
 }
 
 /// Feature-major levels `v`, `n` a feature, as a matrix of the groups
-/// shown (`cols`).
+/// shown (`cols`). With one group, a level's margin is the level itself
+/// and only those above zero count, so the levels are raised to start at
+/// one: a topic run's, logs of shares, are all below zero.
 fn shown<'a>(v: &'a [f32], n: usize, cols: &'a [usize]) -> ByFn<impl Fn(usize, usize) -> f32 + 'a> {
+    let rows = v.len().checked_div(n).unwrap_or(0);
+    let lift = match cols {
+        [g] => (0..rows)
+            .map(|r| v[r * n + g])
+            .filter(|x| x.is_finite())
+            .reduce(f32::min)
+            .map_or(0., |lo| 1. - lo),
+        _ => 0.,
+    };
     ByFn {
-        rows: v.len().checked_div(n).unwrap_or(0),
+        rows,
         cols: cols.len(),
-        f: move |r, c| v[r * n + cols[c]],
+        f: move |r, c| v[r * n + cols[c]] + lift,
     }
 }
 
@@ -620,6 +631,26 @@ mod tests {
         let (f, means) = pick(&first, 2, &[1], 2, model).unwrap();
         assert_eq!(f, [3, 2]);
         assert_eq!(means, [4.0, 3.5]);
+        // A topic run's levels are logs of shares, all below zero: one
+        // group still ranks them, by the model and by what is read.
+        let logs = [-0.7, -0.9, -1.2, -0.7, -1.6, -1.6];
+        let own = |pool: &[usize]| {
+            Ok::<_, String>(
+                pool.iter()
+                    .flat_map(|&f| logs[f * 2..f * 2 + 2].to_vec())
+                    .collect(),
+            )
+        };
+        let (f, means) = pick(&logs, 2, &[1], 2, own).unwrap();
+        assert_eq!(f, [1, 0]);
+        assert_eq!(means, [-0.7, -0.9]);
+        let counts = |pool: &[usize]| {
+            assert_eq!(pool, [1, 0, 2]);
+            Ok(vec![0.0, 0.5, 0.0, 0.25, 0.0, 2.0])
+        };
+        let (f, means) = pick(&logs, 2, &[1], 2, counts).unwrap();
+        assert_eq!(f, [2, 1]);
+        assert_eq!(means, [2.0, 0.5]);
         // What cannot be read is said.
         let fails = |_: &[usize]| Err::<Vec<f32>, String>("unreadable".into());
         assert_eq!(
