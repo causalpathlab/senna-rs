@@ -72,9 +72,9 @@ fn run_detaches_attaches_and_is_killed_through_its_quit_path() {
     }
     second.type_(b"?");
     second.wait_screen("ctrl+alt+d");
-    second.wait_screen("detach,");
+    second.wait_screen("detach:");
     second.wait_screen("ctrl+alt+s");
-    second.wait_screen("switch,");
+    second.wait_screen("switch:");
 
     // A TUI started under the session's marker, as `senna run` starts
     // `senna view` when its fits are done, runs plain: no second host, no

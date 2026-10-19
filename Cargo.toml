@@ -67,7 +67,7 @@ pdf-writer = { version = "0.15", optional = true }
 miniz_oxide = { version = "0.8", optional = true }
 noto-sans-mono-bitmap = { version = "0.3", optional = true, default-features = false, features = ["regular", "bold", "size_16", "size_20", "size_24", "size_32", "unicode-basic-latin", "unicode-latin-1-supplement"] }
 # Detachable sessions for `senna run` and `senna view`.
-legume-tui = { version = "0.3", optional = true }
+legume-tui = { version = "0.3.1", optional = true }
 clap = { version = "4.5.20", features = ["derive"] }
 num_cpus = "1.16.0"
 rayon = "1.10.0"
@@ -89,7 +89,7 @@ serde_json = "1.0"
 [dev-dependencies]
 # The crate's harness, driving `senna run` and `senna view` through
 # pseudo-terminals in tests/detach_session.rs.
-legume-tui = { version = "0.3", default-features = false, features = ["testing"] }
+legume-tui = { version = "0.3.1", default-features = false, features = ["testing"] }
 
 # The terminal size a running program reads, in tests/detach_session.rs.
 [target.'cfg(unix)'.dev-dependencies]
