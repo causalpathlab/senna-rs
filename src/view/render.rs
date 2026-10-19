@@ -17,7 +17,7 @@ pub use legume_tui::map::points::{Job, Medians};
 pub use legume_tui::map::raster::Frame;
 pub use legume_tui::map::viewport::Viewport;
 use legume_tui::map::viewport::{Limits, YAxis};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// How much of the frame a fitted layout fills on its tighter axis.
 const MARGIN: f32 = 0.92;
@@ -33,6 +33,11 @@ pub const FREE: Limits = Limits {
     scale: None,
     keep_inside: None,
 };
+
+/// Muted points and the merge cursor's ink in linear light: worked out
+/// once, not for every point the map draws.
+static MUTED: LazyLock<Rgb> = LazyLock::new(|| color::linear_rgb(color::MUTED));
+static INK: LazyLock<Rgb> = LazyLock::new(|| color::linear_rgb(color::TEXT));
 
 /// How one layer of points is drawn.
 pub struct Paint<'a> {
@@ -163,11 +168,7 @@ impl PointLayer for Paint<'_> {
 
     #[inline]
     fn mark(&self, i: usize) -> Option<Mark> {
-        self.mark_in(
-            i,
-            color::linear_rgb(color::MUTED),
-            color::linear_rgb(color::TEXT),
-        )
+        self.mark_in(i, *MUTED, *INK)
     }
 
     fn size(&self) -> f32 {
@@ -256,6 +257,35 @@ mod tests {
         assert_eq!(paint.mark_in(2, muted, ink).unwrap().colour, ink);
         assert_eq!(paint.mark_in(0, muted, ink).unwrap().colour, [0.1; 3]);
         assert_eq!(paint.mark_in(1, muted, ink).unwrap().colour, muted);
+    }
+
+    #[test]
+    fn marks_mute_and_ink_in_the_page_colours_in_linear_light() {
+        let points = Points::new(vec!["a".into(), "b".into()], vec![[0.0; 2], [1.0, 0.0]]);
+        let groups = [NONE, 0];
+        let styles = [Resolved {
+            colour: [0.5; 3],
+            ink: [0.0; 3],
+            shape: Shape::Circle,
+            alpha: 1.0,
+            size: 1.0,
+            hidden: false,
+        }];
+        let paint = Paint {
+            points: &points,
+            groups: Some(&groups),
+            styles: &styles,
+            focus: None,
+            selected: None,
+            cursor: Some(0),
+            muted: false,
+            size: 1.0,
+            levels: None,
+            order: None,
+        };
+        let colour = |i| paint.mark(i).unwrap().colour;
+        assert_eq!(colour(0), color::linear_rgb(color::MUTED));
+        assert_eq!(colour(1), color::linear_rgb(color::TEXT));
     }
 
     #[test]
