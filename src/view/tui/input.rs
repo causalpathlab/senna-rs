@@ -124,10 +124,10 @@ impl App {
                 self.restart();
             }
             KeyCode::Char('+' | '=') => {
-                self.with_vp(|v| v.zoom_at(1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
+                self.with_vp(|v| v.zoom_at(1.4, 0.5 * v.w as f32, 0.5 * v.h as f32, &FREE))
             }
             KeyCode::Char('-' | '_') => {
-                self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32))
+                self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32, &FREE))
             }
             KeyCode::Char('T') => self.resolve_topics(),
             KeyCode::Char('H') => {
@@ -162,7 +162,7 @@ impl App {
                     _ => (0.0, -1.0),
                 };
                 let d = step(self);
-                self.with_vp(|v| v.pan_px(sx * d, sy * d));
+                self.with_vp(|v| v.pan_px(sx * d, sy * d, &FREE));
             }
             KeyCode::Char('R') => self.toggle_review(),
             KeyCode::Char('r') => self.open_recompute(),
@@ -307,8 +307,8 @@ impl App {
             return false;
         };
         match m.kind {
-            MouseEventKind::ScrollUp => self.with_vp(|v| v.zoom_at(1.25, px, py)),
-            MouseEventKind::ScrollDown => self.with_vp(|v| v.zoom_at(0.8, px, py)),
+            MouseEventKind::ScrollUp => self.with_vp(|v| v.zoom_at(1.25, px, py, &FREE)),
+            MouseEventKind::ScrollDown => self.with_vp(|v| v.zoom_at(0.8, px, py, &FREE)),
             MouseEventKind::Down(MouseButton::Left) => {
                 self.drag = Some(Drag {
                     col: m.column,
@@ -326,7 +326,7 @@ impl App {
                         row: m.row,
                         moved: true,
                     };
-                    self.with_vp(|v| v.pan_px(dx, dy));
+                    self.with_vp(|v| v.pan_px(dx, dy, &FREE));
                 } else {
                     return false;
                 }
@@ -527,10 +527,7 @@ fn adjust(
     match field {
         0 => {
             let sw = swatches();
-            let enc = color::encoder();
-            let now = st
-                .colour
-                .or_else(|| current.map(|c| c.map(|v| enc.encode(v))));
+            let now = st.colour.or_else(|| current.map(color::to_srgb_senna));
             // Start from the swatch nearest the colour shown now.
             let at = now.map_or(0, |c| {
                 (0..sw.len())

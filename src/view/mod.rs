@@ -19,7 +19,6 @@ mod saved;
 mod state;
 mod style;
 mod sublayout;
-mod text;
 mod tui;
 mod velocity;
 mod zoom;
@@ -29,9 +28,10 @@ use color::Rgb;
 use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
 use features::Centre;
-use render::{draw_labels, group_medians, Label, Paint, Tier, Viewport};
+use legume_tui::map::labels::{Hits, TEXT_SCALES};
+use legume_tui::map::text::Font;
+use render::{group_medians, Frame, Label, Paint, Tier, Viewport};
 use senna::embed_common::*;
-use text::Font;
 
 /// `--graphics`: the image protocol named, else the terminal asked.
 pub use legume_tui::graphics::Graphics;
@@ -243,9 +243,6 @@ struct Shown {
     levels: Levels,
 }
 
-/// The camera of a frame, and each group label it drew with where.
-type LabelHits = (Viewport, Vec<(u32, [f32; 4])>);
-
 /// How a run's velocity field is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum VelocityStyle {
@@ -260,9 +257,6 @@ type Moved = (usize, std::sync::Arc<Vec<[f32; 2]>>);
 
 /// Point of each name (its first, for a repeated name).
 type NameIndex = std::collections::HashMap<Box<str>, usize>;
-
-/// Text sizes on the map, as multiples of the terminal's cell height.
-const TEXT_SCALES: [f32; 4] = [1.0, 1.4, 1.8, 2.4];
 
 /// What is on screen.
 pub(crate) struct Scene {
@@ -281,7 +275,7 @@ pub(crate) struct Scene {
     pub hover: Option<u32>,
     /// Where group labels were drawn in the last frame, and its camera: what
     /// a click on the map can hit.
-    label_hits: std::cell::RefCell<Option<LabelHits>>,
+    label_hits: std::cell::RefCell<Hits<u32>>,
     /// Group id per point, and points per group, cached per (space, labels).
     groups: Option<(usize, usize, Vec<u32>, Vec<usize>)>,
     /// Resolved style per group of the current grouping.
@@ -765,7 +759,7 @@ fn off_screen(args: &ViewArgs, from: &[Box<str>]) -> anyhow::Result<()> {
         // Labels about 8 pt on the page, whatever its size.
         let cell_px = dpi * 11.0 / 72.0;
         let page = if let [scene] = &scenes[..] {
-            let vp = Viewport::fit(scene.current().points.bounds, w, h);
+            let vp = render::fit(scene.current().points.bounds, w, h);
             deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
         } else {
             let titles: Vec<String> = from
@@ -1158,7 +1152,7 @@ mod tests {
         s.data.spaces.push(placed);
         s.show_labels = false;
         assert_eq!(s.near_spaces(), (Some(0), Some(3)));
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         let before = render_full(&s, vp, 16.0);
         s.near = Some(features::Near {
             name: "c1".into(),
@@ -1183,7 +1177,7 @@ mod tests {
     #[test]
     fn a_click_on_a_cluster_label_finds_that_cluster() {
         let s = scene();
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         // Only a frame that was drawn has labels to click.
         let (x, y) = vp.to_px(s.group_centre(1).unwrap());
         assert_eq!(s.group_at(&vp, x, y), None);
@@ -1211,7 +1205,7 @@ mod tests {
         // C0 is one cell in the frame's corner: its label would run off the
         // frame, so it is not drawn, and a click there is not C0.
         let s = scene();
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         render_full(&s, vp, 16.0);
         let (x, y) = vp.to_px(s.group_centre(0).unwrap());
         assert_ne!(s.group_at(&vp, x, y), Some(0));
@@ -1221,7 +1215,7 @@ mod tests {
     fn a_label_under_the_pointer_is_framed() {
         let mut s = scene();
         s.show_labels = true;
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         let plain = render_full(&s, vp, 16.0);
         let [x0, y0, x1, _] = s.label_rect(1).unwrap();
         s.hover = Some(1);
@@ -1244,7 +1238,7 @@ mod tests {
         placed.backdrop = Some(0);
         s.data.spaces.push(placed);
         s.show_labels = false;
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         let before = render_full(&s, vp, 16.0);
         let centre = s.group_centre(1).unwrap();
         s.near = Some(features::Near {
@@ -1277,7 +1271,7 @@ mod tests {
         assert!((dot(&s) - 1.25 * before).abs() < 1e-6);
         assert!(s.note.take().unwrap().contains("1.25"));
         // Text follows: the label box to click grows with it.
-        let vp = Viewport::fit(s.current().points.bounds, 200, 200);
+        let vp = render::fit(s.current().points.bounds, 200, 200);
         let (x, y) = vp.to_px(s.group_centre(1).unwrap());
         let reach = |s: &Scene| {
             render_full(s, vp, 16.0);

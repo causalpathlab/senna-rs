@@ -1,19 +1,22 @@
 //! How `senna view` and `senna run` look: the page's colours, the styles
 //! of text, menus and hints, and bordered popups over the screen.
 
+use legume_tui::map::theme::Theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+/// senna's page, the map's and the screen's: legume-tui's paper.
+pub const THEME: Theme = Theme::PAPER;
 /// Page background: a warm light gray.
-pub const BACKGROUND: [u8; 3] = [246, 245, 242];
+pub const BACKGROUND: [u8; 3] = THEME.background;
 /// Rules, and in the view points with no group or outside the focused one.
-pub const MUTED: [u8; 3] = [200, 199, 196];
+pub const MUTED: [u8; 3] = THEME.muted;
 /// Menus, popups and the status line: near-black, to read at a glance.
-pub const TEXT: [u8; 3] = [30, 30, 32];
+pub const TEXT: [u8; 3] = THEME.text;
 /// Key hints and other secondary lines beside `TEXT`: lighter, still clear.
-pub const HINT: [u8; 3] = [104, 104, 104];
+pub const HINT: [u8; 3] = THEME.hint;
 
 pub(crate) fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])

@@ -2,10 +2,10 @@
 
 use super::color;
 use super::pdf::Page;
-use super::render::{Frame, Job, Paint, Viewport};
-use super::text::{self, Font};
+use super::render::{self, Frame, Job, Paint, Viewport};
 use super::Scene;
 use image::RgbaImage;
+use legume_tui::map::text::{self, Font};
 use rayon::prelude::*;
 
 /// Pixels past which a picture is refused (its canvas is 12 bytes a pixel).
@@ -27,18 +27,7 @@ pub(crate) fn shape(n: usize, w: f32, h: f32) -> (usize, usize) {
 /// camera yet.
 #[must_use]
 pub(crate) fn camera(cam: Option<Viewport>, bounds: [f32; 4], w: usize, h: usize) -> Viewport {
-    match cam {
-        Some(v) if v.w > 0 && v.h > 0 => {
-            let k = (w as f32 / v.w as f32).min(h as f32 / v.h as f32);
-            Viewport {
-                scale: v.scale * k,
-                w,
-                h,
-                ..v
-            }
-        }
-        _ => Viewport::fit(bounds, w, h),
-    }
+    cam.map_or_else(|| render::fit(bounds, w, h), |v| v.resized(bounds, w, h))
 }
 
 /// Every view drawn to the end and labelled at its `cell_px`. The views go
@@ -68,7 +57,7 @@ pub(crate) fn frames(views: &[(&Scene, Viewport, f32)], keep_text: bool) -> Vec<
     let mut jobs: Vec<Job> = views
         .iter()
         .zip(&layers)
-        .map(|((_, vp, _), l)| Job::new(*vp, l))
+        .map(|((_, vp, _), l)| Job::new(*vp, color::BACKGROUND, l))
         .collect();
     jobs.par_iter_mut()
         .zip(&layers)

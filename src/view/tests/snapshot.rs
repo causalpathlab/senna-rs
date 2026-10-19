@@ -19,7 +19,7 @@ pub(super) fn digest(img: &image::RgbaImage) -> (u32, u32, u64) {
 }
 
 /// Digest of text kept as runs, every field to the bit.
-pub(super) fn runs_digest(runs: &[text::TextRun]) -> u64 {
+pub(super) fn runs_digest(runs: &[legume_tui::map::text::TextRun]) -> u64 {
     fnv(runs
         .iter()
         .flat_map(|t| {
@@ -37,7 +37,7 @@ const W: usize = 240;
 const H: usize = 180;
 
 fn draw(s: &Scene, cell_px: f32) -> (u32, u32, u64) {
-    let vp = Viewport::fit(s.current().points.bounds, W, H);
+    let vp = render::fit(s.current().points.bounds, W, H);
     digest(
         &deck::frames(&[(s, vp, cell_px)], false)
             .remove(0)
@@ -111,7 +111,7 @@ fn a_cluster_map_draws_as_it_did() {
 #[test]
 fn a_hovered_label_draws_as_it_did() {
     let mut s = crowded(3000);
-    let vp = Viewport::fit(s.current().points.bounds, W, H);
+    let vp = render::fit(s.current().points.bounds, W, H);
     draw(&s, 16.0);
     let (x, y) = vp.to_px(s.group_centre(2).unwrap());
     s.hover = s.group_at(&vp, x, y);
@@ -188,7 +188,7 @@ fn activity_with_its_ramp_key_draws_as_it_did() {
 #[test]
 fn text_kept_for_a_page_is_as_it_was() {
     let s = with_near(crowded(3000));
-    let vp = Viewport::fit(s.current().points.bounds, W, H);
+    let vp = render::fit(s.current().points.bounds, W, H);
     let mut frame = deck::frames(&[(&s, vp, 16.0)], true).remove(0);
     let runs = frame.take_text();
     assert_eq!(
@@ -210,7 +210,7 @@ fn a_grid_page_is_as_it_was() {
 
 #[test]
 fn velocity_marks_draw_as_they_did() {
-    let mut frame = render::Frame::blank(W, H);
+    let mut frame = render::Frame::blank(W, H, color::BACKGROUND);
     let lines = vec![
         vec![(10.0, 20.0), (60.0, 35.5), (130.0, 90.0), (300.0, 120.0)],
         vec![(200.0, 170.0), (180.0, 100.0), (185.5, -40.0)],

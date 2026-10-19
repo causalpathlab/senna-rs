@@ -19,9 +19,9 @@ use super::activity::Source;
 use super::color::{self, Rgb};
 use super::data::NONE;
 use super::render::Frame;
-use super::text::{self, Font};
 use super::Axis;
 use super::Scene;
+use legume_tui::map::text::{self, Font};
 
 /// z-scores are clipped to this, so one extreme group cannot wash out the
 /// rest of the colours.
@@ -266,7 +266,7 @@ impl Scene {
     #[must_use]
     pub fn chart_frame(&self, w: usize, h: usize, cell_px: f32, keep_text: bool) -> Option<Frame> {
         let c = self.chart.as_ref()?;
-        let mut frame = Frame::blank(w, h);
+        let mut frame = Frame::blank(w, h, color::BACKGROUND);
         if keep_text {
             frame.keep_text();
         }
@@ -770,7 +770,7 @@ mod tests {
             top: 2,
         };
         let drawn = |f: &dyn Fn(&mut Frame), keep: bool| {
-            let mut frame = Frame::blank(320, 240);
+            let mut frame = Frame::blank(320, 240, color::BACKGROUND);
             if keep {
                 frame.keep_text();
             }

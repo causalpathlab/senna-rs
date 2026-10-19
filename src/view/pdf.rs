@@ -3,8 +3,8 @@
 //! has), so labels stay sharp, selectable and editable.
 
 use super::color::{self, Rgb};
-use super::text::TextRun;
 use image::RgbaImage;
+use legume_tui::map::text::TextRun;
 use pdf_writer::types::{LineJoinStyle, TextRenderingMode};
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
 use rayon::prelude::*;
@@ -129,8 +129,7 @@ fn document(pages: &[Page], dpi: f32) -> Vec<u8> {
 }
 
 fn srgb(c: Rgb) -> [f32; 3] {
-    let enc = color::encoder();
-    c.map(|v| f32::from(enc.encode(v)) / 255.0)
+    color::to_srgb_senna(c).map(|v| f32::from(v) / 255.0)
 }
 
 /// `s` in WinAnsi, the standard fonts' encoding: ASCII and Latin-1 as they

@@ -525,11 +525,11 @@ impl Deck {
             if w > 0 && h > 0 {
                 // A chart is drawn whole, at once.
                 if let Some(frame) = app.scene.chart_frame(w, h, self.cell.1, false) {
-                    tile.proto = protocol(&self.picker, frame.to_image(), inner).ok();
+                    tile.proto = fit_protocol(&self.picker, frame.to_image(), inner).ok();
                     continue;
                 }
                 let vp = deck::camera(app.vp, app.scene.current().points.bounds, w, h);
-                tile.job = Some(Job::new(vp, &app.scene.layers()));
+                tile.job = Some(Job::new(vp, color::BACKGROUND, &app.scene.layers()));
             }
         }
     }
@@ -580,7 +580,7 @@ impl Deck {
             .into_par_iter()
             .map(|(k, img)| {
                 let inner = Block::bordered().inner(tiles[k].rect);
-                Ok((k, protocol(picker, img, inner)?))
+                Ok((k, fit_protocol(picker, img, inner)?))
             })
             .collect::<anyhow::Result<_>>()?;
         for (k, p) in protos {
@@ -1004,7 +1004,7 @@ impl Deck {
             if !self.thumbs.contains_key(&path) {
                 let p = image::open(&path)
                     .ok()
-                    .and_then(|img| protocol(&self.picker, img.to_rgba8(), area).ok());
+                    .and_then(|img| fit_protocol(&self.picker, img.to_rgba8(), area).ok());
                 self.thumbs.insert(path, p);
             }
         }

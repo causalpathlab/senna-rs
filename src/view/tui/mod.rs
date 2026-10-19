@@ -26,25 +26,25 @@ use super::color;
 use super::decide::{Action, Decision, Mode, Rescore, Watcher};
 use super::features::PaneRow;
 use super::files::{self, modified, same_file};
-use super::render::{Frame, Job, Viewport};
+use super::render::{self, Frame, Job, Viewport, FREE};
 use super::style::{swatches, Shape};
 use super::{Axis, Graphics, Pick, Scene};
 use crate::tui::style::{first_row, hint, page, popup, rgb, selected, toast, At};
 use crate::tui::Pending;
-use image::DynamicImage;
 use legume_tui::graphics::Fallback;
+use legume_tui::map::display::{cell, fit_protocol, stroke_floor};
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::layout::{Constraint, Layout, Rect, Size};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::DefaultTerminal;
-use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
-use ratatui_image::{Image, Resize};
+use ratatui_image::Image;
 use std::time::Duration;
 
 /// A run prefix as a name in the directory the viewer runs from, where
@@ -89,32 +89,6 @@ pub fn run(
     session.restore();
     drop(quiet);
     result
-}
-
-/// Pixels per terminal cell under `picker`.
-fn cell(picker: &Picker) -> (f32, f32) {
-    let f = picker.font_size();
-    (f32::from(f.width.max(1)), f32::from(f.height.max(1)))
-}
-
-/// The thinnest line drawn on the map under `picker`: one pixel of the
-/// screen when it shows the frame in coarser pixels (half blocks), as a
-/// thinner line averages away.
-fn stroke_floor(picker: &Picker) -> f32 {
-    if picker.protocol_type() == ProtocolType::Halfblocks {
-        cell(picker).0
-    } else {
-        1.0
-    }
-}
-
-/// `img` ready to draw into `area`, scaled to fit it.
-fn protocol(picker: &Picker, img: image::RgbaImage, area: Rect) -> anyhow::Result<Protocol> {
-    Ok(picker.new_protocol(
-        DynamicImage::ImageRgba8(img),
-        Size::new(area.width, area.height),
-        Resize::Fit(Some(image::imageops::FilterType::Triangle)),
-    )?)
 }
 
 /// How long a toast stays up.
@@ -523,7 +497,7 @@ impl App {
         }
         if self.vp.is_none() {
             let (w, h) = self.map_px();
-            self.vp = Some(Viewport::fit(self.scene.current().points.bounds, w, h));
+            self.vp = Some(render::fit(self.scene.current().points.bounds, w, h));
             self.restart();
         }
     }
@@ -554,7 +528,7 @@ impl App {
         }
         if let Some(vp) = self.vp {
             if vp.w > 0 && vp.h > 0 {
-                self.job = Some(Job::new(vp, &self.scene.layers()));
+                self.job = Some(Job::new(vp, color::BACKGROUND, &self.scene.layers()));
             }
         }
     }
@@ -590,7 +564,7 @@ impl App {
     }
 
     fn show(&mut self, img: image::RgbaImage) -> anyhow::Result<()> {
-        self.proto = Some(protocol(&self.picker, img, self.map)?);
+        self.proto = Some(fit_protocol(&self.picker, img, self.map)?);
         Ok(())
     }
 
@@ -805,6 +779,7 @@ mod tests {
 #[cfg(test)]
 pub(super) mod attach_tests {
     use super::*;
+    use ratatui_image::picker::ProtocolType;
 
     /// The picker of a terminal that speaks kitty images in 8 × 16 cells.
     pub(in crate::view) fn kitty() -> Picker {

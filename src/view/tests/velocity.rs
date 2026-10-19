@@ -1,4 +1,5 @@
 use super::*;
+use crate::view::{color, render};
 
 /// Cells on a grid in two dimensions, laid out as themselves, all moving
 /// along +x: every displacement on the map points along +x, and the arrows
@@ -28,7 +29,7 @@ fn a_field_along_x_draws_arrows_along_x() {
         let [dx, dy] = moved[i];
         assert!(dx > 0.0 && dx > 3.0 * dy.abs(), "cell {i}: ({dx}, {dy})");
     }
-    let vp = Viewport::fit(points.bounds, 400, 400);
+    let vp = render::fit(points.bounds, 400, 400);
     let arrows = arrows(&points, &moved, &vp);
     assert!(!arrows.is_empty());
     let right = arrows.iter().filter(|(a, b)| b.0 > a.0).count();
@@ -62,7 +63,7 @@ fn a_field_along_x_streams_along_x() {
         .collect();
     let points = Points::new(names, xy);
     let moved = vec![[1.0f32, 0.0]; side * side];
-    let vp = Viewport::fit(points.bounds, 400, 400);
+    let vp = render::fit(points.bounds, 400, 400);
     let lines = streamlines(&points, &moved, &vp, LANES);
     // Denser lanes, more lines.
     assert!(streamlines(&points, &moved, &vp, 2.0 * LANES).len() > lines.len());
@@ -87,7 +88,7 @@ fn a_field_along_x_streams_along_x() {
 fn streamlines_survive_a_screen_coarser_than_the_frame() {
     let line = vec![(20.0, 200.0), (200.0, 200.0), (380.0, 200.0)];
     let darkest = |floor: f32| {
-        let mut frame = Frame::blank(400, 400);
+        let mut frame = Frame::blank(400, 400, color::BACKGROUND);
         let bg = frame.to_image().get_pixel(0, 0)[0];
         draw_lines(
             &mut frame,
