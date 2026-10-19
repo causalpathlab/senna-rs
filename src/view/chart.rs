@@ -348,23 +348,13 @@ fn pick(
 }
 
 /// Feature-major levels `v`, `n` a feature, as a matrix of the groups
-/// shown (`cols`). With one group, a level's margin is the level itself
-/// and only those above zero count, so the levels are raised to start at
-/// one: a topic run's, logs of shares, are all below zero.
+/// shown (`cols`).
 fn shown<'a>(v: &'a [f32], n: usize, cols: &'a [usize]) -> ByFn<impl Fn(usize, usize) -> f32 + 'a> {
     let rows = v.len().checked_div(n).unwrap_or(0);
-    let lift = match cols {
-        [g] => (0..rows)
-            .map(|r| v[r * n + g])
-            .filter(|x| x.is_finite())
-            .reduce(f32::min)
-            .map_or(0., |lo| 1. - lo),
-        _ => 0.,
-    };
     ByFn {
         rows,
         cols: cols.len(),
-        f: move |r, c| v[r * n + cols[c]] + lift,
+        f: move |r, c| v[r * n + cols[c]],
     }
 }
 
