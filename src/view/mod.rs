@@ -787,6 +787,10 @@ fn off_screen(args: &ViewArgs, from: &[Box<str>]) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[path = "tests/snapshot.rs"]
+mod snapshot;
+
+#[cfg(test)]
 mod tests {
     use super::data::{Labels, Points, Space};
 

@@ -735,6 +735,74 @@ mod tests {
         assert_eq!(s.panels[0].1, [0.8, 0.1, 0.1, 0.6, 0.3, 0.1, 0.3, 0.6, 0.1]);
     }
 
+    /// A structure plot, a heatmap and a note, drawn to the byte as they
+    /// were, pixels and kept text.
+    #[test]
+    fn charts_draw_as_they_did() {
+        use crate::view::snapshot::{digest, runs_digest};
+        let (font, bold) = (
+            Font::for_cell_height(16.0, false),
+            Font::for_cell_height(16.0, true),
+        );
+        let k = 4;
+        let theta: Vec<f32> = (0..60 * k)
+            .map(|j| ((j * 37 % 11) as f32 + 1.0) / (12.0 * k as f32))
+            .collect();
+        let groups: Vec<u32> = (0..60)
+            .map(|p| if p % 9 == 0 { NONE } else { p % 3 })
+            .collect();
+        let levels: Vec<Box<str>> = vec!["CT1".into(), "CT2".into(), "CT3".into()];
+        let s = build_structure("cluster".into(), &theta, k, &groups, &levels);
+        let hm = Heatmap {
+            grouping: "cluster".into(),
+            features: (1..=6).map(|i| format!("GENE{i}").into()).collect(),
+            groups: levels.iter().map(ToString::to_string).collect(),
+            z: (0..18)
+                .map(|j| {
+                    if j == 7 {
+                        f32::NAN
+                    } else {
+                        (j as f32 - 9.0) / 9.0
+                    }
+                })
+                .collect(),
+            source: Source::Expected,
+            top: 2,
+        };
+        let drawn = |f: &dyn Fn(&mut Frame), keep: bool| {
+            let mut frame = Frame::blank(320, 240);
+            if keep {
+                frame.keep_text();
+            }
+            f(&mut frame);
+            let runs = frame.take_text();
+            (digest(&frame.to_image()), runs.len(), runs_digest(&runs))
+        };
+        let structure = |f: &mut Frame| draw_structure(f, &s, font, bold);
+        let heatmap = |f: &mut Frame| draw_heatmap(f, &hm, font, bold);
+        let said = |f: &mut Frame| note(f, "drawing the heatmap…", bold);
+        assert_eq!(
+            drawn(&structure, false),
+            ((320, 240, 17183389818082099426), 0, 14695981039346656037)
+        );
+        assert_eq!(
+            drawn(&structure, true),
+            ((320, 240, 18322447451800817174), 9, 11116718457719180847)
+        );
+        assert_eq!(
+            drawn(&heatmap, false),
+            ((320, 240, 15222720487810110223), 0, 14695981039346656037)
+        );
+        assert_eq!(
+            drawn(&heatmap, true),
+            ((320, 240, 17814653105649234099), 14, 11586368578154238834)
+        );
+        assert_eq!(
+            drawn(&said, false),
+            ((320, 240, 12649403086188204864), 0, 14695981039346656037)
+        );
+    }
+
     #[test]
     fn each_group_takes_its_own_top_features() {
         let per = vec![vec![3.0, 2.0, 1.0, f32::NAN], vec![3.5, 0.5, 2.5, 4.0]];
