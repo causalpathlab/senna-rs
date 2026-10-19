@@ -223,3 +223,53 @@ fn velocity_marks_draw_as_they_did() {
     velocity::draw(&mut frame, &arrows, color::highlight_ink(), 2.0);
     assert_eq!(digest(&frame.to_image()), (240, 180, 2108609922703495894));
 }
+
+/// Size and digest of the PDF of `pages`, as a save writes it.
+fn pdf_digest(pages: &[pdf::Page], dpi: f32) -> (usize, u64) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("page.pdf");
+    pdf::write(pages, dpi, &path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    (bytes.len(), fnv(bytes))
+}
+
+#[test]
+fn a_map_saved_as_a_pdf_is_as_it_was() {
+    let (page, px) = headless_page(&[with_near(crowded(3000))], &[], false, 2.0, 150).unwrap();
+    assert_eq!(px, (300, 278));
+    assert_eq!(pdf_digest(&[page], 150.0), (42547, 4532757784813180276));
+}
+
+#[test]
+fn a_grid_saved_as_a_pdf_is_as_it_was() {
+    let titles = ["run A".to_string(), "run B".to_string()];
+    let scenes = [crowded(2000), with_near(scene())];
+    let (page, px) = headless_page(&scenes, &titles, false, 2.0, 150).unwrap();
+    assert_eq!(px, (300, 113));
+    assert_eq!(pdf_digest(&[page], 150.0), (14982, 1032533684822131051));
+    // One run with a chart asked for takes a 4:3 page.
+    let (page, px) = headless_page(&[scene()], &titles, true, 2.0, 150).unwrap();
+    assert_eq!(px, (300, 225));
+    assert_eq!(pdf_digest(&[page], 150.0), (1628, 9598306093650663253));
+}
+
+#[test]
+fn views_saved_one_page_each_are_as_they_were() {
+    let (a, b) = (crowded(2000), with_near(scene()));
+    let views = [
+        (&a, render::fit(a.current().points.bounds, W, H), 16.0),
+        (&b, render::fit(b.current().points.bounds, H, W), 24.0),
+    ];
+    assert_eq!(
+        pdf_digest(&deck::view_pages(&views), 144.0),
+        (23939, 7457570728265228916)
+    );
+}
+
+#[test]
+fn a_page_too_large_or_empty_is_refused() {
+    let s = [scene()];
+    assert!(headless_page(&s, &[], false, 0.0, 300).is_err());
+    assert!(headless_page(&s, &[], false, 7.0, 0).is_err());
+    assert!(headless_page(&s, &[], false, 100.0, 1200).is_err());
+}

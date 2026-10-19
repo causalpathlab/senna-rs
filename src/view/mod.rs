@@ -735,42 +735,17 @@ fn off_screen(args: &ViewArgs, from: &[Box<str>]) -> anyhow::Result<()> {
     start_charts(args, &mut scenes);
 
     if let Some(path) = &args.pdf {
-        anyhow::ensure!(
-            args.width > 0.0 && args.dpi > 0,
-            "--width and --dpi must be positive"
-        );
-        let dpi = args.dpi as f32;
-        let w = (args.width * dpi).round() as usize;
-        // One map: a page of the map's own shape, as it would fill a screen
-        // of that shape. A chart, or several views: a roughly 4:3 page of
-        // 4:3 tiles.
-        let h = if let ([scene], None) = (&scenes[..], args.chart) {
-            let [x0, y0, x1, y1] = scene.current().points.bounds;
-            let aspect = ((y1 - y0) / (x1 - x0).max(1e-6)).clamp(0.4, 2.5);
-            (w as f32 * aspect).round() as usize
-        } else {
-            let (cols, rows) = deck::shape(scenes.len(), 4.0, 3.0);
-            (w as f32 * 0.75 * rows as f32 / cols as f32).round() as usize
-        };
-        anyhow::ensure!(
-            w * h <= deck::MAX_PIXELS,
-            "{w} × {h} px is too large; lower --width or --dpi"
-        );
-        // Labels about 8 pt on the page, whatever its size.
-        let cell_px = dpi * 11.0 / 72.0;
-        let page = if let [scene] = &scenes[..] {
-            let vp = render::fit(scene.current().points.bounds, w, h);
-            deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
-        } else {
-            let titles: Vec<String> = from
-                .iter()
-                .map(|f| files::name(std::path::Path::new(f.as_ref())))
-                .collect();
-            let refs: Vec<&Scene> = scenes.iter().collect();
-            let cams = vec![None; scenes.len()];
-            deck::render_grid(&refs, &cams, &titles, (w, h), cell_px)
-        };
-        pdf::write(&[page], dpi, std::path::Path::new(path.as_ref()))?;
+        let titles: Vec<String> = from
+            .iter()
+            .map(|f| files::name(std::path::Path::new(f.as_ref())))
+            .collect();
+        let (page, (w, h)) =
+            headless_page(&scenes, &titles, args.chart.is_some(), args.width, args.dpi)?;
+        pdf::write(
+            &[page],
+            args.dpi as f32,
+            std::path::Path::new(path.as_ref()),
+        )?;
         info!(
             "Saved {path} ({w} × {h} px at {} dpi, {} run(s))",
             args.dpi,
@@ -778,6 +753,47 @@ fn off_screen(args: &ViewArgs, from: &[Box<str>]) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// The page `--pdf` saves of `scenes`, `width` inches wide at `dpi`, and
+/// its size in pixels: one map alone, else a grid of them named by
+/// `titles`.
+fn headless_page(
+    scenes: &[Scene],
+    titles: &[String],
+    chart: bool,
+    width: f32,
+    dpi: u32,
+) -> anyhow::Result<(pdf::Page, (usize, usize))> {
+    anyhow::ensure!(width > 0.0 && dpi > 0, "--width and --dpi must be positive");
+    let dpi = dpi as f32;
+    let w = (width * dpi).round() as usize;
+    // One map: a page of the map's own shape, as it would fill a screen
+    // of that shape. A chart, or several views: a roughly 4:3 page of
+    // 4:3 tiles.
+    let h = if let ([scene], false) = (scenes, chart) {
+        let [x0, y0, x1, y1] = scene.current().points.bounds;
+        let aspect = ((y1 - y0) / (x1 - x0).max(1e-6)).clamp(0.4, 2.5);
+        (w as f32 * aspect).round() as usize
+    } else {
+        let (cols, rows) = deck::shape(scenes.len(), 4.0, 3.0);
+        (w as f32 * 0.75 * rows as f32 / cols as f32).round() as usize
+    };
+    anyhow::ensure!(
+        w * h <= deck::MAX_PIXELS,
+        "{w} × {h} px is too large; lower --width or --dpi"
+    );
+    // Labels about 8 pt on the page, whatever its size.
+    let cell_px = dpi * 11.0 / 72.0;
+    let page = if let [scene] = scenes {
+        let vp = render::fit(scene.current().points.bounds, w, h);
+        deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
+    } else {
+        let refs: Vec<&Scene> = scenes.iter().collect();
+        let cams = vec![None; scenes.len()];
+        deck::render_grid(&refs, &cams, titles, (w, h), cell_px)
+    };
+    Ok((page, (w, h)))
 }
 
 #[cfg(test)]
