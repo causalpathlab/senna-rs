@@ -63,7 +63,7 @@ image = { version = "0.25", optional = true, default-features = false, features 
 # Detachable sessions for `senna run` and `senna view`, and the map they
 # draw: colour, viewport, points, text, labels and keys, and the frame on
 # the terminal; its PDF pages, the save dialog, and the saved figures.
-legume-tui = { version = "0.3.8", optional = true, features = ["map", "map-display", "export", "save", "gallery"] }
+legume-tui = { version = "0.3.8", optional = true, features = ["map", "map-display", "export", "chart", "save", "gallery"] }
 clap = { version = "4.5.20", features = ["derive"] }
 num_cpus = "1.16.0"
 rayon = "1.10.0"
