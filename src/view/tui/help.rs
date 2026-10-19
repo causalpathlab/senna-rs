@@ -210,7 +210,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "s",
-                "save as PDF: this view, or every run (one grid, or a page each); width, dpi, file name",
+                "save as PDF: this view, or every run (one grid, or a page each); width, dpi, file name (typing replaces the name offered; end keeps it to add to)",
             ),
             ("ctrl+l", "reload the run from disk and redraw the screen"),
             ("q", "quit"),

@@ -1199,6 +1199,23 @@ mod tests {
     }
 
     #[test]
+    fn the_offered_name_opens_selected() {
+        let t = target(1, "fig");
+        // Typing replaces the offered name, and backspace clears it.
+        let mut d = SaveDialog::new(&t, Scope::View, NUMBERING);
+        d.key(key(KeyCode::Char('x')), &t);
+        assert_eq!(d.name(), "x");
+        let mut d = SaveDialog::new(&t, Scope::View, NUMBERING);
+        d.key(key(KeyCode::Backspace), &t);
+        assert_eq!(d.name(), "");
+        // End keeps it to type on.
+        let mut d = SaveDialog::new(&t, Scope::View, NUMBERING);
+        d.key(key(KeyCode::End), &t);
+        d.key(key(KeyCode::Char('x')), &t);
+        assert_eq!(d.name(), "figx");
+    }
+
+    #[test]
     fn replacing_a_file_takes_a_second_enter() {
         let dir = tempfile::tempdir().unwrap();
         let taken = dir.path().join("fig");
