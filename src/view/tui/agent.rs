@@ -22,9 +22,6 @@ pub(crate) struct Agent {
     /// Whether the map follows the agent; off once the human changes the
     /// view. The call list goes on following either way.
     following: bool,
-    /// Following again: the agent's latest view is applied even when it is
-    /// the one applied before the human changed the view.
-    resumed: bool,
     /// The view last applied: the same one again is not applied again.
     applied: Option<Value>,
     /// The window of the agent's view last applied: what the map frames
@@ -38,7 +35,6 @@ impl Agent {
         Ok(Self {
             watch: watch::Agent::new(dir, false)?,
             following: true,
-            resumed: false,
             applied: None,
             window: None,
         })
@@ -48,18 +44,13 @@ impl Agent {
         self.following
     }
 
-    /// The view to apply now, if any: the agent's latest after `W`, else
-    /// a new one. Taken only when it is applied, so one that comes while
-    /// the view is paused or busy waits in the feed's reader.
-    fn next_view(&mut self) -> Option<Value> {
-        if std::mem::take(&mut self.resumed) {
-            // Whatever the human did to the view, the agent's comes back.
-            self.watch.take_new_state();
-            return self.watch.state().cloned();
-        }
+    /// The agent's view, when it is not the one last applied. One that
+    /// comes while the view is paused or busy is applied once it is not.
+    fn next_view(&self) -> Option<Value> {
         self.watch
-            .take_new_state()
-            .filter(|v| self.applied.as_ref() != Some(v))
+            .state()
+            .filter(|v| self.applied.as_ref() != Some(*v))
+            .cloned()
     }
 
     /// The sidebar's rows: whether the map follows, the latest calls, and
@@ -74,24 +65,42 @@ impl Agent {
         };
         let mut rows = w.lines(CALL_ROWS + 1, WIDTH);
         rows[0] = title.into();
-        let last = w.calls().last();
-        let doing = last.and_then(|c| match c.status {
+        let doing = w.calls().last().and_then(|c| match c.status {
             watch::Status::Running => c.progress.back().cloned(),
-            watch::Status::Failed { .. } => {
-                let words: Vec<&str> = c.text.split_whitespace().collect();
-                Some(words.join(" "))
-            }
+            watch::Status::Failed { .. } => Some(printable(&c.text)),
             _ => None,
         });
-        let command = w.records().last().map(|c| format!("$ {c}"));
+        let command = w.records().last().map(|c| format!("$ {}", printable(c)));
         rows.extend(
             [doing.map(|d| format!("  {d}")), command]
                 .into_iter()
                 .flatten()
-                .map(|r| r.chars().take(WIDTH).collect()),
+                .map(|r| fit(&r)),
         );
         rows
     }
+}
+
+/// `row` cut to the sidebar's width, an ellipsis marking the cut, as
+/// legume-mcp cuts the call rows above it.
+fn fit(row: &str) -> String {
+    if row.chars().count() <= WIDTH {
+        return row.into();
+    }
+    let mut cut: String = row.chars().take(WIDTH - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// `text` on one line for the screen: its words, no control characters
+/// (an escape a tool's output carries never reaches the terminal).
+fn printable(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 
 impl App {
@@ -110,9 +119,10 @@ impl App {
         let Some(view) = agent.next_view() else {
             return heard;
         };
-        match mcp::agent_view(&view) {
+        // Taken as applied before it is read, so a view that does not read
+        // is said once, not at every tick.
+        match mcp::agent_view(agent.applied.insert(view)) {
             Ok((shown, args)) => {
-                agent.applied = Some(view);
                 agent.window = args.bbox;
                 self.show_agent_view(&shown, &args);
             }
@@ -140,7 +150,8 @@ impl App {
             return;
         };
         agent.following = true;
-        agent.resumed = true;
+        // Whatever the human did to the view, the agent's comes back.
+        agent.applied = None;
         if agent.watch.state().is_none() {
             self.message = Some("following the agent · no view shown yet".into());
         }
