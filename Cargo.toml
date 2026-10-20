@@ -49,12 +49,12 @@ hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
 mimalloc = "0.1"
-data-beans = { version = "0.10.2", default-features = false, features = ["aux", "alg"] }
-legume-numeric = { version = "0.9.5", features = ["matrix", "param", "candle", "mcmc"] }
-genomic-data = { version = "0.6.0", package = "legume-genomic-types" }
+data-beans = { version = "0.10", default-features = false, features = ["aux", "alg"] }
+legume-numeric = { version = "0.9", features = ["matrix", "param", "candle", "mcmc"] }
+genomic-data = { version = "0.6", package = "legume-genomic-types" }
 graph-embedding-util = { version = "0.10", package = "legume-graph-embedding" }
-hsblock = { version = "0.2.0", package = "hsblock-rs" }
-enrichment = { version = "0.5.2", package = "legume-enrichment" }
+hsblock = { version = "0.2", package = "hsblock-rs" }
+enrichment = { version = "0.5", package = "legume-enrichment" }
 
 anyhow = "1.0"
 base64 = { version = "0.22", optional = true }
@@ -64,7 +64,7 @@ image = { version = "0.25", optional = true, default-features = false, features 
 # Detachable sessions for `senna run` and `senna view`, and the map they
 # draw: colour, viewport, points, text, labels and keys, and the frame on
 # the terminal; its PDF pages, the save dialog, and the saved figures.
-legume-tui = { version = "0.3.13", optional = true, features = ["map", "map-display", "export", "chart", "save", "gallery"] }
+legume-tui = { version = "0.3", optional = true, features = ["map", "map-display", "export", "chart", "save", "gallery"] }
 # `senna mcp`: the viewer's tools and senna's fits served to an agent.
 legume-mcp = { version = "0.4", optional = true }
 clap = { version = "4.5.20", features = ["derive"] }
@@ -88,7 +88,7 @@ serde_json = "1.0"
 [dev-dependencies]
 # The crate's harness, driving `senna run` and `senna view` through
 # pseudo-terminals in tests/detach_session.rs.
-legume-tui = { version = "0.3.13", default-features = false, features = ["testing"] }
+legume-tui = { version = "0.3", default-features = false, features = ["testing"] }
 
 # The terminal size a running program reads, in tests/detach_session.rs.
 [target.'cfg(unix)'.dev-dependencies]
