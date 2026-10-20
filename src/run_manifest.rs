@@ -1427,23 +1427,32 @@ impl RunManifest {
     /// Write the manifest to `path` whole: into a file beside it, on disk,
     /// then renamed over it, so a reader (or a crash) never leaves half of
     /// one. A manifest that is there is one a run finished writing. A link
-    /// is written through, and the file keeps its permissions.
+    /// is written through (to where it leads, there yet or not); the file
+    /// keeps its mode where it can, and a new one gets the mode a plain
+    /// write would give it.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         use std::io::Write;
         let fail = |e: &dyn std::fmt::Display| anyhow::anyhow!("write {}: {e}", path.display());
         let s = serde_json::to_string_pretty(self)?;
-        let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let dir = match target.parent() {
-            Some(d) if !d.as_os_str().is_empty() => d,
-            _ => Path::new("."),
-        };
-        // Removed on any failure before it takes the manifest's place.
-        let mut part = tempfile::NamedTempFile::new_in(dir).map_err(|e| fail(&e))?;
+        let target = canonical_so_far(path);
+        let dir = manifest_dir(&target);
+        let name = target.file_name().unwrap_or_default().to_string_lossy();
+        // Removed on any failure before it takes the manifest's place, and
+        // named for the manifest should a kill leave it behind.
+        let prefix = format!(".{name}.");
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(&prefix).suffix(".part");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // As a plain write would make it: 0666 less the umask.
+            builder.permissions(fs::Permissions::from_mode(0o666));
+        }
+        let mut part = builder.tempfile_in(dir).map_err(|e| fail(&e))?;
         part.write_all(s.as_bytes()).map_err(|e| fail(&e))?;
         if let Ok(old) = fs::metadata(&target) {
-            part.as_file()
-                .set_permissions(old.permissions())
-                .map_err(|e| fail(&e))?;
+            // Where the filesystem refuses modes, the manifest still goes.
+            let _ = part.as_file().set_permissions(old.permissions());
         }
         part.as_file().sync_all().map_err(|e| fail(&e))?;
         part.persist(&target).map_err(|e| fail(&e.error))?;
@@ -1517,60 +1526,81 @@ fn rel_to_manifest_from(cwd: &Path, manifest_dir: &Path, written_path: &str) -> 
 /// written yet still gets its folder's real path. Folding `..` before
 /// following links would put `link/../x` beside the link, not where the
 /// link leads.
-fn canonical_so_far(p: &Path) -> PathBuf {
+#[must_use]
+pub fn canonical_so_far(p: &Path) -> PathBuf {
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::path::Component;
     /// Links followed before a loop is given up on, as the system does.
     const MAX_LINKS: usize = 40;
-    let parts = |p: &Path| -> Vec<(bool, OsString)> {
-        // (is the root, the part); `.` is dropped.
+    /// A part of a path, owned: a root (or drive) to start from, `..`, or
+    /// a name.
+    enum Part {
+        Root(OsString),
+        Up,
+        Name(OsString),
+    }
+    let parts = |p: &Path| -> Vec<Part> {
         p.components()
-            .filter(|c| *c != Component::CurDir)
-            .map(|c| {
-                (
-                    matches!(c, Component::RootDir | Component::Prefix(_)),
-                    c.as_os_str().to_owned(),
-                )
+            .filter_map(|c| match c {
+                Component::CurDir => None,
+                Component::ParentDir => Some(Part::Up),
+                Component::Normal(n) => Some(Part::Name(n.to_os_string())),
+                c => Some(Part::Root(c.as_os_str().to_os_string())),
             })
             .collect()
     };
-    let mut todo: VecDeque<(bool, OsString)> = parts(p).into();
+    let mut todo: VecDeque<Part> = parts(p).into();
     let mut out = PathBuf::new();
     let mut links = 0;
-    while let Some((root, part)) = todo.pop_front() {
-        if root {
-            out.push(&part);
-            continue;
-        }
-        if part == ".." {
-            match out.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                Some(Component::RootDir | Component::Prefix(_)) => {}
-                _ => out.push(".."),
-            }
-            continue;
-        }
-        let next = out.join(&part);
-        let link = fs::symlink_metadata(&next).is_ok_and(|m| m.file_type().is_symlink());
-        match fs::read_link(&next) {
-            Ok(target) if link && links < MAX_LINKS => {
-                links += 1;
-                // An absolute target starts again from its root; a relative
-                // one goes on from the link's folder.
-                if target.is_absolute() {
-                    out = PathBuf::new();
-                }
-                for p in parts(&target).into_iter().rev() {
-                    todo.push_front(p);
+    while let Some(part) = todo.pop_front() {
+        match part {
+            Part::Root(root) => out.push(root),
+            Part::Up => step_back(&mut out),
+            Part::Name(name) => {
+                let next = out.join(&name);
+                match fs::read_link(&next) {
+                    Ok(target) if links < MAX_LINKS => {
+                        links += 1;
+                        let target = unverbatim(target);
+                        // An absolute target starts again from its root; a
+                        // relative one goes on from the link's folder.
+                        if target.is_absolute() {
+                            out = PathBuf::new();
+                        }
+                        for p in parts(&target).into_iter().rev() {
+                            todo.push_front(p);
+                        }
+                    }
+                    _ => out = next,
                 }
             }
-            _ => out = next,
         }
     }
     out
+}
+
+/// `out` one `..` further: a name before it is cancelled; after nothing, a
+/// root or another `..`, the `..` stays (or, at a root, goes).
+fn step_back(out: &mut PathBuf) {
+    use std::path::Component;
+    match out.components().next_back() {
+        Some(Component::Normal(_)) => {
+            out.pop();
+        }
+        Some(Component::RootDir | Component::Prefix(_)) => {}
+        _ => out.push(".."),
+    }
+}
+
+/// A link's target as the rest of the path spells it: on Windows without
+/// its `\\?\` verbatim prefix, which the working directory never has.
+fn unverbatim(target: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(plain) = target.to_str().and_then(|t| t.strip_prefix(r"\\?\")) {
+        return PathBuf::from(plain);
+    }
+    target
 }
 
 /// The directory a manifest (or any file) sits in, `.` for a bare file name.
@@ -1604,15 +1634,7 @@ pub fn normalize(p: &Path) -> PathBuf {
     for c in p.components() {
         match c {
             Component::CurDir => {}
-            // `..` cancels a name before it; after nothing, a root or
-            // another `..` it stays.
-            Component::ParentDir => match out.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                Some(Component::RootDir | Component::Prefix(_)) => {}
-                _ => out.push(".."),
-            },
+            Component::ParentDir => step_back(&mut out),
             c => out.push(c),
         }
     }

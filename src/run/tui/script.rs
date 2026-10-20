@@ -29,28 +29,13 @@ pub fn line(argv: &[String]) -> String {
     argv.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")
 }
 
-/// `path` with `.` and `..` resolved: through symlinks as far as it
-/// exists, so two paths into one folder compare alike, then by its words.
+/// `path` absolute, resolved as the system resolves it (links where they
+/// are met, `..` after them), so two paths into one folder compare alike.
 #[must_use]
 pub fn normalize(path: &Path) -> PathBuf {
-    let words = lexical(path);
-    let mut head = words.clone();
-    let mut tail = Vec::new();
-    loop {
-        if let Ok(p) = head.canonicalize() {
-            return tail.iter().rev().fold(p, |p, w| p.join(w));
-        }
-        match (
-            head.file_name().map(std::ffi::OsStr::to_os_string),
-            head.parent(),
-        ) {
-            (Some(w), Some(up)) => {
-                tail.push(w);
-                head = up.to_path_buf();
-            }
-            _ => return words,
-        }
-    }
+    senna::run_manifest::canonical_so_far(
+        &std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+    )
 }
 
 /// `path` with `.` and `..` resolved by its words alone.

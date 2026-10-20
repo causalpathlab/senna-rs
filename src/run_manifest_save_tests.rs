@@ -79,3 +79,32 @@ fn a_linked_manifest_is_written_through_and_keeps_its_permissions() {
     let mode = fs::metadata(&shared).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o664);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_new_manifest_gets_the_mode_a_plain_write_gives() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("plain");
+    fs::write(&plain, "x").unwrap();
+    let path = dir.path().join("r.senna.json");
+    RunManifest::new(RunKind::Svd, "r").save(&path).unwrap();
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), mode(&plain));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_to_a_manifest_not_written_yet_is_written_through() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("shared")).unwrap();
+    let link = dir.path().join("r.senna.json");
+    std::os::unix::fs::symlink("shared/r.senna.json", &link).unwrap();
+    RunManifest::new(RunKind::Svd, "r").save(&link).unwrap();
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let shared = dir.path().join("shared/r.senna.json");
+    assert_eq!(RunManifest::load(&shared).unwrap().0.kind, RunKind::Svd);
+}
