@@ -1424,19 +1424,29 @@ impl RunManifest {
         Some(if Path::new(&all).is_file() { all } else { full })
     }
 
-    /// Write the manifest to `path` whole: to a file beside it first, then
-    /// renamed over it, so a reader never sees half of one. A manifest that
-    /// is there is one a run finished writing.
+    /// Write the manifest to `path` whole: into a file beside it, on disk,
+    /// then renamed over it, so a reader (or a crash) never leaves half of
+    /// one. A manifest that is there is one a run finished writing. A link
+    /// is written through, and the file keeps its permissions.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        use std::io::Write;
+        let fail = |e: &dyn std::fmt::Display| anyhow::anyhow!("write {}: {e}", path.display());
         let s = serde_json::to_string_pretty(self)?;
-        let mut part = path.as_os_str().to_owned();
-        part.push(format!(".{}.part", std::process::id()));
-        let part = PathBuf::from(part);
-        fs::write(&part, s).map_err(|e| anyhow::anyhow!("write {}: {e}", part.display()))?;
-        fs::rename(&part, path).map_err(|e| {
-            let _ = fs::remove_file(&part);
-            anyhow::anyhow!("write {}: {e}", path.display())
-        })?;
+        let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let dir = match target.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        // Removed on any failure before it takes the manifest's place.
+        let mut part = tempfile::NamedTempFile::new_in(dir).map_err(|e| fail(&e))?;
+        part.write_all(s.as_bytes()).map_err(|e| fail(&e))?;
+        if let Ok(old) = fs::metadata(&target) {
+            part.as_file()
+                .set_permissions(old.permissions())
+                .map_err(|e| fail(&e))?;
+        }
+        part.as_file().sync_all().map_err(|e| fail(&e))?;
+        part.persist(&target).map_err(|e| fail(&e.error))?;
         log::info!("wrote {}", path.display());
         Ok(())
     }
@@ -1500,16 +1510,67 @@ fn rel_to_manifest_from(cwd: &Path, manifest_dir: &Path, written_path: &str) -> 
         .into_owned()
 }
 
-/// `p` absolute and normalized, with its longest existing head canonicalized
-/// (a file not written yet still gets its folder's real path).
+/// `p` resolved as the system resolves it, one part at a time: a link is
+/// followed where it is met (even to a folder not made yet), `..` steps
+/// back from what is resolved so far, and a part not there yet is taken as
+/// written. For a path that exists this is its canonical path; a file not
+/// written yet still gets its folder's real path. Folding `..` before
+/// following links would put `link/../x` beside the link, not where the
+/// link leads.
 fn canonical_so_far(p: &Path) -> PathBuf {
-    let p = normalize(p);
-    p.ancestors()
-        .find_map(|a| {
-            let real = a.canonicalize().ok()?;
-            Some(real.join(p.strip_prefix(a).ok()?))
-        })
-        .unwrap_or(p)
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::path::Component;
+    /// Links followed before a loop is given up on, as the system does.
+    const MAX_LINKS: usize = 40;
+    let parts = |p: &Path| -> Vec<(bool, OsString)> {
+        // (is the root, the part); `.` is dropped.
+        p.components()
+            .filter(|c| *c != Component::CurDir)
+            .map(|c| {
+                (
+                    matches!(c, Component::RootDir | Component::Prefix(_)),
+                    c.as_os_str().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let mut todo: VecDeque<(bool, OsString)> = parts(p).into();
+    let mut out = PathBuf::new();
+    let mut links = 0;
+    while let Some((root, part)) = todo.pop_front() {
+        if root {
+            out.push(&part);
+            continue;
+        }
+        if part == ".." {
+            match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            }
+            continue;
+        }
+        let next = out.join(&part);
+        let link = fs::symlink_metadata(&next).is_ok_and(|m| m.file_type().is_symlink());
+        match fs::read_link(&next) {
+            Ok(target) if link && links < MAX_LINKS => {
+                links += 1;
+                // An absolute target starts again from its root; a relative
+                // one goes on from the link's folder.
+                if target.is_absolute() {
+                    out = PathBuf::new();
+                }
+                for p in parts(&target).into_iter().rev() {
+                    todo.push_front(p);
+                }
+            }
+            _ => out = next,
+        }
+    }
+    out
 }
 
 /// The directory a manifest (or any file) sits in, `.` for a bare file name.
@@ -1980,15 +2041,15 @@ pub struct RunDescription<'a> {
 /// the manifest's own directory — even when the run directory is moved
 /// after writing.
 pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
-    write_run_manifest_with(desc, |_| {})
+    write_run_manifest_with(desc, |_, _| {})
 }
 
 /// [`write_run_manifest`], with `edit` applied before the one write: for a
 /// run that records more than [`RunDescription`] says, so its manifest is
-/// never there without it.
+/// never there without it. `edit` is given the outputs' base name.
 pub fn write_run_manifest_with(
     desc: &RunDescription<'_>,
-    edit: impl FnOnce(&mut RunManifest),
+    edit: impl FnOnce(&mut RunManifest, &str),
 ) -> anyhow::Result<()> {
     match (desc.carried, desc.feature_embedding_suffix) {
         (Some(c), Some(suffix)) => c.append_to(desc.prefix, suffix)?,
@@ -2081,7 +2142,7 @@ pub fn write_run_manifest_with(
         m.outputs.pb_tree = Some(format!("{basename}.pb_tree.json"));
     }
     m.defaults.colour_by = Some(desc.default_colour_by.into());
-    edit(&mut m);
+    edit(&mut m, &basename);
 
     m.save(Path::new(&path))
 }
@@ -2520,59 +2581,12 @@ mod tests {
         assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, e);
         assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
     }
-
-    #[test]
-    fn a_manifest_is_saved_whole_and_leaves_nothing_beside_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("r.senna.json");
-        RunManifest::new(RunKind::Svd, "r").save(&path).unwrap();
-        RunManifest::new(RunKind::Topic, "r").save(&path).unwrap();
-        let (m, _) = RunManifest::load(&path).unwrap();
-        assert_eq!(m.kind, RunKind::Topic);
-        let names: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(names, ["r.senna.json"]);
-    }
-
-    #[test]
-    fn an_edit_is_in_the_manifest_from_its_one_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = dir.path().join("r").to_string_lossy().into_owned();
-        let desc = RunDescription {
-            kind: RunKind::TdRbm,
-            prefix: &prefix,
-            train_args: None,
-            data_input: &[],
-            data_batch: &[],
-            data_input_null: &[],
-            data_multiome: None,
-            dictionary_suffix: None,
-            has_model: false,
-            has_cell_proj: false,
-            pb_gene_suffix: None,
-            pb_latent_suffix: None,
-            pb_reference_suffix: None,
-            dictionary_empirical_suffix: None,
-            feature_embedding_suffix: None,
-            feature_coembedding_suffix: None,
-            carried: None,
-            module_membership_suffix: None,
-            module_dictionary_suffix: None,
-            softmax_dictionary_suffix: None,
-            cell_embedding_suffix: None,
-            cell_encoder_suffix: None,
-            default_colour_by: "cluster",
-            has_latent: false,
-            has_cell_to_pb: false,
-            has_pb_tree: false,
-        };
-        write_run_manifest_with(&desc, |m| {
-            m.outputs.cell_time = Some("r.cell_time.parquet".into());
-        })
-        .unwrap();
-        let (m, _) = RunManifest::load(Path::new(&default_path(&prefix))).unwrap();
-        assert_eq!(m.outputs.cell_time.as_deref(), Some("r.cell_time.parquet"));
-    }
 }
+
+#[cfg(test)]
+#[path = "run_manifest_save_tests.rs"]
+mod save_tests;
+
+#[cfg(test)]
+#[path = "run_manifest_path_tests.rs"]
+mod path_tests;

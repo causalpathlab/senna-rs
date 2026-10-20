@@ -843,12 +843,9 @@ fn write_manifest(args: &TdRbmArgs, inputs: &Inputs, has_pb_tree: bool) -> anyho
         .as_deref()
         .map(|v| v.iter().map(ToString::to_string).collect())
         .unwrap_or_default();
-    let base = std::path::Path::new(prefix)
-        .file_name()
-        .map_or_else(|| prefix.to_string(), |n| n.to_string_lossy().into_owned());
     // Its time, velocity and state tables are in the manifest from the
     // start: it is written once, last.
-    let record_time = |m: &mut senna::run_manifest::RunManifest| {
+    let record_time = |m: &mut senna::run_manifest::RunManifest, base: &str| {
         m.outputs.cell_time = Some(format!("{base}.cell_time.parquet"));
         m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
         m.outputs.cell_state = Some(format!("{base}.cell_state.parquet"));
