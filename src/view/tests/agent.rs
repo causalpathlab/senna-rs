@@ -1,5 +1,5 @@
 use super::*;
-use legume_mcp::watch::Meta;
+use legume_mcp::watch::{Body, Meta};
 use serde_json::json;
 use std::io::Write;
 
@@ -23,7 +23,9 @@ impl Server {
         )
         .unwrap();
         std::fs::write(dir.path().join("feed.jsonl"), "").unwrap();
-        Self(dir)
+        let server = Self(dir);
+        server.say(Body::Server(meta));
+        server
     }
 
     fn say(&self, body: Body) {
@@ -104,7 +106,7 @@ fn the_agent_s_view_is_shown_with_its_window_through_a_resize() {
     app.handle(Event::Resize(100, 30));
     app.layout(Rect::new(0, 0, 100, 30), 1);
     assert!(framed(&app), "{:?}", app.vp.unwrap().window());
-    assert!(app.agent.as_ref().unwrap().following);
+    assert!(app.agent.as_ref().unwrap().following());
 }
 
 #[test]
@@ -116,10 +118,10 @@ fn changing_the_view_by_hand_pauses_following_and_w_resumes_it() {
     // W while following changes nothing and keeps following.
     app.handle(key('W'));
     tick(&mut app);
-    assert!(app.agent.as_ref().unwrap().following);
+    assert!(app.agent.as_ref().unwrap().following());
 
     app.handle(key('c'));
-    assert!(!app.agent.as_ref().unwrap().following);
+    assert!(!app.agent.as_ref().unwrap().following());
     let mine = app.scene.colour;
     server.show(view("cluster", "C0", None));
     tick(&mut app);
@@ -127,7 +129,7 @@ fn changing_the_view_by_hand_pauses_following_and_w_resumes_it() {
 
     app.handle(key('W'));
     tick(&mut app);
-    assert!(app.agent.as_ref().unwrap().following);
+    assert!(app.agent.as_ref().unwrap().following());
     assert_eq!(app.scene.focused_name().as_deref(), Some("C0"));
 }
 
@@ -159,19 +161,40 @@ fn a_menu_open_holds_the_agent_s_view_until_it_closes() {
 }
 
 #[test]
-fn the_pane_shows_the_history_and_the_newest_lines_and_the_end() {
+fn the_pane_lists_the_newest_calls_even_paused_and_says_when_it_ended() {
     let server = Server::new();
-    for k in 0..20 {
-        server.say(Body::Progress {
-            id: "2".into(),
-            message: format!("line {k}"),
+    server.show(view("cluster", "C1", None));
+    let mut app = watching(&server);
+    tick(&mut app);
+    app.handle(key('c'));
+    for k in 0..12 {
+        server.say(Body::Call {
+            id: k.to_string(),
+            tool: format!("tool{k}"),
+            args: json!({}),
         });
     }
-    let mut app = watching(&server);
+    server.say(Body::Progress {
+        id: "11".into(),
+        message: "\u{1b}[2m[12:00:00 INFO senna] \u{1b}[0mepoch 3 of 9".into(),
+    });
+    server.say(Body::Record {
+        line: "senna clustering --from r.senna.json\n".into(),
+        command: Some("senna clustering --from r.senna.json".into()),
+    });
+    tick(&mut app);
     let rows = app.agent.as_ref().unwrap().rows();
-    assert_eq!(rows[0], "agent · following");
-    assert_eq!(rows.len(), 1 + SHOWN);
-    assert_eq!(rows.last().unwrap(), "14:03:07   line 19");
+    assert_eq!(rows[0], "agent · paused · W follows");
+    assert!(
+        rows[CALL_ROWS].contains("tool11"),
+        "the newest call, paused or not: {rows:?}"
+    );
+    assert_eq!(rows[CALL_ROWS + 1], "  epoch 3 of 9");
+    assert_eq!(
+        rows[CALL_ROWS + 2],
+        "$ senna clustering --from r.senna.json"
+    );
+    assert!(rows.iter().all(|r| r.chars().count() <= WIDTH), "{rows:?}");
     server.say(Body::Ended { ok: true });
     tick(&mut app);
     assert_eq!(app.agent.as_ref().unwrap().rows()[0], "agent · ended");
@@ -179,56 +202,21 @@ fn the_pane_shows_the_history_and_the_newest_lines_and_the_end() {
 }
 
 #[test]
-fn feed_events_read_as_one_short_line_each_with_their_time() {
-    let t = "2026-10-20T14:03:07-07:00";
-    let call = Body::Call {
-        id: "3".into(),
-        tool: "view_map".into(),
-        args: json!({"focus": "C1"}),
-    };
-    assert_eq!(
-        line(t, call).unwrap(),
-        r#"14:03:07 → view_map {"focus":"C1"}"#
-    );
-    let done = Body::Result {
-        id: "3".into(),
-        ok: false,
-        ms: 1500,
-        text: "\n no group C9\nin cluster".into(),
-    };
-    assert_eq!(
-        line(t, done).unwrap(),
-        "14:03:07 ✗ 1.5s no group C9 in cluster"
-    );
-    let drawn = Body::Result {
-        id: "4".into(),
-        ok: true,
-        ms: 100,
-        text: "[image/png, 120639 bytes]\n{\n  \"map\": \"umap\"".into(),
-    };
-    assert_eq!(
-        line(t, drawn).unwrap(),
-        r#"14:03:07 ✓ 0.1s { "map": "umap""#
-    );
-    let ran = Body::Record {
-        line: "if [ ! -e o.clusters.parquet ]; then\n  senna clustering\nfi\n".into(),
-        command: Some("senna clustering".into()),
-    };
-    assert_eq!(line(t, ran).unwrap(), "14:03:07 $ senna clustering");
-    let failed = Body::Record {
-        line: "# did not succeed\n".into(),
-        command: None,
-    };
-    assert_eq!(line(t, failed), None);
-    let long = Body::Progress {
-        id: "3".into(),
-        message: "x".repeat(500),
-    };
-    assert_eq!(line(t, long).unwrap().chars().count(), LINE);
+fn w_brings_back_the_agent_s_view_even_when_it_did_not_change() {
+    let server = Server::new();
+    server.show(view("cluster", "C1", None));
+    let mut app = watching(&server);
+    tick(&mut app);
+    app.handle(key('c'));
+    let mine = app.scene.colour;
+    app.handle(key('W'));
+    tick(&mut app);
+    assert_ne!(app.scene.colour, mine);
+    assert_eq!(app.scene.focused_name().as_deref(), Some("C1"));
 }
 
 #[test]
-fn the_same_view_again_keeps_the_picture_and_the_person_s_note_is_said_once() {
+fn the_same_view_again_keeps_the_picture() {
     let server = Server::new();
     server.show(view("cluster", "C1", None));
     let mut app = watching(&server);
@@ -237,19 +225,20 @@ fn the_same_view_again_keeps_the_picture_and_the_person_s_note_is_said_once() {
     server.show(view("cluster", "C1", None));
     tick(&mut app);
     assert_eq!(app.vp, vp, "nothing changed: no new picture");
+}
 
-    server.say(Body::Note {
-        text: "look at C2".into(),
-    });
-    server.say(Body::Notebook {
-        entry: "user".into(),
-        text: "look at C2".into(),
-    });
-    tick(&mut app);
-    let rows = app.agent.as_ref().unwrap().rows();
+#[test]
+fn text_from_the_agent_reaches_the_screen_without_control_characters() {
     assert_eq!(
-        rows.iter().filter(|r| r.contains("look at C2")).count(),
-        1,
-        "{rows:?}"
+        printable("no \u{1b}[31mgroup\n  C9\u{7}"),
+        "no [31mgroup C9"
     );
+}
+
+#[test]
+fn a_long_row_is_cut_to_the_sidebar_with_an_ellipsis() {
+    let row = fit(&"x".repeat(100));
+    assert_eq!(row.chars().count(), WIDTH);
+    assert!(row.ends_with('…'));
+    assert_eq!(fit("short"), "short");
 }

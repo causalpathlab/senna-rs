@@ -124,8 +124,8 @@ While an agent works, the server writes a live feed to
 `$XDG_RUNTIME_DIR/legume-mcp/senna-<pid>/` and publishes the view it shows
 after `view_open` and `view_map`. `senna view --watch` (or `--watch <pid>`)
 follows it in senna's own viewer: the same run, round, map, grouping, focus and
-window, with a pane of the agent's calls, their progress and the commands they
-ran. Changing the view by hand stops following; `W` follows again.
+window, with a pane of the agent's latest calls, what the latest is doing and
+the last command it ran. Changing the view by hand stops following; `W` follows again.
 legume-mcp's own watch view can also stop a call or leave the agent a note.
 `LEGUME_MCP_WATCH=off` writes no feed.
 
