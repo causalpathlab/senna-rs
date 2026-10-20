@@ -76,6 +76,7 @@ impl App {
             KeyCode::Char('e') => self.open_menu(),
             KeyCode::Char('g') => self.change(|s| s.step_feature(1)),
             KeyCode::Char('G') => self.change(|s| s.step_feature(-1)),
+            KeyCode::Char('W') if self.agent.is_some() => self.follow_agent(),
             KeyCode::Char('a') => self.change(Scene::pick_marker_set),
             KeyCode::Char('o') => self.change_source(Scene::cycle_source),
             KeyCode::Char('/') => {
@@ -593,6 +594,24 @@ impl App {
             return false;
         }
         let before = self.message.clone();
+        let by_hand = matches!(&ev, Event::Key(k) if k.kind != KeyEventKind::Release)
+            || matches!(&ev, Event::Mouse(m) if !matches!(m.kind, MouseEventKind::Moved));
+        // What is shown, to tell whether the human changed it.
+        let shown = |a: &App| {
+            let s = &a.scene;
+            (
+                s.space,
+                s.colour,
+                s.focus,
+                s.pick.clone(),
+                s.source,
+                a.from.clone(),
+                a.zooming.is_some(),
+                a.vp,
+            )
+        };
+        let followed =
+            (by_hand && self.agent.as_ref().is_some_and(|a| a.following)).then(|| shown(self));
         let changed = match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
             Event::Mouse(m) => self.mouse(m),
@@ -602,6 +621,11 @@ impl App {
             }
             _ => false,
         };
+        // The human moved the camera or changed what is shown: the view is
+        // theirs until W.
+        if followed.is_some_and(|before| before != shown(self)) {
+            self.pause_agent();
+        }
         changed || self.message != before
     }
 }

@@ -28,6 +28,13 @@ pub fn fit(bounds: [f32; 4], w: usize, h: usize) -> Viewport {
     Viewport::fit(bounds, w, h, MARGIN, YAxis::Up)
 }
 
+/// `window` exactly in `w × h`, data y up: a camera asked for by its
+/// window, as `view_map` and an agent's view give it.
+#[must_use]
+pub fn frame(window: [f32; 4], w: usize, h: usize) -> Viewport {
+    Viewport::fit(window, w, h, 1.0, YAxis::Up)
+}
+
 /// No limits: senna zooms and pans anywhere.
 pub const FREE: Limits = Limits {
     scale: None,

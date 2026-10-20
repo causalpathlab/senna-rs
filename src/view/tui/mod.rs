@@ -5,6 +5,7 @@
 //! picture appears at once and fills in; any key or mouse event in between
 //! simply replaces the job.
 
+mod agent;
 mod annotate;
 mod browse;
 mod decisions;
@@ -60,6 +61,7 @@ fn here(prefix: &str) -> String {
 pub fn run(
     session: &legume_tui::Session,
     views: Vec<(Scene, std::path::PathBuf)>,
+    agent: Option<&std::path::Path>,
     graphics: Graphics,
     lupin: String,
 ) -> anyhow::Result<()> {
@@ -74,10 +76,14 @@ pub fn run(
         session.take_repaint();
         let picker = legume_tui::graphics::pick(session, graphics, Fallback::Probe);
         session.set_modes(legume_tui::Modes::new().mouse(legume_tui::Mouse::Full))?;
-        let apps = views
+        let mut apps: Vec<App> = views
             .into_iter()
             .map(|(scene, from)| App::new(scene, picker.clone(), from, lupin.clone()))
             .collect();
+        // `--watch` opens one view, the agent's.
+        if let (Some(dir), Some(app)) = (agent, apps.first_mut()) {
+            app.agent = Some(agent::Agent::open(dir)?);
+        }
         grid::Deck::new(
             apps,
             picker,
@@ -93,6 +99,11 @@ pub fn run(
     session.restore();
     drop(quiet);
     result
+}
+
+/// Sidebar rows that name no feature.
+fn plain(lines: Vec<String>) -> Vec<PaneRow> {
+    lines.into_iter().map(|l| (l, None)).collect()
 }
 
 /// How long a toast stays up.
@@ -208,6 +219,8 @@ struct App {
     /// missing: recorded only once all are found and checked.
     data_pending: Option<senna::run_manifest::RunData>,
     quit: bool,
+    /// The agent followed (`--watch`), when there is one.
+    agent: Option<agent::Agent>,
 }
 
 impl App {
@@ -261,6 +274,7 @@ impl App {
             menu: None,
             zooming: None,
             quit: false,
+            agent: None,
         }
     }
 
@@ -305,10 +319,11 @@ impl App {
             | self.finish_relabel()
             | self.finish_recompute()
             | self.keep_scores_current()
-            | self.ask_missing_data(on_screen);
+            | self.ask_missing_data(on_screen)
+            | self.hear_agent();
         // Not while drawing on screen: a reload would restart the picture;
         // nor while senna rewrites the run, which reloads when it is done.
-        let idle = (!on_screen || self.job.is_none()) && self.recomputing.is_none();
+        let idle = (!on_screen || self.job.is_none()) && !self.holds_outside_changes();
         if idle && self.checked.elapsed() >= Duration::from_secs(1) {
             self.checked = std::time::Instant::now();
             if modified(&self.from) != self.stamp {
@@ -354,11 +369,24 @@ impl App {
 
     /// The sidebar's rows, each with the feature it names, if any.
     fn side_rows(&self) -> Option<Vec<PaneRow>> {
-        let plain =
-            |lines: Vec<String>| -> Vec<PaneRow> { lines.into_iter().map(|l| (l, None)).collect() };
         if let Some(Modal::Search(query, hits, at)) = &self.modal {
             return Some(input::search_rows(query, hits, *at));
         }
+        let rows = self.view_rows();
+        let Some(agent) = &self.agent else {
+            return rows;
+        };
+        // The agent's activity on top, what the view lists below it.
+        let mut out = plain(agent.rows());
+        if let Some(rows) = rows {
+            out.push((String::new(), None));
+            out.extend(rows);
+        }
+        Some(out)
+    }
+
+    /// The sidebar's rows from the view itself.
+    fn view_rows(&self) -> Option<Vec<PaneRow>> {
         self.scene
             .merge_lines()
             .or_else(|| self.scene.review_lines())
@@ -497,7 +525,11 @@ impl App {
         }
         if self.vp.is_none() {
             let (w, h) = self.map_px();
-            self.vp = Some(render::fit(self.scene.current().points.bounds, w, h));
+            // Following an agent, its window; else the whole map.
+            self.vp = Some(match self.agent_window() {
+                Some(window) => render::frame(window, w, h),
+                None => render::fit(self.scene.current().points.bounds, w, h),
+            });
             self.restart();
         }
     }
