@@ -110,6 +110,20 @@ impl Step {
         }
     }
 
+    /// The tables the step writes beside `t`'s output prefix, as `argv`
+    /// runs it; none for the joint layout and topics, whose names their
+    /// commands choose.
+    pub fn outputs(self, t: &Target, setting: &str) -> Vec<String> {
+        let out = &t.out;
+        match self {
+            Step::CellLayout => vec![format!("{out}.{setting}.cell_coords.parquet")],
+            Step::FeatureLayout => vec![format!("{out}.{setting}.feature_coords.parquet")],
+            Step::CellClusters => vec![format!("{out}.clusters.parquet")],
+            Step::FeatureClusters => vec![format!("{out}.feature_clusters.parquet")],
+            Step::JointLayout | Step::Topics => Vec::new(),
+        }
+    }
+
     /// senna's arguments for this step on `t` with `setting`: a layout's
     /// method, or a clustering's Leiden resolution (empty: its default).
     pub fn argv(self, t: &Target, setting: &str) -> Vec<String> {
@@ -377,6 +391,17 @@ mod tests {
             Step::Topics.argv(&t, ""),
             ["resolve-topics", "--from", "run.senna.json", "-o", "run"]
         );
+    }
+
+    #[test]
+    fn a_step_names_the_tables_its_command_writes() {
+        let t = target(true);
+        assert_eq!(
+            Step::CellLayout.outputs(&t, "phate"),
+            ["run.phate.cell_coords.parquet"]
+        );
+        assert_eq!(Step::CellClusters.outputs(&t, ""), ["run.clusters.parquet"]);
+        assert!(Step::Topics.outputs(&t, "").is_empty());
     }
 
     fn with_coembedding() -> Target {
