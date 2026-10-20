@@ -857,6 +857,22 @@ enum Commands {
 
     #[cfg(feature = "view")]
     #[command(
+        about = "Serve senna to an agent (Model Context Protocol)",
+        long_about = "Serve senna to an agent as a Model Context Protocol server on\n\
+                      stdin and stdout. run_fit starts a fit and returns its run\n\
+                      manifest; the view tools are the viewer's: view_open opens a\n\
+                      run, view_map draws it as a PNG with its legend, view_markers,\n\
+                      view_cell and view_export ask about it and write figures.\n\
+                      The view is kept between calls, as `senna view` keeps it.\n\
+                      lupin rounds are shown as they are on disk.\n\n\
+                      Examples:\n\
+                      \x20 claude mcp add senna -- senna mcp\n\
+                      \x20 codex mcp add senna -- senna mcp"
+    )]
+    Mcp,
+
+    #[cfg(feature = "view")]
+    #[command(
         about = "Set up embedding fits in the terminal and run them.",
         long_about = format!(
             "Set up embedding fits in the terminal and run them.\n\
@@ -1073,6 +1089,15 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "view")]
         Commands::View(args) => view::run_view(args)?,
+        #[cfg(feature = "view")]
+        Commands::Mcp => legume_mcp::serve(
+            legume_mcp::ServerInfo {
+                name: "senna".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                instructions: Some(view::mcp::INSTRUCTIONS.into()),
+            },
+            view::mcp::Tools::default(),
+        )?,
         #[cfg(feature = "view")]
         Commands::Run(args) => {
             use clap::CommandFactory;

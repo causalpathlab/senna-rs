@@ -8,6 +8,7 @@ mod decide;
 mod deck;
 mod features;
 mod files;
+pub(crate) mod mcp;
 mod paint;
 mod places;
 mod recompute;
@@ -525,16 +526,16 @@ fn run_senna(
     Ok(())
 }
 
+/// How [`prepare_run`] runs one step: `(why, argv, outputs)`.
+type RunStep<'a> = dyn Fn(&str, &[String], &[String]) -> anyhow::Result<()> + 'a;
+
 /// Compute what the view shows and the run lacks: a layout of the cells
 /// (not for fne, which has none), of the feature embedding, and clusters of
 /// each. Outputs go beside the manifest and are recorded in it, so this runs
 /// once. Only a missing cell layout is an error; the rest warn and the view
-/// opens without them. Run in `session` on the way to the screen.
-fn prepare_run(
-    args: &ViewArgs,
-    from: &str,
-    session: Option<&legume_tui::Session>,
-) -> anyhow::Result<()> {
+/// opens without them. Each step runs through `run_step(why, argv,
+/// outputs)`: in a session on the way to the screen, or as an MCP call.
+fn prepare_run(args: &ViewArgs, from: &str, run_step: &RunStep) -> anyhow::Result<()> {
     use recompute::{Step, Target};
     use senna::run_manifest::RunManifest;
     let load = || RunManifest::load(std::path::Path::new(from));
@@ -560,7 +561,11 @@ fn prepare_run(
             None => !here(&m.layout.cell_coords) && m.layout.methods.values().all(no_cells),
         };
     let run = |step: Step, method: &str, why: String| {
-        run_senna(session, &why, &step.argv(&target, method))
+        run_step(
+            &why,
+            &step.argv(&target, method),
+            &step.outputs(&target, method),
+        )
     };
     let warn = |r: anyhow::Result<()>| {
         if let Err(e) = r {
@@ -667,7 +672,7 @@ fn read_scenes(
     );
     if !args.no_compute {
         for f in from {
-            prepare_run(args, f, session)?;
+            prepare_run(args, f, &|why, argv, _| run_senna(session, why, argv))?;
         }
     }
     // Reading runs is independent work; the scenes are built in order.
