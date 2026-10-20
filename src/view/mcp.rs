@@ -118,7 +118,7 @@ fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T> {
 }
 
 fn absolute(path: &Path) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    run_manifest::from_cwd(path)
 }
 
 #[derive(Deserialize)]
@@ -148,9 +148,19 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
             let data = Path::new(&a.data[0]).file_name().unwrap_or_default();
             let stem = data.to_string_lossy();
             let stem = stem.split('.').next().unwrap_or("run");
-            dir.join(format!("{stem}_{}", a.method))
-                .to_string_lossy()
-                .into_owned()
+            // The first name no running fit is writing: `{stem}_{method}`,
+            // then `_2`, `_3`, …
+            (1..)
+                .map(|k| match k {
+                    1 => format!("{stem}_{}", a.method),
+                    k => format!("{stem}_{}_{k}", a.method),
+                })
+                .map(|name| dir.join(name).to_string_lossy().into_owned())
+                .find(|out| {
+                    let manifest = absolute(Path::new(&run_manifest::default_path(out)));
+                    cx.ensure_free(&[manifest]).is_ok()
+                })
+                .expect("a name no fit holds")
         }
     };
     let manifest = absolute(Path::new(&run_manifest::default_path(&out)));

@@ -364,9 +364,9 @@ fn run_lane(
         let job = &js[i];
         // The fit whose partition it collapses on, once that one is through.
         let source = job.pb_from.as_ref().and_then(|run| {
-            let run = super::script::normalize(&job.dir.join(run));
+            let run = super::script::resolved(&job.dir.join(run));
             js.iter()
-                .position(|j| super::script::normalize(&j.result()) == run)
+                .position(|j| super::script::resolved(&j.result()) == run)
         });
         let source_state = source.map(|k| loop {
             let state = s

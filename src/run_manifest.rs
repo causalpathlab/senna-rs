@@ -1281,9 +1281,7 @@ impl RunManifest {
         }
         // Lexically absolute, not canonical: the recorded paths are as
         // written, so resolving symlinks here alone would skew the rebase.
-        let here = normalize(
-            &std::path::absolute(manifest_dir).unwrap_or_else(|_| manifest_dir.to_path_buf()),
-        );
+        let here = normalize(&from_cwd(manifest_dir));
         let recorded_abs = normalize(Path::new(recorded));
         let trained_in = Path::new(&self.prefix)
             .is_absolute()
@@ -1424,38 +1422,18 @@ impl RunManifest {
         Some(if Path::new(&all).is_file() { all } else { full })
     }
 
-    /// Write the manifest to `path` whole: into a file beside it, on disk,
-    /// then renamed over it, so a reader (or a crash) never leaves half of
-    /// one. A manifest that is there is one a run finished writing. A link
-    /// is written through (to where it leads, there yet or not); the file
-    /// keeps its mode where it can, and a new one gets the mode a plain
-    /// write would give it.
+    /// Write the manifest to `path`, through a link, and on to the disk
+    /// before returning: the file keeps its owner, mode and links, and a
+    /// read-only one is refused. Each run writes its manifest last, so a
+    /// manifest that is there is one whose run finished.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         use std::io::Write;
-        let fail = |e: &dyn std::fmt::Display| anyhow::anyhow!("write {}: {e}", path.display());
         let s = serde_json::to_string_pretty(self)?;
-        let target = canonical_so_far(path);
-        let dir = manifest_dir(&target);
-        let name = target.file_name().unwrap_or_default().to_string_lossy();
-        // Removed on any failure before it takes the manifest's place, and
-        // named for the manifest should a kill leave it behind.
-        let prefix = format!(".{name}.");
-        let mut builder = tempfile::Builder::new();
-        builder.prefix(&prefix).suffix(".part");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // As a plain write would make it: 0666 less the umask.
-            builder.permissions(fs::Permissions::from_mode(0o666));
-        }
-        let mut part = builder.tempfile_in(dir).map_err(|e| fail(&e))?;
-        part.write_all(s.as_bytes()).map_err(|e| fail(&e))?;
-        if let Ok(old) = fs::metadata(&target) {
-            // Where the filesystem refuses modes, the manifest still goes.
-            let _ = part.as_file().set_permissions(old.permissions());
-        }
-        part.as_file().sync_all().map_err(|e| fail(&e))?;
-        part.persist(&target).map_err(|e| fail(&e.error))?;
+        let written = fs::File::create(path).and_then(|mut f| {
+            f.write_all(s.as_bytes())?;
+            f.sync_all()
+        });
+        written.map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
         log::info!("wrote {}", path.display());
         Ok(())
     }
@@ -1594,13 +1572,30 @@ fn step_back(out: &mut PathBuf) {
 }
 
 /// A link's target as the rest of the path spells it: on Windows without
-/// its `\\?\` verbatim prefix, which the working directory never has.
+/// its verbatim prefix, which the working directory never has (`\\?\UNC\`
+/// for a share becomes `\\`; `\\?\` before a drive goes).
 fn unverbatim(target: PathBuf) -> PathBuf {
     #[cfg(windows)]
-    if let Some(plain) = target.to_str().and_then(|t| t.strip_prefix(r"\\?\")) {
-        return PathBuf::from(plain);
+    if let Some(t) = target.to_str() {
+        if let Some(share) = t.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{share}"));
+        }
+        if let Some(plain) = t.strip_prefix(r"\\?\") {
+            return PathBuf::from(plain);
+        }
     }
     target
+}
+
+/// `p` from the working directory when it is relative, its `.`, `..` and
+/// links as written (unlike `std::path::absolute`, which on Windows folds
+/// `..` first); `p` itself when there is no working directory.
+#[must_use]
+pub fn from_cwd(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    std::env::current_dir().map_or_else(|_| p.to_path_buf(), |d| d.join(p))
 }
 
 /// The directory a manifest (or any file) sits in, `.` for a bare file name.
@@ -1656,7 +1651,7 @@ pub fn relative_to(p: &Path, base: &Path) -> PathBuf {
 /// it works for paths that no longer exist.
 #[must_use]
 pub fn rebase(path: &Path, from_dir: &Path, to_dir: &Path) -> PathBuf {
-    let abs = |p: &Path| normalize(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+    let abs = |p: &Path| normalize(&from_cwd(p));
     normalize(&abs(to_dir).join(relative_to(&abs(path), &abs(from_dir))))
 }
 

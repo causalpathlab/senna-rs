@@ -1212,7 +1212,7 @@ impl App {
         let abs = self.here.join(&self.rows[i].out);
         let dir = abs
             .parent()
-            .map_or_else(|| self.here.clone(), script::normalize);
+            .map_or_else(|| self.here.clone(), script::resolved);
         let name = abs
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

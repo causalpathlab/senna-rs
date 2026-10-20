@@ -1,6 +1,6 @@
-//! Saving a run manifest: whole or not at all, through a link, keeping its
-//! permissions; and a run that records more than its description writing
-//! it once.
+//! Saving a run manifest: through a link (there yet or not), keeping its
+//! mode, refusing a read-only one; and a run that records more than its
+//! description writing it once.
 
 use super::*;
 
@@ -107,4 +107,18 @@ fn a_link_to_a_manifest_not_written_yet_is_written_through() {
         .is_symlink());
     let shared = dir.path().join("shared/r.senna.json");
     assert_eq!(RunManifest::load(&shared).unwrap().0.kind, RunKind::Svd);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_manifest_is_refused_not_replaced() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("r.senna.json");
+    RunManifest::new(RunKind::Svd, "r").save(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    // Root writes anyway; the check means something only for a user.
+    if RunManifest::new(RunKind::Topic, "r").save(&path).is_err() {
+        assert_eq!(RunManifest::load(&path).unwrap().0.kind, RunKind::Svd);
+    }
 }

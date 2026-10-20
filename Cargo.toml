@@ -52,9 +52,9 @@ mimalloc = "0.1"
 data-beans = { version = "0.8.6", features = ["aux", "alg"] }
 legume-numeric = { version = "0.9.5", features = ["matrix", "param", "candle", "mcmc"] }
 genomic-data = { version = "0.6.0", package = "legume-genomic-types" }
-graph-embedding-util = { version = "0.9.2", package = "legume-graph-embedding" }
+graph-embedding-util = { version = "0.9.4", package = "legume-graph-embedding" }
 hsblock = { version = "0.2.0", package = "hsblock-rs" }
-enrichment = { version = "0.5.0", package = "legume-enrichment" }
+enrichment = { version = "0.5.2", package = "legume-enrichment" }
 
 anyhow = "1.0"
 base64 = { version = "0.22", optional = true }
@@ -66,7 +66,7 @@ image = { version = "0.25", optional = true, default-features = false, features 
 # the terminal; its PDF pages, the save dialog, and the saved figures.
 legume-tui = { version = "0.3.13", optional = true, features = ["map", "map-display", "export", "chart", "save", "gallery"] }
 # `senna mcp`: the viewer's tools and senna's fits served to an agent.
-legume-mcp = { version = "0.3.2", optional = true }
+legume-mcp = { version = "0.4", optional = true }
 clap = { version = "4.5.20", features = ["derive"] }
 num_cpus = "1.16.0"
 rayon = "1.10.0"

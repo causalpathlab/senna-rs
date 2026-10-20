@@ -228,7 +228,7 @@ fn what_would_overwrite_or_misparse_is_stopped_before_running() {
     std::fs::remove_file(dir.path().join("sub")).unwrap();
     let p = &a.plan()[0];
     assert_eq!(p.problem, None);
-    assert_eq!(p.job.dir, script::normalize(&dir.path().join("sub")));
+    assert_eq!(p.job.dir, script::resolved(&dir.path().join("sub")));
     assert_eq!(p.job.argv[1], "../d1.zarr");
 
     let steps = a.rows[svd]
@@ -337,7 +337,7 @@ fn an_out_folder_given_with_dotdot_still_finds_the_data() {
     let p = &a.plan()[0];
     assert_eq!(p.problem, None);
     assert_eq!(p.job.argv[1], "../b/d.zarr");
-    assert_eq!(p.job.dir, script::normalize(&dir.path().join("res")));
+    assert_eq!(p.job.dir, script::resolved(&dir.path().join("res")));
 }
 
 #[test]

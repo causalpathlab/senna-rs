@@ -10,11 +10,22 @@ use std::process::{Command, ExitStatus, Stdio};
 /// A `senna mcp` session given `calls` (id, tool, arguments) after the
 /// handshake: every message it wrote, and how it ended.
 fn session(calls: &[(u64, &str, Value)]) -> (Vec<Value>, ExitStatus) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_senna"))
-        .arg("mcp")
-        // No records in the repository, no live feed left behind.
-        .env(legume_mcp::project::OFF_ENV, "off")
-        .env(legume_mcp::watch::ENV, "off")
+    session_in(None, calls)
+}
+
+/// [`session`] keeping its records in `project` when given (none else, so
+/// nothing lands in the repository); never a live feed.
+fn session_in(
+    project: Option<&std::path::Path>,
+    calls: &[(u64, &str, Value)],
+) -> (Vec<Value>, ExitStatus) {
+    let mut server = Command::new(env!("CARGO_BIN_EXE_senna"));
+    server.arg("mcp").env(legume_mcp::watch::ENV, "off");
+    match project {
+        Some(p) => server.env(legume_mcp::project::ROOT_ENV, p),
+        None => server.env(legume_mcp::project::OFF_ENV, "off"),
+    };
+    let mut child = server
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -136,4 +147,37 @@ fn a_background_fit_returns_a_job_and_the_same_out_again_however_spelled_is_refu
     assert_eq!(again["isError"], true, "{}", replies[2]);
     let said = again["content"][0]["text"].as_str().unwrap_or_default();
     assert!(said.contains(&format!("by {job}:")), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fit_with_no_out_takes_the_first_name_no_running_fit_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data.zarr.zip");
+    assert!(Command::new("mkfifo")
+        .arg(&data)
+        .status()
+        .unwrap()
+        .success());
+    let fit = json!({"method": "svd", "data": [&data], "background": true});
+    let (messages, status) = session_in(
+        Some(dir.path()),
+        &[call(1, "run_fit", fit.clone()), call(2, "run_fit", fit)],
+    );
+    drop(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&data),
+    );
+    assert!(status.success());
+    let replies: Vec<&Value> = messages.iter().filter(|m| m.get("id").is_some()).collect();
+    let run = |k: usize| {
+        replies[k]["result"]["structuredContent"]["run"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{}", replies[k]))
+            .to_string()
+    };
+    assert!(run(1).ends_with("/data_svd.senna.json"), "{}", run(1));
+    assert!(run(2).ends_with("/data_svd_2.senna.json"), "{}", run(2));
 }

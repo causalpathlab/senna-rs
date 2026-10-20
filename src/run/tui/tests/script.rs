@@ -33,7 +33,7 @@ fn a_dotdot_in_the_out_folder_is_resolved_first() {
         PathBuf::from("../b/d.zarr")
     );
     assert_eq!(r("/a/b/../b/d.zarr", "/a/b"), PathBuf::from("d.zarr"));
-    assert_eq!(normalize(Path::new("/a/./b/../c")), PathBuf::from("/a/c"));
+    assert_eq!(resolved(Path::new("/a/./b/../c")), PathBuf::from("/a/c"));
 }
 
 #[test]

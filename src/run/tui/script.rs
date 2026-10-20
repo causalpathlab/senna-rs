@@ -32,10 +32,8 @@ pub fn line(argv: &[String]) -> String {
 /// `path` absolute, resolved as the system resolves it (links where they
 /// are met, `..` after them), so two paths into one folder compare alike.
 #[must_use]
-pub fn normalize(path: &Path) -> PathBuf {
-    senna::run_manifest::canonical_so_far(
-        &std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
-    )
+pub fn resolved(path: &Path) -> PathBuf {
+    senna::run_manifest::canonical_so_far(&senna::run_manifest::from_cwd(path))
 }
 
 /// `path` with `.` and `..` resolved by its words alone.
@@ -52,7 +50,7 @@ const MAX_UP: usize = 2;
 /// it when that stays near, else absolute. Both absolute.
 #[must_use]
 pub fn relative(path: &Path, base: &Path) -> PathBuf {
-    let (real, base) = (normalize(path), normalize(base));
+    let (real, base) = (resolved(path), resolved(base));
     let common = real
         .components()
         .zip(base.components())
