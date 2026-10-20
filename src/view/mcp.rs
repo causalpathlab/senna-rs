@@ -154,40 +154,48 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
         }
     };
     let manifest = absolute(Path::new(&run_manifest::default_path(&out)));
-    // An out a background fit is still writing is refused by legume-mcp,
-    // naming that job; a fit that ends without its manifest fails there.
-    let fitted = !manifest.exists();
-    if fitted {
-        let mut argv = vec![a.method.clone()];
-        argv.extend(a.data.iter().cloned());
-        argv.extend(["-o".into(), out.clone()]);
-        argv.extend(a.args);
-        let summary = format!("senna {} fit of {}", a.method, a.data.join(", "));
-        let outputs = std::slice::from_ref(&manifest);
-        if a.background {
-            // Returned at once: the agent follows the job, and opens the
-            // run once it is done.
-            let job = cx.spawn_job(senna(&argv)?, outputs, &summary)?;
-            return Ok(vec![Content::Json(json!({
-                "job": job,
-                "run": manifest,
-                "note": "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done",
-            }))]);
-        }
-        cx.progress(&format!("senna {} → {out}", a.method));
-        cx.run_making(senna(&argv)?, outputs, &summary)?;
+    if manifest.exists() {
+        return Ok(vec![Content::Json(json!({
+            "run": manifest,
+            "kind": kind(&manifest)?,
+            "fitted": false,
+            "note": "the run is there already, of the kind given; another out fits anew",
+        }))]);
     }
-    let mut out = json!({ "run": manifest, "kind": kind(&manifest)?, "fitted": fitted });
-    if !fitted {
-        out["note"] = "the run is there already, of the kind given; another out fits anew".into();
+    // legume-mcp refuses an out a background fit is still writing (naming
+    // its job) until that fit has written the manifest, and fails a fit
+    // that ends without it.
+    let mut argv = vec![a.method.clone()];
+    argv.extend(a.data.iter().cloned());
+    argv.extend(["-o".into(), out.clone()]);
+    argv.extend(a.args);
+    let summary = format!("senna {} fit of {}", a.method, a.data.join(", "));
+    let outputs = std::slice::from_ref(&manifest);
+    let fit = || format!("senna {}", a.method);
+    if a.background {
+        // Returned at once: the agent follows the job, and opens the run
+        // once it is done.
+        let job = cx
+            .spawn_job(senna(&argv)?, outputs, &summary)
+            .with_context(fit)?;
+        return Ok(vec![Content::Json(json!({
+            "job": job,
+            "run": manifest,
+            "note": "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done",
+        }))]);
     }
-    Ok(vec![Content::Json(out)])
+    cx.progress(&format!("senna {} → {out}", a.method));
+    cx.run_making(senna(&argv)?, outputs, &summary)
+        .with_context(fit)?;
+    Ok(vec![Content::Json(
+        json!({ "run": manifest, "kind": kind(&manifest)?, "fitted": true }),
+    )])
 }
 
 /// `senna {argv}` as a child, verbose: its log is the call's progress.
 fn senna(argv: &[String]) -> Result<Command> {
-    let mut senna = Command::new(std::env::current_exe()?);
-    senna.args(argv);
+    // This server's own binary, found even when it was reinstalled since.
+    let mut senna = legume_mcp::own_command(argv)?;
     if !argv.iter().any(|f| f == "-v" || f == "--verbose") {
         senna.arg("-v");
     }
@@ -864,7 +872,8 @@ fn specs() -> Vec<ToolSpec> {
             "run_fit",
             "Fit a senna embedding as `senna {method} {data} -o {out} {args}` and return \
              the absolute path of its run manifest. An out whose manifest exists is not \
-             fitted again. Fits can take long; progress carries the log.",
+             fitted again; one a background fit is still writing is refused, naming its \
+             job (job_wait for it). Fits can take long; progress carries the log.",
             json!({
                 "type": "object",
                 "properties": {
