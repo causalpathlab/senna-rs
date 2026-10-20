@@ -102,7 +102,9 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | `job_status`, `job_wait`, `job_cancel` | (from legume-mcp) a background fit's state, waiting for it, stopping it |
 
 Fits and the layouts and clusterings a view needs run as child `senna`
-processes. An output the agent does not name goes to the day's results folder.
+processes. A fit with `background` runs as a job the agent follows with
+`job_status` or `job_wait` (or a person stops from a watch view); jobs end with
+the server, so a client that closes its session stops a background fit. An output the agent does not name goes to the day's results folder.
 
 ### Records
 

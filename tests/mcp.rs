@@ -85,3 +85,50 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
     let help = replies[4]["result"]["content"][0]["text"].as_str().unwrap();
     assert!(help.contains("--out"), "{help}");
 }
+
+#[test]
+fn a_background_fit_returns_a_job_and_the_same_out_twice_gets_the_same_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("fit").to_string_lossy().into_owned();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_senna"))
+        .arg("mcp")
+        .env(legume_mcp::project::OFF_ENV, "off")
+        .env(legume_mcp::watch::ENV, "off")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let fit = json!({"method": "svd", "data": ["missing.zarr"], "out": out, "background": true});
+    for (id, method, params) in [
+        (1, "initialize", json!({"protocolVersion": "2025-06-18"})),
+        (
+            2,
+            "tools/call",
+            json!({"name": "run_fit", "arguments": fit}),
+        ),
+        (
+            3,
+            "tools/call",
+            json!({"name": "run_fit", "arguments": fit}),
+        ),
+    ] {
+        let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(stdin, "{msg}").unwrap();
+    }
+    drop(stdin);
+    let replies: Vec<Value> = BufReader::new(child.stdout.take().unwrap())
+        .lines()
+        .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
+        .filter(|m: &Value| m.get("id").is_some())
+        .collect();
+    child.wait().unwrap();
+    let job = |k: usize| replies[k]["result"]["structuredContent"]["job"].clone();
+    assert!(
+        job(1).as_str().unwrap().starts_with("job-"),
+        "{}",
+        replies[1]
+    );
+    assert_eq!(job(2), job(1), "{}", replies[2]);
+}

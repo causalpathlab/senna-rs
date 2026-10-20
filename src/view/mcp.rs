@@ -64,6 +64,9 @@ coordinates are the layout's, y up. Close with `notebook` (kind \
 #[derive(Default)]
 pub struct Tools {
     open: Option<Open>,
+    /// The background fits started, by the run manifest each writes: a
+    /// second fit of the same out is not started beside the first.
+    fitting: std::collections::HashMap<PathBuf, String>,
 }
 
 /// An open run and the view on it.
@@ -83,7 +86,7 @@ impl Handler for Tools {
 
     fn call(&mut self, name: &str, args: Value, cx: &Call) -> Result<Vec<Content>> {
         match name {
-            "run_fit" => run_fit(parse(args)?, cx),
+            "run_fit" => run_fit(parse(args)?, &mut self.fitting, cx),
             "run_help" => run_help(parse(args)?),
             "view_open" => {
                 let open = self.open.insert(Open::new(&parse(args)?, cx)?);
@@ -136,7 +139,11 @@ struct FitArgs {
 /// `senna {method} {data} -o {out} {args}` as a child, unless the run is
 /// there already. Without an out, the run goes in today's results folder,
 /// named by its first data file and method.
-fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
+fn run_fit(
+    a: FitArgs,
+    fitting: &mut std::collections::HashMap<PathBuf, String>,
+    cx: &Call,
+) -> Result<Vec<Content>> {
     check_method(&a.method)?;
     ensure!(!a.data.is_empty(), "no data files");
     let out = match a.out {
@@ -154,6 +161,13 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
         }
     };
     let manifest = absolute(Path::new(&run_manifest::default_path(&out)));
+    if let Some(job) = fitting.get(&manifest).filter(|_| !manifest.exists()) {
+        return Ok(vec![Content::Json(json!({
+            "job": job,
+            "run": manifest,
+            "note": "a background fit of this out was started already; job_status says whether it still runs. To fit again after it failed, pass another out",
+        }))]);
+    }
     let fitted = !manifest.exists();
     if fitted {
         let mut argv = vec![a.method.clone()];
@@ -166,10 +180,11 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
             // Returned at once: the agent follows the job, and opens the
             // run once it is done.
             let job = cx.spawn_job(senna(&argv)?, outputs, &summary)?;
+            fitting.insert(manifest.clone(), job.clone());
             return Ok(vec![Content::Json(json!({
                 "job": job,
                 "run": manifest,
-                "note": "the fit runs as this job; job_status or job_wait follow it, and the run opens once it is done",
+                "note": "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done and the run is there",
             }))]);
         }
         cx.progress(&format!("senna {} → {out}", a.method));

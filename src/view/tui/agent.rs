@@ -59,12 +59,24 @@ impl Agent {
             (false, true) => "agent · following",
             (false, false) => "agent · paused · W follows",
         };
-        let doing = w.calls().last().and_then(|c| match c.status {
-            watch::Status::Running | watch::Status::Failed { .. } => c.doing(),
-            _ => None,
-        });
+        // The newest call still at work with something to say (a background
+        // fit while the agent waits on it), else why the latest failed.
+        let running = w
+            .calls()
+            .iter()
+            .rev()
+            .filter(|c| c.status == watch::Status::Running)
+            .find_map(|c| c.doing().map(str::to_string));
+        let failed = || {
+            w.calls()
+                .last()
+                .filter(|c| matches!(c.status, watch::Status::Failed { .. }))
+                .and_then(|c| c.text.lines().rev().find(|l| !l.trim().is_empty()))
+                .map(str::to_string)
+        };
+        let doing = running.or_else(failed);
         let detail = [
-            doing.map(|d| format!("  {}", printable(d))),
+            doing.map(|d| format!("  {}", printable(&d))),
             w.records().last().map(|c| format!("$ {}", printable(c))),
         ];
         std::iter::once(title.to_string())
@@ -74,15 +86,16 @@ impl Agent {
     }
 }
 
-/// `text` on one line for the screen: its words, no control characters
-/// (an escape a tool's output carries never reaches the terminal).
+/// `text` on one line for the screen: each line as legume-mcp shows a log
+/// line (no escape sequences or other control), joined, its spaces
+/// collapsed.
 fn printable(text: &str) -> String {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    words
+    let lines: Vec<String> = text.lines().map(watch::plain).collect();
+    lines
         .join(" ")
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl App {
@@ -101,8 +114,8 @@ impl App {
         let Some(view) = agent.next_view() else {
             return heard;
         };
-        // Taken as applied before it is read, so a view that does not read
-        // is said once, not at every tick.
+        // Kept as the view applied, so the same one published again is not
+        // applied again.
         match mcp::agent_view(agent.applied.insert(view)) {
             Ok((shown, args)) => {
                 agent.window = args.bbox;
