@@ -51,7 +51,8 @@ Use senna's MCP tools to embed single-cell data and look at the result; \
 annotation is lupin's own server. Open the day with `notebook` (kind `plan`): \
 the question, the data, and how the result will be checked. `run_fit` runs a \
 fit to its end (`run_help` lists a method's flags) and returns its run \
-manifest; an existing run is not fitted again. `view_open` opens a run (or a \
+manifest; an existing run is not fitted again. A long fit runs with \
+`background`, as a job to follow with `job_wait`. `view_open` opens a run (or a \
 lupin round) and computes a missing layout or clustering first. `view_map` \
 draws the map with its legend; its arguments stay set until changed, so pass \
 only what changes. `view_markers` lists what sets a group apart, `view_cell` \
@@ -128,6 +129,8 @@ struct FitArgs {
     out: Option<String>,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
+    background: bool,
 }
 
 /// `senna {method} {data} -o {out} {args}` as a child, unless the run is
@@ -157,9 +160,20 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
         argv.extend(a.data.iter().cloned());
         argv.extend(["-o".into(), out.clone()]);
         argv.extend(a.args);
-        cx.progress(&format!("senna {} → {out}", a.method));
         let summary = format!("senna {} fit of {}", a.method, a.data.join(", "));
-        cx.run_making(senna(&argv)?, std::slice::from_ref(&manifest), &summary)?;
+        let outputs = std::slice::from_ref(&manifest);
+        if a.background {
+            // Returned at once: the agent follows the job, and opens the
+            // run once it is done.
+            let job = cx.spawn_job(senna(&argv)?, outputs, &summary)?;
+            return Ok(vec![Content::Json(json!({
+                "job": job,
+                "run": manifest,
+                "note": "the fit runs as this job; job_status or job_wait follow it, and the run opens once it is done",
+            }))]);
+        }
+        cx.progress(&format!("senna {} → {out}", a.method));
+        cx.run_making(senna(&argv)?, outputs, &summary)?;
         ensure!(
             manifest.exists(),
             "senna {} finished without writing {}",
@@ -862,6 +876,7 @@ fn specs() -> Vec<ToolSpec> {
                     "data": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Data files (.zarr, .zarr.zip, .h5)"},
                     "out": {"type": "string", "description": "Output prefix; the run is {out}.senna.json [default: today's results folder, by data file and method]"},
                     "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help lists them, e.g. [\"-b\", \"batch.txt\"]"},
+                    "background": {"type": "boolean", "description": "Run the fit as a job and return its id at once, for a fit longer than a call can wait; follow it with job_status or job_wait [default: false]"},
                 },
                 "required": ["method", "data"],
                 "additionalProperties": false,

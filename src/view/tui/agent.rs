@@ -19,9 +19,6 @@ const WIDTH: usize = 44;
 /// The agent being followed, and what senna keeps of it for its view.
 pub(crate) struct Agent {
     watch: watch::Agent,
-    /// Whether the map follows the agent; off once the human changes the
-    /// view. The call list goes on following either way.
-    following: bool,
     /// The view last applied: the same one again is not applied again.
     applied: Option<Value>,
     /// The window of the agent's view last applied: what the map frames
@@ -34,23 +31,22 @@ impl Agent {
     pub(crate) fn open(dir: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             watch: watch::Agent::new(dir, false)?,
-            following: true,
             applied: None,
             window: None,
         })
     }
 
     pub(crate) fn following(&self) -> bool {
-        self.following
+        self.watch.following()
     }
 
-    /// The agent's view, when it is not the one last applied. One that
-    /// comes while the view is paused or busy is applied once it is not.
-    fn next_view(&self) -> Option<Value> {
+    /// The agent's new view, when it is not the one last applied. Taken
+    /// only while the view follows and is free, so one that comes while it
+    /// is paused or busy waits for it.
+    fn next_view(&mut self) -> Option<Value> {
         self.watch
-            .state()
-            .filter(|v| self.applied.as_ref() != Some(*v))
-            .cloned()
+            .take_new_state()
+            .filter(|v| self.applied.as_ref() != Some(v))
     }
 
     /// The sidebar's rows: whether the map follows, the latest calls, and
@@ -58,38 +54,24 @@ impl Agent {
     /// failed) and the last command the agent ran.
     pub(super) fn rows(&self) -> Vec<String> {
         let w = &self.watch;
-        let title = match (w.ended(), self.following) {
+        let title = match (w.ended(), w.following()) {
             (true, _) => "agent · ended",
             (false, true) => "agent · following",
             (false, false) => "agent · paused · W follows",
         };
-        let mut rows = w.lines(CALL_ROWS + 1, WIDTH);
-        rows[0] = title.into();
         let doing = w.calls().last().and_then(|c| match c.status {
-            watch::Status::Running => c.progress.back().cloned(),
-            watch::Status::Failed { .. } => Some(printable(&c.text)),
+            watch::Status::Running | watch::Status::Failed { .. } => c.doing(),
             _ => None,
         });
-        let command = w.records().last().map(|c| format!("$ {}", printable(c)));
-        rows.extend(
-            [doing.map(|d| format!("  {d}")), command]
-                .into_iter()
-                .flatten()
-                .map(|r| fit(&r)),
-        );
-        rows
+        let detail = [
+            doing.map(|d| format!("  {}", printable(d))),
+            w.records().last().map(|c| format!("$ {}", printable(c))),
+        ];
+        std::iter::once(title.to_string())
+            .chain(w.call_lines(CALL_ROWS, WIDTH))
+            .chain(detail.into_iter().flatten().map(|r| watch::fit(&r, WIDTH)))
+            .collect()
     }
-}
-
-/// `row` cut to the sidebar's width, an ellipsis marking the cut, as
-/// legume-mcp cuts the call rows above it.
-fn fit(row: &str) -> String {
-    if row.chars().count() <= WIDTH {
-        return row.into();
-    }
-    let mut cut: String = row.chars().take(WIDTH - 1).collect();
-    cut.push('…');
-    cut
 }
 
 /// `text` on one line for the screen: its words, no control characters
@@ -113,7 +95,7 @@ impl App {
             return false;
         };
         let heard = agent.watch.poll();
-        if !agent.following || held {
+        if !agent.following() || held {
             return heard;
         }
         let Some(view) = agent.next_view() else {
@@ -149,8 +131,8 @@ impl App {
         let Some(agent) = self.agent.as_mut() else {
             return;
         };
-        agent.following = true;
-        // Whatever the human did to the view, the agent's comes back.
+        // The agent's latest view comes back, whatever the human did.
+        agent.watch.resume();
         agent.applied = None;
         if agent.watch.state().is_none() {
             self.message = Some("following the agent · no view shown yet".into());
@@ -160,7 +142,7 @@ impl App {
     /// Stop following: the human took the view.
     pub(super) fn pause_agent(&mut self) {
         if let Some(agent) = self.agent.as_mut() {
-            agent.following = false;
+            agent.watch.pause();
             self.message = Some("following paused · W follows the agent again".into());
         }
     }
@@ -169,7 +151,7 @@ impl App {
     pub(super) fn agent_window(&self) -> Option<[f32; 4]> {
         self.agent
             .as_ref()
-            .filter(|a| a.following)
+            .filter(|a| a.following())
             .and_then(|a| a.window)
     }
 

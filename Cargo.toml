@@ -1,6 +1,6 @@
 [package]
 name = "senna-rs"
-version = "0.23.1"
+version = "0.24.0"
 edition = "2021"
 rust-version = "1.91"
 license = "MIT"
@@ -66,7 +66,7 @@ image = { version = "0.25", optional = true, default-features = false, features 
 # the terminal; its PDF pages, the save dialog, and the saved figures.
 legume-tui = { version = "0.3.13", optional = true, features = ["map", "map-display", "export", "chart", "save", "gallery"] }
 # `senna mcp`: the viewer's tools and senna's fits served to an agent.
-legume-mcp = { version = "0.2", optional = true }
+legume-mcp = { version = "0.3", optional = true }
 clap = { version = "4.5.20", features = ["derive"] }
 num_cpus = "1.16.0"
 rayon = "1.10.0"

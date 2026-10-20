@@ -69,7 +69,10 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
             "view_map",
             "view_markers",
             "view_cell",
-            "view_export"
+            "view_export",
+            "job_status",
+            "job_wait",
+            "job_cancel"
         ]
     );
     for r in &replies[2..4] {

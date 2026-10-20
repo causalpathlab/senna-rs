@@ -80,7 +80,8 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > annotation is lupin's own server. Open the day with `notebook` (kind `plan`):
 > the question, the data, and how the result will be checked. `run_fit` runs a
 > fit to its end (`run_help` lists a method's flags) and returns its run
-> manifest; an existing run is not fitted again. `view_open` opens a run (or a
+> manifest; an existing run is not fitted again. A long fit runs with
+> `background`, as a job to follow with `job_wait`. `view_open` opens a run (or a
 > lupin round) and computes a missing layout or clustering first. `view_map`
 > draws the map with its legend; its arguments stay set until changed, so pass
 > only what changes. `view_markers` lists what sets a group apart, `view_cell`
@@ -90,7 +91,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 
 | Tool | Does |
 |---|---|
-| `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind |
+| `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow |
 | `run_help` | every flag of one method, with its help |
 | `view_open` | opens a run or a lupin round: its maps, groupings and the groups shown, a missing layout or clustering computed first |
 | `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, window and zoom |
@@ -98,6 +99,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | `view_cell` | the point under a pixel of the last map, at a world point, or by name: its position and groups |
 | `view_export` | the view as `.png`/`.pdf` figures; never replaces a file unless asked |
 | `notebook` | (from legume-mcp) an entry in the day's lab notebook |
+| `job_status`, `job_wait`, `job_cancel` | (from legume-mcp) a background fit's state, waiting for it, stopping it |
 
 Fits and the layouts and clusterings a view needs run as child `senna`
 processes. An output the agent does not name goes to the day's results folder.

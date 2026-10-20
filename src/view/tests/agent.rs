@@ -234,11 +234,3 @@ fn text_from_the_agent_reaches_the_screen_without_control_characters() {
         "no [31mgroup C9"
     );
 }
-
-#[test]
-fn a_long_row_is_cut_to_the_sidebar_with_an_ellipsis() {
-    let row = fit(&"x".repeat(100));
-    assert_eq!(row.chars().count(), WIDTH);
-    assert!(row.ends_with('…'));
-    assert_eq!(fit("short"), "short");
-}
