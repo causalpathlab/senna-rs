@@ -84,7 +84,7 @@ fn line(t: &str, body: Body) -> Option<String> {
         }
         Body::Cancelled { by, .. } => format!("✗ cancelled by the {by}"),
         // The command itself, not the comments and guards around it.
-        Body::Record { line } => {
+        Body::Record { line, .. } => {
             let scaffold = ["#", "if ", "then", "fi", "mkdir "];
             let command = line
                 .lines()
@@ -94,7 +94,9 @@ fn line(t: &str, body: Body) -> Option<String> {
         }
         Body::Notebook { entry, text } => format!("✎ {entry}: {text}"),
         Body::Note { text } => format!("you: {text}"),
-        Body::Server(_) | Body::State { .. } => return None,
+        // The server, its views and its end are said elsewhere; events
+        // legume-mcp adds later are left out until read here.
+        _ => return None,
     };
     Some(format!("{at} {text}").chars().take(LINE).collect())
 }
