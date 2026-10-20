@@ -10,8 +10,9 @@ use std::process::{Command, Stdio};
 fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_senna"))
         .arg("mcp")
-        // No session script left in the repository.
+        // No records in the repository, no live feed left behind.
         .env(legume_mcp::project::OFF_ENV, "off")
+        .env(legume_mcp::watch::ENV, "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
