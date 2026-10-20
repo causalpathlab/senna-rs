@@ -181,8 +181,9 @@ pub struct ViewArgs {
         help = "Follow what an agent does through `senna mcp`: the newest running server, or the one with this pid",
         long_help = "Follow what an agent does through `senna mcp`.\n\
                      The view shows the run, map, grouping, focus and window the agent\n\
-                     shows, and a pane lists its calls, their progress and the commands\n\
-                     they ran. Changing the view by hand stops following; W follows again.\n\
+                     shows, and a pane lists its latest calls, what the latest is doing\n\
+                     and the last command it ran. Changing the view by hand stops\n\
+                     following; W follows again.\n\
                      With no SERVER, the newest running one; else the one with that pid."
     )]
     pub watch: Option<String>,

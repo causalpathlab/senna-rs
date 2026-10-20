@@ -10,8 +10,8 @@ use legume_mcp::watch;
 use serde_json::Value;
 use std::path::Path;
 
-/// Rows of the agent's activity the sidebar shows, its title included.
-const ROWS: usize = 9;
+/// Calls the sidebar lists.
+const CALL_ROWS: usize = 6;
 
 /// Characters of a row: the widest sidebar's, so none wraps there.
 const WIDTH: usize = 44;
@@ -19,9 +19,12 @@ const WIDTH: usize = 44;
 /// The agent being followed, and what senna keeps of it for its view.
 pub(crate) struct Agent {
     watch: watch::Agent,
-    /// A view taken from the feed while the view was busy, to apply once
-    /// it is not.
-    pending: Option<Value>,
+    /// Whether the map follows the agent; off once the human changes the
+    /// view. The call list goes on following either way.
+    following: bool,
+    /// Following again: the agent's latest view is applied even when it is
+    /// the one applied before the human changed the view.
+    resumed: bool,
     /// The view last applied: the same one again is not applied again.
     applied: Option<Value>,
     /// The window of the agent's view last applied: what the map frames
@@ -34,30 +37,60 @@ impl Agent {
     pub(crate) fn open(dir: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             watch: watch::Agent::new(dir, false)?,
-            pending: None,
+            following: true,
+            resumed: false,
             applied: None,
             window: None,
         })
     }
 
     pub(crate) fn following(&self) -> bool {
-        self.watch.following()
+        self.following
     }
 
-    /// What the server wrote since the last look. Returns whether it wrote
-    /// anything, or ended.
-    fn read(&mut self) -> bool {
-        let heard = self.watch.poll();
-        if let Some(view) = self.watch.take_new_state() {
-            self.pending = Some(view);
+    /// The view to apply now, if any: the agent's latest after `W`, else
+    /// a new one. Taken only when it is applied, so one that comes while
+    /// the view is paused or busy waits in the feed's reader.
+    fn next_view(&mut self) -> Option<Value> {
+        if std::mem::take(&mut self.resumed) {
+            // Whatever the human did to the view, the agent's comes back.
+            self.watch.take_new_state();
+            return self.watch.state().cloned();
         }
-        heard
+        self.watch
+            .take_new_state()
+            .filter(|v| self.applied.as_ref() != Some(v))
     }
 
-    /// The sidebar's rows: the server and whether it is followed, then its
-    /// latest calls.
+    /// The sidebar's rows: whether the map follows, the latest calls, and
+    /// under them what the latest call is doing (its progress, or why it
+    /// failed) and the last command the agent ran.
     pub(super) fn rows(&self) -> Vec<String> {
-        self.watch.lines(ROWS, WIDTH)
+        let w = &self.watch;
+        let title = match (w.ended(), self.following) {
+            (true, _) => "agent · ended",
+            (false, true) => "agent · following",
+            (false, false) => "agent · paused · W follows",
+        };
+        let mut rows = w.lines(CALL_ROWS + 1, WIDTH);
+        rows[0] = title.into();
+        let last = w.calls().last();
+        let doing = last.and_then(|c| match c.status {
+            watch::Status::Running => c.progress.back().cloned(),
+            watch::Status::Failed { .. } => {
+                let words: Vec<&str> = c.text.split_whitespace().collect();
+                Some(words.join(" "))
+            }
+            _ => None,
+        });
+        let command = w.records().last().map(|c| format!("$ {c}"));
+        rows.extend(
+            [doing.map(|d| format!("  {d}")), command]
+                .into_iter()
+                .flatten()
+                .map(|r| r.chars().take(WIDTH).collect()),
+        );
+        rows
     }
 }
 
@@ -70,26 +103,20 @@ impl App {
         let Some(agent) = self.agent.as_mut() else {
             return false;
         };
-        let heard = agent.read();
-        if !agent.following() {
-            // Following again starts from the latest view, not this one.
-            agent.pending = None;
-        }
-        if held || agent.pending.is_none() {
+        let heard = agent.watch.poll();
+        if !agent.following || held {
             return heard;
         }
-        let view = agent.pending.take();
-        if view == agent.applied {
+        let Some(view) = agent.next_view() else {
             return heard;
-        }
-        agent.applied.clone_from(&view);
-        match view.as_ref().map(mcp::agent_view) {
-            Some(Ok((shown, args))) => {
+        };
+        match mcp::agent_view(&view) {
+            Ok((shown, args)) => {
+                agent.applied = Some(view);
                 agent.window = args.bbox;
                 self.show_agent_view(&shown, &args);
             }
-            Some(Err(e)) => self.message = Some(format!("the agent's view: {e:#}")),
-            None => {}
+            Err(e) => self.message = Some(format!("the agent's view: {e:#}")),
         }
         true
     }
@@ -112,9 +139,9 @@ impl App {
         let Some(agent) = self.agent.as_mut() else {
             return;
         };
-        agent.watch.resume();
-        agent.pending = agent.watch.state().cloned();
-        if agent.pending.is_none() {
+        agent.following = true;
+        agent.resumed = true;
+        if agent.watch.state().is_none() {
             self.message = Some("following the agent · no view shown yet".into());
         }
     }
@@ -122,10 +149,7 @@ impl App {
     /// Stop following: the human took the view.
     pub(super) fn pause_agent(&mut self) {
         if let Some(agent) = self.agent.as_mut() {
-            agent.watch.pause();
-            // The view is the human's now: following again applies the
-            // agent's view even when it has not changed.
-            agent.applied = None;
+            agent.following = false;
             self.message = Some("following paused · W follows the agent again".into());
         }
     }
@@ -134,7 +158,7 @@ impl App {
     pub(super) fn agent_window(&self) -> Option<[f32; 4]> {
         self.agent
             .as_ref()
-            .filter(|a| a.following())
+            .filter(|a| a.following)
             .and_then(|a| a.window)
     }
 

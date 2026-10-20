@@ -161,8 +161,12 @@ fn a_menu_open_holds_the_agent_s_view_until_it_closes() {
 }
 
 #[test]
-fn the_pane_lists_the_agent_s_calls_and_says_when_it_ended() {
+fn the_pane_lists_the_newest_calls_even_paused_and_says_when_it_ended() {
     let server = Server::new();
+    server.show(view("cluster", "C1", None));
+    let mut app = watching(&server);
+    tick(&mut app);
+    app.handle(key('c'));
     for k in 0..12 {
         server.say(Body::Call {
             id: k.to_string(),
@@ -170,16 +174,45 @@ fn the_pane_lists_the_agent_s_calls_and_says_when_it_ended() {
             args: json!({}),
         });
     }
-    let mut app = watching(&server);
+    server.say(Body::Progress {
+        id: "11".into(),
+        message: "\u{1b}[2m[12:00:00 INFO senna] \u{1b}[0mepoch 3 of 9".into(),
+    });
+    server.say(Body::Record {
+        line: "senna clustering --from r.senna.json\n".into(),
+        command: Some("senna clustering --from r.senna.json".into()),
+    });
+    tick(&mut app);
     let rows = app.agent.as_ref().unwrap().rows();
-    assert_eq!(rows[0], "senna · following");
-    assert_eq!(rows.len(), ROWS);
-    assert!(rows.last().unwrap().contains("tool11"), "{rows:?}");
+    assert_eq!(rows[0], "agent · paused · W follows");
+    assert!(
+        rows[CALL_ROWS].contains("tool11"),
+        "the newest call, paused or not: {rows:?}"
+    );
+    assert_eq!(rows[CALL_ROWS + 1], "  epoch 3 of 9");
+    assert_eq!(
+        rows[CALL_ROWS + 2],
+        "$ senna clustering --from r.senna.json"
+    );
     assert!(rows.iter().all(|r| r.chars().count() <= WIDTH), "{rows:?}");
     server.say(Body::Ended { ok: true });
     tick(&mut app);
-    assert_eq!(app.agent.as_ref().unwrap().rows()[0], "senna · ended");
-    assert!(app.side_lines().unwrap()[0].starts_with("senna"));
+    assert_eq!(app.agent.as_ref().unwrap().rows()[0], "agent · ended");
+    assert!(app.side_lines().unwrap()[0].starts_with("agent"));
+}
+
+#[test]
+fn w_brings_back_the_agent_s_view_even_when_it_did_not_change() {
+    let server = Server::new();
+    server.show(view("cluster", "C1", None));
+    let mut app = watching(&server);
+    tick(&mut app);
+    app.handle(key('c'));
+    let mine = app.scene.colour;
+    app.handle(key('W'));
+    tick(&mut app);
+    assert_ne!(app.scene.colour, mine);
+    assert_eq!(app.scene.focused_name().as_deref(), Some("C1"));
 }
 
 #[test]
