@@ -319,15 +319,16 @@ pub(crate) fn run(
     progress: &std::sync::Mutex<String>,
     stopper: &Stopper,
 ) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // This binary, found even when it was reinstalled while the view ran.
     let commands = chosen
         .iter()
         .map(|&(step, setting)| {
-            let mut c = Command::new(&exe);
-            crate::tui::own_group(&mut c).args(step.argv(t, setting));
-            (step.label(), c)
+            let mut c =
+                legume_mcp::own_command(step.argv(t, setting)).map_err(|e| format!("{e:#}"))?;
+            crate::tui::own_group(&mut c);
+            Ok((step.label(), c))
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     run_commands(commands, progress, stopper)
 }
 

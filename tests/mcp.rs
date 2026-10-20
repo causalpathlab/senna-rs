@@ -110,8 +110,14 @@ fn a_background_fit_returns_a_job_and_the_same_out_again_is_refused_naming_it() 
     let out = dir.path().join("fit").to_string_lossy().into_owned();
     let fit = json!({"method": "svd", "data": [data], "out": out, "background": true});
     let (messages, status) = session(&[call(1, "run_fit", fit.clone()), call(2, "run_fit", fit)]);
-    // Should the fit outlive its server, writing to the pipe frees it.
-    std::thread::spawn(move || std::fs::OpenOptions::new().write(true).open(data));
+    // Should the fit outlive its server, opening the pipe frees it: read
+    // and write, so the open itself never waits.
+    drop(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&data),
+    );
     assert!(
         status.success(),
         "the server stops its job and ends cleanly"

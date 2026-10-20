@@ -1245,7 +1245,10 @@ fn the_view_v_opens_runs_as_this_session_was_asked_to() {
         ..Default::default()
     };
     let session = crate::tui::TOOL.session("test", &opts).unwrap();
-    let mut cmd = view_command("senna".into(), &["r.senna.json".into()]);
+    let mut cmd = view_command(
+        std::process::Command::new("senna"),
+        &["r.senna.json".into()],
+    );
     session.command(&mut cmd, legume_tui::Group::Shared);
     let args: Vec<_> = cmd
         .get_args()
