@@ -695,16 +695,19 @@ fn agent_run(
 ) -> anyhow::Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
     use anyhow::Context;
     use legume_mcp::watch;
-    let server = watch::live()
+    let pid = match which {
+        "" => None,
+        pid => Some(
+            pid.parse::<u32>()
+                .with_context(|| format!("{pid} is not a pid"))?,
+        ),
+    };
+    let server = watch::find(mcp::SERVER, pid)
         .into_iter()
-        .find(|l| {
-            l.alive
-                && l.meta.server == mcp::SERVER
-                && (which.is_empty() || l.meta.pid.to_string() == which)
-        })
-        .with_context(|| match which {
-            "" => "no running `senna mcp`".to_string(),
-            pid => format!("no running `senna mcp` with pid {pid}"),
+        .next()
+        .with_context(|| match pid {
+            None => "no running `senna mcp`".to_string(),
+            Some(pid) => format!("no running `senna mcp` with pid {pid}"),
         })?;
     let mut said = false;
     loop {

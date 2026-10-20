@@ -611,7 +611,7 @@ impl App {
             )
         };
         let followed =
-            (by_hand && self.agent.as_ref().is_some_and(|a| a.following)).then(|| shown(self));
+            (by_hand && self.agent.as_ref().is_some_and(|a| a.following())).then(|| shown(self));
         let changed = match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
             Event::Mouse(m) => self.mouse(m),
