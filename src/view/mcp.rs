@@ -44,23 +44,20 @@ const REACH_PX: f32 = 12.0;
 /// Features `view_markers` lists without a count.
 const MARKERS: usize = 12;
 
+/// What the agent is told when it connects, word for word the block the
+/// README gives for clients that do not pass it on.
 pub const INSTRUCTIONS: &str = "\
-senna embeds single-cell data and draws the result. Its tools state what a \
-run holds and draw it; annotating clusters with cell types is lupin's own \
-server, whose rounds this one shows as they are on disk.
-
-1. run_fit runs a fit to its end, its log as progress (run_help lists a \
-method's flags), and returns the absolute path of its run manifest \
-({out}.senna.json) and its kind; an existing run is not fitted again. \
-Without an out, the run goes in today's results folder.
-2. view_open opens a run manifest (or a lupin round's) and summarizes it: \
-cells, maps, groupings and the groups of the one shown. A missing layout or \
-clustering is computed first, which can take minutes.
-3. view_map draws the map as a PNG with its legend; its arguments stay set \
-until changed, so pass only what changes. view_markers lists the features \
-that set a group apart, view_cell names the point under a pixel of the last \
-map (or at a world point, or by name) and its groups, and view_export writes \
-the view as PNG/PDF files. World coordinates are the layout's, y up.";
+Use senna's MCP tools to embed single-cell data and look at the result; \
+annotation is lupin's own server. Open the day with `notebook` (kind `plan`): \
+the question, the data, and how the result will be checked. `run_fit` runs a \
+fit to its end (`run_help` lists a method's flags) and returns its run \
+manifest; an existing run is not fitted again. `view_open` opens a run (or a \
+lupin round) and computes a missing layout or clustering first. `view_map` \
+draws the map with its legend; its arguments stay set until changed, so pass \
+only what changes. `view_markers` lists what sets a group apart, `view_cell` \
+names a point and its groups, and `view_export` writes figures. World \
+coordinates are the layout's, y up. Close with `notebook` (kind \
+`conclusion`) and tell the user where the records are.";
 
 /// The tools, and the run they have open.
 #[derive(Default)]

@@ -84,8 +84,9 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > lupin round) and computes a missing layout or clustering first. `view_map`
 > draws the map with its legend; its arguments stay set until changed, so pass
 > only what changes. `view_markers` lists what sets a group apart, `view_cell`
-> names a point and its groups, and `view_export` writes figures. Close with
-> `notebook` (kind `conclusion`) and tell the user where the records are.
+> names a point and its groups, and `view_export` writes figures. World
+> coordinates are the layout's, y up. Close with `notebook` (kind
+> `conclusion`) and tell the user where the records are.
 
 | Tool | Does |
 |---|---|
