@@ -117,6 +117,26 @@ fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T> {
     serde_json::from_value(args).context("reading the arguments")
 }
 
+/// `path` absolute, its `.` and `..` folded, and the folder it is in with
+/// its links followed when that folder is there.
+fn resolved(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in absolute(path).components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    match (out.parent().map(Path::canonicalize), out.file_name()) {
+        (Some(Ok(dir)), Some(name)) => dir.join(name),
+        _ => out,
+    }
+}
+
 fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -153,7 +173,10 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
                 .into_owned()
         }
     };
-    let manifest = absolute(Path::new(&run_manifest::default_path(&out)));
+    // One spelling per out, so two spellings of it are one out to
+    // legume-mcp, which holds it while a fit writes it.
+    let out = resolved(Path::new(&out)).to_string_lossy().into_owned();
+    let manifest = PathBuf::from(run_manifest::default_path(&out));
     if manifest.exists() {
         return Ok(vec![Content::Json(json!({
             "run": manifest,

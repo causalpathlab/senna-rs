@@ -275,3 +275,20 @@ fn the_readme_gives_the_instructions_word_for_word() {
     let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(words(&quoted.join(" ")), words(INSTRUCTIONS));
 }
+
+#[cfg(unix)]
+#[test]
+fn an_out_spelled_two_ways_resolves_to_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("runs");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+    let one = resolved(&real.join("fit"));
+    assert_eq!(resolved(&dir.path().join("runs/../runs/./fit")), one);
+    assert_eq!(resolved(&dir.path().join("link/fit")), one);
+    // A folder not made yet: folded, never followed.
+    assert_eq!(
+        resolved(&dir.path().join("new/../new/fit")),
+        dir.path().join("new/fit")
+    );
+}

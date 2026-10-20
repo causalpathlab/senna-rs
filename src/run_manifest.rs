@@ -1424,9 +1424,19 @@ impl RunManifest {
         Some(if Path::new(&all).is_file() { all } else { full })
     }
 
+    /// Write the manifest to `path` whole: to a file beside it first, then
+    /// renamed over it, so a reader never sees half of one. A manifest that
+    /// is there is one a run finished writing.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let s = serde_json::to_string_pretty(self)?;
-        fs::write(path, s).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
+        let mut part = path.as_os_str().to_owned();
+        part.push(format!(".{}.part", std::process::id()));
+        let part = PathBuf::from(part);
+        fs::write(&part, s).map_err(|e| anyhow::anyhow!("write {}: {e}", part.display()))?;
+        fs::rename(&part, path).map_err(|e| {
+            let _ = fs::remove_file(&part);
+            anyhow::anyhow!("write {}: {e}", path.display())
+        })?;
         log::info!("wrote {}", path.display());
         Ok(())
     }
@@ -1970,6 +1980,16 @@ pub struct RunDescription<'a> {
 /// the manifest's own directory — even when the run directory is moved
 /// after writing.
 pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
+    write_run_manifest_with(desc, |_| {})
+}
+
+/// [`write_run_manifest`], with `edit` applied before the one write: for a
+/// run that records more than [`RunDescription`] says, so its manifest is
+/// never there without it.
+pub fn write_run_manifest_with(
+    desc: &RunDescription<'_>,
+    edit: impl FnOnce(&mut RunManifest),
+) -> anyhow::Result<()> {
     match (desc.carried, desc.feature_embedding_suffix) {
         (Some(c), Some(suffix)) => c.append_to(desc.prefix, suffix)?,
         (Some(_), None) => anyhow::bail!("{}: no ρ file to carry rows into", desc.prefix),
@@ -2061,6 +2081,7 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
         m.outputs.pb_tree = Some(format!("{basename}.pb_tree.json"));
     }
     m.defaults.colour_by = Some(desc.default_colour_by.into());
+    edit(&mut m);
 
     m.save(Path::new(&path))
 }
@@ -2498,5 +2519,60 @@ mod tests {
         let e = format!("{prefix}{fe}");
         assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, e);
         assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
+    }
+
+    #[test]
+    fn a_manifest_is_saved_whole_and_leaves_nothing_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.senna.json");
+        RunManifest::new(RunKind::Svd, "r").save(&path).unwrap();
+        RunManifest::new(RunKind::Topic, "r").save(&path).unwrap();
+        let (m, _) = RunManifest::load(&path).unwrap();
+        assert_eq!(m.kind, RunKind::Topic);
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["r.senna.json"]);
+    }
+
+    #[test]
+    fn an_edit_is_in_the_manifest_from_its_one_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("r").to_string_lossy().into_owned();
+        let desc = RunDescription {
+            kind: RunKind::TdRbm,
+            prefix: &prefix,
+            train_args: None,
+            data_input: &[],
+            data_batch: &[],
+            data_input_null: &[],
+            data_multiome: None,
+            dictionary_suffix: None,
+            has_model: false,
+            has_cell_proj: false,
+            pb_gene_suffix: None,
+            pb_latent_suffix: None,
+            pb_reference_suffix: None,
+            dictionary_empirical_suffix: None,
+            feature_embedding_suffix: None,
+            feature_coembedding_suffix: None,
+            carried: None,
+            module_membership_suffix: None,
+            module_dictionary_suffix: None,
+            softmax_dictionary_suffix: None,
+            cell_embedding_suffix: None,
+            cell_encoder_suffix: None,
+            default_colour_by: "cluster",
+            has_latent: false,
+            has_cell_to_pb: false,
+            has_pb_tree: false,
+        };
+        write_run_manifest_with(&desc, |m| {
+            m.outputs.cell_time = Some("r.cell_time.parquet".into());
+        })
+        .unwrap();
+        let (m, _) = RunManifest::load(Path::new(&default_path(&prefix))).unwrap();
+        assert_eq!(m.outputs.cell_time.as_deref(), Some("r.cell_time.parquet"));
     }
 }
