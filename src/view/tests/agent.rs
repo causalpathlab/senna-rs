@@ -58,6 +58,8 @@ fn watching(server: &Server) -> App {
         "r.senna.json".into(),
         "lupin".into(),
     );
+    // Styles the view saves go to the server's folder, not the repository.
+    app.scene.data.prefix = server.0.path().join("r").to_string_lossy().into();
     app.agent = Some(Agent::open(server.0.path()).unwrap());
     app.layout(Rect::new(0, 0, 80, 24), 1);
     app
@@ -230,15 +232,58 @@ fn the_same_view_again_keeps_the_picture() {
 #[test]
 fn text_from_the_agent_reaches_the_screen_without_control_characters() {
     assert_eq!(
-        printable("no \u{1b}[31mgroup\n  C9\u{7}"),
-        "no [31mgroup C9"
+        printable("no \u{1b}[31mgroup\u{1b}[0m\n  C9\u{7}"),
+        "no group C9"
     );
 }
 
 #[test]
-fn a_long_row_is_cut_to_the_sidebar_with_an_ellipsis() {
-    let row = fit(&"x".repeat(100));
-    assert_eq!(row.chars().count(), WIDTH);
-    assert!(row.ends_with('…'));
-    assert_eq!(fit("short"), "short");
+fn a_background_fit_s_progress_stays_in_sight_while_the_agent_waits_on_it() {
+    let server = Server::new();
+    let mut app = watching(&server);
+    server.say(Body::Call {
+        id: "job-1".into(),
+        tool: "run_fit (job)".into(),
+        args: json!({}),
+    });
+    server.say(Body::Progress {
+        id: "job-1".into(),
+        message: format!("epoch 3 of 9 {}", "x".repeat(80)),
+    });
+    server.say(Body::Call {
+        id: "7".into(),
+        tool: "job_wait".into(),
+        args: json!({"id": "job-1"}),
+    });
+    tick(&mut app);
+    let rows = app.agent.as_ref().unwrap().rows();
+    let doing = rows
+        .iter()
+        .find(|r| r.contains("epoch 3 of 9"))
+        .expect("the fit's progress");
+    assert_eq!(doing.chars().count(), WIDTH, "cut to the sidebar: {doing}");
+    assert!(doing.ends_with('…'));
+}
+
+#[test]
+fn a_failed_call_says_why_its_last_line() {
+    let server = Server::new();
+    let mut app = watching(&server);
+    server.say(Body::Call {
+        id: "1".into(),
+        tool: "run_fit".into(),
+        args: json!({}),
+    });
+    server.say(Body::Result {
+        id: "1".into(),
+        ok: false,
+        ms: 10,
+        text: "\"senna\" \"topic\" failed (exit status: 1):\nError: no such file x.zarr\n".into(),
+    });
+    tick(&mut app);
+    let rows = app.agent.as_ref().unwrap().rows();
+    assert!(
+        rows.iter().any(|r| r == "  Error: no such file x.zarr"),
+        "{rows:?}"
+    );
 }
