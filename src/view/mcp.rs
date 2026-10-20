@@ -18,6 +18,7 @@ use legume_tui::export::PageSize;
 use senna::run_manifest::{self, RunManifest};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -66,7 +67,7 @@ pub struct Tools {
     open: Option<Open>,
     /// The background fits started, by the run manifest each writes: a
     /// second fit of the same out is not started beside the first.
-    fitting: std::collections::HashMap<PathBuf, String>,
+    fitting: HashMap<PathBuf, String>,
 }
 
 /// An open run and the view on it.
@@ -139,11 +140,7 @@ struct FitArgs {
 /// `senna {method} {data} -o {out} {args}` as a child, unless the run is
 /// there already. Without an out, the run goes in today's results folder,
 /// named by its first data file and method.
-fn run_fit(
-    a: FitArgs,
-    fitting: &mut std::collections::HashMap<PathBuf, String>,
-    cx: &Call,
-) -> Result<Vec<Content>> {
+fn run_fit(a: FitArgs, fitting: &mut HashMap<PathBuf, String>, cx: &Call) -> Result<Vec<Content>> {
     check_method(&a.method)?;
     ensure!(!a.data.is_empty(), "no data files");
     let out = match a.out {
@@ -161,14 +158,17 @@ fn run_fit(
         }
     };
     let manifest = absolute(Path::new(&run_manifest::default_path(&out)));
-    if let Some(job) = fitting.get(&manifest).filter(|_| !manifest.exists()) {
-        return Ok(vec![Content::Json(json!({
-            "job": job,
-            "run": manifest,
-            "note": "a background fit of this out was started already; job_status says whether it still runs. To fit again after it failed, pass another out",
-        }))]);
-    }
     let fitted = !manifest.exists();
+    // A background fit of this out may still run: none is started beside
+    // it, in the background or not. legume-mcp cannot yet say whether a job
+    // still runs (proposed upstream: spawn_job and run_making refuse outputs
+    // a running job makes); until it can, this map stands in.
+    if !fitted {
+        fitting.remove(&manifest);
+    } else if let Some(job) = fitting.get(&manifest) {
+        let note = "a background fit of this out was started already; job_status says whether it still runs. To fit again after it failed, pass another out";
+        return Ok(job_reply(job, &manifest, note));
+    }
     if fitted {
         let mut argv = vec![a.method.clone()];
         argv.extend(a.data.iter().cloned());
@@ -180,12 +180,10 @@ fn run_fit(
             // Returned at once: the agent follows the job, and opens the
             // run once it is done.
             let job = cx.spawn_job(senna(&argv)?, outputs, &summary)?;
-            fitting.insert(manifest.clone(), job.clone());
-            return Ok(vec![Content::Json(json!({
-                "job": job,
-                "run": manifest,
-                "note": "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done and the run is there",
-            }))]);
+            let note = "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done and the run is there";
+            let reply = job_reply(&job, &manifest, note);
+            fitting.insert(manifest, job);
+            return Ok(reply);
         }
         cx.progress(&format!("senna {} → {out}", a.method));
         cx.run_making(senna(&argv)?, outputs, &summary)?;
@@ -201,6 +199,13 @@ fn run_fit(
         out["note"] = "the run is there already, of the kind given; another out fits anew".into();
     }
     Ok(vec![Content::Json(out)])
+}
+
+/// A background fit's answer: its job, the run it makes, what to do next.
+fn job_reply(job: &str, run: &Path, note: &str) -> Vec<Content> {
+    vec![Content::Json(
+        json!({ "job": job, "run": run, "note": note }),
+    )]
 }
 
 /// `senna {argv}` as a child, verbose: its log is the call's progress.

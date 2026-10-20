@@ -66,17 +66,17 @@ impl Agent {
             .iter()
             .rev()
             .filter(|c| c.status == watch::Status::Running)
-            .find_map(|c| c.doing().map(str::to_string));
+            .find_map(|c| c.doing());
         let failed = || {
             w.calls()
                 .last()
                 .filter(|c| matches!(c.status, watch::Status::Failed { .. }))
                 .and_then(|c| c.text.lines().rev().find(|l| !l.trim().is_empty()))
-                .map(str::to_string)
         };
-        let doing = running.or_else(failed);
         let detail = [
-            doing.map(|d| format!("  {}", printable(&d))),
+            running
+                .or_else(failed)
+                .map(|d| format!("  {}", printable(d))),
             w.records().last().map(|c| format!("$ {}", printable(c))),
         ];
         std::iter::once(title.to_string())
