@@ -149,8 +149,8 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
             let stem = data.to_string_lossy();
             let stem = stem.split('.').next().unwrap_or("run");
             // The first name no running fit is writing: `{stem}_{method}`,
-            // then `_2`, `_3`, …
-            (1..)
+            // then `_2`, `_3`, … (as many as there could be jobs and more).
+            (1..=1000)
                 .map(|k| match k {
                     1 => format!("{stem}_{}", a.method),
                     k => format!("{stem}_{}_{k}", a.method),
@@ -160,7 +160,7 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
                     let manifest = absolute(Path::new(&run_manifest::default_path(out)));
                     cx.ensure_free(&[manifest]).is_ok()
                 })
-                .expect("a name no fit holds")
+                .context("every default name is being written by a running fit: pass out")?
         }
     };
     let manifest = absolute(Path::new(&run_manifest::default_path(&out)));

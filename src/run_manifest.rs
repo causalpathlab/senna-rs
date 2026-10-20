@@ -1424,8 +1424,9 @@ impl RunManifest {
 
     /// Write the manifest to `path`, through a link, and on to the disk
     /// before returning: the file keeps its owner, mode and links, and a
-    /// read-only one is refused. Each run writes its manifest last, so a
-    /// manifest that is there is one whose run finished.
+    /// read-only one is refused. Each run writes its manifest last, after
+    /// every table it names; a run killed while writing it can leave it
+    /// cut short, which a reader then fails to parse.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         use std::io::Write;
         let s = serde_json::to_string_pretty(self)?;
