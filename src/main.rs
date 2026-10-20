@@ -1092,7 +1092,7 @@ fn main() -> anyhow::Result<()> {
         #[cfg(feature = "view")]
         Commands::Mcp => legume_mcp::serve(
             legume_mcp::ServerInfo {
-                name: "senna".into(),
+                name: view::mcp::SERVER.into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 instructions: Some(view::mcp::INSTRUCTIONS.into()),
             },

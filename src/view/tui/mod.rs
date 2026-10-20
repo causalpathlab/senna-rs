@@ -82,7 +82,7 @@ pub fn run(
             .collect();
         // `--watch` opens one view, the agent's.
         if let (Some(dir), Some(app)) = (agent, apps.first_mut()) {
-            app.agent = Some(agent::Agent::new(agent::listen(dir)?));
+            app.agent = Some(agent::Agent::open(dir)?);
         }
         grid::Deck::new(
             apps,
@@ -101,8 +101,10 @@ pub fn run(
     result
 }
 
-/// Lines of the agent's activity the sidebar shows.
-const AGENT_ROWS: usize = 12;
+/// Sidebar rows that name no feature.
+fn plain(lines: Vec<String>) -> Vec<PaneRow> {
+    lines.into_iter().map(|l| (l, None)).collect()
+}
 
 /// How long a toast stays up.
 const TOAST_FOR: Duration = Duration::from_millis(2500);
@@ -367,8 +369,6 @@ impl App {
 
     /// The sidebar's rows, each with the feature it names, if any.
     fn side_rows(&self) -> Option<Vec<PaneRow>> {
-        let plain =
-            |lines: Vec<String>| -> Vec<PaneRow> { lines.into_iter().map(|l| (l, None)).collect() };
         if let Some(Modal::Search(query, hits, at)) = &self.modal {
             return Some(input::search_rows(query, hits, *at));
         }
@@ -377,7 +377,7 @@ impl App {
             return rows;
         };
         // The agent's activity on top, what the view lists below it.
-        let mut out = plain(agent.rows(AGENT_ROWS));
+        let mut out = plain(agent.rows());
         if let Some(rows) = rows {
             out.push((String::new(), None));
             out.extend(rows);
@@ -387,8 +387,6 @@ impl App {
 
     /// The sidebar's rows from the view itself.
     fn view_rows(&self) -> Option<Vec<PaneRow>> {
-        let plain =
-            |lines: Vec<String>| -> Vec<PaneRow> { lines.into_iter().map(|l| (l, None)).collect() };
         self.scene
             .merge_lines()
             .or_else(|| self.scene.review_lines())
@@ -527,7 +525,11 @@ impl App {
         }
         if self.vp.is_none() {
             let (w, h) = self.map_px();
-            self.vp = Some(render::fit(self.scene.current().points.bounds, w, h));
+            // Following an agent, its window; else the whole map.
+            self.vp = Some(match self.agent_window() {
+                Some(window) => agent::framing(window, w, h),
+                None => render::fit(self.scene.current().points.bounds, w, h),
+            });
             self.restart();
         }
     }

@@ -729,12 +729,29 @@ pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
     Ok(moved)
 }
 
+/// The server's name, as `initialize` reports it and watchers find it.
+pub(crate) const SERVER: &str = "senna";
+
+/// The view_map arguments a published view sets.
+const VIEW_KEYS: [&str; 8] = [
+    "round",
+    "map",
+    "space",
+    "colour_by",
+    "focus",
+    "feature",
+    "observed",
+    "bbox",
+];
+
 /// An agent's published view ([`Open::view_state`]): the manifest it
 /// shows, and the rest as view_map's arguments.
 pub(super) fn agent_view(state: &Value) -> Result<(PathBuf, MapArgs)> {
     let mut state = state.clone();
     let fields = state.as_object_mut().context("a view state is an object")?;
     let run = fields.remove("run");
+    // What another build of senna publishes beyond these is left out.
+    fields.retain(|k, _| VIEW_KEYS.contains(&k.as_str()));
     let shown = fields
         .get("round")
         .filter(|r| !r.is_null())

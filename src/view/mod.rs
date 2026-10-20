@@ -176,6 +176,7 @@ pub struct ViewArgs {
         long,
         value_name = "SERVER",
         num_args = 0..=1,
+        conflicts_with_all = ["from", "pdf", "relabel"],
         default_missing_value = "",
         help = "Follow what an agent does through `senna mcp`: the newest running server, or the one with this pid",
         long_help = "Follow what an agent does through `senna mcp`.\n\
@@ -644,7 +645,10 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     let picked: Vec<Box<str>>;
     let mut agent = None;
     let from: &[Box<str>] = if let Some(which) = &args.watch {
-        let (dir, shown) = agent_run(which)?;
+        // Killed while waiting for the agent: nothing to open.
+        let Some((dir, shown)) = agent_run(which, &session)? else {
+            return Ok(());
+        };
         agent = Some(dir);
         picked = vec![shown.to_string_lossy().into()];
         &picked
@@ -684,13 +688,16 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
 
 /// The folder of the `senna mcp` server `which` names (its pid, or the
 /// newest running one when empty), and the manifest its agent shows,
-/// waited for until it shows one.
-fn agent_run(which: &str) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+/// waited for until it shows one, or the session is stopped.
+fn agent_run(
+    which: &str,
+    session: &legume_tui::Session,
+) -> anyhow::Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
     use legume_mcp::watch;
     let running = || {
         watch::live()
             .into_iter()
-            .filter(|l| l.alive && l.meta.server == "senna")
+            .filter(|l| l.alive && l.meta.server == mcp::SERVER)
             .find(|l| which.is_empty() || l.meta.pid.to_string() == which)
     };
     let server = running().ok_or_else(|| {
@@ -706,10 +713,13 @@ fn agent_run(which: &str) -> anyhow::Result<(std::path::PathBuf, std::path::Path
     let mut said = false;
     loop {
         if let Some(state) = watch::state(&server.dir) {
-            return Ok((server.dir, mcp::agent_view(&state)?.0));
+            return Ok(Some((server.dir, mcp::agent_view(&state)?.0)));
+        }
+        if session.stop_requested() {
+            return Ok(None);
         }
         anyhow::ensure!(
-            watch::live().iter().any(|l| l.dir == server.dir && l.alive),
+            watch::alive(server.meta.pid),
             "the agent's server ended before it opened a run"
         );
         if !std::mem::replace(&mut said, true) {

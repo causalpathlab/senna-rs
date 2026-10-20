@@ -596,11 +596,15 @@ impl App {
         let before = self.message.clone();
         // What is shown, to tell whether the human changed it.
         let shown = |a: &App| {
+            let s = &a.scene;
             (
-                a.scene.space,
-                a.scene.colour,
-                a.scene.focus,
-                a.scene.pick.clone(),
+                s.space,
+                s.colour,
+                s.focus,
+                s.pick.clone(),
+                s.source,
+                a.from.clone(),
+                a.zooming.is_some(),
                 a.vp,
             )
         };
