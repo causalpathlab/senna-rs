@@ -594,6 +594,8 @@ impl App {
             return false;
         }
         let before = self.message.clone();
+        let by_hand = matches!(&ev, Event::Key(k) if k.kind != KeyEventKind::Release)
+            || matches!(&ev, Event::Mouse(m) if !matches!(m.kind, MouseEventKind::Moved));
         // What is shown, to tell whether the human changed it.
         let shown = |a: &App| {
             let s = &a.scene;
@@ -608,13 +610,8 @@ impl App {
                 a.vp,
             )
         };
-        let followed = self
-            .agent
-            .as_ref()
-            .filter(|a| a.following)
-            .map(|_| shown(self));
-        let by_hand = matches!(&ev, Event::Key(k) if k.kind != KeyEventKind::Release)
-            || matches!(&ev, Event::Mouse(m) if !matches!(m.kind, MouseEventKind::Moved));
+        let followed =
+            (by_hand && self.agent.as_ref().is_some_and(|a| a.following)).then(|| shown(self));
         let changed = match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
             Event::Mouse(m) => self.mouse(m),
@@ -626,7 +623,7 @@ impl App {
         };
         // The human moved the camera or changed what is shown: the view is
         // theirs until W.
-        if followed.is_some_and(|before| by_hand && before != shown(self)) {
+        if followed.is_some_and(|before| before != shown(self)) {
             self.pause_agent();
         }
         changed || self.message != before

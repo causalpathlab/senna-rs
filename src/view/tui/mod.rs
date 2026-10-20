@@ -323,7 +323,7 @@ impl App {
             | self.hear_agent();
         // Not while drawing on screen: a reload would restart the picture;
         // nor while senna rewrites the run, which reloads when it is done.
-        let idle = (!on_screen || self.job.is_none()) && self.recomputing.is_none();
+        let idle = (!on_screen || self.job.is_none()) && !self.holds_outside_changes();
         if idle && self.checked.elapsed() >= Duration::from_secs(1) {
             self.checked = std::time::Instant::now();
             if modified(&self.from) != self.stamp {
@@ -527,7 +527,7 @@ impl App {
             let (w, h) = self.map_px();
             // Following an agent, its window; else the whole map.
             self.vp = Some(match self.agent_window() {
-                Some(window) => agent::framing(window, w, h),
+                Some(window) => render::frame(window, w, h),
                 None => render::fit(self.scene.current().points.bounds, w, h),
             });
             self.restart();

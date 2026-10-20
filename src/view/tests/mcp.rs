@@ -243,3 +243,19 @@ fn a_published_view_applied_to_a_fresh_scene_shows_the_same() {
     // Applied again, nothing moves.
     assert!(!apply(&mut watcher, &a).unwrap());
 }
+
+#[test]
+fn a_published_view_names_the_run_and_exactly_the_keys_a_watcher_reads() {
+    let o = open();
+    let state = o.view_state();
+    let mut keys: Vec<&str> = state
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    let mut want: Vec<&str> = VIEW_KEYS.iter().copied().chain(["run"]).collect();
+    want.sort_unstable();
+    assert_eq!(keys, want);
+}

@@ -7,7 +7,6 @@
 use super::*;
 use crate::view::mcp;
 use legume_mcp::watch::{self, Body, Follow};
-use legume_tui::map::viewport::YAxis;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -30,6 +29,8 @@ pub(crate) struct Agent {
     /// while the view was busy waits for it.
     latest: Option<Value>,
     fresh: bool,
+    /// The view last applied: the same one again is not applied again.
+    applied: Option<Value>,
     /// The window of the agent's view last applied: what the map frames
     /// while following, through resizes and reattaches.
     window: Option<[f32; 4]>,
@@ -40,22 +41,18 @@ impl Agent {
     /// Follow the server in `dir`: its history read for the pane, and its
     /// latest view, read whole, for the map.
     pub(crate) fn open(dir: &Path) -> anyhow::Result<Self> {
+        let latest = watch::state(dir);
         let mut agent = Self {
             feed: watch::follow(dir, watch::From::Start)?,
             lines: VecDeque::new(),
             following: true,
-            latest: None,
-            fresh: false,
+            fresh: latest.is_some(),
+            latest,
+            applied: None,
             window: None,
             ended: false,
         };
-        while let Some(event) = agent.feed.try_next() {
-            if !matches!(event.body, Body::State { .. }) {
-                agent.push(event);
-            }
-        }
-        agent.latest = watch::state(dir);
-        agent.fresh = agent.latest.is_some();
+        agent.read();
         Ok(agent)
     }
 
@@ -109,7 +106,8 @@ fn line(t: &str, body: Body) -> Option<String> {
     let at = t.get(11..19).unwrap_or(t);
     let text = match body {
         Body::Call { tool, args, .. } => format!("→ {tool} {args}"),
-        Body::Progress { message, .. } => format!("  {message}"),
+        // A child's log line, without its colours and prefix.
+        Body::Progress { message, .. } => format!("  {}", legume_tui::child::log_line(&message)),
         Body::Result { ok, ms, text, .. } => {
             // Its words on one line, past an image's placeholder.
             let first = text
@@ -124,7 +122,8 @@ fn line(t: &str, body: Body) -> Option<String> {
         Body::Cancelled { by, .. } => format!("✗ cancelled by the {by}"),
         // A step that ran; comments and failed steps have no command.
         Body::Record { command, .. } => format!("$ {}", command?),
-        Body::Notebook { entry, text } => format!("✎ {entry}: {text}"),
+        // The person's own note is said once, as theirs, below.
+        Body::Notebook { entry, text } if entry != "user" => format!("✎ {entry}: {text}"),
         Body::Note { text } => format!("you: {text}"),
         // The server, its views and its end are said elsewhere; events
         // legume-mcp adds later are left out until read here.
@@ -138,24 +137,35 @@ impl App {
     /// view is not in the middle of something of its own. Returns whether
     /// anything changed.
     pub(super) fn hear_agent(&mut self) -> bool {
-        let busy = self.busy_for_agent();
+        let held = self.holds_outside_changes();
         let Some(agent) = self.agent.as_mut() else {
             return false;
         };
         let heard = agent.read();
-        if !(agent.following && agent.fresh) || busy {
+        if !(agent.following && agent.fresh) || held {
             return heard;
         }
         agent.fresh = false;
-        if let Some(view) = agent.latest.clone() {
-            self.show_agent_view(&view);
+        if agent.latest == agent.applied {
+            return heard;
+        }
+        agent.applied.clone_from(&agent.latest);
+        let view = agent.latest.as_ref().map(mcp::agent_view);
+        match view {
+            Some(Ok((shown, args))) => {
+                agent.window = args.bbox;
+                self.show_agent_view(&shown, &args);
+            }
+            Some(Err(e)) => self.message = Some(format!("the agent's view: {e:#}")),
+            None => {}
         }
         true
     }
 
     /// A menu, a box being typed in, a relabel round or work under way
-    /// (a zoom, lupin, senna) holds the view as it is.
-    fn busy_for_agent(&self) -> bool {
+    /// (a zoom, lupin, senna) holds the view as it is: no reload, newer
+    /// round or agent's view changes it underneath them.
+    pub(super) fn holds_outside_changes(&self) -> bool {
         self.menu.is_some()
             || self.modal.is_some()
             || self.label_edit.is_some()
@@ -179,8 +189,11 @@ impl App {
 
     /// Stop following: the human took the view.
     pub(super) fn pause_agent(&mut self) {
-        if let Some(agent) = self.agent.as_mut().filter(|a| a.following) {
+        if let Some(agent) = self.agent.as_mut() {
             agent.following = false;
+            // The view is the human's now: following again applies the
+            // agent's view even when it has not changed.
+            agent.applied = None;
             self.message = Some("following paused · W follows the agent again".into());
         }
     }
@@ -193,41 +206,24 @@ impl App {
             .and_then(|a| a.window)
     }
 
-    /// Show `view`: the manifest the agent shows, its map and groups as
+    /// Show the agent's view: the manifest it shows, its map and groups as
     /// `view_map` applies them, and its window, framed at the next layout.
-    fn show_agent_view(&mut self, view: &Value) {
-        let (shown, args) = match mcp::agent_view(view) {
-            Ok(v) => v,
-            Err(e) => {
-                self.message = Some(format!("the agent's view: {e:#}"));
-                return;
-            }
-        };
-        if shown != self.from && !senna::run_manifest::same_file(&shown, &self.from) {
-            self.open_round(&shown, "the agent opened");
+    fn show_agent_view(&mut self, shown: &Path, args: &mcp::MapArgs) {
+        // Framed afresh at the next layout, so a new run is drawn once.
+        self.vp = None;
+        if shown != self.from && !senna::run_manifest::same_file(shown, &self.from) {
+            self.open_round(shown, "the agent opened");
         }
         let source = self.scene.source;
-        if let Err(e) = mcp::apply(&mut self.scene, &args) {
-            self.message = Some(format!("the agent's view: {e:#}"));
+        if let Err(e) = mcp::apply(&mut self.scene, args) {
+            self.scene.note = Some(format!("the agent's view: {e:#}"));
         }
         if self.scene.source != source {
             // Searches list the features of the source shown.
             self.names = None;
         }
-        if let Some(note) = self.scene.note.take() {
-            self.message = Some(note);
-        }
-        if let Some(agent) = self.agent.as_mut() {
-            agent.window = args.bbox;
-        }
-        self.vp = None;
-        self.restart();
+        self.settle();
     }
-}
-
-/// The camera for a map `w × h` pixels showing `window`.
-pub(super) fn framing(window: [f32; 4], w: usize, h: usize) -> Viewport {
-    Viewport::fit(window, w, h, 1.0, YAxis::Up)
 }
 
 #[cfg(test)]

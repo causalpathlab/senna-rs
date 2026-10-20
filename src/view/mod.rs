@@ -693,23 +693,19 @@ fn agent_run(
     which: &str,
     session: &legume_tui::Session,
 ) -> anyhow::Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
+    use anyhow::Context;
     use legume_mcp::watch;
-    let running = || {
-        watch::live()
-            .into_iter()
-            .filter(|l| l.alive && l.meta.server == mcp::SERVER)
-            .find(|l| which.is_empty() || l.meta.pid.to_string() == which)
-    };
-    let server = running().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no running `senna mcp`{}",
-            if which.is_empty() {
-                String::new()
-            } else {
-                format!(" with pid {which}")
-            }
-        )
-    })?;
+    let server = watch::live()
+        .into_iter()
+        .find(|l| {
+            l.alive
+                && l.meta.server == mcp::SERVER
+                && (which.is_empty() || l.meta.pid.to_string() == which)
+        })
+        .with_context(|| match which {
+            "" => "no running `senna mcp`".to_string(),
+            pid => format!("no running `senna mcp` with pid {pid}"),
+        })?;
     let mut said = false;
     loop {
         if let Some(state) = watch::state(&server.dir) {

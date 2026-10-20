@@ -226,3 +226,30 @@ fn feed_events_read_as_one_short_line_each_with_their_time() {
     };
     assert_eq!(line(t, long).unwrap().chars().count(), LINE);
 }
+
+#[test]
+fn the_same_view_again_keeps_the_picture_and_the_person_s_note_is_said_once() {
+    let server = Server::new();
+    server.show(view("cluster", "C1", None));
+    let mut app = watching(&server);
+    tick(&mut app);
+    let vp = app.vp;
+    server.show(view("cluster", "C1", None));
+    tick(&mut app);
+    assert_eq!(app.vp, vp, "nothing changed: no new picture");
+
+    server.say(Body::Note {
+        text: "look at C2".into(),
+    });
+    server.say(Body::Notebook {
+        entry: "user".into(),
+        text: "look at C2".into(),
+    });
+    tick(&mut app);
+    let rows = app.agent.as_ref().unwrap().rows();
+    assert_eq!(
+        rows.iter().filter(|r| r.contains("look at C2")).count(),
+        1,
+        "{rows:?}"
+    );
+}

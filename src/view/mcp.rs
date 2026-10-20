@@ -15,7 +15,6 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use image::codecs::png::CompressionType;
 use legume_mcp::{Call, Content, Handler, ToolSpec};
 use legume_tui::export::PageSize;
-use legume_tui::map::viewport::YAxis;
 use senna::run_manifest::{self, RunManifest};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -367,7 +366,7 @@ impl Open {
             "map": root.method,
             "space": root.kind.slug(),
             "colour_by": s.colour.map_or("none", |i| s.data.labels[i].title()),
-            "focus": s.focused_name().map_or(String::new(), String::from),
+            "focus": s.focused_name().unwrap_or_default(),
             "feature": feature,
             "observed": s.source != Source::Expected,
             "bbox": self.drawn.map(|vp| vp.window()),
@@ -482,7 +481,7 @@ impl Open {
         let h = ((width as f32 * aspect).round() as usize).clamp(1, MAX_SIDE);
         match self.window {
             None => render::fit([x0, y0, x1, y1], width, h),
-            Some(w) => Viewport::fit(w, width, h, 1.0, YAxis::Up),
+            Some(w) => render::frame(w, width, h),
         }
     }
 
@@ -747,19 +746,20 @@ const VIEW_KEYS: [&str; 8] = [
 /// An agent's published view ([`Open::view_state`]): the manifest it
 /// shows, and the rest as view_map's arguments.
 pub(super) fn agent_view(state: &Value) -> Result<(PathBuf, MapArgs)> {
-    let mut state = state.clone();
-    let fields = state.as_object_mut().context("a view state is an object")?;
-    let run = fields.remove("run");
-    // What another build of senna publishes beyond these is left out.
-    fields.retain(|k, _| VIEW_KEYS.contains(&k.as_str()));
-    let shown = fields
-        .get("round")
-        .filter(|r| !r.is_null())
-        .or(run.as_ref())
-        .and_then(Value::as_str)
+    let shown = state["round"]
+        .as_str()
+        .or(state["run"].as_str())
         .context("a view state names its run")?
         .into();
-    Ok((shown, parse(state)?))
+    // What another build of senna publishes beyond these is left out.
+    let fields: serde_json::Map<String, Value> = state
+        .as_object()
+        .context("a view state is an object")?
+        .iter()
+        .filter(|(k, _)| VIEW_KEYS.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Ok((shown, parse(Value::Object(fields))?))
 }
 
 /// Whether the round at `path` is the one `scene` shows.
