@@ -96,18 +96,27 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
 }
 
 #[test]
-fn a_background_fit_returns_a_job_and_the_same_out_twice_gets_the_same_job() {
+fn a_background_fit_returns_a_job_and_the_same_out_again_is_refused_naming_it() {
     let dir = tempfile::tempdir().unwrap();
+    // A data file nobody writes: senna blocks opening it, so the job still
+    // runs when the same out is asked for again (and ends with the server).
+    let data = dir.path().join("data.zarr.zip");
+    assert!(Command::new("mkfifo")
+        .arg(&data)
+        .status()
+        .unwrap()
+        .success());
     let out = dir.path().join("fit").to_string_lossy().into_owned();
-    let fit = json!({"method": "svd", "data": ["missing.zarr"], "out": out, "background": true});
+    let fit = json!({"method": "svd", "data": [data], "out": out, "background": true});
     let (messages, _) = session(&[call(1, "run_fit", fit.clone()), call(2, "run_fit", fit)]);
     // Replies only: a job's progress may come between them.
     let replies: Vec<&Value> = messages.iter().filter(|m| m.get("id").is_some()).collect();
-    let job = |k: usize| replies[k]["result"]["structuredContent"]["job"].clone();
-    assert!(
-        job(1).as_str().unwrap().starts_with("job-"),
-        "{}",
-        replies[1]
-    );
-    assert_eq!(job(2), job(1), "{}", replies[2]);
+    let job = replies[1]["result"]["structuredContent"]["job"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", replies[1]));
+    assert!(job.starts_with("job-"));
+    let again = &replies[2]["result"];
+    let said = again["content"][0]["text"].as_str().unwrap();
+    assert_eq!(again["isError"], true, "{}", replies[2]);
+    assert!(said.contains(job), "{said}");
 }
