@@ -259,3 +259,19 @@ fn a_published_view_names_the_run_and_exactly_the_keys_a_watcher_reads() {
     want.sort_unstable();
     assert_eq!(keys, want);
 }
+
+#[test]
+fn the_readme_gives_the_instructions_word_for_word() {
+    let readme = include_str!("../../../README.md");
+    let quoted: Vec<&str> = readme
+        .split("### What the agent does")
+        .nth(1)
+        .expect("the README's agent section")
+        .lines()
+        .skip_while(|l| !l.starts_with("> "))
+        .take_while(|l| l.starts_with('>'))
+        .map(|l| l.trim_start_matches('>').trim())
+        .collect();
+    let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(words(&quoted.join(" ")), words(INSTRUCTIONS));
+}
