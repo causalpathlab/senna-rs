@@ -5,6 +5,7 @@
 //! picture appears at once and fills in; any key or mouse event in between
 //! simply replaces the job.
 
+mod agent;
 mod annotate;
 mod browse;
 mod decisions;
@@ -94,6 +95,9 @@ pub fn run(
     drop(quiet);
     result
 }
+
+/// Lines of the agent's activity the sidebar shows.
+const AGENT_ROWS: usize = 12;
 
 /// How long a toast stays up.
 const TOAST_FOR: Duration = Duration::from_millis(2500);
@@ -208,6 +212,8 @@ struct App {
     /// missing: recorded only once all are found and checked.
     data_pending: Option<senna::run_manifest::RunData>,
     quit: bool,
+    /// The agent followed (`--watch`), when there is one.
+    agent: Option<agent::Agent>,
 }
 
 impl App {
@@ -261,6 +267,7 @@ impl App {
             menu: None,
             zooming: None,
             quit: false,
+            agent: None,
         }
     }
 
@@ -305,7 +312,8 @@ impl App {
             | self.finish_relabel()
             | self.finish_recompute()
             | self.keep_scores_current()
-            | self.ask_missing_data(on_screen);
+            | self.ask_missing_data(on_screen)
+            | self.hear_agent();
         // Not while drawing on screen: a reload would restart the picture;
         // nor while senna rewrites the run, which reloads when it is done.
         let idle = (!on_screen || self.job.is_none()) && self.recomputing.is_none();
@@ -359,6 +367,23 @@ impl App {
         if let Some(Modal::Search(query, hits, at)) = &self.modal {
             return Some(input::search_rows(query, hits, *at));
         }
+        let rows = self.view_rows();
+        let Some(agent) = &self.agent else {
+            return rows;
+        };
+        // The agent's activity on top, what the view lists below it.
+        let mut out = plain(agent.rows(AGENT_ROWS));
+        if let Some(rows) = rows {
+            out.push((String::new(), None));
+            out.extend(rows);
+        }
+        Some(out)
+    }
+
+    /// The sidebar's rows from the view itself.
+    fn view_rows(&self) -> Option<Vec<PaneRow>> {
+        let plain =
+            |lines: Vec<String>| -> Vec<PaneRow> { lines.into_iter().map(|l| (l, None)).collect() };
         self.scene
             .merge_lines()
             .or_else(|| self.scene.review_lines())

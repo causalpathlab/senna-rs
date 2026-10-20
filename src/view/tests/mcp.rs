@@ -224,3 +224,22 @@ fn zoom_on_a_fitted_map_starts_from_the_window_drawn() {
         "{w:?} {fitted:?}"
     );
 }
+
+#[test]
+fn a_published_view_applied_to_a_fresh_scene_shows_the_same() {
+    let mut agent = open();
+    agent
+        .map(args(json!({"map": "phate", "colour_by": "cluster", "focus": "C1", "zoom": 2.0, "width": 32})))
+        .unwrap();
+    let (shown, a) = agent_view(&agent.view_state()).unwrap();
+    assert_eq!(shown, agent.run);
+    assert_eq!(a.bbox, agent.drawn.map(|v| v.window()));
+
+    let mut watcher = crate::view::tests::scene();
+    watcher.colour_by(LabelKind::Annotation);
+    assert!(apply(&mut watcher, &a).unwrap());
+    assert_eq!(watcher.current().method, "phate");
+    assert_eq!(watcher.focused_name().as_deref(), Some("C1"));
+    // Applied again, nothing moves.
+    assert!(!apply(&mut watcher, &a).unwrap());
+}

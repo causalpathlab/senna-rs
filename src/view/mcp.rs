@@ -234,7 +234,7 @@ struct OpenArgs {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct MapArgs {
+pub(super) struct MapArgs {
     round: Option<String>,
     map: Option<String>,
     space: Option<String>,
@@ -242,7 +242,7 @@ struct MapArgs {
     focus: Option<Value>,
     feature: Option<String>,
     observed: Option<bool>,
-    bbox: Option<[f32; 4]>,
+    pub(super) bbox: Option<[f32; 4]>,
     fit: Option<bool>,
     center: Option<[f32; 2]>,
     zoom: Option<f32>,
@@ -345,6 +345,28 @@ impl Open {
         })
     }
 
+    /// The view as a watcher re-applies it: view_map's own arguments, set
+    /// in full, with the run and the window last drawn.
+    fn view_state(&self) -> Value {
+        let s = &self.scene;
+        let root = &s.data.spaces[s.root()];
+        let feature = match &s.pick {
+            Some(Pick::One(f)) => f.as_ref(),
+            _ => "",
+        };
+        json!({
+            "run": self.run,
+            "round": s.data.round.as_ref().map(|r| absolute(&r.path)),
+            "map": root.method,
+            "space": root.kind.slug(),
+            "colour_by": s.colour.map_or("none", |i| s.data.labels[i].title()),
+            "focus": s.focused_name().map_or(String::new(), String::from),
+            "feature": feature,
+            "observed": s.source != Source::Expected,
+            "bbox": self.drawn.map(|vp| vp.window()),
+        })
+    }
+
     /// What the view shows: map, grouping, focus, feature and legend.
     fn state(&self) -> Value {
         let s = &self.scene;
@@ -401,99 +423,8 @@ impl Open {
             a.zoom.is_none_or(|z| (1e-6..=1e6).contains(&z)),
             "zoom is between 1e-6 and 1e6"
         );
-        // A round the view does not show is read now and swapped in last.
-        let round = match &a.round {
-            Some(r) if !self.shows_round(Path::new(r)) => Some(Dataset::load(r)?),
-            _ => None,
-        };
-        let s = &self.scene;
-        let data = round.as_ref().unwrap_or(&s.data);
-        let space = match (&a.map, &a.space) {
-            (None, None) => None,
-            (map, space) => {
-                let cur = &s.data.spaces[s.root()];
-                Some(find_space(
-                    data,
-                    map.as_deref().unwrap_or(&cur.method),
-                    space.as_deref().unwrap_or(cur.kind.slug()),
-                )?)
-            }
-        };
-        let axis = space.map_or(s.current().axis(), |at| data.spaces[at].axis());
-        let choices: Vec<usize> = (0..data.labels.len())
-            .filter(|&i| data.labels[i].axis() == axis)
-            .collect();
-        let colour = match &a.colour_by {
-            Some(by) if by.eq_ignore_ascii_case("none") => Some(None),
-            Some(by) => Some(Some(
-                choices
-                    .iter()
-                    .copied()
-                    .find(|&i| data.labels[i].title().eq_ignore_ascii_case(by))
-                    .ok_or_else(|| {
-                        let names: Vec<&str> =
-                            choices.iter().map(|&i| data.labels[i].title()).collect();
-                        anyhow!("no {by} grouping on this map; it has {}", names.join(", "))
-                    })?,
-            )),
-            None => None,
-        };
-        // The grouping shown once the rest applies: the one asked for, a
-        // new axis's first, or the one shown now, by kind.
-        let shown = colour.unwrap_or_else(|| match space {
-            Some(at) if data.spaces[at].axis() != s.current().axis() => choices.first().copied(),
-            // As replace_data keeps it: the same kind, else the first.
-            _ => s.colour.and_then(|li| {
-                let kind = s.data.labels[li].kind;
-                choices
-                    .iter()
-                    .copied()
-                    .find(|&i| data.labels[i].kind == kind)
-                    .or_else(|| choices.first().copied())
-            }),
-        });
-        let focus = match &a.focus {
-            None => None,
-            Some(f) => Some(match focus_name(f)? {
-                None => None,
-                Some(name) => {
-                    let li = shown.ok_or_else(|| anyhow!("no grouping shown: pass colour_by"))?;
-                    Some(group_of(&data.labels[li], &name)?)
-                }
-            }),
-        };
-
-        if let Some(data) = round {
-            // Another round of the same layout keeps the window.
-            let bounds = self.scene.current().points.bounds;
-            self.scene.replace_data(data);
-            if self.scene.current().points.bounds != bounds {
-                self.window = None;
-            }
-        }
-        if let Some(at) = space.filter(|&at| at != self.scene.space) {
-            self.scene.set_space(at);
+        if apply(&mut self.scene, &a)? {
             self.window = None;
-        }
-        // The grouping shown, asked for again, keeps its focus and feature.
-        if let Some(li) = colour.filter(|&li| li != self.scene.colour) {
-            self.scene.set_colour(li);
-        }
-        if let Some(focus) = focus {
-            self.scene.focus = focus;
-        }
-        match a.observed {
-            Some(true) => self.scene.source = self.scene.count_source(),
-            Some(false) => self.scene.source = Source::Expected,
-            None => {}
-        }
-        match a.feature.as_deref() {
-            Some("") => {
-                self.scene.clear_pick();
-            }
-            Some(f) => self.scene.set_pick(Pick::One(f.into())),
-            None if a.observed.is_some() => self.scene.refresh_activity(),
-            None => {}
         }
         self.move_window(&a, width);
         let vp = self.viewport(width);
@@ -507,12 +438,6 @@ impl Open {
             state["note"] = note.into();
         }
         Ok(vec![Content::Png(png), Content::Json(state)])
-    }
-
-    /// Whether the round at `path` is the one shown.
-    fn shows_round(&self, path: &Path) -> bool {
-        let shown = self.scene.data.round.as_ref().map(|r| r.path.as_path());
-        shown.is_some_and(|r| run_manifest::same_file(r, path))
     }
 
     /// Group `name` of the grouping shown.
@@ -692,6 +617,131 @@ impl Open {
             json!({"wrote": wrote, "image": [vp.w, vp.h]}),
         )])
     }
+}
+
+/// The view changes `a` asks for, beyond the window, applied to `scene`.
+/// Every one is checked against the run before anything changes, so one
+/// that fails leaves the scene as it was. Returns whether the map moved
+/// (another layout, or a round with other bounds): a window kept from
+/// before no longer applies. The terminal viewer applies an agent's view
+/// with it as `view_map` does.
+pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
+    // A round the view does not show is read now and swapped in last.
+    let round = match &a.round {
+        Some(r) if !shows_round(scene, Path::new(r)) => Some(Dataset::load(r)?),
+        _ => None,
+    };
+    let s = &*scene;
+    let data = round.as_ref().unwrap_or(&s.data);
+    let space = match (&a.map, &a.space) {
+        (None, None) => None,
+        (map, space) => {
+            let cur = &s.data.spaces[s.root()];
+            Some(find_space(
+                data,
+                map.as_deref().unwrap_or(&cur.method),
+                space.as_deref().unwrap_or(cur.kind.slug()),
+            )?)
+        }
+    };
+    let axis = space.map_or(s.current().axis(), |at| data.spaces[at].axis());
+    let choices: Vec<usize> = (0..data.labels.len())
+        .filter(|&i| data.labels[i].axis() == axis)
+        .collect();
+    let colour = match &a.colour_by {
+        Some(by) if by.eq_ignore_ascii_case("none") => Some(None),
+        Some(by) => Some(Some(
+            choices
+                .iter()
+                .copied()
+                .find(|&i| data.labels[i].title().eq_ignore_ascii_case(by))
+                .ok_or_else(|| {
+                    let names: Vec<&str> =
+                        choices.iter().map(|&i| data.labels[i].title()).collect();
+                    anyhow!("no {by} grouping on this map; it has {}", names.join(", "))
+                })?,
+        )),
+        None => None,
+    };
+    // The grouping shown once the rest applies: the one asked for, a
+    // new axis's first, or the one shown now, by kind.
+    let shown = colour.unwrap_or_else(|| match space {
+        Some(at) if data.spaces[at].axis() != s.current().axis() => choices.first().copied(),
+        // As replace_data keeps it: the same kind, else the first.
+        _ => s.colour.and_then(|li| {
+            let kind = s.data.labels[li].kind;
+            choices
+                .iter()
+                .copied()
+                .find(|&i| data.labels[i].kind == kind)
+                .or_else(|| choices.first().copied())
+        }),
+    });
+    let focus = match &a.focus {
+        None => None,
+        Some(f) => Some(match focus_name(f)? {
+            None => None,
+            Some(name) => {
+                let li = shown.ok_or_else(|| anyhow!("no grouping shown: pass colour_by"))?;
+                Some(group_of(&data.labels[li], &name)?)
+            }
+        }),
+    };
+
+    let mut moved = false;
+    if let Some(data) = round {
+        // Another round of the same layout keeps the window.
+        let bounds = scene.current().points.bounds;
+        scene.replace_data(data);
+        moved |= scene.current().points.bounds != bounds;
+    }
+    if let Some(at) = space.filter(|&at| at != scene.space) {
+        scene.set_space(at);
+        moved = true;
+    }
+    // The grouping shown, asked for again, keeps its focus and feature.
+    if let Some(li) = colour.filter(|&li| li != scene.colour) {
+        scene.set_colour(li);
+    }
+    if let Some(focus) = focus {
+        scene.focus = focus;
+    }
+    match a.observed {
+        Some(true) => scene.source = scene.count_source(),
+        Some(false) => scene.source = Source::Expected,
+        None => {}
+    }
+    match a.feature.as_deref() {
+        Some("") => {
+            scene.clear_pick();
+        }
+        Some(f) => scene.set_pick(Pick::One(f.into())),
+        None if a.observed.is_some() => scene.refresh_activity(),
+        None => {}
+    }
+    Ok(moved)
+}
+
+/// An agent's published view ([`Open::view_state`]): the manifest it
+/// shows, and the rest as view_map's arguments.
+pub(super) fn agent_view(state: &Value) -> Result<(PathBuf, MapArgs)> {
+    let mut state = state.clone();
+    let fields = state.as_object_mut().context("a view state is an object")?;
+    let run = fields.remove("run");
+    let shown = fields
+        .get("round")
+        .filter(|r| !r.is_null())
+        .or(run.as_ref())
+        .and_then(Value::as_str)
+        .context("a view state names its run")?
+        .into();
+    Ok((shown, parse(state)?))
+}
+
+/// Whether the round at `path` is the one `scene` shows.
+fn shows_round(scene: &Scene, path: &Path) -> bool {
+    let shown = scene.data.round.as_ref().map(|r| r.path.as_path());
+    shown.is_some_and(|r| run_manifest::same_file(r, path))
 }
 
 /// The root map `method` of `kind` in `data`, never a zoomed layout.
