@@ -387,14 +387,19 @@ impl Open {
     fn map(&mut self, a: MapArgs) -> Result<Vec<Content>> {
         let width = width(a.width, WIDTH)?;
         if let Some(b) = a.bbox {
+            let (w, h) = (b[2] - b[0], b[3] - b[1]);
             ensure!(
-                b.iter().all(|v| v.is_finite()) && b[0] < b[2] && b[1] < b[3],
+                b.iter().all(|v| v.is_finite()) && w > 0.0 && h > 0.0 && (w * h).is_finite(),
                 "bbox is [x0, y0, x1, y1] with x0 < x1 and y0 < y1"
             );
         }
         ensure!(
             a.center.is_none_or(|c| c.iter().all(|v| v.is_finite())),
             "center is a finite [x, y]"
+        );
+        ensure!(
+            a.zoom.is_none_or(|z| (1e-6..=1e6).contains(&z)),
+            "zoom is between 1e-6 and 1e6"
         );
         // A round the view does not show is read now and swapped in last.
         let round = match &a.round {
@@ -642,6 +647,20 @@ impl Open {
 
     fn export(&mut self, a: ExportArgs) -> Result<Vec<Content>> {
         ensure!(a.png.is_some() || a.pdf.is_some(), "pass png, pdf or both");
+        // Figures only: no other file is written, overwrite or not.
+        for (path, ext) in a
+            .png
+            .iter()
+            .map(|p| (p, "png"))
+            .chain(a.pdf.iter().map(|p| (p, "pdf")))
+        {
+            ensure!(
+                path.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(ext)),
+                "{} is not a .{ext} file",
+                path.display()
+            );
+        }
         for path in a.png.iter().chain(&a.pdf) {
             ensure!(
                 a.overwrite || !path.exists(),

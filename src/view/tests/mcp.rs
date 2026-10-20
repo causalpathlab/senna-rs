@@ -137,6 +137,10 @@ fn export_refuses_a_file_that_exists_unless_told() {
         serde_json::from_value(json!({"png": png, "width": 32, "overwrite": overwrite})).unwrap()
     };
     assert!(o.export(ask(false)).is_err());
+    let notes = dir.path().join("notes.txt");
+    let other = serde_json::from_value(json!({"png": notes, "overwrite": true})).unwrap();
+    assert!(o.export(other).is_err());
+    assert!(!notes.exists());
     assert_eq!(std::fs::read(&png).unwrap(), b"keep");
     o.export(ask(true)).unwrap();
     assert_eq!(&std::fs::read(&png).unwrap()[1..4], b"PNG");
