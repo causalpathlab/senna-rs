@@ -90,9 +90,16 @@ impl Handler for Tools {
             "run_help" => run_help(parse(args)?),
             "view_open" => {
                 let open = self.open.insert(Open::new(&parse(args)?, cx)?);
+                cx.state(&open.view_state());
                 Ok(vec![Content::Json(open.summary())])
             }
-            "view_map" => self.open()?.map(parse(args)?),
+            "view_map" => {
+                let open = self.open()?;
+                let out = open.map(parse(args)?)?;
+                // What a person following the server sees next.
+                cx.state(&open.view_state());
+                Ok(out)
+            }
             "view_markers" => self.open()?.markers(parse(args)?),
             "view_cell" => self.open()?.cell(parse(args)?),
             "view_export" => self.open()?.export(parse(args)?),

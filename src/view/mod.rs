@@ -172,6 +172,20 @@ pub struct ViewArgs {
     )]
     pub cell_stat: Option<CellStat>,
 
+    #[arg(
+        long,
+        value_name = "SERVER",
+        num_args = 0..=1,
+        default_missing_value = "",
+        help = "Follow what an agent does through `senna mcp`: the newest running server, or the one with this pid",
+        long_help = "Follow what an agent does through `senna mcp`.\n\
+                     The view shows the run, map, grouping, focus and window the agent\n\
+                     shows, and a pane lists its calls, their progress and the commands\n\
+                     they ran. Changing the view by hand stops following; W follows again.\n\
+                     With no SERVER, the newest running one; else the one with that pid."
+    )]
+    pub watch: Option<String>,
+
     #[command(flatten)]
     pub session: legume_tui::cli::SessionArgs,
 }
@@ -622,9 +636,19 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     // On screen, the session first. Hosted, this process only relays the
     // terminal from here on, and the program the host starts reads the
     // runs; with none named, live views are offered before a new one.
-    let session = crate::tui::TOOL.session("view", &args.session.options(!args.from.is_empty()))?;
+    let watching = args.watch.is_some();
+    let session = crate::tui::TOOL.session(
+        "view",
+        &args.session.options(watching || !args.from.is_empty()),
+    )?;
     let picked: Vec<Box<str>>;
-    let from: &[Box<str>] = if args.from.is_empty() {
+    let mut agent = None;
+    let from: &[Box<str>] = if let Some(which) = &args.watch {
+        let (dir, shown) = agent_run(which)?;
+        agent = Some(dir);
+        picked = vec![shown.to_string_lossy().into()];
+        &picked
+    } else if args.from.is_empty() {
         let Some(path) = tui::pick_run(&session)? else {
             return Ok(());
         };
@@ -648,6 +672,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     tui::run(
         &session,
         views,
+        agent.as_deref(),
         args.graphics,
         args.lupin
             .as_deref()
@@ -655,6 +680,46 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
             .or_else(|| std::env::var("SENNA_LUPIN").ok())
             .unwrap_or_else(|| "lupin".into()),
     )
+}
+
+/// The folder of the `senna mcp` server `which` names (its pid, or the
+/// newest running one when empty), and the manifest its agent shows,
+/// waited for until it shows one.
+fn agent_run(which: &str) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    use legume_mcp::watch;
+    let running = || {
+        watch::live()
+            .into_iter()
+            .filter(|l| l.alive && l.meta.server == "senna")
+            .find(|l| which.is_empty() || l.meta.pid.to_string() == which)
+    };
+    let server = running().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no running `senna mcp`{}",
+            if which.is_empty() {
+                String::new()
+            } else {
+                format!(" with pid {which}")
+            }
+        )
+    })?;
+    let mut said = false;
+    loop {
+        if let Some(state) = watch::state(&server.dir) {
+            return Ok((server.dir, mcp::agent_view(&state)?.0));
+        }
+        anyhow::ensure!(
+            watch::live().iter().any(|l| l.dir == server.dir && l.alive),
+            "the agent's server ended before it opened a run"
+        );
+        if !std::mem::replace(&mut said, true) {
+            eprintln!(
+                "senna view: waiting for the agent to open a run (pid {})",
+                server.meta.pid
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 /// The runs `from` read into scenes, what the view needs computed first:
@@ -867,6 +932,7 @@ mod tests {
             chart: None,
             relabel: false,
             lupin: None,
+            watch: None,
             no_compute: true,
             extra: Vec::new(),
             cell_stat: None,

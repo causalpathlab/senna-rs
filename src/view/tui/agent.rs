@@ -6,13 +6,18 @@
 
 use super::*;
 use crate::view::mcp;
+use legume_mcp::watch::{self, Body};
 use legume_tui::map::viewport::YAxis;
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::path::Path;
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 
 /// Lines of the agent's activity the pane keeps.
 const KEPT: usize = 200;
+
+/// Characters of an event the pane shows on its line.
+const LINE: usize = 120;
 
 /// What the follower hears from the agent's server.
 pub(crate) enum Heard {
@@ -34,6 +39,64 @@ pub(crate) struct Agent {
     /// Its latest view, applied again when following resumes.
     latest: Option<Value>,
     ended: bool,
+}
+
+/// What the server in `dir` does, as it does it: its feed from the
+/// start, so the pane has its history and the view its latest state.
+pub(crate) fn listen(dir: &Path) -> anyhow::Result<Receiver<Heard>> {
+    let feed = watch::follow(dir, watch::From::Start)?;
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        for event in feed {
+            let heard = match event.body {
+                Body::State { state, .. } => Heard::View(state),
+                body => match line(&event.t, body) {
+                    Some(l) => Heard::Line(l),
+                    None => continue,
+                },
+            };
+            if tx.send(heard).is_err() {
+                return;
+            }
+        }
+        let _ = tx.send(Heard::Ended);
+    });
+    Ok(rx)
+}
+
+/// An event as a line of the pane, at time `t`.
+fn line(t: &str, body: Body) -> Option<String> {
+    // The time of day, from RFC 3339.
+    let at = t.get(11..19).unwrap_or(t);
+    let text = match body {
+        Body::Call { tool, args, .. } => format!("→ {tool} {args}"),
+        Body::Progress { message, .. } => format!("  {message}"),
+        Body::Result { ok, ms, text, .. } => {
+            // Its words on one line, past an image's placeholder.
+            let first = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("[image/"))
+                .flat_map(str::split_whitespace)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mark = if ok { "✓" } else { "✗" };
+            format!("{mark} {:.1}s {first}", ms as f64 / 1000.0)
+        }
+        Body::Cancelled { by, .. } => format!("✗ cancelled by the {by}"),
+        // The command itself, not the comments and guards around it.
+        Body::Record { line } => {
+            let scaffold = ["#", "if ", "then", "fi", "mkdir "];
+            let command = line
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !scaffold.iter().any(|s| l.starts_with(s)))?;
+            format!("$ {command}")
+        }
+        Body::Notebook { entry, text } => format!("✎ {entry}: {text}"),
+        Body::Note { text } => format!("you: {text}"),
+        Body::Server(_) | Body::State { .. } => return None,
+    };
+    Some(format!("{at} {text}").chars().take(LINE).collect())
 }
 
 impl Agent {

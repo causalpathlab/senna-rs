@@ -61,6 +61,7 @@ fn here(prefix: &str) -> String {
 pub fn run(
     session: &legume_tui::Session,
     views: Vec<(Scene, std::path::PathBuf)>,
+    agent: Option<&std::path::Path>,
     graphics: Graphics,
     lupin: String,
 ) -> anyhow::Result<()> {
@@ -75,10 +76,14 @@ pub fn run(
         session.take_repaint();
         let picker = legume_tui::graphics::pick(session, graphics, Fallback::Probe);
         session.set_modes(legume_tui::Modes::new().mouse(legume_tui::Mouse::Full))?;
-        let apps = views
+        let mut apps: Vec<App> = views
             .into_iter()
             .map(|(scene, from)| App::new(scene, picker.clone(), from, lupin.clone()))
             .collect();
+        // `--watch` opens one view, the agent's.
+        if let (Some(dir), Some(app)) = (agent, apps.first_mut()) {
+            app.agent = Some(agent::Agent::new(agent::listen(dir)?));
+        }
         grid::Deck::new(
             apps,
             picker,

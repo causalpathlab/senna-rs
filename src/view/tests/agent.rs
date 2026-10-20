@@ -88,3 +88,56 @@ fn the_pane_lists_the_newest_activity_and_says_when_the_agent_ended() {
     );
     assert!(app.side_lines().unwrap()[0].starts_with("agent"));
 }
+
+#[test]
+fn feed_events_read_as_one_line_each_with_their_time() {
+    let t = "2026-10-20T14:03:07-07:00";
+    let call = Body::Call {
+        id: "3".into(),
+        tool: "view_map".into(),
+        args: json!({"colour_by": "cluster"}),
+    };
+    assert_eq!(
+        line(t, call).unwrap(),
+        r#"14:03:07 → view_map {"colour_by":"cluster"}"#
+    );
+    let done = Body::Result {
+        id: "3".into(),
+        ok: false,
+        ms: 1500,
+        text: "\n no group C9 in cluster\nmore".into(),
+    };
+    assert_eq!(
+        line(t, done).unwrap(),
+        "14:03:07 ✗ 1.5s no group C9 in cluster more"
+    );
+    let drawn = Body::Result {
+        id: "4".into(),
+        ok: true,
+        ms: 100,
+        text: "[image/png, 120639 bytes]\n{\n  \"map\": \"umap\"".into(),
+    };
+    assert_eq!(
+        line(t, drawn).unwrap(),
+        r#"14:03:07 ✓ 0.1s { "map": "umap""#
+    );
+    let record = Body::Record {
+        line: "# 14:03 senna run_fit\nsenna svd data.zarr -o out -v\n".into(),
+    };
+    assert_eq!(
+        line(t, record).unwrap(),
+        "14:03:07 $ senna svd data.zarr -o out -v"
+    );
+    let guarded = Body::Record {
+        line: "# 14:03 senna view_open\nif [ ! -e out.clusters.parquet ]; then\n  mkdir -p .\n  senna clustering --from out.senna.json\nfi\n".into(),
+    };
+    assert_eq!(
+        line(t, guarded).unwrap(),
+        "14:03:07 $ senna clustering --from out.senna.json"
+    );
+    let long = Body::Progress {
+        id: "3".into(),
+        message: "x".repeat(500),
+    };
+    assert_eq!(line(t, long).unwrap().chars().count(), LINE);
+}
