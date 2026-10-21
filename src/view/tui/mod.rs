@@ -57,11 +57,13 @@ fn here(prefix: &str) -> String {
     files::name(std::path::Path::new(prefix))
 }
 
-/// Open one view per run and hand them the terminal of `session`.
+/// Open one view per run and hand them the terminal of `session`; with
+/// `agent`, the first follows the server in its folder, and with the
+/// servers' folders beside it, the next one there once it ends.
 pub fn run(
     session: &legume_tui::Session,
     views: Vec<(Scene, std::path::PathBuf)>,
-    agent: Option<&std::path::Path>,
+    agent: Option<(&std::path::Path, Option<&std::path::Path>)>,
     graphics: Graphics,
     lupin: String,
 ) -> anyhow::Result<()> {
@@ -81,8 +83,8 @@ pub fn run(
             .map(|(scene, from)| App::new(scene, picker.clone(), from, lupin.clone()))
             .collect();
         // `--watch` opens one view, the agent's.
-        if let (Some(dir), Some(app)) = (agent, apps.first_mut()) {
-            app.agent = Some(agent::Agent::open(dir)?);
+        if let (Some((dir, next)), Some(app)) = (agent, apps.first_mut()) {
+            app.agent = Some(agent::Agent::open(dir, next)?);
         }
         grid::Deck::new(
             apps,

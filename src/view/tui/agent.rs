@@ -2,13 +2,14 @@
 //! `senna mcp`. legume-mcp's `watch::Agent` follows the server; each view
 //! the agent publishes is applied here as `view_map` applies it, and the
 //! sidebar lists its calls. Changing the view by hand stops following; `W`
-//! follows again, from the agent's latest view.
+//! follows again, from the agent's latest view. Following the newest
+//! server, the view moves to the next one when it ends.
 
 use super::*;
 use crate::view::mcp;
 use legume_mcp::watch;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Calls the sidebar lists.
 const CALL_ROWS: usize = 6;
@@ -24,16 +25,47 @@ pub(crate) struct Agent {
     /// The window of the agent's view last applied: what the map frames
     /// while following, through resizes and reattaches.
     window: Option<[f32; 4]>,
+    /// Where the servers' folders are, when the view follows the newest
+    /// server: once this one ends, the next one there is followed.
+    next: Option<PathBuf>,
+    /// When the servers' folders were last looked through for the next.
+    looked: Option<std::time::Instant>,
 }
 
+/// How often an ended server's view looks for the next one.
+const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Agent {
-    /// Follow the server in `dir`; senna's view does not steer it.
-    pub(crate) fn open(dir: &Path) -> anyhow::Result<Self> {
+    /// Follow the server in `dir`, and with `next`, once it ends, the
+    /// newest running one among the servers' folders there; senna's view
+    /// does not steer it.
+    pub(crate) fn open(dir: &Path, next: Option<&Path>) -> anyhow::Result<Self> {
         Ok(Self {
             watch: watch::Agent::new(dir, false)?,
             applied: None,
             window: None,
+            next: next.map(Path::to_path_buf),
+            looked: None,
         })
+    }
+
+    /// The folder of the server followed.
+    pub(crate) fn dir(&self) -> &Path {
+        self.watch.dir()
+    }
+
+    /// The server after this one, once this one ended: the newest running
+    /// one in [`Self::next`] that is not it.
+    fn successor(&mut self) -> Option<(PathBuf, u32)> {
+        let base = self.next.as_ref().filter(|_| self.watch.ended())?;
+        if self.looked.is_some_and(|t| t.elapsed() < LOOK_EVERY) {
+            return None;
+        }
+        self.looked = Some(std::time::Instant::now());
+        watch::find_in(base, mcp::SERVER, None)
+            .into_iter()
+            .find(|l| l.dir != self.dir())
+            .map(|l| (l.dir, l.meta.pid))
     }
 
     pub(crate) fn following(&self) -> bool {
@@ -108,6 +140,26 @@ impl App {
             return false;
         };
         let heard = agent.watch.poll();
+        if let Some((dir, pid)) = agent.successor() {
+            match Agent::open(&dir, agent.next.as_deref()) {
+                Ok(mut next) => {
+                    // Paused by hand, it stays paused: W follows again.
+                    if !agent.following() {
+                        next.watch.pause();
+                    }
+                    *agent = next;
+                    self.message = Some(format!(
+                        "the agent's server ended · following the next one (pid {pid})"
+                    ));
+                }
+                // Not looked for again: the view stays on the one ended.
+                Err(e) => {
+                    agent.next = None;
+                    self.message = Some(format!("the next server: {e:#}"));
+                }
+            }
+            return true;
+        }
         if !agent.following() || held {
             return heard;
         }

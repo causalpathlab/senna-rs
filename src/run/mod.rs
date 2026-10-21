@@ -14,12 +14,19 @@ pub struct RunArgs {
 
     #[command(flatten)]
     pub session: legume_tui::cli::SessionArgs,
+
+    /// A fit given whole (`senna run -- svd data.zarr -o out`): queued at
+    /// once on the Run screen, without the form, and senna run ends when
+    /// it does. `senna mcp` starts a background fit this way.
+    #[arg(last = true, hide = true)]
+    pub fit: Vec<String>,
 }
 
 impl RunArgs {
-    /// The session to run in. A folder named starts a new one; started
-    /// with none, live sessions are offered first.
+    /// The session to run in. A folder or a fit named starts a new one;
+    /// started with neither, live sessions are offered first.
     pub fn session(&self) -> legume_tui::Options {
-        self.session.options(self.dir.is_some())
+        self.session
+            .options(self.dir.is_some() || !self.fit.is_empty())
     }
 }

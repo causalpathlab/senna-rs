@@ -65,8 +65,9 @@ image = { version = "0.25", optional = true, default-features = false, features 
 # draw: colour, viewport, points, text, labels and keys, and the frame on
 # the terminal; its PDF pages, the save dialog, and the saved figures.
 legume-tui = { version = "0.3", optional = true, features = ["map", "map-display", "export", "chart", "save", "gallery"] }
-# `senna mcp`: the viewer's tools and senna's fits served to an agent.
-legume-mcp = { version = "0.4", optional = true }
+# `senna mcp`: the viewer's tools and senna's fits served to an agent, a
+# background fit in a session of `senna run` a person can attach to.
+legume-mcp = { version = "0.4", optional = true, features = ["sessions"] }
 clap = { version = "4.5.20", features = ["derive"] }
 num_cpus = "1.16.0"
 rayon = "1.10.0"

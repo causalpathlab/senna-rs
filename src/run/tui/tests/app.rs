@@ -1260,3 +1260,115 @@ fn the_view_v_opens_runs_as_this_session_was_asked_to() {
     let no_detach = std::ffi::OsStr::new(legume_tui::NO_DETACH_VAR);
     assert_eq!(env, [(no_detach, Some(std::ffi::OsStr::new("1")))]);
 }
+
+fn words(w: &[&str]) -> Vec<String> {
+    w.iter().map(|s| (*s).to_string()).collect()
+}
+
+#[test]
+fn a_fit_given_whole_runs_from_here_as_given_its_script_beside_its_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let here = tmp.path();
+    // Every word as given, a flag's value too: it runs from here.
+    std::fs::write(here.join("5"), "").unwrap();
+    std::fs::create_dir(here.join("runs")).unwrap();
+    let a = app(here);
+    for out in [
+        &["-o", "runs/fit"][..],
+        &["--out", "runs/fit"],
+        &["--out=runs/fit"],
+    ] {
+        let mut argv = words(&["svd", "data.zarr"]);
+        argv.extend(words(out));
+        argv.extend(words(&["--steps", "5", "--batch-files", "b.txt"]));
+        let job = a.fit_job(&argv).unwrap();
+        assert_eq!(job.tool, Tool::Senna);
+        assert_eq!(job.method, a.rows[job.row].label);
+        assert_eq!(a.rows[job.row].form.name, "svd");
+        // Run from here, as it was given; its script beside its out.
+        assert_eq!(job.dir, here);
+        assert_eq!(job.out, "runs/fit");
+        assert_eq!(job.script(), here.join("runs/fit.cmd.sh"));
+        // As given: it runs from here.
+        let data = "data.zarr";
+        assert_eq!(
+            job.argv,
+            words(&[
+                "svd",
+                data,
+                "--out",
+                "runs/fit",
+                "--steps",
+                "5",
+                "--batch-files",
+                "b.txt"
+            ]),
+            "{out:?}"
+        );
+        assert_eq!(job.result(), here.join("runs/fit.senna.json"));
+        assert_eq!(job.lane, 0);
+    }
+    // What it cannot be: no method, one senna has not, or no --out.
+    assert!(a.fit_job(&[]).is_err());
+    assert!(a
+        .fit_job(&words(&["nope", "data.zarr", "-o", "x"]))
+        .is_err());
+    assert!(a.fit_job(&words(&["svd", "data.zarr"])).is_err());
+}
+
+#[test]
+fn a_fit_given_whole_starts_on_the_run_screen_and_ends_as_its_job_did() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut a = app(tmp.path());
+    // Not this test binary: a program that ends at once.
+    a.senna_program = PathBuf::from("true");
+    a.start_fit(&words(&["svd", "data.zarr", "-o", "fit"]))
+        .unwrap();
+    assert!(a.screen == Screen::Run);
+    assert_eq!(a.queue.as_ref().map(|q| q.jobs.len()), Some(1));
+    a.queue
+        .as_ref()
+        .unwrap()
+        .stop_within(Duration::from_secs(5));
+    use legume_mcp::job::End;
+    let manifest = tmp.path().join("fit.senna.json");
+    assert_eq!(
+        fit_end(&jobs::State::Done, &manifest),
+        End::Done(manifest.display().to_string())
+    );
+    assert_eq!(fit_end(&jobs::State::Stopped, &manifest), End::Cancelled);
+    assert_eq!(
+        fit_end(&jobs::State::Failed("diverged".into()), &manifest),
+        End::Failed("diverged".into())
+    );
+}
+
+#[test]
+fn the_queue_log_goes_to_the_job_once_each_line() {
+    let mut shared = jobs::Shared::default();
+    let mut sent = Sent::default();
+    shared.log.extend(["a".to_string(), "b".to_string()]);
+    assert_eq!(sent.new_lines(&shared), ["a", "b"]);
+    assert!(sent.new_lines(&shared).is_empty());
+    // Lines that went off the front unsent are lost, not sent twice.
+    shared
+        .log
+        .extend(["c".to_string(), "d".to_string(), "e".to_string()]);
+    shared.log.drain(..3);
+    shared.dropped += 3;
+    assert_eq!(sent.new_lines(&shared), ["d", "e"]);
+}
+
+#[test]
+fn a_fit_given_whole_out_of_here_has_its_data_whole() {
+    let tmp = tempfile::tempdir().unwrap();
+    let away = tempfile::tempdir().unwrap();
+    let a = app(tmp.path());
+    let out = away.path().join("fit").to_string_lossy().into_owned();
+    let job = a
+        .fit_job(&words(&["svd", "data.zarr", "--out", &out]))
+        .unwrap();
+    assert_eq!(job.out, out);
+    let data = tmp.path().join("data.zarr").to_string_lossy().into_owned();
+    assert_eq!(job.argv, words(&["svd", &data, "--out", &out]));
+}

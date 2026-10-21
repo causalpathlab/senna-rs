@@ -14,13 +14,23 @@ fn session(calls: &[(u64, &str, Value)]) -> (Vec<Value>, ExitStatus) {
 }
 
 /// [`session`] keeping its records in `project` when given (none else, so
-/// nothing lands in the repository); never a live feed.
+/// nothing lands in the repository); its feed, its background fits'
+/// sessions and their jobs' folders in folders of its own, the sessions
+/// ended as it returns.
 fn session_in(
     project: Option<&std::path::Path>,
     calls: &[(u64, &str, Value)],
 ) -> (Vec<Value>, ExitStatus) {
+    // A background fit's session, and its job's folder, in folders of
+    // its own: they outlive the server, and the sessions end as this
+    // returns.
+    #[cfg(unix)]
+    let sessions = legume_tui::testing::Private::new(env!("CARGO_BIN_EXE_senna"));
+    let watch = tempfile::tempdir().unwrap();
     let mut server = Command::new(env!("CARGO_BIN_EXE_senna"));
-    server.arg("mcp").env(legume_mcp::watch::ENV, "off");
+    server.arg("mcp").env(legume_mcp::watch::ENV, watch.path());
+    #[cfg(unix)]
+    server.env(legume_tui::DIR_VAR, sessions.path());
     match project {
         Some(p) => server.env(legume_mcp::project::ROOT_ENV, p),
         None => server.env(legume_mcp::project::OFF_ENV, "off"),
@@ -43,7 +53,8 @@ fn session_in(
         .lines()
         .map(|l| serde_json::from_str(&l.unwrap()).expect("only protocol on stdout"))
         .collect();
-    (messages, child.wait().unwrap())
+    let status = child.wait().unwrap();
+    (messages, status)
 }
 
 fn call(id: u64, tool: &str, arguments: Value) -> (u64, &str, Value) {
@@ -111,7 +122,7 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
 fn a_background_fit_returns_a_job_and_the_same_out_again_however_spelled_is_refused_naming_it() {
     let dir = tempfile::tempdir().unwrap();
     // A data file nobody writes: senna blocks opening it, so the job still
-    // runs when the same out is asked for again (and ends with the server).
+    // runs when the same out is asked for again.
     let data = dir.path().join("data.zarr.zip");
     assert!(Command::new("mkfifo")
         .arg(&data)
@@ -125,8 +136,8 @@ fn a_background_fit_returns_a_job_and_the_same_out_again_however_spelled_is_refu
         call(1, "run_fit", fit(dir.path().join("runs/../fit"))),
         call(2, "run_fit", fit(dir.path().join("fit"))),
     ]);
-    // Should the fit outlive its server, opening the pipe frees it: read
-    // and write, so the open itself never waits.
+    // Opening the pipe frees a fit still blocked on it: read and write, so
+    // the open itself never waits.
     drop(
         std::fs::OpenOptions::new()
             .read(true)
@@ -135,7 +146,7 @@ fn a_background_fit_returns_a_job_and_the_same_out_again_however_spelled_is_refu
     );
     assert!(
         status.success(),
-        "the server stops its job and ends cleanly"
+        "the server ends cleanly, its job running on"
     );
     // Replies only: a job's progress may come between them.
     let replies: Vec<&Value> = messages.iter().filter(|m| m.get("id").is_some()).collect();

@@ -203,6 +203,31 @@ pub(crate) struct App {
     view: Vec<PathBuf>,
 }
 
+/// How a fit given whole ended, as its job tells it: done with its
+/// manifest, failed and why, or stopped.
+fn fit_end(state: &jobs::State, manifest: &Path) -> legume_mcp::job::End {
+    use legume_mcp::job::End;
+    match state {
+        jobs::State::Done => End::Done(manifest.display().to_string()),
+        jobs::State::Failed(why) => End::Failed(why.clone()),
+        jobs::State::Stopped | jobs::State::Waiting | jobs::State::Running => End::Cancelled,
+    }
+}
+
+/// How far the queue's log has gone to the job: its lines up to here.
+#[derive(Default)]
+struct Sent(usize);
+
+impl Sent {
+    /// The lines of `shared`'s log not sent yet; those gone off its front
+    /// unsent are lost.
+    fn new_lines(&mut self, shared: &jobs::Shared) -> Vec<String> {
+        let first = self.0.max(shared.dropped) - shared.dropped;
+        self.0 = shared.dropped + shared.log.len();
+        shared.log.iter().skip(first).cloned().collect()
+    }
+}
+
 /// How long a fit has to wrap up when senna run quits under it.
 const STOP_GRACE: Duration = Duration::from_secs(10);
 
@@ -251,16 +276,51 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
     let session = crate::tui::TOOL.session("run", &args.session())?;
     let start = args.dir.clone().unwrap_or_else(|| PathBuf::from("."));
     let mung = describe_mung(&mung_program());
-    let mut app = App::new(cli, mung, start)?;
+    // A fit given whole (by `senna mcp`, say): senna run ends with it, and
+    // its log and end go to its job, also when it cannot start.
+    let fit = !args.fit.is_empty();
+    let reporter = fit.then(legume_mcp::job::Reporter::from_env).flatten();
+    let failed = |e: anyhow::Error| {
+        if let Some(r) = &reporter {
+            r.finish(legume_mcp::job::End::Failed(format!("{e:#}")));
+        }
+        e
+    };
+    let mut app = App::new(cli, mung, start).map_err(failed)?;
+    let mut sent = Sent::default();
+    let report = |sent: &mut Sent, q: &Queue| {
+        let Some(r) = &reporter else { return };
+        // Taken off the lock, then written.
+        let lines = q
+            .shared
+            .lock()
+            .map(|s| sent.new_lines(&s))
+            .unwrap_or_default();
+        lines.iter().for_each(|l| r.line(l));
+    };
     let quiet = legume_tui::logs::quiet();
     // The mouse's buttons and wheel reported, never its movement, so a
     // moving pointer wakes nothing; shift+drag still selects text in most
     // terminals.
-    let mut terminal =
-        session.terminal_with(legume_tui::Modes::new().mouse(legume_tui::Mouse::Buttons))?;
+    let mut terminal = session
+        .terminal_with(legume_tui::Modes::new().mouse(legume_tui::Mouse::Buttons))
+        .map_err(|e| failed(e.into()))?;
+    // Started once the screen is up: no fit runs that an error before it
+    // would leave behind.
+    if fit {
+        app.start_fit(&args.fit).map_err(failed)?;
+    }
     let result = (|| -> anyhow::Result<()> {
         while !app.quit {
             app.poll();
+            if let Some(q) = &app.queue {
+                report(&mut sent, q);
+                // A fit given whole: done with it, done, without waiting
+                // for a key.
+                if fit && q.finished() {
+                    break;
+                }
+            }
             // Detached, the fits are followed and nothing is drawn.
             session.draw(&mut terminal, |f| app.draw(f))?;
             session.status(&app.session_status());
@@ -296,6 +356,15 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
             let _ = session.draw(&mut terminal, |f| app.draw(f));
         }
         q.stop_within(STOP_GRACE);
+        report(&mut sent, q);
+    }
+    if let (Some(r), Some(q)) = (&reporter, &app.queue) {
+        // A fit done is done, whatever the screen ended with.
+        let state = q.states().first().cloned().unwrap_or(jobs::State::Stopped);
+        r.finish(match &result {
+            Err(e) if state != jobs::State::Done => legume_mcp::job::End::Failed(format!("{e:#}")),
+            _ => fit_end(&state, &q.jobs[0].result()),
+        });
     }
     // An error it ends with stays drawn on a screen nobody is attached to,
     // and is said once by whoever looks next.
@@ -317,7 +386,7 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
         }
     }
     // Not after a `senna kill`: it asked for the session to end.
-    if !app.view.is_empty() && !session.stop_requested() {
+    if !fit && !app.view.is_empty() && !session.stop_requested() {
         let shown: Vec<String> = app.view.iter().map(|p| app.shown(p)).collect();
         // This binary, found even when it was reinstalled while it ran.
         let senna = legume_mcp::own_command(std::iter::empty::<&str>())?;
@@ -433,6 +502,86 @@ impl App {
 
     fn running(&self) -> bool {
         self.queue.as_ref().is_some_and(|q| !q.finished())
+    }
+
+    /// A fit given whole (`senna run -- METHOD DATA... ARGS`), as the queue
+    /// runs it: from here, as it was given, its script beside its out.
+    fn fit_job(&self, argv: &[String]) -> anyhow::Result<Job> {
+        use anyhow::Context;
+        let method = argv
+            .first()
+            .context("no method: senna run -- METHOD DATA... --out OUT")?;
+        let row = self
+            .rows
+            .iter()
+            .position(|r| r.tool == Tool::Senna && r.form.name == *method)
+            .with_context(|| format!("senna has no method {method}"))?;
+        let rest = &argv[1..];
+        // `--out`'s value, wherever and however it is given.
+        let out = rest
+            .iter()
+            .enumerate()
+            .find_map(|(k, w)| match w.as_str() {
+                "-o" | "--out" => rest.get(k + 1).cloned(),
+                w => w.strip_prefix("--out=").map(String::from),
+            })
+            .context("no --out")?;
+        // Run from here, as the fit was given: its paths read as they were
+        // meant, its out named from here when it is under here, whole
+        // otherwise, with its data files whole too.
+        let out = match Path::new(&out).strip_prefix(&self.here) {
+            Ok(under) => under.to_path_buf(),
+            Err(_) => PathBuf::from(&out),
+        };
+        anyhow::ensure!(
+            out.file_name().is_some(),
+            "--out {} names no file",
+            out.display()
+        );
+        let name = out.to_string_lossy().into_owned();
+        let data = |w: &str| {
+            if out.is_absolute() {
+                self.here.join(w).to_string_lossy().into_owned()
+            } else {
+                w.to_string()
+            }
+        };
+        let mut words = vec![method.clone()];
+        let (mut in_data, mut rest) = (true, rest.iter());
+        while let Some(w) = rest.next() {
+            in_data &= !w.starts_with('-');
+            match w.as_str() {
+                "-o" | "--out" => {
+                    rest.next();
+                    words.extend(["--out".to_string(), name.clone()]);
+                }
+                w if w.starts_with("--out=") => words.extend(["--out".to_string(), name.clone()]),
+                w if in_data => words.push(data(w)),
+                w => words.push(w.to_string()),
+            }
+        }
+        Ok(Job {
+            tool: Tool::Senna,
+            program: self.program_of(Tool::Senna),
+            row,
+            method: self.rows[row].label.clone(),
+            dir: self.here.clone(),
+            out: name,
+            argv: words,
+            labels: Vec::new(),
+            clones: None,
+            pb_from: None,
+            lane: 0,
+        })
+    }
+
+    /// Queue the fit given whole and show it running; senna run ends
+    /// with it.
+    fn start_fit(&mut self, argv: &[String]) -> anyhow::Result<()> {
+        let job = self.fit_job(argv)?;
+        self.queue = Some(Queue::start(vec![job]));
+        self.screen = Screen::Run;
+        Ok(())
     }
 
     /// One line for `senna sessions` and the resume picker.

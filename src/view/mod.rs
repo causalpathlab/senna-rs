@@ -184,7 +184,8 @@ pub struct ViewArgs {
                      shows, and a pane lists its latest calls, what the latest is doing\n\
                      and the last command it ran. Changing the view by hand stops\n\
                      following; W follows again.\n\
-                     With no SERVER, the newest running one; else the one with that pid."
+                     With no SERVER, the newest running one, waited for until one runs,\n\
+                     and the next one once it ends; else the one with that pid."
     )]
     pub watch: Option<String>,
 
@@ -647,10 +648,10 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     let mut agent = None;
     let from: &[Box<str>] = if let Some(which) = &args.watch {
         // Killed while waiting for the agent: nothing to open.
-        let Some((dir, shown)) = agent_run(which, &session)? else {
+        let Some((followed, shown)) = agent_run(which, &session)? else {
             return Ok(());
         };
-        agent = Some(dir);
+        agent = Some(followed);
         picked = vec![shown.to_string_lossy().into()];
         &picked
     } else if args.from.is_empty() {
@@ -677,7 +678,9 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     tui::run(
         &session,
         views,
-        agent.as_deref(),
+        agent
+            .as_ref()
+            .map(|(dir, next)| (dir.as_path(), next.as_deref())),
         args.graphics,
         args.lupin
             .as_deref()
@@ -687,13 +690,18 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     )
 }
 
-/// The folder of the `senna mcp` server `which` names (its pid, or the
-/// newest running one when empty), and the manifest its agent shows,
-/// waited for until it shows one, or the session is stopped.
+/// What `--watch` follows: the folder of a `senna mcp` server and, when
+/// it follows the newest one, the servers' folders, where the next one is
+/// found once it ends.
+type Followed = (std::path::PathBuf, Option<std::path::PathBuf>);
+
+/// The `senna mcp` server `which` names (its pid; else the newest running
+/// one, waited for until one runs), and the manifest its agent shows,
+/// waited for until it shows one; None if the session is stopped first.
 fn agent_run(
     which: &str,
     session: &legume_tui::Session,
-) -> anyhow::Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
+) -> anyhow::Result<Option<(Followed, std::path::PathBuf)>> {
     use anyhow::Context;
     use legume_mcp::watch;
     let pid = match which {
@@ -703,17 +711,33 @@ fn agent_run(
                 .with_context(|| format!("{pid} is not a pid"))?,
         ),
     };
-    let server = watch::find(mcp::SERVER, pid)
-        .into_iter()
-        .next()
-        .with_context(|| match pid {
-            None => "no running `senna mcp`".to_string(),
-            Some(pid) => format!("no running `senna mcp` with pid {pid}"),
-        })?;
+    anyhow::ensure!(
+        watch::base().is_some(),
+        "watching is off ({}=off): no server to follow",
+        watch::ENV
+    );
+    let mut said = false;
+    let server = loop {
+        if let Some(server) = watch::find(mcp::SERVER, pid).into_iter().next() {
+            break server;
+        }
+        if let Some(pid) = pid {
+            anyhow::bail!("no running `senna mcp` with pid {pid}");
+        }
+        if session.stop_requested() {
+            return Ok(None);
+        }
+        if !std::mem::replace(&mut said, true) {
+            eprintln!("senna view: waiting for a `senna mcp` to start");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    };
+    let next = pid.is_none().then(watch::base).flatten();
     let mut said = false;
     loop {
         if let Some(state) = watch::state(&server.dir) {
-            return Ok(Some((server.dir, mcp::agent_view(&state)?.0)));
+            let shown = mcp::agent_view(&state)?.0;
+            return Ok(Some(((server.dir, next), shown)));
         }
         if session.stop_requested() {
             return Ok(None);
