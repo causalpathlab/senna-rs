@@ -29,28 +29,11 @@ pub fn line(argv: &[String]) -> String {
     argv.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")
 }
 
-/// `path` with `.` and `..` resolved: through symlinks as far as it
-/// exists, so two paths into one folder compare alike, then by its words.
+/// `path` absolute, resolved as the system resolves it (links where they
+/// are met, `..` after them), so two paths into one folder compare alike.
 #[must_use]
-pub fn normalize(path: &Path) -> PathBuf {
-    let words = lexical(path);
-    let mut head = words.clone();
-    let mut tail = Vec::new();
-    loop {
-        if let Ok(p) = head.canonicalize() {
-            return tail.iter().rev().fold(p, |p, w| p.join(w));
-        }
-        match (
-            head.file_name().map(std::ffi::OsStr::to_os_string),
-            head.parent(),
-        ) {
-            (Some(w), Some(up)) => {
-                tail.push(w);
-                head = up.to_path_buf();
-            }
-            _ => return words,
-        }
-    }
+pub fn resolved(path: &Path) -> PathBuf {
+    senna::run_manifest::canonical_so_far(&senna::run_manifest::from_cwd(path))
 }
 
 /// `path` with `.` and `..` resolved by its words alone.
@@ -67,7 +50,7 @@ const MAX_UP: usize = 2;
 /// it when that stays near, else absolute. Both absolute.
 #[must_use]
 pub fn relative(path: &Path, base: &Path) -> PathBuf {
-    let (real, base) = (normalize(path), normalize(base));
+    let (real, base) = (resolved(path), resolved(base));
     let common = real
         .components()
         .zip(base.components())

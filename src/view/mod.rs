@@ -528,8 +528,8 @@ fn run_senna(
     argv: &[String],
 ) -> anyhow::Result<()> {
     eprintln!("senna view: {why}; running `senna {}`", argv.join(" "));
-    let mut senna = std::process::Command::new(std::env::current_exe()?);
-    senna.args(argv);
+    // This binary, found even when it was reinstalled while it ran.
+    let mut senna = legume_mcp::own_command(argv)?;
     let status = match session {
         Some(session) => session.run_child(&mut senna)?,
         None => senna.status()?,

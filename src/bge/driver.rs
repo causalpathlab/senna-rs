@@ -352,6 +352,17 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         .batch_files
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
+    // Written before the manifest, which comes last: a run whose manifest
+    // is there has every table.
+    // The phase-1 pseudobulk embeddings, with each pseudobulk's batch: the
+    // geometry the dictionary was trained against. When the per-cell embedding
+    // separates by batch, this table says whether the separation was already
+    // there before phase 2.
+    write_pb_embeddings(knobs.out, &out.pb_embeddings, &plan.unified.batch_names)?;
+    if let Some(fold) = &out.batch_gene_fold {
+        write_batch_gene_fold(knobs.out, fold, &plan.unified.feature_names)?;
+    }
+
     let has_modules = out.model.modules.is_some();
     senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
         train_args: Some(plan.train_args),
@@ -395,15 +406,6 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         has_cell_to_pb: false,
         has_pb_tree: false,
     })?;
-
-    // The phase-1 pseudobulk embeddings, with each pseudobulk's batch: the
-    // geometry the dictionary was trained against. When the per-cell embedding
-    // separates by batch, this table says whether the separation was already
-    // there before phase 2.
-    write_pb_embeddings(knobs.out, &out.pb_embeddings, &plan.unified.batch_names)?;
-    if let Some(fold) = &out.batch_gene_fold {
-        write_batch_gene_fold(knobs.out, fold, &plan.unified.feature_names)?;
-    }
 
     if resolve_etm {
         info!(

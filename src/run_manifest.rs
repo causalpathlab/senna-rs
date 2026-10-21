@@ -1281,9 +1281,7 @@ impl RunManifest {
         }
         // Lexically absolute, not canonical: the recorded paths are as
         // written, so resolving symlinks here alone would skew the rebase.
-        let here = normalize(
-            &std::path::absolute(manifest_dir).unwrap_or_else(|_| manifest_dir.to_path_buf()),
-        );
+        let here = normalize(&from_cwd(manifest_dir));
         let recorded_abs = normalize(Path::new(recorded));
         let trained_in = Path::new(&self.prefix)
             .is_absolute()
@@ -1424,9 +1422,19 @@ impl RunManifest {
         Some(if Path::new(&all).is_file() { all } else { full })
     }
 
+    /// Write the manifest to `path`, through a link, and on to the disk
+    /// before returning: the file keeps its owner, mode and links, and a
+    /// read-only one is refused. Each run writes its manifest last, after
+    /// every table it names; a run killed while writing it can leave it
+    /// cut short, which a reader then fails to parse.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        use std::io::Write;
         let s = serde_json::to_string_pretty(self)?;
-        fs::write(path, s).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
+        let written = fs::File::create(path).and_then(|mut f| {
+            f.write_all(s.as_bytes())?;
+            f.sync_all()
+        });
+        written.map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
         log::info!("wrote {}", path.display());
         Ok(())
     }
@@ -1490,16 +1498,105 @@ fn rel_to_manifest_from(cwd: &Path, manifest_dir: &Path, written_path: &str) -> 
         .into_owned()
 }
 
-/// `p` absolute and normalized, with its longest existing head canonicalized
-/// (a file not written yet still gets its folder's real path).
-fn canonical_so_far(p: &Path) -> PathBuf {
-    let p = normalize(p);
-    p.ancestors()
-        .find_map(|a| {
-            let real = a.canonicalize().ok()?;
-            Some(real.join(p.strip_prefix(a).ok()?))
-        })
-        .unwrap_or(p)
+/// `p` resolved as the system resolves it, one part at a time: a link is
+/// followed where it is met (even to a folder not made yet), `..` steps
+/// back from what is resolved so far, and a part not there yet is taken as
+/// written. For a path that exists this is its canonical path; a file not
+/// written yet still gets its folder's real path. Folding `..` before
+/// following links would put `link/../x` beside the link, not where the
+/// link leads.
+#[must_use]
+pub fn canonical_so_far(p: &Path) -> PathBuf {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::path::Component;
+    /// Links followed before a loop is given up on, as the system does.
+    const MAX_LINKS: usize = 40;
+    /// A part of a path, owned: a root (or drive) to start from, `..`, or
+    /// a name.
+    enum Part {
+        Root(OsString),
+        Up,
+        Name(OsString),
+    }
+    let parts = |p: &Path| -> Vec<Part> {
+        p.components()
+            .filter_map(|c| match c {
+                Component::CurDir => None,
+                Component::ParentDir => Some(Part::Up),
+                Component::Normal(n) => Some(Part::Name(n.to_os_string())),
+                c => Some(Part::Root(c.as_os_str().to_os_string())),
+            })
+            .collect()
+    };
+    let mut todo: VecDeque<Part> = parts(p).into();
+    let mut out = PathBuf::new();
+    let mut links = 0;
+    while let Some(part) = todo.pop_front() {
+        match part {
+            Part::Root(root) => out.push(root),
+            Part::Up => step_back(&mut out),
+            Part::Name(name) => {
+                let next = out.join(&name);
+                match fs::read_link(&next) {
+                    Ok(target) if links < MAX_LINKS => {
+                        links += 1;
+                        let target = unverbatim(target);
+                        // An absolute target starts again from its root; a
+                        // relative one goes on from the link's folder.
+                        if target.is_absolute() {
+                            out = PathBuf::new();
+                        }
+                        for p in parts(&target).into_iter().rev() {
+                            todo.push_front(p);
+                        }
+                    }
+                    _ => out = next,
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `out` one `..` further: a name before it is cancelled; after nothing, a
+/// root or another `..`, the `..` stays (or, at a root, goes).
+fn step_back(out: &mut PathBuf) {
+    use std::path::Component;
+    match out.components().next_back() {
+        Some(Component::Normal(_)) => {
+            out.pop();
+        }
+        Some(Component::RootDir | Component::Prefix(_)) => {}
+        _ => out.push(".."),
+    }
+}
+
+/// A link's target as the rest of the path spells it: on Windows without
+/// its verbatim prefix, which the working directory never has (`\\?\UNC\`
+/// for a share becomes `\\`; `\\?\` before a drive goes).
+fn unverbatim(target: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(t) = target.to_str() {
+        if let Some(share) = t.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{share}"));
+        }
+        if let Some(plain) = t.strip_prefix(r"\\?\") {
+            return PathBuf::from(plain);
+        }
+    }
+    target
+}
+
+/// `p` from the working directory when it is relative, its `.`, `..` and
+/// links as written (unlike `std::path::absolute`, which on Windows folds
+/// `..` first); `p` itself when there is no working directory.
+#[must_use]
+pub fn from_cwd(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    std::env::current_dir().map_or_else(|_| p.to_path_buf(), |d| d.join(p))
 }
 
 /// The directory a manifest (or any file) sits in, `.` for a bare file name.
@@ -1533,15 +1630,7 @@ pub fn normalize(p: &Path) -> PathBuf {
     for c in p.components() {
         match c {
             Component::CurDir => {}
-            // `..` cancels a name before it; after nothing, a root or
-            // another `..` it stays.
-            Component::ParentDir => match out.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                Some(Component::RootDir | Component::Prefix(_)) => {}
-                _ => out.push(".."),
-            },
+            Component::ParentDir => step_back(&mut out),
             c => out.push(c),
         }
     }
@@ -1563,7 +1652,7 @@ pub fn relative_to(p: &Path, base: &Path) -> PathBuf {
 /// it works for paths that no longer exist.
 #[must_use]
 pub fn rebase(path: &Path, from_dir: &Path, to_dir: &Path) -> PathBuf {
-    let abs = |p: &Path| normalize(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+    let abs = |p: &Path| normalize(&from_cwd(p));
     normalize(&abs(to_dir).join(relative_to(&abs(path), &abs(from_dir))))
 }
 
@@ -1970,6 +2059,16 @@ pub struct RunDescription<'a> {
 /// the manifest's own directory — even when the run directory is moved
 /// after writing.
 pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
+    write_run_manifest_with(desc, |_, _| {})
+}
+
+/// [`write_run_manifest`], with `edit` applied before the one write: for a
+/// run that records more than [`RunDescription`] says, so its manifest is
+/// never there without it. `edit` is given the outputs' base name.
+pub fn write_run_manifest_with(
+    desc: &RunDescription<'_>,
+    edit: impl FnOnce(&mut RunManifest, &str),
+) -> anyhow::Result<()> {
     match (desc.carried, desc.feature_embedding_suffix) {
         (Some(c), Some(suffix)) => c.append_to(desc.prefix, suffix)?,
         (Some(_), None) => anyhow::bail!("{}: no ρ file to carry rows into", desc.prefix),
@@ -2061,6 +2160,7 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
         m.outputs.pb_tree = Some(format!("{basename}.pb_tree.json"));
     }
     m.defaults.colour_by = Some(desc.default_colour_by.into());
+    edit(&mut m, &basename);
 
     m.save(Path::new(&path))
 }
@@ -2500,3 +2600,11 @@ mod tests {
         assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
     }
 }
+
+#[cfg(test)]
+#[path = "run_manifest_save_tests.rs"]
+mod save_tests;
+
+#[cfg(test)]
+#[path = "run_manifest_path_tests.rs"]
+mod path_tests;

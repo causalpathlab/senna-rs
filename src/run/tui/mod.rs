@@ -234,13 +234,13 @@ fn fits_status(states: &[jobs::State], finished: bool) -> String {
     line
 }
 
-/// `senna view` on the runs `shown`, as `v` opens them once the screens
-/// are left; [`legume_tui::Session::run_child`] runs it in this session
-/// as this one runs (plain too, when it was asked to be).
-fn view_command(exe: PathBuf, shown: &[String]) -> std::process::Command {
-    let mut view = std::process::Command::new(exe);
-    view.arg("view").arg("-f").args(shown);
-    view
+/// `senna view` on the runs `shown`, run by `senna` (this binary), as `v`
+/// opens them once the screens are left; [`legume_tui::Session::run_child`]
+/// runs it in this session as this one runs (plain too, when it was asked
+/// to be).
+fn view_command(mut senna: std::process::Command, shown: &[String]) -> std::process::Command {
+    senna.arg("view").arg("-f").args(shown);
+    senna
 }
 
 /// Run the screens; `cli` is senna's built command, the source of every
@@ -319,7 +319,9 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
     // Not after a `senna kill`: it asked for the session to end.
     if !app.view.is_empty() && !session.stop_requested() {
         let shown: Vec<String> = app.view.iter().map(|p| app.shown(p)).collect();
-        let mut view = view_command(std::env::current_exe()?, &shown);
+        // This binary, found even when it was reinstalled while it ran.
+        let senna = legume_mcp::own_command(std::iter::empty::<&str>())?;
+        let mut view = view_command(senna, &shown);
         // In the same session: a `senna kill` reaches it through us.
         session.run_child(&mut view)?;
     }
@@ -1210,7 +1212,7 @@ impl App {
         let abs = self.here.join(&self.rows[i].out);
         let dir = abs
             .parent()
-            .map_or_else(|| self.here.clone(), script::normalize);
+            .map_or_else(|| self.here.clone(), script::resolved);
         let name = abs
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

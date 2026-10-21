@@ -10,11 +10,22 @@ use std::process::{Command, ExitStatus, Stdio};
 /// A `senna mcp` session given `calls` (id, tool, arguments) after the
 /// handshake: every message it wrote, and how it ended.
 fn session(calls: &[(u64, &str, Value)]) -> (Vec<Value>, ExitStatus) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_senna"))
-        .arg("mcp")
-        // No records in the repository, no live feed left behind.
-        .env(legume_mcp::project::OFF_ENV, "off")
-        .env(legume_mcp::watch::ENV, "off")
+    session_in(None, calls)
+}
+
+/// [`session`] keeping its records in `project` when given (none else, so
+/// nothing lands in the repository); never a live feed.
+fn session_in(
+    project: Option<&std::path::Path>,
+    calls: &[(u64, &str, Value)],
+) -> (Vec<Value>, ExitStatus) {
+    let mut server = Command::new(env!("CARGO_BIN_EXE_senna"));
+    server.arg("mcp").env(legume_mcp::watch::ENV, "off");
+    match project {
+        Some(p) => server.env(legume_mcp::project::ROOT_ENV, p),
+        None => server.env(legume_mcp::project::OFF_ENV, "off"),
+    };
+    let mut child = server
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -95,19 +106,78 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
     assert!(help.contains("--out"), "{help}");
 }
 
+#[cfg(unix)]
 #[test]
-fn a_background_fit_returns_a_job_and_the_same_out_twice_gets_the_same_job() {
+fn a_background_fit_returns_a_job_and_the_same_out_again_however_spelled_is_refused_naming_it() {
     let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("fit").to_string_lossy().into_owned();
-    let fit = json!({"method": "svd", "data": ["missing.zarr"], "out": out, "background": true});
-    let (messages, _) = session(&[call(1, "run_fit", fit.clone()), call(2, "run_fit", fit)]);
+    // A data file nobody writes: senna blocks opening it, so the job still
+    // runs when the same out is asked for again (and ends with the server).
+    let data = dir.path().join("data.zarr.zip");
+    assert!(Command::new("mkfifo")
+        .arg(&data)
+        .status()
+        .unwrap()
+        .success());
+    // The same out, the first time spelled through a folder and back.
+    std::fs::create_dir(dir.path().join("runs")).unwrap();
+    let fit = |out: std::path::PathBuf| json!({"method": "svd", "data": [&data], "out": out, "background": true});
+    let (messages, status) = session(&[
+        call(1, "run_fit", fit(dir.path().join("runs/../fit"))),
+        call(2, "run_fit", fit(dir.path().join("fit"))),
+    ]);
+    // Should the fit outlive its server, opening the pipe frees it: read
+    // and write, so the open itself never waits.
+    drop(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&data),
+    );
+    assert!(
+        status.success(),
+        "the server stops its job and ends cleanly"
+    );
     // Replies only: a job's progress may come between them.
     let replies: Vec<&Value> = messages.iter().filter(|m| m.get("id").is_some()).collect();
-    let job = |k: usize| replies[k]["result"]["structuredContent"]["job"].clone();
-    assert!(
-        job(1).as_str().unwrap().starts_with("job-"),
-        "{}",
-        replies[1]
+    let job = replies[1]["result"]["structuredContent"]["job"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", replies[1]));
+    assert!(job.starts_with("job-"));
+    let again = &replies[2]["result"];
+    assert_eq!(again["isError"], true, "{}", replies[2]);
+    let said = again["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(said.contains(&format!("by {job}:")), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fit_with_no_out_takes_the_first_name_no_running_fit_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data.zarr.zip");
+    assert!(Command::new("mkfifo")
+        .arg(&data)
+        .status()
+        .unwrap()
+        .success());
+    let fit = json!({"method": "svd", "data": [&data], "background": true});
+    let (messages, status) = session_in(
+        Some(dir.path()),
+        &[call(1, "run_fit", fit.clone()), call(2, "run_fit", fit)],
     );
-    assert_eq!(job(2), job(1), "{}", replies[2]);
+    drop(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&data),
+    );
+    assert!(status.success());
+    let replies: Vec<&Value> = messages.iter().filter(|m| m.get("id").is_some()).collect();
+    let run = |k: usize| {
+        replies[k]["result"]["structuredContent"]["run"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{}", replies[k]))
+            .to_string()
+    };
+    assert!(run(1).ends_with("/data_svd.senna.json"), "{}", run(1));
+    assert!(run(2).ends_with("/data_svd_2.senna.json"), "{}", run(2));
 }

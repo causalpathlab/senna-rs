@@ -834,7 +834,7 @@ pub fn run_td_rbm(args: &TdRbmArgs) -> anyhow::Result<()> {
 /// recorded beside them, with the input and its partition.
 fn write_manifest(args: &TdRbmArgs, inputs: &Inputs, has_pb_tree: bool) -> anyhow::Result<()> {
     use senna::run_manifest::{
-        record_train_args, write_run_manifest, RunDescription, RunKind, RunManifest,
+        record_train_args, write_run_manifest_with, RunDescription, RunKind,
     };
     let prefix: &str = &args.out;
     let input: Vec<String> = inputs.data_files.iter().map(ToString::to_string).collect();
@@ -843,43 +843,44 @@ fn write_manifest(args: &TdRbmArgs, inputs: &Inputs, has_pb_tree: bool) -> anyho
         .as_deref()
         .map(|v| v.iter().map(ToString::to_string).collect())
         .unwrap_or_default();
-    write_run_manifest(&RunDescription {
-        train_args: Some(record_train_args(args)?),
-        kind: RunKind::TdRbm,
-        prefix,
-        data_input: &input,
-        data_multiome: None,
-        data_batch: &batch,
-        data_input_null: &[],
-        dictionary_suffix: Some("dictionary.parquet"),
-        has_model: false,
-        has_cell_proj: true,
-        pb_gene_suffix: None,
-        pb_latent_suffix: None,
-        pb_reference_suffix: None,
-        dictionary_empirical_suffix: None,
-        feature_embedding_suffix: Some("feature_embedding.parquet"),
-        feature_coembedding_suffix: None,
-        carried: None,
-        module_membership_suffix: None,
-        module_dictionary_suffix: None,
-        softmax_dictionary_suffix: None,
-        cell_embedding_suffix: Some("cell_embedding.parquet"),
-        cell_encoder_suffix: None,
-        default_colour_by: "cluster",
-        has_latent: true,
-        has_cell_to_pb: true,
-        has_pb_tree,
-    })?;
-    let path = std::path::PathBuf::from(format!("{prefix}.senna.json"));
-    let (mut m, _) = RunManifest::load(&path)?;
-    let base = std::path::Path::new(prefix)
-        .file_name()
-        .map_or_else(|| prefix.to_string(), |n| n.to_string_lossy().into_owned());
-    m.outputs.cell_time = Some(format!("{base}.cell_time.parquet"));
-    m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
-    m.outputs.cell_state = Some(format!("{base}.cell_state.parquet"));
-    m.save(&path)
+    // Its time, velocity and state tables are in the manifest from the
+    // start: it is written once, last.
+    let record_time = |m: &mut senna::run_manifest::RunManifest, base: &str| {
+        m.outputs.cell_time = Some(format!("{base}.cell_time.parquet"));
+        m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
+        m.outputs.cell_state = Some(format!("{base}.cell_state.parquet"));
+    };
+    write_run_manifest_with(
+        &RunDescription {
+            train_args: Some(record_train_args(args)?),
+            kind: RunKind::TdRbm,
+            prefix,
+            data_input: &input,
+            data_multiome: None,
+            data_batch: &batch,
+            data_input_null: &[],
+            dictionary_suffix: Some("dictionary.parquet"),
+            has_model: false,
+            has_cell_proj: true,
+            pb_gene_suffix: None,
+            pb_latent_suffix: None,
+            pb_reference_suffix: None,
+            dictionary_empirical_suffix: None,
+            feature_embedding_suffix: Some("feature_embedding.parquet"),
+            feature_coembedding_suffix: None,
+            carried: None,
+            module_membership_suffix: None,
+            module_dictionary_suffix: None,
+            softmax_dictionary_suffix: None,
+            cell_embedding_suffix: Some("cell_embedding.parquet"),
+            cell_encoder_suffix: None,
+            default_colour_by: "cluster",
+            has_latent: true,
+            has_cell_to_pb: true,
+            has_pb_tree,
+        },
+        record_time,
+    )
 }
 
 /// Put a given table's rows into `rho` (`[G × H]` row-major) and mark them
