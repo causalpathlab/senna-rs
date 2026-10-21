@@ -81,7 +81,8 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > the question, the data, and how the result will be checked. `run_fit` runs a
 > fit to its end (`run_help` lists a method's flags) and returns its run
 > manifest; an existing run is not fitted again. A long fit runs with
-> `background`, as a job to follow with `job_wait`. `view_open` opens a run (or a
+> `background`, as a job to follow with `job_wait`, in a session of `senna run`
+> the user can watch with `senna attach`. `view_open` opens a run (or a
 > lupin round) and computes a missing layout or clustering first. `view_map`
 > draws the map with its legend; its arguments stay set until changed, so pass
 > only what changes. `view_markers` lists what sets a group apart, `view_cell`
@@ -91,7 +92,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 
 | Tool | Does |
 |---|---|
-| `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow |
+| `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
 | `run_help` | every flag of one method, with its help |
 | `view_open` | opens a run or a lupin round: its maps, groupings and the groups shown, a missing layout or clustering computed first |
 | `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, window and zoom |

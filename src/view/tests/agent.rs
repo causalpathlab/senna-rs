@@ -9,7 +9,23 @@ struct Server(tempfile::TempDir);
 
 impl Server {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        Self::in_dir(tempfile::tempdir().unwrap())
+    }
+
+    /// A server's folder in `base`, as servers keep theirs side by side,
+    /// the `nth` to start there (servers are listed by when they started).
+    fn in_base(base: &std::path::Path, nth: u64) -> Self {
+        let server = Self::in_dir(tempfile::tempdir_in(base).unwrap());
+        let started = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 + nth);
+        std::fs::File::options()
+            .write(true)
+            .open(server.0.path().join("meta.json"))
+            .and_then(|f| f.set_modified(started))
+            .unwrap();
+        server
+    }
+
+    fn in_dir(dir: tempfile::TempDir) -> Self {
         let meta = Meta {
             server: "senna".into(),
             version: "0".into(),
@@ -60,7 +76,7 @@ fn watching(server: &Server) -> App {
     );
     // Styles the view saves go to the server's folder, not the repository.
     app.scene.data.prefix = server.0.path().join("r").to_string_lossy().into();
-    app.agent = Some(Agent::open(server.0.path()).unwrap());
+    app.agent = Some(Agent::open(server.0.path(), None).unwrap());
     app.layout(Rect::new(0, 0, 80, 24), 1);
     app
 }
@@ -286,4 +302,53 @@ fn a_failed_call_says_why_its_last_line() {
         rows.iter().any(|r| r == "  Error: no such file x.zarr"),
         "{rows:?}"
     );
+}
+
+#[test]
+fn when_the_server_followed_ends_the_view_follows_the_next_one() {
+    let base = tempfile::tempdir().unwrap();
+    let first = Server::in_base(base.path(), 1);
+    first.show(view("cluster", "C1", None));
+    let mut app = watching(&first);
+    app.agent = Some(Agent::open(first.0.path(), Some(base.path())).unwrap());
+    tick(&mut app);
+    // A second server starts; the first one ends.
+    let second = Server::in_base(base.path(), 2);
+    second.show(view("cluster", "C0", None));
+    first.say(Body::Ended { ok: true });
+    assert!(tick(&mut app));
+    let agent = app.agent.as_ref().unwrap();
+    assert_eq!(agent.dir(), second.0.path());
+    assert_eq!(agent.rows()[0], "agent · following");
+    tick(&mut app);
+    assert_eq!(
+        app.scene.focused_name().as_deref(),
+        Some("C0"),
+        "the next one's view"
+    );
+
+    // Paused by hand, the view stays paused on the next server.
+    app.handle(key('c'));
+    let third = Server::in_base(base.path(), 3);
+    third.show(view("cluster", "C1", None));
+    second.say(Body::Ended { ok: true });
+    // Looked for again once its wait between looks is over.
+    let start = std::time::Instant::now();
+    while app.agent.as_ref().unwrap().dir() != third.0.path() {
+        assert!(start.elapsed().as_secs() < 10, "never moved to the third");
+        tick(&mut app);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    tick(&mut app);
+    let rows = app.agent.as_ref().unwrap().rows();
+    assert_eq!(rows[0], "agent · paused · W follows");
+
+    // Following a server by its pid, or one that ended with none after
+    // it: it stays on that one, ended.
+    let lone = Server::new();
+    let mut app = watching(&lone);
+    lone.say(Body::Ended { ok: true });
+    tick(&mut app);
+    assert_eq!(app.agent.as_ref().unwrap().dir(), lone.0.path());
+    assert_eq!(app.agent.as_ref().unwrap().rows()[0], "agent · ended");
 }

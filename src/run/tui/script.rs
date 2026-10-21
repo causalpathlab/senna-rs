@@ -99,7 +99,8 @@ pub fn command_lines(argv: &[String], tool: Tool) -> Vec<String> {
 }
 
 /// The script for `argv` (without the program `tool`), whose `--out` is
-/// `out`.
+/// `out`, written beside its out: it runs from the folder `out` is
+/// relative to.
 #[must_use]
 pub fn text(argv: &[String], out: &str, tool: Tool) -> String {
     let result = format!("${{out}}.{}", tool.result());
@@ -111,7 +112,13 @@ pub fn text(argv: &[String], out: &str, tool: Tool) -> String {
         quote(out)
     ));
     s.push_str("set -euo pipefail\n");
-    s.push_str("cd \"$(dirname \"$0\")\"\n");
+    // Beside its out, which may be in a folder of where the run started:
+    // run from there.
+    let up = Some(Path::new(out))
+        .filter(|o| o.is_relative())
+        .and_then(Path::parent)
+        .map_or(0, |p| p.components().count());
+    s.push_str(&format!("cd \"$(dirname \"$0\")\"{}\n", "/..".repeat(up)));
     s.push_str(&format!("export RUST_LOG=\"${{RUST_LOG:-{LOG_LEVEL}}}\"\n"));
     s.push_str(&format!("out={}\n", quote(out)));
     s.push_str(&format!("if [ -f \"{result}\" ]; then\n"));

@@ -52,7 +52,7 @@ annotation is lupin's own server. Open the day with `notebook` (kind `plan`): \
 the question, the data, and how the result will be checked. `run_fit` runs a \
 fit to its end (`run_help` lists a method's flags) and returns its run \
 manifest; an existing run is not fitted again. A long fit runs with \
-`background`, as a job to follow with `job_wait`. `view_open` opens a run (or a \
+`background`, as a job to follow with `job_wait`, in a session of `senna run` the user can watch with `senna attach`. `view_open` opens a run (or a \
 lupin round) and computes a missing layout or clustering first. `view_map` \
 draws the map with its legend; its arguments stay set until changed, so pass \
 only what changes. `view_markers` lists what sets a group apart, `view_cell` \
@@ -185,14 +185,9 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
     if a.background {
         // Returned at once: the agent follows the job, and opens the run
         // once it is done.
-        let job = cx
-            .spawn_job(senna(&argv)?, outputs, &summary)
-            .with_context(fit)?;
-        return Ok(vec![Content::Json(json!({
-            "job": job,
-            "run": manifest,
-            "note": "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done",
-        }))]);
+        let mut job = background_fit(cx, &out, &argv, outputs, &summary).with_context(fit)?;
+        job["run"] = json!(manifest);
+        return Ok(vec![Content::Json(job)]);
     }
     cx.progress(&format!("senna {} → {out}", a.method));
     cx.run_making(senna(&argv)?, outputs, &summary)
@@ -200,6 +195,52 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
     Ok(vec![Content::Json(
         json!({ "run": manifest, "kind": kind(&manifest)?, "fitted": true }),
     )])
+}
+
+/// The fit `senna {argv}` in the background, from this server's folder:
+/// on `senna run`'s Run screen in a session of its own, which a
+/// person can attach to and which outlives this server; where there are
+/// no sessions, a job of this server's. The job, as the agent is told it.
+fn background_fit(
+    cx: &Call,
+    out: &str,
+    argv: &[String],
+    outputs: &[PathBuf],
+    summary: &str,
+) -> Result<Value> {
+    #[cfg(unix)]
+    {
+        let mut watch = legume_mcp::own_command(["run", "--"])?;
+        watch.args(argv);
+        let label = Path::new(out)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        let started = cx.start_session_job(legume_mcp::SessionJob {
+            tool: crate::tui::TOOL,
+            screen: "fit".into(),
+            label,
+            watch,
+            record: senna(argv)?,
+            outputs: outputs.to_vec(),
+            summary: summary.into(),
+        })?;
+        let session = started.session;
+        Ok(json!({
+            "job": started.job,
+            "session": session,
+            "note": format!(
+                "the fit runs as this job, on senna run's screen in session {session} (`senna attach {session}` shows it to the user), and goes on if this server ends; follow it with job_status or job_wait, then open the run with view_open once the job is done"
+            ),
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = out;
+        Ok(json!({
+            "job": cx.spawn_job(senna(argv)?, outputs, summary)?,
+            "note": "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done",
+        }))
+    }
 }
 
 /// `senna {argv}` as a child, verbose: its log is the call's progress.

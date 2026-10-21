@@ -9,7 +9,7 @@
 //! after it, run them without, or stop.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -457,8 +457,13 @@ fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper)
     if job.result().exists() {
         return State::Failed(format!("{} exists", job.result().display()));
     }
-    if let Err(e) = legume_numeric::matrix::common_io::mkdir(&job.dir.to_string_lossy()) {
-        return State::Failed(format!("cannot make {}: {e}", job.dir.display()));
+    // Where its script and out go: its folder, or one in it.
+    let folder = job
+        .script()
+        .parent()
+        .map_or(job.dir.clone(), Path::to_path_buf);
+    if let Err(e) = legume_numeric::matrix::common_io::mkdir(&folder.to_string_lossy()) {
+        return State::Failed(format!("cannot make {}: {e}", folder.display()));
     }
     for w in &job.labels {
         if let Err(e) = super::batches::write(w) {

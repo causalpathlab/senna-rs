@@ -139,3 +139,35 @@ fn a_mung_script_runs_mung_and_guards_its_clones() {
         "\"${MUNG:-mung}\" clones \\\n  d.zarr \\\n  --out \"$out\" \\\n  --gff g.gtf\n"
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_script_for_an_out_in_a_folder_runs_from_where_the_run_started() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("runs")).unwrap();
+    std::fs::write(dir.path().join("d.zarr"), "").unwrap();
+    // A stand-in senna that reads its data where it was given, and
+    // writes the manifest its --out names.
+    let fake = dir.path().join("fake-senna");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n[ -e d.zarr ] || exit 3\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = dir.path().join("runs/r.cmd.sh");
+    let a = argv(&["svd", "d.zarr", "--out", "runs/r"]);
+    write(&path, "runs/r", &a, Tool::Senna).unwrap();
+    let run = || {
+        std::process::Command::new("bash")
+            .arg(&path)
+            .env("SENNA", &fake)
+            .output()
+            .unwrap()
+    };
+    let first = run();
+    assert!(first.status.success(), "{first:?}");
+    assert!(dir.path().join("runs/r.senna.json").exists());
+    assert!(!run().status.success(), "refuses to run over its result");
+}
