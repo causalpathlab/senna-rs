@@ -182,9 +182,10 @@ pub fn query_load(
 pub fn trained_modalities(trained_features: &[Box<str>]) -> Vec<Box<str>> {
     // A multiome load namespaces every row as `{name}/{modality}` — exactly
     // one separator. Anything else is a different grammar: faba writes
-    // `{gene}/{modality}/{channel}`, whose trailing field is a splice channel. Reading that as a modality would route such a
-    // model's query down the multiome path and re-scope its whole feature axis, so
-    // require the two-field shape on every row.
+    // `{gene}/{modality}/{channel}`, whose trailing field is a splice
+    // channel. Reading that as a modality would route such a model's query
+    // down the multiome path and re-scope its whole feature axis, so require
+    // the two-field shape on every row.
     if trained_features.is_empty()
         || !trained_features
             .iter()

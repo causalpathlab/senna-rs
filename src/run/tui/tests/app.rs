@@ -1059,8 +1059,11 @@ fn long_lists_scroll_to_keep_the_cursor_on_a_small_terminal() {
     assert!(text.contains("more"), "{text}");
     a.screen = Screen::Methods;
     a.method_row = a.rows.len() - 1;
-    let text = drawn(&a, 80, 16);
-    assert!(text.contains("rbm"), "{text}");
+    let last = a.rows[a.method_row].form.name.clone();
+    let text = drawn(&a, 80, 10);
+    assert!(text.contains(&last), "{text}");
+    let first = format!("] {} ", a.rows[0].form.name);
+    assert!(!text.contains(&first), "the list scrolled: {text}");
 }
 
 #[test]

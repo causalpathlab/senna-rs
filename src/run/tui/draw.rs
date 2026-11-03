@@ -562,18 +562,12 @@ impl App {
                 at = lines.len();
             }
             lines.push(Line::from(Span::styled(fit(&text, w), style)));
-            // Notes under a row, wrapped by word under its name.
-            let note = |lines: &mut Vec<Line<'static>>, text: &str, style: Style| {
-                for l in crate::tui::wrap_words(text, w.saturating_sub(6)) {
-                    lines.push(Line::from(Span::styled(format!("      {l}"), style)));
-                }
-            };
             if r.tool == Tool::Mung {
-                note(
-                    &mut lines,
-                    "runs first; once it is done you see its clones and choose whether the fits get --cnv-clones",
-                    hint(),
-                );
+                // A note under the row, wrapped by word under its name.
+                let note = "runs first; once it is done you see its clones and choose whether the fits get --cnv-clones";
+                for l in crate::tui::wrap_words(note, w.saturating_sub(6)) {
+                    lines.push(Line::from(Span::styled(format!("      {l}"), hint())));
+                }
                 lines.push(Line::from(""));
             }
         }

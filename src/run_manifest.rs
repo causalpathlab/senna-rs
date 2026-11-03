@@ -960,18 +960,16 @@ pub struct RunOutputs {
     /// by the topic-family fits whose collapse rewrote the high bits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_tree: Option<String>,
-    /// `{out}.cell_time.parquet` — a time fit's: every cell's lineage,
-    /// time within it and its spread, start, tree cluster and lineage
-    /// posterior (string and number columns, keyed by `cell`).
+    /// `{out}.cell_time.parquet`, read by `senna view` when present: every
+    /// cell's lineage, time within it and its spread, start, tree cluster
+    /// and lineage posterior (string and number columns, keyed by `cell`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_time: Option<String>,
-    /// `{out}.cell_velocity.parquet` — a time fit's: every cell's
-    /// velocity in the coordinates of `cell_embedding`, row for row.
+    /// `{out}.cell_velocity.parquet`, read by `senna view` when present:
+    /// every cell's velocity in the coordinates of `cell_embedding`, row
+    /// for row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_velocity: Option<String>,
-    /// `{out}.cell_state.parquet` — a time fit's: every cell's state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cell_state: Option<String>,
     /// Fields this version does not know, written by another tool or a
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]
@@ -1911,10 +1909,7 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
             m.kind
         ),
     }
-    inherited(m, &dir)
-}
-
-fn inherited(m: RunManifest, dir: &Path) -> anyhow::Result<InheritedFromManifest> {
+    let dir = dir.as_path();
     let to_box = |s: &str| -> Box<str> { resolve(dir, s).to_string_lossy().into_owned().into() };
     let data_files = m.data_inputs(dir);
     let batch_files = m.data_batches(dir);
