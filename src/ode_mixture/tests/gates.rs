@@ -212,7 +212,7 @@ fn with_no_dynamics_the_direction_is_undetermined() {
 /// unspliced share looks like a shared rate change). It needs the
 /// per-pseudobulk unspliced-share term.
 #[test]
-#[ignore = "fails: a shared unspliced drift alone calls a direction"]
+#[ignore = "fails: a shared unspliced drift alone calls a direction; profiling every pseudobulk's unspliced share fixes it but loses the shared share's kinetic evidence (time origin, speeds), so not the default"]
 fn a_shared_unspliced_drift_alone_is_not_a_direction() {
     for drift in [1.0, 3.0] {
         let c = call(&config(true, drift, 1));
@@ -237,7 +237,7 @@ fn with_kinetics_the_direction_survives_a_shared_unspliced_drift() {
 /// The rate gate under the drift. It fails: the drift is read as a shared
 /// change of rates.
 #[test]
-#[ignore = "fails: a shared unspliced drift biases the rates"]
+#[ignore = "fails: a shared unspliced drift biases the rates; see a_shared_unspliced_drift_alone_is_not_a_direction"]
 fn with_kinetics_the_rates_survive_a_shared_unspliced_drift() {
     for drift in [1.0, 3.0] {
         let c = call(&config(false, drift, 1));
