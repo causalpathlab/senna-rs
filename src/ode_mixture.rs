@@ -4,6 +4,8 @@
 
 pub mod kernel;
 pub mod kinetics;
+pub mod likelihood;
+pub mod model;
 #[cfg(test)]
 pub mod sim;
 
