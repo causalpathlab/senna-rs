@@ -241,6 +241,38 @@ impl Fit {
         self.objective(&dev)?.to_scalar::<f32>()
     }
 
+    /// `Σ_p log π_ℓ p(x_p | ℓ, k)` with every pseudobulk held at its row
+    /// `rows[p] = ℓ n + k`, the multinomial (no coefficient), plus the log
+    /// priors.
+    pub fn held_objective(&self, reads: &DeviceReads, rows: &Tensor) -> Result<Tensor> {
+        let (l, n, _, _) = self.dims;
+        let (u, s) = self.levels()?;
+        let z = (u.sum_keepdim(1)? + s.sum_keepdim(1)?)?.log()?;
+        let lu = u.log()?.broadcast_sub(&z)?.index_select(rows, 0)?;
+        let ls = s.log()?.broadcast_sub(&z)?.index_select(rows, 0)?;
+        let ll = ((&reads.u * lu)? + (&reads.s * ls)?)?.sum_all()?;
+        let log_pi = log_softmax(self.logit_pi.as_tensor(), D::Minus1)?
+            .unsqueeze(2)?
+            .broadcast_as((1, l, n))?
+            .reshape((l * n,))?
+            .index_select(rows, 0)?
+            .sum_all()?;
+        (ll + log_pi)? + self.log_prior()?
+    }
+
+    /// `steps` of Adam at `lr` on [`Self::held_objective`] per read; the
+    /// objective after.
+    pub fn adam_held(&self, reads: &Reads, rows: &[u32], steps: usize, lr: f64) -> Result<f32> {
+        let dev = self.reads(reads)?;
+        let rows = Tensor::from_vec(rows.to_vec(), (rows.len(),), self.eta.device())?;
+        let mut opt = adam(self.vars(), lr)?;
+        for _ in 0..steps {
+            let loss = (self.held_objective(&dev, &rows)? / -dev.total)?;
+            opt.backward_step(&loss)?;
+        }
+        self.held_objective(&dev, &rows)?.to_scalar::<f32>()
+    }
+
     /// Every pseudobulk's posterior over lineages `[P][L]` and its mean
     /// time on its lineages, `[P]` (lineage time, `k T_ℓ/(n − 1)`).
     pub fn posterior(&self, reads: &DeviceReads) -> Result<(Vec<Vec<f64>>, Vec<f64>)> {

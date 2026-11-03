@@ -1,6 +1,7 @@
 mod blocks;
 mod branch;
 mod fit;
+mod gates;
 mod init;
 mod kernel;
 mod kinetics;
