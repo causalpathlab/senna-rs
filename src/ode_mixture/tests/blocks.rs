@@ -300,78 +300,111 @@ fn diagnostic_gene_laplace() {
     );
 }
 
-/// From a flat path, a lineage's path is found: the chain reaches the
-/// truth's log-likelihood and every gene's log transcription over time.
+/// From the posterior mode (Adam from the truth), the path block alone,
+/// genes, latents and depths held: it mixes. The move is the generalized
+/// elliptical slice on the Gauss–Newton Laplace approximation
+/// (`path_laplace`, `path_gess_step`); `PLAIN=1` runs plain ESS on the
+/// prior instead, for comparison. Followed are the invariants a
+/// path sets, log transcription `ρ_gᵀz(t_k) + b_g` of a few genes at a few
+/// times, and the reads' log-likelihood; their effective draws are reported
+/// and must not be few. (A start from a flat path, as this test once
+/// tried, is the climb's job, not the sampler's.)
 #[test]
-#[ignore = "prior-shaped ESS from a flat path is too slow (8400 nats short after 400 sweeps); the sampler starts paths at the Adam mode"]
-fn a_lineages_path_is_found_from_a_flat_start() {
-    use crate::ode_mixture::blocks::{path_ll, path_step};
+fn a_lineages_path_mixes_from_the_mode() {
+    use crate::ode_mixture::blocks::{path_gess_step, path_laplace, path_ll, path_step};
+    use crate::ode_mixture::fit::Fit;
     use crate::ode_mixture::kernel::GridPrior;
+    use crate::ode_mixture::likelihood::table;
+    use legume_numeric::candle::candle_core::Device;
+    use legume_numeric::mcmc::engine::diagnostics::ess;
     let cfg = SimConfig {
         fine: 133,
         ..SimConfig::default()
     };
     let sim = simulate(&cfg).unwrap();
-    let truth = truth_params(&sim, 133, 45);
     let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
-    let lv = truth.levels();
+    let grid = GridPrior::new(45, 1.0, cfg.kappa).unwrap();
+    let fit = Fit::from_params(&truth_params(&sim, 133, 45), &grid, &Device::Cpu).unwrap();
+    fit.adam(&reads, 2000, 0.01).unwrap();
+    let mut params = fit.params().unwrap();
+    // Every pseudobulk at its most likely grid point at the mode.
+    let lv = params.levels();
+    let tab = table(&reads, &lv);
     let rows: Vec<usize> = (0..sim.n_pb)
-        .map(|p| (sim.truth.time[p] / (cfg.t_len / 44.0)).round() as usize)
+        .map(|p| {
+            (0..tab.ncols())
+                .max_by(|&a, &b| tab[(p, a)].total_cmp(&tab[(p, b)]))
+                .unwrap()
+        })
         .collect();
     let lambda = reads.depths(&rows, &lv);
-    let prior = GridPrior::new(45, cfg.t_len, cfg.kappa * cfg.t_len).unwrap();
-    let h = truth.rho[0].len();
-    let at_truth = path_ll(&truth, 0, &reads, &rows, &lambda);
-
-    let mut params = truth.clone();
-    params.path[0] = vec![vec![0.0; h]; 45];
-    let mut eta = vec![nalgebra::DVector::<f64>::zeros(45); h];
-    let mut ll = f64::NEG_INFINITY;
+    let h = params.rho[0].len();
+    let mut eta: Vec<nalgebra::DVector<f64>> = (0..h)
+        .map(|d| grid.whiten(&nalgebra::DVector::from_fn(45, |k, _| params.path[0][k][d])))
+        .collect();
+    let followed: Vec<(usize, usize)> = [0, 3, 11]
+        .iter()
+        .flat_map(|&g| [2usize, 22, 42].map(|k| (g, k)))
+        .collect();
+    let log_alpha = |p: &crate::ode_mixture::model::Params, (g, k): (usize, usize)| {
+        p.rho[g]
+            .iter()
+            .zip(&p.path[0][k])
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            + p.base[g]
+    };
+    let prior = GenePrior::default();
     let mut rng = StdRng::seed_from_u64(4);
-    let mut lls = Vec::new();
-    for _ in 0..400 {
-        (eta, ll) = path_step(
-            &mut params,
-            0,
-            &eta,
-            ll,
-            &prior,
-            &reads,
-            &rows,
-            &lambda,
-            &GenePrior::default(),
-            &mut rng,
-        );
-        lls.push(ll);
+    let mut ll = f64::NEG_INFINITY;
+    let moves = 1500;
+    let mut traces = vec![Vec::with_capacity(moves); followed.len() + 1];
+    let t0 = std::time::Instant::now();
+    let plain = std::env::var("PLAIN").is_ok();
+    let prop = path_laplace(&params, 0, &eta, &grid, &reads, &rows, &lambda, &prior);
+    for _ in 0..moves {
+        (eta, ll) = if plain {
+            path_step(
+                &mut params,
+                0,
+                &eta,
+                ll,
+                &grid,
+                &reads,
+                &rows,
+                &lambda,
+                &prior,
+                &mut rng,
+            )
+        } else {
+            path_gess_step(
+                &mut params,
+                0,
+                &eta,
+                ll,
+                &grid,
+                &reads,
+                &rows,
+                &lambda,
+                &prior,
+                &prop,
+                &mut rng,
+            )
+        };
+        for (i, &at) in followed.iter().enumerate() {
+            traces[i].push(log_alpha(&params, at) as f32);
+        }
+        traces[followed.len()].push(path_ll(&params, 0, &reads, &rows, &lambda) as f32);
     }
-    let late: f64 = lls[300..].iter().sum::<f64>() / 100.0;
-    let err: f64 = (0..sim.n_genes)
-        .map(|g| {
-            (0..45)
-                .map(|k| {
-                    let fit: f64 = params.path[0][k]
-                        .iter()
-                        .zip(&truth.rho[g])
-                        .map(|(a, b)| a * b)
-                        .sum();
-                    let tru: f64 = truth.path[0][k]
-                        .iter()
-                        .zip(&truth.rho[g])
-                        .map(|(a, b)| a * b)
-                        .sum();
-                    (fit - tru).abs()
-                })
-                .sum::<f64>()
-                / 45.0
-        })
-        .sum::<f64>()
-        / sim.n_genes as f64;
-    eprintln!("log-likelihood: truth {at_truth:.1}, chain late {late:.1}; mean |Δ log α| {err:.3}");
-    assert!(
-        late > at_truth - 3.0 * ((45 * h) as f64).sqrt(),
-        "the chain is short of the truth"
+    let eff: Vec<f32> = traces.iter().map(|t| ess(t).round()).collect();
+    eprintln!(
+        "{moves} path moves in {:.1} s; effective draws: log α at (gene, point) {followed:?}: {:?}; reads' log-likelihood {}",
+        t0.elapsed().as_secs_f64(),
+        &eff[..followed.len()],
+        eff[followed.len()]
     );
-    assert!(err < 0.1, "log transcription off by {err}");
+    let worst = eff.iter().cloned().fold(f32::INFINITY, f32::min);
+    assert!(worst > 100.0, "{worst} effective draws of {moves}");
 }
 
 /// The path's conditional carries the genes' prior: `b̃ = b + ρᵀz̄ − log γ`
@@ -385,7 +418,7 @@ fn a_lineages_path_is_found_from_a_flat_start() {
 /// `d = b − log γ − m`, `(m, s)` the prior on `b̃`.
 #[test]
 fn the_path_block_carries_the_genes_prior_through_the_path_mean() {
-    use crate::ode_mixture::blocks::path_step;
+    use crate::ode_mixture::blocks::{path_gess_step, path_laplace, path_step};
     use crate::ode_mixture::kernel::GridPrior;
     use crate::ode_mixture::model::Params;
     let n = 5;
@@ -410,28 +443,59 @@ fn the_path_block_carries_the_genes_prior_through_the_path_mean() {
     let want_mean = -rho * d * q / (s * s + rho * rho * q);
     let want_var = q * s * s / (s * s + rho * rho * q);
 
-    let mut eta = vec![nalgebra::DVector::<f64>::zeros(n)];
-    let mut ll = f64::NEG_INFINITY;
-    let mut rng = StdRng::seed_from_u64(3);
-    let mut z_bar = Vec::new();
-    for _ in 0..40_000 {
-        (eta, ll) = path_step(
-            &mut params,
-            0,
-            &eta,
-            ll,
-            &grid,
-            &reads,
-            &[],
-            &[],
-            &gene_prior,
-            &mut rng,
+    // The plain move, then the preconditioned one, its proposal built on an
+    // anchor away from the mode (the move is exact whatever it is built on).
+    let anchor = vec![nalgebra::DVector::from_element(n, 0.7)];
+    let prop = path_laplace(&params, 0, &anchor, &grid, &reads, &[], &[], &gene_prior);
+    for preconditioned in [false, true] {
+        let mut eta = vec![nalgebra::DVector::<f64>::zeros(n)];
+        let mut ll = f64::NEG_INFINITY;
+        let mut rng = StdRng::seed_from_u64(3);
+        let mut z_bar = Vec::new();
+        for _ in 0..40_000 {
+            (eta, ll) = if preconditioned {
+                path_gess_step(
+                    &mut params,
+                    0,
+                    &eta,
+                    ll,
+                    &grid,
+                    &reads,
+                    &[],
+                    &[],
+                    &gene_prior,
+                    &prop,
+                    &mut rng,
+                )
+            } else {
+                path_step(
+                    &mut params,
+                    0,
+                    &eta,
+                    ll,
+                    &grid,
+                    &reads,
+                    &[],
+                    &[],
+                    &gene_prior,
+                    &mut rng,
+                )
+            };
+            z_bar.push(params.path_mean()[0]);
+        }
+        let mean = z_bar.iter().sum::<f64>() / z_bar.len() as f64;
+        let var = z_bar.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / z_bar.len() as f64;
+        eprintln!(
+            "preconditioned {preconditioned}: z̄ mean {mean:.3} (want {want_mean:.3}), \
+             var {var:.3} (want {want_var:.3})"
         );
-        z_bar.push(params.path_mean()[0]);
+        assert!(
+            (mean - want_mean).abs() < 0.03,
+            "mean {mean} vs {want_mean}"
+        );
+        assert!(
+            (var / want_var - 1.0).abs() < 0.1,
+            "var {var} vs {want_var}"
+        );
     }
-    let mean = z_bar.iter().sum::<f64>() / z_bar.len() as f64;
-    let var = z_bar.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / z_bar.len() as f64;
-    eprintln!("z̄: mean {mean:.3} (want {want_mean:.3}), var {var:.3} (want {want_var:.3})");
-    assert!((mean - want_mean).abs() < 0.03, "mean {mean} vs {want_mean}");
-    assert!((var / want_var - 1.0).abs() < 0.1, "var {var} vs {want_var}");
 }
