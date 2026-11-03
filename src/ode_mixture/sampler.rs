@@ -22,6 +22,12 @@
 //!    does not move with `T`, only the grid's step does;
 //! 6. the lineages' weights ([`draw_weights`]).
 //!
+//! With a jitter of the unspliced share ([`Options::share`]), every
+//! pseudobulk's `ω_p` is a latent too: the rows are drawn given it
+//! ([`jittered_table`]), then `ω_p` given its row ([`share_step`]), then
+//! the jitter's sd given every `ω` ([`draw_share_sd`]); the depths are the
+//! jittered ones ([`Reads::jittered_depths`]).
+//!
 //! The parameters are kept natural, `(β, γ, ρ, b)`; a gene's sampler
 //! coordinates ([`to_theta`]) are taken at the current paths' mean each
 //! sweep. Chains run in parallel, each from the same start (the Adam mode)
@@ -29,11 +35,11 @@
 //! `z` against `ρ` and the baseline's shared shift, do not show in them).
 
 use super::blocks::{
-    draw_latents, draw_weights, from_theta, gene_laplace, gene_step, path_gess_step, path_laplace,
-    path_ll, stream, to_theta, GenePrior,
+    draw_latents, draw_share_sd, draw_weights, from_theta, gene_laplace, gene_step, path_gess_step,
+    path_laplace, path_ll, share_step, stream, to_theta, GenePrior,
 };
 use super::kernel::GridPrior;
-use super::likelihood::{table, Reads};
+use super::likelihood::{jittered_table, table, Depth, Reads};
 use super::model::Params;
 use legume_numeric::mcmc::engine::elliptical_slice_step;
 use nalgebra::DVector;
@@ -60,6 +66,9 @@ pub struct Options {
     /// Set (as Ctrl+C sets it, [`crate::topic::common::setup_stop_handler`])
     /// to end every chain after its current sweep, keeping what it drew.
     pub stop: Option<Arc<AtomicBool>>,
+    /// The jitter of the unspliced share's sd to start from (the climb's,
+    /// [`super::fit::Fit::share_sd`]); `None`: no jitter, the shared model.
+    pub share: Option<f64>,
 }
 
 impl Default for Options {
@@ -74,6 +83,7 @@ impl Default for Options {
             a0: 1.0,
             seed: 1,
             stop: None,
+            share: None,
         }
     }
 }
@@ -91,6 +101,10 @@ pub struct Draws {
     /// `[S]` the reads' log-likelihood at the drawn latents and depths, a
     /// summary of the paths and genes together.
     pub path_ll: Vec<f64>,
+    /// `[S]` the jitter's sd and `[S][P]` every pseudobulk's jitter (empty
+    /// with no jitter).
+    pub share_sd: Vec<f64>,
+    pub omega: Vec<Vec<f64>>,
 }
 
 /// A chain's state.
@@ -103,6 +117,9 @@ struct State {
     /// `[L][H]` the paths' likewise.
     modes: Vec<Vec<f64>>,
     path_modes: Vec<Vec<DVector<f64>>>,
+    /// `[P]` every pseudobulk's jitter and their sd, `None` with no jitter.
+    omega: Vec<f64>,
+    share_sd: Option<f64>,
 }
 
 /// Every block's seed of its own, from the chain's.
@@ -116,8 +133,10 @@ const GENES: u64 = 2;
 const PATHS: u64 = 3;
 const DURATIONS: u64 = 4;
 const WEIGHTS: u64 = 5;
+const JITTERS: u64 = 6;
+const JITTER_SD: u64 = 7;
 
-fn start(params: &Params, grid: &GridPrior) -> State {
+fn start(params: &Params, grid: &GridPrior, pseudobulks: usize, share: Option<f64>) -> State {
     let lineages = params.path.len();
     let h = params.rho.first().map_or(0, Vec::len);
     let eta: Vec<Vec<DVector<f64>>> = params
@@ -147,6 +166,8 @@ fn start(params: &Params, grid: &GridPrior) -> State {
         eta,
         log_w: vec![-(lineages as f64).ln(); lineages],
         modes,
+        omega: vec![0.0; pseudobulks],
+        share_sd: share,
     }
 }
 
@@ -159,7 +180,7 @@ pub fn duration_step(
     l: usize,
     reads: &Reads,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
     rng: &mut impl rand::Rng,
 ) {
     let probe = params.clone();
@@ -194,16 +215,36 @@ fn sweep(
     let lineages = state.params.path.len();
     // Rows are positions (a pseudobulk's time may sit between the nodes).
     let n = state.params.positions();
-    // 1–2. Levels, latents and depths.
+    // 1–2. Levels, latents (and jitters) and depths.
     let lv = state.params.levels();
-    let rows = draw_latents(
-        &table(reads, &lv),
-        &state.log_w,
-        n,
-        block_seed(seed, LATENTS),
-        it,
-    );
-    let lambda = reads.depths(&rows, &lv);
+    let tab = match state.share_sd {
+        Some(_) => jittered_table(reads, &lv, &state.omega),
+        None => table(reads, &lv),
+    };
+    let rows = draw_latents(&tab, &state.log_w, n, block_seed(seed, LATENTS), it);
+    if let Some(sd) = state.share_sd {
+        let jitter_seed = block_seed(seed, JITTERS);
+        state.omega = rows
+            .par_iter()
+            .zip(&state.omega)
+            .enumerate()
+            .map(|(p, (&r, &w))| {
+                let mut rng = stream(jitter_seed, p as u64, it);
+                let (z_u, z_s) = (lv.u.row(r).sum(), lv.s.row(r).sum());
+                share_step(
+                    reads.unspliced(p),
+                    reads.total(p),
+                    z_u,
+                    z_s,
+                    w,
+                    sd,
+                    &mut rng,
+                )
+            })
+            .collect();
+        state.share_sd = Some(draw_share_sd(&state.omega, block_seed(seed, JITTER_SD), it));
+    }
+    let lambda = reads.jittered_depths(&rows, &lv, &state.omega);
 
     // 3. Genes, every other parameter held.
     let z_bar = state.params.path_mean();
@@ -305,7 +346,7 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
         .into_par_iter()
         .map(|c| {
             let seed = block_seed(opts.seed, 1000 + c as u64);
-            let mut state = start(start_at, &grid);
+            let mut state = start(start_at, &grid, reads.u.nrows(), opts.share);
             let kept = opts.sweeps.saturating_sub(opts.burn);
             let mut d = Draws {
                 lineage: Vec::with_capacity(kept),
@@ -314,6 +355,8 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 log_ratio: Vec::with_capacity(kept),
                 log_t: Vec::with_capacity(kept),
                 path_ll: Vec::with_capacity(kept),
+                share_sd: Vec::new(),
+                omega: Vec::new(),
             };
             for it in 0..opts.sweeps {
                 if stopped() {
@@ -338,6 +381,10 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 );
                 d.log_t.push(p.t_len.iter().map(|t| t.ln()).collect());
                 d.path_ll.push(ll);
+                if let Some(sd) = state.share_sd {
+                    d.share_sd.push(sd);
+                    d.omega.push(state.omega.clone());
+                }
             }
             d
         })

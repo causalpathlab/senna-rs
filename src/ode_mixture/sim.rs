@@ -43,6 +43,10 @@ pub struct SimConfig {
     /// Every gene's unspliced reads scaled by `e^{d (t/T − ½)}`: a drift of
     /// the unspliced share shared by every gene, no kinetics in it.
     pub unspliced_drift: f64,
+    /// Every pseudobulk's unspliced reads scaled by its own `e^{ω_p}`,
+    /// `ω_p ~ N(0, j²)`: a jitter of the unspliced share from pseudobulk to
+    /// pseudobulk, no kinetics in it, drawn apart from every other draw.
+    pub share_jitter: f64,
     /// With `Some(f)` and two lineages or more, every lineage on lineage
     /// 0's path until `f T`, apart after.
     pub branch_at: Option<f64>,
@@ -63,6 +67,7 @@ impl Default for SimConfig {
             rho_sd: 0.7,
             steady: false,
             unspliced_drift: 0.0,
+            share_jitter: 0.0,
             branch_at: None,
             seed: 1,
         }
@@ -84,6 +89,9 @@ pub struct Truth {
     pub time: Vec<f64>,
     /// Every pseudobulk on the shared trunk (at or before the branch).
     pub trunk: Vec<bool>,
+    /// `[P]` every pseudobulk's jitter of its unspliced share
+    /// ([`SimConfig::share_jitter`]).
+    pub omega: Vec<f64>,
     /// `[P × G]` the reads' means.
     pub u_mean: Vec<f64>,
     pub s_mean: Vec<f64>,
@@ -174,11 +182,15 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
     let (mut u, mut s) = (vec![0f64; p_n * g], vec![0f64; p_n * g]);
     let (mut u_mean, mut s_mean) = (vec![0f64; p_n * g], vec![0f64; p_n * g]);
     let (mut lineage, mut time, mut depth) = (vec![0; p_n], vec![0f64; p_n], vec![0f64; p_n]);
+    let mut omega = vec![0f64; p_n];
+    let mut jitter_rng = StdRng::seed_from_u64(cfg.seed ^ 0x6a17);
+    let jitter = Normal::new(0.0, cfg.share_jitter.max(0.0))?;
     for p in 0..p_n {
         let lin = p % l;
         let k = rng.random_range(0..n);
         let t = k as f64 * step;
-        let drift = (cfg.unspliced_drift * (t / t_len[lin] - 0.5)).exp();
+        omega[p] = jitter.sample(&mut jitter_rng);
+        let drift = (cfg.unspliced_drift * (t / t_len[lin] - 0.5) + omega[p]).exp();
         let total: f64 = (0..g)
             .map(|j| traj[lin][j].0[k] * drift + traj[lin][j].1[k])
             .sum();
@@ -216,6 +228,7 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
             lineage,
             time,
             trunk,
+            omega,
             u_mean,
             s_mean,
         },

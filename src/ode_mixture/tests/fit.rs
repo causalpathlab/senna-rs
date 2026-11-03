@@ -133,3 +133,56 @@ fn a_stop_ends_adam_at_once() {
         .unwrap();
     assert_eq!(before, after);
 }
+
+/// The fit's share term is the host's: the held objective with a jitter
+/// minus without is `Σ_p` [`share_term`] at every pseudobulk's held row.
+#[test]
+fn the_share_term_is_the_hosts() {
+    use crate::ode_mixture::likelihood::share_term;
+    use legume_numeric::candle::candle_core::Tensor;
+    let sim = simulate(&SimConfig {
+        fine: 133,
+        share_jitter: 0.4,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let params = truth_params(&sim, 133, 45);
+    let prior = GridPrior::new(45, 1.0, 0.25).unwrap();
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let rows: Vec<u32> = (0..sim.n_pb).map(|p| (p % 45) as u32).collect();
+    let held = |sd: Option<f64>| {
+        let fit = Fit::from_params(&params, &prior, &Device::Cpu)
+            .unwrap()
+            .with_share(sd)
+            .unwrap();
+        let dev = fit.reads(&reads).unwrap();
+        let r = Tensor::new(rows.as_slice(), &Device::Cpu).unwrap();
+        f64::from(
+            fit.held_objective(&dev, &r)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap(),
+        )
+    };
+    let got = held(Some(0.4)) - held(None);
+    let lv = params.levels();
+    let want: f64 = rows
+        .iter()
+        .enumerate()
+        .map(|(p, &r)| {
+            let r = r as usize;
+            let n_u = reads.u.row(p).sum();
+            share_term(
+                n_u,
+                reads.total(p),
+                lv.u.row(r).sum(),
+                lv.s.row(r).sum(),
+                0.4,
+            )
+        })
+        .sum();
+    assert!(
+        (got - want).abs() < 1e-4 * want.abs().max(1.0) + 2.0,
+        "{got} vs {want}"
+    );
+}

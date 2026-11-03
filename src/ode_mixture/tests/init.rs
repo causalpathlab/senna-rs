@@ -57,6 +57,7 @@ fn from_scratch_the_climb_finds_time_and_its_direction() {
     let train = first(&sim, n_train);
     let dev = Device::Cpu;
     let opts = Climb {
+        jitter: false,
         lineages: 1,
         points: 45,
         dim: 3,
@@ -101,6 +102,7 @@ fn from_scratch_two_lineages_come_apart() {
     let train = first(&sim, n_train);
     let dev = Device::Cpu;
     let opts = Climb {
+        jitter: false,
         lineages: 2,
         points: 45,
         dim: 3,
@@ -217,6 +219,7 @@ fn the_climbs_time_is_not_a_grid_step_late() {
     let sim = simulate(&cfg).unwrap();
     let train = first(&sim, 240);
     let opts = Climb {
+        jitter: false,
         lineages: 1,
         points: 45,
         dim: 3,

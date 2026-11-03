@@ -10,15 +10,27 @@
 //!
 //! (up to the multinomial coefficient), every `(ℓ, k)` at once by two
 //! matrix products.
+//!
+//! A pseudobulk's unspliced share may jitter on its own: its unspliced
+//! levels scaled by `e^{ω_p}`, `ω_p ~ N(0, σ²)`. Integrated out, that adds
+//! [`share_term`] to its log-likelihood at every point; `σ = 0` is the
+//! shared model. Jitter from pseudobulk to pseudobulk is told apart from
+//! kinetics because the levels are smooth in time and the jitter is not;
+//! a drift smooth in time is not.
 
 use super::model::Levels;
 use nalgebra::DMatrix;
 
-/// Pseudobulks' reads, `[P × G]` per track, and their totals.
+/// A pseudobulk's depth per track, `[λ^u, λ^s]` (the same with no jitter;
+/// `λ^u = e^{ω_p} λ^s` with one).
+pub type Depth = [f64; 2];
+
+/// Pseudobulks' reads, `[P × G]` per track, their totals and unspliced totals.
 pub struct Reads {
     pub u: DMatrix<f64>,
     pub s: DMatrix<f64>,
     total: Vec<f64>,
+    unspliced: Vec<f64>,
 }
 
 impl Reads {
@@ -28,8 +40,19 @@ impl Reads {
             DMatrix::from_row_slice(p, g, u),
             DMatrix::from_row_slice(p, g, s),
         );
-        let total = (0..p).map(|i| u.row(i).sum() + s.row(i).sum()).collect();
-        Self { u, s, total }
+        let unspliced: Vec<f64> = (0..p).map(|i| u.row(i).sum()).collect();
+        let total = (0..p).map(|i| unspliced[i] + s.row(i).sum()).collect();
+        Self {
+            u,
+            s,
+            total,
+            unspliced,
+        }
+    }
+
+    /// Pseudobulk `p`'s unspliced reads, `N^u_p`.
+    pub fn unspliced(&self, p: usize) -> f64 {
+        self.unspliced[p]
     }
 
     /// Pseudobulk `p`'s reads, `N_p`.
@@ -37,11 +60,23 @@ impl Reads {
         self.total[p]
     }
 
-    /// Every pseudobulk's best depth `λ_p = N_p / Z` at its row `rows[p]`.
-    pub fn depths(&self, rows: &[usize], lv: &Levels) -> Vec<f64> {
+    /// Every pseudobulk's best depth `λ_p = N_p / Z` at its row `rows[p]`,
+    /// on both tracks.
+    pub fn depths(&self, rows: &[usize], lv: &Levels) -> Vec<Depth> {
+        self.jittered_depths(rows, lv, &vec![0.0; rows.len()])
+    }
+
+    /// Every pseudobulk's best depths at its row `rows[p]` with its jitter
+    /// `omega[p]`: `λ_p = N_p / (e^{ω_p} Z_u + Z_s)`, `[e^{ω_p} λ_p, λ_p]`.
+    pub fn jittered_depths(&self, rows: &[usize], lv: &Levels, omega: &[f64]) -> Vec<Depth> {
         rows.iter()
+            .zip(omega)
             .enumerate()
-            .map(|(p, &r)| self.total[p] / (lv.u.row(r).sum() + lv.s.row(r).sum()))
+            .map(|(p, (&r, &w))| {
+                let e = w.exp();
+                let lambda = self.total[p] / (e * lv.u.row(r).sum() + lv.s.row(r).sum());
+                [e * lambda, lambda]
+            })
             .collect()
     }
 }
@@ -56,20 +91,80 @@ pub fn table(reads: &Reads, lv: &Levels) -> DMatrix<f64> {
     &reads.u * log_share(&lv.u) + &reads.s * log_share(&lv.s)
 }
 
+/// [`table`] with every pseudobulk's unspliced levels scaled by its jitter
+/// `e^{omega[p]}`: the shared table plus
+/// `N^u_p ω_p − N_p log((e^{ω_p} Z_u + Z_s)/(Z_u + Z_s))` at every point.
+pub fn jittered_table(reads: &Reads, lv: &Levels, omega: &[f64]) -> DMatrix<f64> {
+    let mut tab = table(reads, lv);
+    let z: Vec<(f64, f64)> = (0..lv.u.nrows())
+        .map(|r| (lv.u.row(r).sum(), lv.s.row(r).sum()))
+        .collect();
+    for (p, &w) in omega.iter().enumerate() {
+        let (n_u, n, e) = (reads.unspliced[p], reads.total[p], w.exp());
+        for (r, &(z_u, z_s)) in z.iter().enumerate() {
+            tab[(p, r)] += n_u * w - n * ((e * z_u + z_s) / (z_u + z_s)).ln();
+        }
+    }
+    tab
+}
+
 /// Gene `g`'s Poisson log-likelihood (no `log x!`) with every pseudobulk at
-/// its row `rows[p]` and depth `lambda[p]`, the gene's levels `(ū, s̄)` by row.
+/// its row `rows[p]` and depths `lambda[p]`, the gene's levels `(ū, s̄)` by row.
 pub fn gene_log_likelihood(
     reads: &Reads,
     g: usize,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
     (u, s): (&[f64], &[f64]),
 ) -> f64 {
     rows.iter()
         .enumerate()
         .map(|(p, &r)| {
-            let (mu, ms) = (lambda[p] * u[r], lambda[p] * s[r]);
+            let (mu, ms) = (lambda[p][0] * u[r], lambda[p][1] * s[r]);
             reads.u[(p, g)] * mu.ln() - mu + reads.s[(p, g)] * ms.ln() - ms
         })
         .sum()
+}
+
+/// Newton steps to the jitter's mode, from its Gaussian guess.
+const SHARE_NEWTON: usize = 8;
+
+/// `log(1 + e^x)`, stable.
+pub fn softplus(x: f64) -> f64 {
+    x.max(0.0) + (-x.abs()).exp().ln_1p()
+}
+
+/// The jitter's mode `ω̂` given `N_u` unspliced reads of `N`, the levels'
+/// log unspliced-to-spliced ratio `a = log(Z_u/Z_s)` and the jitter's
+/// variance `v`: the maximum of
+/// `f(ω) = N_u ω − N(softplus(a + ω) − softplus(a)) − ω²/(2v)` (concave).
+pub fn share_mode(n_u: f64, n: f64, a: f64, v: f64) -> f64 {
+    let q = (n_u + 0.5) / (n + 1.0);
+    let h = n * q * (1.0 - q);
+    let mut w = ((q / (1.0 - q)).ln() - a) * h * v / (1.0 + h * v);
+    for _ in 0..SHARE_NEWTON {
+        let q = 1.0 / (1.0 + (-(a + w)).exp());
+        w += (n_u - n * q - w / v) / (n * q * (1.0 - q) + 1.0 / v);
+    }
+    w
+}
+
+/// A pseudobulk's log-likelihood gain from its share's jitter integrated
+/// out, `log ∫ e^{Δ(ω)} N(ω; 0, σ²) dω` with
+/// `Δ(ω) = N_u ω − N log((e^ω Z_u + Z_s)/(Z_u + Z_s))` (the multinomial with
+/// the unspliced levels scaled by `e^ω`, minus without), by Laplace at the
+/// mode: `f(ω̂) − ½ log(1 + σ² N q̂(1 − q̂))`, `q̂` the jittered unspliced
+/// share. `N_u`, `N` its unspliced and all reads, `Z_u`, `Z_s` the levels'
+/// totals at its point.
+pub fn share_term(n_u: f64, n: f64, z_u: f64, z_s: f64, sd: f64) -> f64 {
+    if sd <= 0.0 {
+        return 0.0;
+    }
+    let (a, v) = ((z_u / z_s).ln(), sd * sd);
+    let w = share_mode(n_u, n, a, v);
+    let q = 1.0 / (1.0 + (-(a + w)).exp());
+    n_u * w
+        - n * (softplus(a + w) - softplus(a))
+        - w * w / (2.0 * v)
+        - 0.5 * (v * n * q * (1.0 - q)).ln_1p()
 }

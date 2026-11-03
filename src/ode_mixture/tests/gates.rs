@@ -15,6 +15,7 @@ const POINTS: usize = 45;
 
 fn opts(cfg: &SimConfig) -> Climb {
     Climb {
+        jitter: false,
         lineages: 1,
         points: POINTS,
         dim: cfg.dim,
@@ -61,9 +62,13 @@ impl Call {
 }
 
 fn call(cfg: &SimConfig) -> Call {
+    call_with(cfg, &opts(cfg))
+}
+
+fn call_with(cfg: &SimConfig, opts: &Climb) -> Call {
     let sim = simulate(cfg).unwrap();
     let reads = first(&sim, sim.n_pb);
-    let dir = direction(&reads, &opts(cfg), 0, &Device::Cpu).unwrap();
+    let dir = direction(&reads, opts, 0, &Device::Cpu).unwrap();
     let (_, time) = dir.fit.posterior(&dir.fit.reads(&reads).unwrap()).unwrap();
     let climbed = spearman(&time, &sim.truth.time);
     let c = Call { sim, dir, climbed };
@@ -206,16 +211,22 @@ fn with_no_dynamics_the_direction_is_undetermined() {
     assert!(!c.dir.determined(), "evidence {}", c.dir.evidence());
 }
 
-/// The gate as the plan sets it. It fails: a drift of every gene's
-/// unspliced share alone, with no kinetics in the reads, calls a direction
-/// as confidently as kinetics do (the plan's warning: a shared shift of the
-/// unspliced share looks like a shared rate change). It needs the
-/// per-pseudobulk unspliced-share term.
+/// The gate as the plan sets it: a drift of every gene's unspliced share
+/// alone, with no kinetics in the reads, calls no direction. It needs the
+/// jitter in the model ([`Climb::jitter`]): the shared model calls one as
+/// confidently as kinetics do (a shared shift of the unspliced share looks
+/// like a shared rate change).
 #[test]
-#[ignore = "fails: a shared unspliced drift alone calls a direction; profiling every pseudobulk's unspliced share fixes it but loses the shared share's kinetic evidence (time origin, speeds), so not the default"]
 fn a_shared_unspliced_drift_alone_is_not_a_direction() {
     for drift in [1.0, 3.0] {
-        let c = call(&config(true, drift, 1));
+        let cfg = config(true, drift, 1);
+        let c = call_with(
+            &cfg,
+            &Climb {
+                jitter: true,
+                ..opts(&cfg)
+            },
+        );
         assert!(
             !c.dir.determined(),
             "drift {drift}: evidence {}",
@@ -234,10 +245,11 @@ fn with_kinetics_the_direction_survives_a_shared_unspliced_drift() {
     assert!(c.for_truth() > 0.0, "the wrong way: {}", c.for_truth());
 }
 
-/// The rate gate under the drift. It fails: the drift is read as a shared
-/// change of rates.
+/// The rate gate under the drift. It fails, with the jitter in the model
+/// too at the smaller drift: a drift smooth in time is read as a shared
+/// change of rates, and nothing in the reads tells the two apart.
 #[test]
-#[ignore = "fails: a shared unspliced drift biases the rates; see a_shared_unspliced_drift_alone_is_not_a_direction"]
+#[ignore = "fails: a drift smooth in time is not identifiable from kinetics; the jitter in the model absorbs only its rough part"]
 fn with_kinetics_the_rates_survive_a_shared_unspliced_drift() {
     for drift in [1.0, 3.0] {
         let c = call(&config(false, drift, 1));
@@ -273,4 +285,67 @@ fn sweep() {
             }
         }
     }
+}
+
+/// With the jitter in the model ([`Climb::jitter`]), a jitter of the
+/// unspliced share from pseudobulk to pseudobulk leaves the gates as they
+/// are without it: rates, time and direction. (The shared model loses the
+/// rates already at the smaller jitter.)
+#[test]
+fn with_the_jitter_in_the_model_the_gates_survive_a_jitter_of_the_unspliced_share() {
+    for j in [0.3, 1.0] {
+        let cfg = SimConfig {
+            share_jitter: j,
+            ..config(false, 0.0, 1)
+        };
+        let c = call_with(
+            &cfg,
+            &Climb {
+                jitter: true,
+                ..opts(&cfg)
+            },
+        );
+        let (gamma, beta) = rate_errors(&c, &pinned(&c.sim));
+        let sd = c.chosen().share_sd().unwrap().unwrap();
+        eprintln!(
+            "jitter {j}: fitted sd {sd:.3}; median |log γ̂/γ| {gamma:.3}, |log β̂/β| {beta:.3}"
+        );
+        assert!(gamma < 1.25f64.ln(), "jitter {j}: median |log γ̂/γ| {gamma}");
+        assert!(
+            c.climbed.abs() > 0.95,
+            "jitter {j}: climbed Spearman {}",
+            c.climbed
+        );
+        assert!(
+            c.dir.determined() && c.for_truth() > 0.0,
+            "jitter {j}: evidence {}",
+            c.for_truth()
+        );
+        assert!((sd / j).ln().abs() < 0.25f64, "jitter {j}: fitted sd {sd}");
+    }
+}
+
+/// With no jitter in the reads, the jitter in the model costs nothing: the
+/// gates pass and the fitted jitter is small.
+#[test]
+fn with_no_jitter_in_the_reads_the_jitter_in_the_model_stays_small() {
+    let cfg = config(false, 0.0, 1);
+    let c = call_with(
+        &cfg,
+        &Climb {
+            jitter: true,
+            ..opts(&cfg)
+        },
+    );
+    let (gamma, _) = rate_errors(&c, &pinned(&c.sim));
+    let sd = c.chosen().share_sd().unwrap().unwrap();
+    eprintln!("no jitter: fitted sd {sd:.4}; median |log γ̂/γ| {gamma:.3}");
+    assert!(gamma < 1.25f64.ln(), "median |log γ̂/γ| {gamma}");
+    assert!(c.climbed.abs() > 0.95, "climbed Spearman {}", c.climbed);
+    assert!(
+        c.dir.determined() && c.for_truth() > 0.0,
+        "evidence {}",
+        c.for_truth()
+    );
+    assert!(sd < 0.05, "fitted sd {sd}");
 }

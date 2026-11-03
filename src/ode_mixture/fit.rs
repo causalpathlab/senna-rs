@@ -11,6 +11,13 @@
 //! `z_ℓ = C η_ℓ` (`C` fixed: `κ/T` held during the climb); lineage 1's
 //! duration is the unit. The priors are [`super::blocks::GenePrior`]'s on the
 //! sampler's coordinates, `N(0, I)` on `η`, `N(0, 1)` on `log T`.
+//!
+//! With [`Fit::with_share`], every pseudobulk's unspliced share jitters on
+//! its own, `σ` fitted: [`super::likelihood::share_term`] added at every
+//! point, its mode `ω̂` found with the graph detached (at the mode the
+//! gradient through `ω̂` vanishes from the first part; the Laplace
+//! determinant's share of it is dropped). The term is a marginal likelihood
+//! for `σ` with `σ → 0` the shared model, so `σ` has no prior.
 
 use super::blocks::GenePrior;
 use super::kernel::GridPrior;
@@ -22,6 +29,13 @@ use legume_numeric::candle::candle_nn::ops::log_softmax;
 use legume_numeric::candle::candle_nn::Optimizer;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// `σ` a jitter starts from.
+pub const SHARE_START: f64 = 0.1;
+
+/// Newton steps to the jitter's mode, from its Gaussian guess (as
+/// [`super::likelihood::share_mode`]).
+const SHARE_NEWTON: usize = 8;
+
 /// Below this `|x|`, `expm1(x)/x` by its series (the division is lost).
 const SMALL: f64 = 1e-4;
 
@@ -29,6 +43,9 @@ const SMALL: f64 = 1e-4;
 pub struct DeviceReads {
     u: Tensor,
     s: Tensor,
+    /// `[P × 1]` every pseudobulk's unspliced and all reads.
+    n_u: Tensor,
+    n: Tensor,
     total: f64,
 }
 
@@ -42,6 +59,8 @@ pub struct Fit {
     /// `[L − 1]` the other lineages' log durations (lineage 1's is 0).
     log_t: Option<Var>,
     logit_pi: Var,
+    /// `[1]` the log sd of the unspliced share's jitter, `None` for none.
+    log_share_sd: Option<Var>,
     /// `[n × n]` the prior's Cholesky factor.
     chol: Tensor,
     prior: GenePrior,
@@ -89,11 +108,88 @@ impl Fit {
             eta: var(eta, &[l, n, h], dev)?,
             log_t,
             logit_pi: var(vec![0.0; l], &[1, l], dev)?,
+            log_share_sd: None,
             chol: Tensor::from_vec(c.iter().map(|&x| x as f32).collect::<Vec<_>>(), (n, n), dev)?,
             prior: GenePrior::default(),
             dims: (l, n, g, h),
             sub: params.sub.max(1),
         })
+    }
+
+    /// With every pseudobulk's unspliced share jittering on its own from
+    /// sd `sd` on (`None`: shared, no jitter).
+    pub fn with_share(mut self, sd: Option<f64>) -> Result<Self> {
+        self.log_share_sd = sd
+            .map(|sd| var(vec![sd.ln()], &[1], self.eta.device()))
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// The unspliced share's jitter sd, `None` with no jitter.
+    pub fn share_sd(&self) -> Result<Option<f64>> {
+        self.log_share_sd
+            .as_ref()
+            .map(|v| Ok(f64::from(v.as_tensor().to_vec1::<f32>()?[0]).exp()))
+            .transpose()
+    }
+
+    /// [`super::likelihood::share_term`] for every pseudobulk at every point
+    /// `a` holds, `a` the levels' `log(Z_u/Z_s)` as `[1 × R]` (every point
+    /// for every pseudobulk, `[P × R]` out) or `[P × 1]` (a point each); `None`
+    /// with no jitter.
+    fn share(&self, reads: &DeviceReads, a: &Tensor) -> Result<Option<Tensor>> {
+        let Some(log_sd) = &self.log_share_sd else {
+            return Ok(None);
+        };
+        let v = (log_sd.as_tensor() * 2.0)?.exp()?.reshape((1, 1))?;
+        let (n_u, n) = (&reads.n_u, &reads.n);
+        let sigmoid = |x: &Tensor| -> Result<Tensor> { (x.neg()?.exp()? + 1.0)?.recip() };
+        let softplus =
+            |x: &Tensor| -> Result<Tensor> { x.relu()? + (x.abs()?.neg()?.exp()? + 1.0)?.log()? };
+        // The mode, detached: from the Gaussian guess, Newton.
+        let (a_d, v_d) = (a.detach(), v.detach());
+        let q0 = ((n_u + 0.5)? / (n + 1.0)?)?;
+        let h0 = (n * (&q0 * (1.0 - &q0)?)?)?;
+        let shrink = h0.broadcast_mul(&v_d)?;
+        let shrink = (&shrink / (&shrink + 1.0)?)?;
+        let logit0 = (q0.log()? - (1.0 - &q0)?.log()?)?;
+        let mut w = logit0.broadcast_sub(&a_d)?.broadcast_mul(&shrink)?;
+        for _ in 0..SHARE_NEWTON {
+            let q = sigmoid(&w.broadcast_add(&a_d)?)?;
+            let grad = (n_u.broadcast_sub(&n.broadcast_mul(&q)?)? - w.broadcast_div(&v_d)?)?;
+            let hess = n
+                .broadcast_mul(&(&q * (1.0 - &q)?)?)?
+                .broadcast_add(&v_d.recip()?)?;
+            w = (w + (grad / hess)?)?;
+        }
+        let w = w.detach();
+        let x = w.broadcast_add(a)?;
+        let q = sigmoid(&x)?;
+        let fit = ((n_u.broadcast_mul(&w)?
+            - n.broadcast_mul(&(softplus(&x)? - softplus(a)?.broadcast_as(x.shape())?)?)?)?
+            - w.sqr()?.broadcast_div(&(&v * 2.0)?)?)?;
+        let det =
+            ((n.broadcast_mul(&(&q * (1.0 - &q)?)?)?.broadcast_mul(&v)? + 1.0)?.log()? * 0.5)?;
+        Ok(Some((fit - det)?))
+    }
+
+    /// `[R]` the levels' `log(Z_u/Z_s)` at every point.
+    fn log_share_ratio(u: &Tensor, s: &Tensor) -> Result<Tensor> {
+        u.sum(1)?.log()? - s.sum(1)?.log()?
+    }
+
+    /// `[P × R]` every pseudobulk's log-likelihood at every point, the
+    /// multinomial (no coefficient) plus the share term.
+    fn table(&self, reads: &DeviceReads, u: &Tensor, s: &Tensor) -> Result<Tensor> {
+        let z = (u.sum_keepdim(1)? + s.sum_keepdim(1)?)?.log()?;
+        let lu = u.log()?.broadcast_sub(&z)?;
+        let ls = s.log()?.broadcast_sub(&z)?;
+        let tab = (reads.u.matmul(&lu.t()?)? + reads.s.matmul(&ls.t()?)?)?;
+        let a = Self::log_share_ratio(u, s)?.unsqueeze(0)?;
+        match self.share(reads, &a)? {
+            Some(share) => tab + share,
+            None => Ok(tab),
+        }
     }
 
     pub fn reads(&self, reads: &Reads) -> Result<DeviceReads> {
@@ -109,9 +205,14 @@ impl Fit {
             )
         };
         let total = (0..p).map(|i| reads.total(i)).sum();
+        let column = |f: &dyn Fn(usize) -> f64| {
+            Tensor::from_vec((0..p).map(|i| f(i) as f32).collect::<Vec<_>>(), (p, 1), dev)
+        };
         Ok(DeviceReads {
             u: host(&reads.u)?,
             s: host(&reads.s)?,
+            n_u: column(&|i| reads.u.row(i).sum())?,
+            n: column(&|i| reads.total(i))?,
             total,
         })
     }
@@ -126,6 +227,7 @@ impl Fit {
             self.logit_pi.clone(),
         ];
         v.extend(self.log_t.clone());
+        v.extend(self.log_share_sd.clone());
         v
     }
 
@@ -220,10 +322,7 @@ impl Fit {
     pub fn log_marginal(&self, reads: &DeviceReads) -> Result<Tensor> {
         let (l, n) = (self.dims.0, self.positions());
         let (u, s) = self.levels()?;
-        let z = (u.sum_keepdim(1)? + s.sum_keepdim(1)?)?.log()?;
-        let lu = u.log()?.broadcast_sub(&z)?;
-        let ls = s.log()?.broadcast_sub(&z)?;
-        let tab = (reads.u.matmul(&lu.t()?)? + reads.s.matmul(&ls.t()?)?)?; // [P × L·n]
+        let tab = self.table(reads, &u, &s)?; // [P × L·n]
         let log_pi = log_softmax(self.logit_pi.as_tensor(), D::Minus1)?; // [1 × L]
         let prior = (log_pi
             .unsqueeze(2)?
@@ -300,7 +399,13 @@ impl Fit {
         let z = (u.sum_keepdim(1)? + s.sum_keepdim(1)?)?.log()?;
         let lu = u.log()?.broadcast_sub(&z)?.index_select(rows, 0)?;
         let ls = s.log()?.broadcast_sub(&z)?.index_select(rows, 0)?;
-        let ll = ((&reads.u * lu)? + (&reads.s * ls)?)?.sum_all()?;
+        let mut ll = ((&reads.u * lu)? + (&reads.s * ls)?)?.sum_all()?;
+        let a = Self::log_share_ratio(&u, &s)?
+            .index_select(rows, 0)?
+            .unsqueeze(1)?;
+        if let Some(share) = self.share(reads, &a)? {
+            ll = (ll + share.sum_all()?)?;
+        }
         let log_pi = log_softmax(self.logit_pi.as_tensor(), D::Minus1)?
             .unsqueeze(2)?
             .broadcast_as((1, l, n))?
@@ -328,10 +433,7 @@ impl Fit {
     pub fn posterior(&self, reads: &DeviceReads) -> Result<(Vec<Vec<f64>>, Vec<f64>)> {
         let (l, n) = (self.dims.0, self.positions());
         let (u, s) = self.levels()?;
-        let z = (u.sum_keepdim(1)? + s.sum_keepdim(1)?)?.log()?;
-        let lu = u.log()?.broadcast_sub(&z)?;
-        let ls = s.log()?.broadcast_sub(&z)?;
-        let tab = (reads.u.matmul(&lu.t()?)? + reads.s.matmul(&ls.t()?)?)?;
+        let tab = self.table(reads, &u, &s)?;
         let log_pi = log_softmax(self.logit_pi.as_tensor(), D::Minus1)?;
         let prior = log_pi
             .unsqueeze(2)?

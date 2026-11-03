@@ -85,6 +85,32 @@ fn a_drift_shifts_every_genes_unspliced_share_alike() {
     }
 }
 
+/// A jitter moves every pseudobulk's unspliced share by its own `ω_p`,
+/// every gene's alike: at steady state `log(ū β/(s̄ γ)) = ω_p` in every
+/// gene, those amounts spread as the jitter.
+#[test]
+fn a_jitter_moves_every_pseudobulks_unspliced_share_its_own_way() {
+    let sim = simulate(&SimConfig {
+        steady: true,
+        share_jitter: 0.5,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let (g_n, t) = (sim.n_genes, &sim.truth);
+    let shift = |p: usize, g: usize| {
+        let i = p * g_n + g;
+        (t.u_mean[i] * t.beta[g] / (t.s_mean[i] * t.gamma[g])).ln()
+    };
+    let omega: Vec<f64> = (0..sim.n_pb).map(|p| shift(p, 0)).collect();
+    for (p, &w) in omega.iter().enumerate() {
+        for g in [7, 42] {
+            assert!((shift(p, g) - w).abs() < 1e-9, "{p} {g}");
+        }
+    }
+    let sd = (omega.iter().map(|w| w * w).sum::<f64>() / omega.len() as f64).sqrt();
+    assert!((sd - 0.5).abs() < 0.08, "sd {sd}");
+}
+
 #[test]
 fn a_seed_replays() {
     let (a, b) = (

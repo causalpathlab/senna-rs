@@ -23,7 +23,7 @@
 //! also from every tree start, and keeps the best of all.
 
 use super::blocks::GenePrior;
-use super::fit::Fit;
+use super::fit::{Fit, SHARE_START};
 use super::kernel::GridPrior;
 use super::likelihood::Reads;
 use super::model::Params;
@@ -45,6 +45,9 @@ pub struct Climb {
     /// Positions per grid step a pseudobulk's time can take
     /// ([`Params::sub`]).
     pub sub: usize,
+    /// Every pseudobulk's unspliced share jitters on its own, `σ` fitted
+    /// ([`Fit::with_share`]).
+    pub jitter: bool,
 }
 
 /// Bandwidth, on `[0, 1]`, of the smoothing of scores onto the grid.
@@ -370,7 +373,8 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<(Fit, f32)> {
     let (y, _) = log_shares(reads);
     let (scores, _) = axes(&y, opts.dim);
     let run = |places: &Places| -> Result<(Fit, f32)> {
-        let fit = Fit::from_params(&params_from(reads, opts, places), &prior, dev)?;
+        let fit = Fit::from_params(&params_from(reads, opts, places), &prior, dev)?
+            .with_share(opts.jitter.then_some(SHARE_START))?;
         let objective = fit.adam(reads, opts.steps, opts.lr)?;
         Ok((fit, objective))
     };

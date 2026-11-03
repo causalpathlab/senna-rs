@@ -72,6 +72,7 @@ fn from_scratch_branching_lineages_keep_their_trunk() {
     let train = first(&sim, n_train);
     let dev = Device::Cpu;
     let opts = Climb {
+        jitter: false,
         lineages: 2,
         points: 45,
         dim: 3,

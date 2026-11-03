@@ -55,6 +55,7 @@ fn chains_from(mode: &Params, sweeps: usize, burn: usize, seed: u64) -> Vec<Draw
 /// The Adam mode from the reads alone ([`climb`]).
 fn climb_mode() -> Params {
     let opts = Climb {
+        jitter: false,
         lineages: 1,
         points: POINTS,
         dim: 3,
@@ -272,7 +273,7 @@ fn a_duration_with_no_reads_follows_its_prior() {
     let n = 40_000;
     let (mut m, mut v) = (0.0, 0.0);
     for _ in 0..n {
-        duration_step(&mut params, 1, &reads, &[1], &[1.0], &mut rng);
+        duration_step(&mut params, 1, &reads, &[1], &[[1.0, 1.0]], &mut rng);
         let x = params.t_len[1].ln();
         m += x / n as f64;
         v += x * x / n as f64;
@@ -424,4 +425,61 @@ fn diagnostic_gene_speeds_between_modes() {
             t.gamma[g].ln()
         );
     }
+}
+
+/// With the jitter in the model, chains in the truth's basin on reads with
+/// a jitter of the unspliced share find its sd and every pseudobulk's own.
+#[test]
+fn with_the_jitter_in_the_model_the_chains_find_the_jitter() {
+    let sim = simulate(&SimConfig {
+        fine: 133,
+        kappa: KAPPA,
+        share_jitter: 0.5,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let reads = first(&sim, TRAIN);
+    let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
+    let fit = Fit::from_params(&truth_params(&sim, 133, POINTS), &grid, &Device::Cpu)
+        .unwrap()
+        .with_share(Some(0.1))
+        .unwrap();
+    fit.adam(&reads, 2000, 0.01).unwrap();
+    let draws = run(
+        &reads,
+        &fit.params().unwrap(),
+        &Options {
+            kappa: KAPPA,
+            chains: 2,
+            sweeps: 200,
+            burn: 50,
+            share: fit.share_sd().unwrap(),
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let truth = &sim.truth.omega[..TRAIN];
+    let spread = (truth.iter().map(|w| w * w).sum::<f64>() / TRAIN as f64).sqrt();
+    let sd: Vec<f64> = draws
+        .iter()
+        .flat_map(|d| d.share_sd.iter().copied())
+        .collect();
+    let sd_mean = sd.iter().sum::<f64>() / sd.len() as f64;
+    let kept = draws.iter().map(|d| d.omega.len()).sum::<usize>() as f64;
+    let omega: Vec<f64> = (0..TRAIN)
+        .map(|p| {
+            draws
+                .iter()
+                .flat_map(|d| d.omega.iter().map(move |w| w[p]))
+                .sum::<f64>()
+                / kept
+        })
+        .collect();
+    let r = super::init::spearman(&omega, truth);
+    eprintln!("jitter: sd {sd_mean:.3} vs the truth's spread {spread:.3}; ω's correlation {r:.3}");
+    assert!(
+        (sd_mean / spread).ln().abs() < 0.15,
+        "sd {sd_mean} vs {spread}"
+    );
+    assert!(r > 0.95, "correlation {r}");
 }

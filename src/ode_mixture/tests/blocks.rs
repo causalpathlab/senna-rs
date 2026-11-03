@@ -1,6 +1,7 @@
 use super::model::truth_params;
 use crate::ode_mixture::blocks::{
-    draw_latents, draw_weights, from_theta, gene_laplace, gene_step, to_theta, GenePrior,
+    draw_latents, draw_share_sd, draw_weights, from_theta, gene_laplace, gene_step, share_step,
+    to_theta, GenePrior,
 };
 use crate::ode_mixture::likelihood::Reads;
 use crate::ode_mixture::sim::{simulate, SimConfig};
@@ -532,5 +533,61 @@ fn with_time_between_nodes_the_path_likelihood_is_the_genes() {
     assert!(
         (blocks - genes).abs() < 1e-8 * genes.abs(),
         "{blocks} vs {genes}"
+    );
+}
+
+/// The jitter's conditional, `∝ e^{Δ(ω)} N(ω; 0, σ²)`, its mean and sd by
+/// quadrature.
+fn share_posterior(n_u: f64, n: f64, z_u: f64, z_s: f64, sd: f64) -> (f64, f64) {
+    let (lo, hi, m) = (-8.0 * sd - 4.0, 8.0 * sd + 4.0, 200_001);
+    let h = (hi - lo) / (m - 1) as f64;
+    let f =
+        |w: f64| n_u * w - n * ((w.exp() * z_u + z_s) / (z_u + z_s)).ln() - 0.5 * (w / sd).powi(2);
+    let top = (0..m)
+        .map(|i| f(lo + i as f64 * h))
+        .fold(f64::MIN, f64::max);
+    let (mut z, mut m1, mut m2) = (0.0, 0.0, 0.0);
+    for i in 0..m {
+        let w = lo + i as f64 * h;
+        let d = (f(w) - top).exp();
+        (z, m1, m2) = (z + d, m1 + d * w, m2 + d * w * w);
+    }
+    let mean = m1 / z;
+    (mean, (m2 / z - mean * mean).sqrt())
+}
+
+/// [`share_step`] leaves the jitter's conditional invariant: the chain's
+/// mean and sd are the conditional's, at a deep and a shallow pseudobulk.
+#[test]
+fn the_jitter_step_draws_its_conditional() {
+    for (n_u, n, z_u, z_s, sd) in [(1200.0, 5000.0, 0.3, 0.7, 0.5), (3.0, 40.0, 0.3, 0.7, 0.5)] {
+        let (want_m, want_s) = share_posterior(n_u, n, z_u, z_s, sd);
+        let mut rng = StdRng::seed_from_u64(4);
+        let (mut w, steps) = (0.0, 100_000);
+        let (mut m1, mut m2) = (0.0, 0.0);
+        for _ in 0..steps {
+            w = share_step(n_u, n, z_u, z_s, w, sd, &mut rng);
+            m1 += w / steps as f64;
+            m2 += w * w / steps as f64;
+        }
+        let got_s = (m2 - m1 * m1).sqrt();
+        assert!(
+            (m1 - want_m).abs() < 0.03 * want_s.max(0.01) + 0.002
+                && (got_s / want_s).ln().abs() < 0.03,
+            "N {n}: mean {m1} vs {want_m}, sd {got_s} vs {want_s}"
+        );
+    }
+}
+
+/// Given the jitters, the sd's draws centre on their spread.
+#[test]
+fn the_jitter_sd_is_drawn_from_its_conditional() {
+    let omega: Vec<f64> = (0..300).map(|p| 0.5 * (p as f64 * 1.3).sin()).collect();
+    let spread = (omega.iter().map(|w| w * w).sum::<f64>() / omega.len() as f64).sqrt();
+    let draws: Vec<f64> = (0..4000).map(|it| draw_share_sd(&omega, 9, it)).collect();
+    let mean = draws.iter().sum::<f64>() / draws.len() as f64;
+    assert!(
+        (mean / spread).ln().abs() < 0.02,
+        "mean {mean} vs spread {spread}"
     );
 }

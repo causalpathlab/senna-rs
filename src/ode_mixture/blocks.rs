@@ -5,7 +5,7 @@
 
 use super::kernel::GridPrior;
 use super::kinetics::fine_trajectory;
-use super::likelihood::{gene_log_likelihood, Reads};
+use super::likelihood::{gene_log_likelihood, share_mode, softplus, Depth, Reads};
 use super::model::Params;
 use legume_numeric::mcmc::engine::elliptical_slice_step;
 use nalgebra::{DMatrix, DVector};
@@ -175,7 +175,7 @@ fn gene_ll(
     reads: &Reads,
     g: usize,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
 ) -> f64 {
     let (beta, gamma, rho, base) = from_theta(theta, &params.path_mean());
     let lv = params.levels_of(beta, gamma, rho, base);
@@ -218,7 +218,7 @@ pub fn gene_laplace(
     g: usize,
     reads: &Reads,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
     prior: &GenePrior,
     anchor: &[f64],
 ) -> GeneProposal {
@@ -351,7 +351,7 @@ pub fn gene_step(
     cur_ll: f64,
     reads: &Reads,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
     prior: &GenePrior,
     prop: &GeneProposal,
     rng: &mut impl Rng,
@@ -419,7 +419,7 @@ pub fn gene_step(
 /// The log-likelihood (no `log x!`) of the pseudobulks on lineage `l`, at
 /// their rows and depths, every gene's levels on `l` from `params`; in
 /// parallel over genes.
-pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda: &[f64]) -> f64 {
+pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda: &[Depth]) -> f64 {
     let (n, positions) = (params.path[l].len(), params.positions());
     let on: Vec<(usize, usize)> = rows
         .iter()
@@ -438,7 +438,7 @@ pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda:
             let (u, s) = fine_trajectory(&alpha, params.beta[g], params.gamma[g], h, params.sub);
             on.iter()
                 .map(|&(p, k)| {
-                    let (mu, ms) = (lambda[p] * u[k], lambda[p] * s[k]);
+                    let (mu, ms) = (lambda[p][0] * u[k], lambda[p][1] * s[k]);
                     reads.u[(p, g)] * mu.ln() - mu + reads.s[(p, g)] * ms.ln() - ms
                 })
                 .sum::<f64>()
@@ -479,7 +479,7 @@ pub fn path_log_density(
     l: usize,
     reads: &Reads,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
     gene_prior: &GenePrior,
 ) -> f64 {
     path_ll(params, l, reads, rows, lambda) + genes_log_prior(params, gene_prior)
@@ -498,7 +498,7 @@ pub fn path_step(
     prior: &GridPrior,
     reads: &Reads,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
     gene_prior: &GenePrior,
     rng: &mut impl Rng,
 ) -> (Vec<DVector<f64>>, f64) {
@@ -555,9 +555,10 @@ fn response(beta: f64, gamma: f64, h: f64, n: usize, sub: usize) -> (DMatrix<f64
 /// (`I` from `η`'s prior, the reads' Fisher information, the genes'
 /// prior's exact curvature through `z̄`). Rows and depths held.
 ///
-/// The reads on lineage `l` pooled per grid point, `U_gk = Σ_{p at k} u_pg`,
-/// `Λ_k = Σ_{p at k} λ_p`: `ℓ = Σ_{g,k} U_gk log ū_gk − Λ_k ū_gk (+ s̄)`,
-/// `∂ℓ/∂ū_gk = U_gk/ū_gk − Λ_k`, Fisher `Λ_k/ū_gk`; then through `ū = A_u α`,
+/// The reads on lineage `l` pooled per position, `U_gk = Σ_{p at k} u_pg`,
+/// `Λ^u_k = Σ_{p at k} λ^u_p` (and the spliced track's likewise):
+/// `ℓ = Σ_{g,k} U_gk log ū_gk − Λ^u_k ū_gk (+ s̄)`,
+/// `∂ℓ/∂ū_gk = U_gk/ū_gk − Λ^u_k`, Fisher `Λ^u_k/ū_gk`; then through `ū = A_u α`,
 /// `α_gj = exp(ρ_gᵀ z_j + b_g)` and `z_d = C η_d`.
 fn path_newton(
     params: &Params,
@@ -565,7 +566,7 @@ fn path_newton(
     prior: &GridPrior,
     reads: &Reads,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
     gene_prior: &GenePrior,
 ) -> (DVector<f64>, DMatrix<f64>) {
     let path = &params.path[l];
@@ -580,9 +581,11 @@ fn path_newton(
         .filter(|&(_, &r)| r / positions == l)
         .map(|(p, &r)| (p, r - l * positions))
         .collect();
-    let mut pooled = vec![0.0; positions];
+    // The depths pooled per position and track.
+    let (mut pooled_u, mut pooled_s) = (vec![0.0; positions], vec![0.0; positions]);
     for &(p, k) in &on {
-        pooled[k] += lambda[p];
+        pooled_u[k] += lambda[p][0];
+        pooled_s[k] += lambda[p][1];
     }
 
     // Summed over genes: the gradient wrt z `[n × H]`, the Fisher `[Hn × Hn]`.
@@ -602,14 +605,14 @@ fn path_newton(
                 ru[k] += reads.u[(p, g)];
                 rs[k] += reads.s[(p, g)];
             }
-            let eu = DVector::from_fn(positions, |k, _| ru[k] / u[k] - pooled[k]);
-            let es = DVector::from_fn(positions, |k, _| rs[k] / s[k] - pooled[k]);
+            let eu = DVector::from_fn(positions, |k, _| ru[k] / u[k] - pooled_u[k]);
+            let es = DVector::from_fn(positions, |k, _| rs[k] / s[k] - pooled_s[k]);
             // ∂ℓ/∂α_j, then ∂ℓ/∂z_jd = α_j ρ_d ∂ℓ/∂α_j.
             let d_alpha = a_u.transpose() * eu + a_s.transpose() * es;
             let gz = DMatrix::from_fn(n, h, |j, d| alpha[j] * rho[d] * d_alpha[j]);
             // Wrt α: A_uᵀ W_u A_u + A_sᵀ W_s A_s; wrt z, α_i α_j ρ_d ρ_e times it.
-            let wu = DMatrix::from_fn(positions, n, |i, j| a_u[(i, j)] * pooled[i] / u[i]);
-            let ws = DMatrix::from_fn(positions, n, |i, j| a_s[(i, j)] * pooled[i] / s[i]);
+            let wu = DMatrix::from_fn(positions, n, |i, j| a_u[(i, j)] * pooled_u[i] / u[i]);
+            let ws = DMatrix::from_fn(positions, n, |i, j| a_s[(i, j)] * pooled_s[i] / s[i]);
             let fa = a_u.transpose() * wu + a_s.transpose() * ws;
             let fz = DMatrix::from_fn(h * n, h * n, |a, b| {
                 let (d, i, e, j) = (a / n, a % n, b / n, b % n);
@@ -710,7 +713,7 @@ pub fn path_laplace(
     prior: &GridPrior,
     reads: &Reads,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
     gene_prior: &GenePrior,
 ) -> PathProposal {
     scoring(
@@ -806,7 +809,7 @@ pub fn path_gess_step(
     prior: &GridPrior,
     reads: &Reads,
     rows: &[usize],
-    lambda: &[f64],
+    lambda: &[Depth],
     gene_prior: &GenePrior,
     prop: &PathProposal,
     rng: &mut impl Rng,
@@ -881,4 +884,55 @@ fn t_ess(
     params.path[l] = coloured(prior, &eta);
     let ll = density(params);
     (eta, ll)
+}
+
+/// The jitter sd's inverse-gamma prior, `σ² ~ IG(a, b)`: weak, the draws
+/// follow the jitters' own spread for tens of pseudobulks or more.
+const SHARE_SD_PRIOR: (f64, f64) = (1.0, 1e-4);
+
+/// Spread of the jitter's independence proposal over its Laplace sd.
+const SHARE_PROPOSAL_WIDTH: f64 = 1.2;
+
+/// One independence Metropolis–Hastings move of a pseudobulk's jitter `ω`
+/// on its conditional `∝ e^{Δ(ω)} N(ω; 0, σ²)` (its row held: `N_u` of `N`
+/// reads unspliced, `Z_u`, `Z_s` the levels' totals there), the proposal
+/// the conditional's Laplace approximation widened by
+/// [`SHARE_PROPOSAL_WIDTH`]. The conditional is near Gaussian at any depth
+/// (a logistic likelihood in one variable), so nearly every move is taken.
+pub fn share_step(
+    n_u: f64,
+    n: f64,
+    z_u: f64,
+    z_s: f64,
+    omega: f64,
+    sd: f64,
+    rng: &mut impl Rng,
+) -> f64 {
+    let (a, v) = ((z_u / z_s).ln(), sd * sd);
+    let log_f = |w: f64| n_u * w - n * softplus(a + w) - w * w / (2.0 * v);
+    let mode = share_mode(n_u, n, a, v);
+    let q = 1.0 / (1.0 + (-(a + mode)).exp());
+    let width = SHARE_PROPOSAL_WIDTH / (n * q * (1.0 - q) + 1.0 / v).sqrt();
+    let log_q = |w: f64| -0.5 * ((w - mode) / width).powi(2);
+    let e: f64 = StandardNormal.sample(rng);
+    let next = mode + width * e;
+    let log_ratio = log_f(next) - log_f(omega) - log_q(next) + log_q(omega);
+    if rng.random::<f64>().ln() < log_ratio {
+        next
+    } else {
+        omega
+    }
+}
+
+/// The jitter sd drawn from its conditional given every pseudobulk's
+/// jitter: `σ² ~ IG(a + P/2, b + Σ ω²/2)` ([`SHARE_SD_PRIOR`]).
+pub fn draw_share_sd(omega: &[f64], seed: u64, sweep: u64) -> f64 {
+    let (a, b) = SHARE_SD_PRIOR;
+    let shape = a + omega.len() as f64 / 2.0;
+    let rate = b + omega.iter().map(|w| w * w).sum::<f64>() / 2.0;
+    let mut rng = stream(seed, u64::MAX - 1, sweep);
+    let precision = Gamma::new(shape, 1.0 / rate)
+        .expect("a positive shape and rate")
+        .sample(&mut rng);
+    precision.recip().sqrt()
 }

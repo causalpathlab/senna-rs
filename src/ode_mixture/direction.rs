@@ -114,8 +114,9 @@ pub fn direction(reads: &Reads, opts: &Climb, lineage: usize, dev: &Device) -> R
         })
         .collect();
     let params = fit.params()?;
+    let share = fit.share_sd()?;
     let held = |start: &Params, rows: &[u32]| -> Result<(Fit, f32)> {
-        let refit = Fit::from_params(start, &prior, dev)?;
+        let refit = Fit::from_params(start, &prior, dev)?.with_share(share)?;
         refit.adam_held(reads, rows, opts.steps, opts.lr)?;
         let objective = refit.adam_held(reads, rows, FINISH_STEPS, opts.lr / 10.0)?;
         Ok((refit, objective))
