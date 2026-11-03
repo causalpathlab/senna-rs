@@ -7,6 +7,13 @@
 //! trajectory ([`super::kinetics`]). A pseudobulk is a lineage, a time
 //! uniform on the fine grid and a depth `N_p`; its reads are Poisson at
 //! `λ_p ū`, `λ_p s̄`, `λ_p = N_p / Σ_g(ū + s̄)`.
+//!
+//! Branching ([`SimConfig::branch_at`]): every lineage `ℓ > 0` is lineage
+//! 0's path plus `√2 r(t) w_ℓ(t)`, `w_ℓ` a draw from the prior and
+//! `r(t) = 1 − e^{−((t − t_b)/κ)²}` past the branch `t_b` (0 before), so
+//! value and slope are continuous there; far past it the lineages are as
+//! far apart as two independent draws. Every lineage starts at steady state
+//! on the same path, so the trunk's levels are shared too.
 
 use super::kernel::GridPrior;
 use super::kinetics::trajectory;
@@ -36,6 +43,9 @@ pub struct SimConfig {
     /// Every gene's unspliced reads scaled by `e^{d (t/T − ½)}`: a drift of
     /// the unspliced share shared by every gene, no kinetics in it.
     pub unspliced_drift: f64,
+    /// With `Some(f)` and two lineages or more, every lineage on lineage
+    /// 0's path until `f T`, apart after.
+    pub branch_at: Option<f64>,
     pub seed: u64,
 }
 
@@ -53,6 +63,7 @@ impl Default for SimConfig {
             rho_sd: 0.7,
             steady: false,
             unspliced_drift: 0.0,
+            branch_at: None,
             seed: 1,
         }
     }
@@ -71,6 +82,8 @@ pub struct Truth {
     /// Every pseudobulk's lineage and time.
     pub lineage: Vec<usize>,
     pub time: Vec<f64>,
+    /// Every pseudobulk on the shared trunk (at or before the branch).
+    pub trunk: Vec<bool>,
     /// `[P × G]` the reads' means.
     pub u_mean: Vec<f64>,
     pub s_mean: Vec<f64>,
@@ -107,7 +120,7 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
 
     let t_len = vec![cfg.t_len; l];
     let prior = GridPrior::new(n, cfg.t_len, cfg.kappa * cfg.t_len)?;
-    let path: Vec<Vec<Vec<f64>>> = (0..l)
+    let mut path: Vec<Vec<Vec<f64>>> = (0..l)
         .map(|_| {
             let dims: Vec<_> = (0..h).map(|_| prior.draw(&mut rng)).collect();
             (0..n)
@@ -115,8 +128,21 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
                 .collect()
         })
         .collect();
-    // Every (lineage, gene)'s trajectory on the fine grid, `[L][G][n]`.
     let step = cfg.t_len / (n - 1) as f64;
+    let branch = cfg.branch_at.filter(|_| l > 1).map(|f| f * cfg.t_len);
+    if let Some(tb) = branch {
+        let width = cfg.kappa * cfg.t_len;
+        for lin in 1..l {
+            for k in 0..n {
+                let after = (k as f64 * step - tb).max(0.0) / width;
+                let ramp = std::f64::consts::SQRT_2 * (1.0 - (-after * after).exp());
+                for d in 0..h {
+                    path[lin][k][d] = path[0][k][d] + ramp * path[lin][k][d];
+                }
+            }
+        }
+    }
+    // Every (lineage, gene)'s trajectory on the fine grid, `[L][G][n]`.
     let traj: Vec<Vec<(Vec<f64>, Vec<f64>)>> = path
         .iter()
         .map(|z| {
@@ -169,6 +195,10 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
         }
         (lineage[p], time[p], depth[p]) = (lin, t, n_p);
     }
+    let trunk = time
+        .iter()
+        .map(|&t| branch.is_some_and(|tb| t <= tb))
+        .collect();
     Ok(Sim {
         u,
         s,
@@ -184,6 +214,7 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
             path,
             lineage,
             time,
+            trunk,
             u_mean,
             s_mean,
         },

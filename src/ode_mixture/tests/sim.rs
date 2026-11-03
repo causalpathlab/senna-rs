@@ -123,3 +123,53 @@ fn the_truth_rebuilds_the_means() {
         assert!((lambda * s / t.s_mean[p * sim.n_genes + g] - 1.0).abs() < 1e-9);
     }
 }
+
+/// Lineages on a shared trunk: lineage 0's path until the branch, then
+/// apart, value and slope continuous at the branch; the truth says which
+/// pseudobulks are on the trunk.
+#[test]
+fn branching_lineages_share_a_trunk_and_part_smoothly() {
+    let cfg = SimConfig {
+        lineages: 3,
+        branch_at: Some(0.4),
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let t = &sim.truth;
+    let step = cfg.t_len / (cfg.fine - 1) as f64;
+    let kb = (0..cfg.fine)
+        .find(|&k| k as f64 * step > 0.4 * cfg.t_len)
+        .unwrap();
+    for l in 1..3 {
+        let gap = |k: usize| -> f64 {
+            t.path[l][k]
+                .iter()
+                .zip(&t.path[0][k])
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+        // Equal on the trunk.
+        assert!((0..kb).all(|k| gap(k) == 0.0), "lineage {l} off the trunk");
+        // No kink: the gap grows slower than linearly off the branch.
+        let (g1, g4) = (gap(kb), gap(kb + 3));
+        assert!(g1 < 1e-3 && g4 < 1e-2, "lineage {l} kinks: {g1} {g4}");
+        // Apart after.
+        let far = (kb..cfg.fine).map(gap).fold(0.0, f64::max);
+        assert!(far > 0.5, "lineage {l} never parts: {far}");
+    }
+    for p in 0..sim.n_pb {
+        assert_eq!(t.trunk[p], t.time[p] <= 0.4 * cfg.t_len, "pseudobulk {p}");
+    }
+    assert!(t.trunk.iter().any(|&b| b) && t.trunk.iter().any(|&b| !b));
+}
+
+#[test]
+fn without_a_branch_no_pseudobulk_is_on_a_trunk() {
+    let sim = simulate(&SimConfig {
+        lineages: 2,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    assert!(sim.truth.trunk.iter().all(|&b| !b));
+}
