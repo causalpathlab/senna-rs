@@ -79,3 +79,31 @@ fn long_after_a_switch_the_new_steady_state_is_reached() {
         s[199]
     );
 }
+
+/// Between nodes, the levels at `m` evenly spaced points of every step are
+/// the ODE's (α held over the step), and the nodes are the grid's.
+#[test]
+fn between_the_nodes_the_levels_are_the_odes() {
+    use crate::ode_mixture::kinetics::fine_trajectory;
+    let alpha: Vec<f64> = (0..11)
+        .map(|k| 1.0 + 3.0 * (k as f64 / 2.0).cos().powi(2))
+        .collect();
+    let (beta, gamma, h, m) = (2.5, 0.8, 0.3, 4);
+    let (u, s) = fine_trajectory(&alpha, beta, gamma, h, m);
+    assert_eq!(u.len(), (alpha.len() - 1) * m + 1);
+    // The same ODE on the sub-grid itself, α held at the node's value.
+    let fine_alpha: Vec<f64> = (0..u.len())
+        .map(|i| alpha[(i / m).min(alpha.len() - 1)])
+        .collect();
+    let (ur, sr) = runge_kutta(&fine_alpha, beta, gamma, h / m as f64, 400);
+    close(&u, &ur, 1e-9);
+    close(&s, &sr, 1e-9);
+    // Every m-th point is a node.
+    let (un, sn) = trajectory(&alpha, beta, gamma, h);
+    for k in 0..alpha.len() {
+        assert!((u[k * m] - un[k]).abs() < 1e-12 && (s[k * m] - sn[k]).abs() < 1e-12);
+    }
+    // m = 1 is the grid.
+    let (u1, _) = fine_trajectory(&alpha, beta, gamma, h, 1);
+    close(&u1, &un, 1e-12);
+}

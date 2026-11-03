@@ -24,26 +24,51 @@ fn expm1_ratio(x: f64) -> f64 {
     }
 }
 
+/// `(u, s)` a time `delta` after `(u0, s0)`, transcription held at `alpha`.
+pub fn step(u0: f64, s0: f64, alpha: f64, beta: f64, gamma: f64, delta: f64) -> (f64, f64) {
+    let (eb, eg) = ((-beta * delta).exp(), (-gamma * delta).exp());
+    let e = delta * eg * expm1_ratio((gamma - beta) * delta);
+    let s = s0 * eg + alpha / gamma * (1.0 - eg) + (beta * u0 - alpha) * e;
+    let u = alpha / beta + (u0 - alpha / beta) * eb;
+    (u, s)
+}
+
 /// One gene's unspliced and spliced levels at every grid point, the grid
 /// step `h`, transcription `alpha[k]` over step `k` (the last value only
 /// sets nothing past the end), from steady state `α_0/β`, `α_0/γ`.
 pub fn trajectory(alpha: &[f64], beta: f64, gamma: f64, h: f64) -> (Vec<f64>, Vec<f64>) {
+    fine_trajectory(alpha, beta, gamma, h, 1)
+}
+
+/// [`trajectory`] at `m` evenly spaced points of every step: positions
+/// `t_k + j h/m` (`j < m`) and the last node, `(n − 1) m + 1` of them, each
+/// the exact partial step from its node (`α` held over the step). The
+/// levels between nodes, so a pseudobulk's time need not sit on a node.
+pub fn fine_trajectory(
+    alpha: &[f64],
+    beta: f64,
+    gamma: f64,
+    h: f64,
+    m: usize,
+) -> (Vec<f64>, Vec<f64>) {
     let n = alpha.len();
-    let (mut u, mut s) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    let m = m.max(1);
+    let (mut u, mut s) = (Vec::with_capacity(n.saturating_sub(1) * m + 1), Vec::new());
     let Some(&a0) = alpha.first() else {
         return (u, s);
     };
-    let (eb, eg) = ((-beta * h).exp(), (-gamma * h).exp());
-    let e = h * eg * expm1_ratio((gamma - beta) * h);
     let (mut uk, mut sk) = (a0 / beta, a0 / gamma);
-    u.push(uk);
-    s.push(sk);
     for &a in &alpha[..n - 1] {
-        let next_s = sk * eg + a / gamma * (1.0 - eg) + (beta * uk - a) * e;
-        uk = a / beta + (uk - a / beta) * eb;
-        sk = next_s;
         u.push(uk);
         s.push(sk);
+        for j in 1..m {
+            let (uj, sj) = step(uk, sk, a, beta, gamma, j as f64 * h / m as f64);
+            u.push(uj);
+            s.push(sj);
+        }
+        (uk, sk) = step(uk, sk, a, beta, gamma, h);
     }
+    u.push(uk);
+    s.push(sk);
     (u, s)
 }

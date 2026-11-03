@@ -42,6 +42,9 @@ pub struct Climb {
     pub kappa: f64,
     pub steps: usize,
     pub lr: f64,
+    /// Positions per grid step a pseudobulk's time can take
+    /// ([`Params::sub`]).
+    pub sub: usize,
 }
 
 /// Bandwidth, on `[0, 1]`, of the smoothing of scores onto the grid.
@@ -354,6 +357,7 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
         base: mean.iter().map(|m| m + gamma0.ln()).collect(),
         t_len: vec![1.0; opts.lineages],
         path,
+        sub: opts.sub,
     }
 }
 

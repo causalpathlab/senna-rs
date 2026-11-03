@@ -21,6 +21,7 @@ fn opts(cfg: &SimConfig) -> Climb {
         kappa: cfg.kappa,
         steps: 2500,
         lr: 0.03,
+        sub: 1,
     }
 }
 

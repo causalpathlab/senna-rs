@@ -19,6 +19,7 @@ fn the_levels_are_the_hosts() {
     let sim = simulate(&cfg).unwrap();
     let mut params = truth_params(&sim, 133, 45);
     params.t_len[1] = 1.7;
+    params.sub = 4;
     let prior = GridPrior::new(45, 1.0, cfg.kappa).unwrap();
     let fit = Fit::from_params(&params, &prior, &Device::Cpu).unwrap();
     let (u, s) = fit.levels().unwrap();

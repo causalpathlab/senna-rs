@@ -59,6 +59,7 @@ fn climb_mode() -> Params {
         kappa: KAPPA,
         steps: 2500,
         lr: 0.03,
+        sub: 1,
     };
     let (fit, _) = climb(&first(sim(), TRAIN), &opts, &Device::Cpu).unwrap();
     fit.params().unwrap()
@@ -262,6 +263,7 @@ fn a_duration_with_no_reads_follows_its_prior() {
         base: vec![0.0],
         t_len: vec![1.0, 1.0],
         path: vec![vec![vec![0.0]; 4]; 2],
+        sub: 1,
     };
     let g = 1;
     // One pseudobulk, on lineage 0.

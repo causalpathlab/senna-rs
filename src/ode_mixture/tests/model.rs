@@ -13,6 +13,7 @@ pub(super) fn truth_params(sim: &Sim, fine: usize, n: usize) -> Params {
         rho: t.rho.clone(),
         base: t.base.clone(),
         t_len: t.t_len.clone(),
+        sub: 1,
         path: t
             .path
             .iter()
@@ -45,4 +46,50 @@ fn the_levels_are_the_simulators_on_its_own_grid() {
             assert!((lambda * lv.u[(r, g)] / want - 1.0).abs() < 1e-9);
         }
     }
+}
+
+/// With `sub = m`, the levels sit at `(n − 1) m + 1` positions per lineage,
+/// every gene's the ODE's between the nodes, and a position's time is its
+/// share of the duration.
+#[test]
+fn the_levels_sit_between_the_nodes_too() {
+    use crate::ode_mixture::kinetics::fine_trajectory;
+    let cfg = SimConfig {
+        lineages: 2,
+        fine: 81,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let mut params = truth_params(&sim, 81, 21);
+    params.t_len[1] = 1.4;
+    params.sub = 4;
+    let lv = params.levels();
+    assert_eq!((lv.lineages, lv.points), (2, 81));
+    for g in [0, 9] {
+        for l in 0..2 {
+            let alpha: Vec<f64> = params.path[l]
+                .iter()
+                .map(|z| {
+                    (z.iter()
+                        .zip(&params.rho[g])
+                        .map(|(a, b)| a * b)
+                        .sum::<f64>()
+                        + params.base[g])
+                        .exp()
+                })
+                .collect();
+            let (u, s) = fine_trajectory(
+                &alpha,
+                params.beta[g],
+                params.gamma[g],
+                params.t_len[l] / 20.0,
+                4,
+            );
+            for k in 0..81 {
+                assert!((lv.u[(lv.row(l, k), g)] / u[k] - 1.0).abs() < 1e-12);
+                assert!((lv.s[(lv.row(l, k), g)] / s[k] - 1.0).abs() < 1e-12);
+            }
+        }
+    }
+    assert!((params.time_at(1, 40) - 0.7).abs() < 1e-12);
 }

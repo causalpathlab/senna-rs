@@ -46,6 +46,8 @@ pub struct Fit {
     chol: Tensor,
     prior: GenePrior,
     dims: (usize, usize, usize, usize),
+    /// Positions per grid step ([`Params::sub`]).
+    sub: usize,
 }
 
 fn var(v: Vec<f64>, shape: &[usize], dev: &Device) -> Result<Var> {
@@ -90,6 +92,7 @@ impl Fit {
             chol: Tensor::from_vec(c.iter().map(|&x| x as f32).collect::<Vec<_>>(), (n, n), dev)?,
             prior: GenePrior::default(),
             dims: (l, n, g, h),
+            sub: params.sub.max(1),
         })
     }
 
@@ -158,37 +161,64 @@ impl Fit {
             self.log_gamma.as_tensor().exp()?,
         );
         let step = (self.t_len()? / (n - 1) as f64)?; // [L × 1]
-        let bh = step.broadcast_mul(&beta)?;
-        let gh = step.broadcast_mul(&gamma)?;
-        let (eb, eg) = (bh.neg()?.exp()?, gh.neg()?.exp()?);
-        let x = (&gh - &bh)?;
-        let small = x.abs()?.lt(SMALL)?;
-        let safe = small.where_cond(&x.ones_like()?, &x)?;
-        let ratio = small.where_cond(&(x.affine(0.5, 1.0))?, &((safe.exp()? - 1.0)? / &safe)?)?;
-        let e = (step.broadcast_mul(&eg)? * ratio)?;
+        let m = self.sub;
+        // `e^{−βδ}`, `e^{−γδ}` and `E(δ) = δ e^{−γδ} expm1((γ−β)δ)/((γ−β)δ)`
+        // for a step `δ` `[L × 1]`, each `[L × G]`.
+        let factors = |delta: &Tensor| -> Result<(Tensor, Tensor, Tensor)> {
+            let bh = delta.broadcast_mul(&beta)?;
+            let gh = delta.broadcast_mul(&gamma)?;
+            let (eb, eg) = (bh.neg()?.exp()?, gh.neg()?.exp()?);
+            let x = (&gh - &bh)?;
+            let small = x.abs()?.lt(SMALL)?;
+            let safe = small.where_cond(&x.ones_like()?, &x)?;
+            let ratio =
+                small.where_cond(&(x.affine(0.5, 1.0))?, &((safe.exp()? - 1.0)? / &safe)?)?;
+            let e = (delta.broadcast_mul(&eg)? * ratio)?;
+            Ok((eb, eg, e))
+        };
+        let full = factors(&step)?;
+        let part: Vec<(Tensor, Tensor, Tensor)> = (1..m)
+            .map(|j| factors(&(&step * (j as f64 / m as f64))?))
+            .collect::<Result<_>>()?;
         let (inv_b, inv_g) = (beta.recip()?, gamma.recip()?);
+        // One exact step of the ODE from `(u, s)` by `(eb, eg, e)`, `α = a`.
+        let advance = |u: &Tensor,
+                       s: &Tensor,
+                       a: &Tensor,
+                       (eb, eg, e): &(Tensor, Tensor, Tensor)|
+         -> Result<(Tensor, Tensor)> {
+            let a_b = a.broadcast_mul(&inv_b)?;
+            let next_s = ((s * eg)?
+                + (a.broadcast_mul(&inv_g)? * (1.0 - eg)?)?
+                + ((u.broadcast_mul(&beta)? - a)? * e)?)?;
+            let next_u = (&a_b + ((u - &a_b)? * eb)?)?;
+            Ok((next_u, next_s))
+        };
         let a0 = alpha.narrow(1, 0, 1)?.squeeze(1)?;
         let (mut u, mut s) = (a0.broadcast_mul(&inv_b)?, a0.broadcast_mul(&inv_g)?);
-        let (mut us, mut ss) = (vec![u.clone()], vec![s.clone()]);
+        let (mut us, mut ss) = (Vec::new(), Vec::new());
         for k in 0..n - 1 {
             let a = alpha.narrow(1, k, 1)?.squeeze(1)?;
-            let a_b = a.broadcast_mul(&inv_b)?;
-            let next_s = ((&s * &eg)?
-                + (a.broadcast_mul(&inv_g)? * (1.0 - &eg)?)?
-                + ((u.broadcast_mul(&beta)? - &a)? * &e)?)?;
-            u = (&a_b + ((&u - &a_b)? * &eb)?)?;
-            s = next_s;
             us.push(u.clone());
             ss.push(s.clone());
+            for f in &part {
+                let (uj, sj) = advance(&u, &s, &a, f)?;
+                us.push(uj);
+                ss.push(sj);
+            }
+            (u, s) = advance(&u, &s, &a, &full)?;
         }
-        let stack = |v: &[Tensor]| Tensor::stack(v, 1)?.reshape((l * n, g));
+        us.push(u);
+        ss.push(s);
+        let positions = (n - 1) * m + 1;
+        let stack = |v: &[Tensor]| Tensor::stack(v, 1)?.reshape((l * positions, g));
         Ok((stack(&us)?, stack(&ss)?))
     }
 
     /// `Σ_p log Σ_{ℓ,k} π_ℓ (1/n) p(x_p | ℓ, k)`, the multinomial (no
     /// coefficient).
     pub fn log_marginal(&self, reads: &DeviceReads) -> Result<Tensor> {
-        let (l, n, _, _) = self.dims;
+        let (l, n) = (self.dims.0, self.positions());
         let (u, s) = self.levels()?;
         let z = (u.sum_keepdim(1)? + s.sum_keepdim(1)?)?.log()?;
         let lu = u.log()?.broadcast_sub(&z)?;
@@ -265,7 +295,7 @@ impl Fit {
     /// `rows[p] = ℓ n + k`, the multinomial (no coefficient), plus the log
     /// priors.
     pub fn held_objective(&self, reads: &DeviceReads, rows: &Tensor) -> Result<Tensor> {
-        let (l, n, _, _) = self.dims;
+        let (l, n) = (self.dims.0, self.positions());
         let (u, s) = self.levels()?;
         let z = (u.sum_keepdim(1)? + s.sum_keepdim(1)?)?.log()?;
         let lu = u.log()?.broadcast_sub(&z)?.index_select(rows, 0)?;
@@ -296,7 +326,7 @@ impl Fit {
     /// Every pseudobulk's posterior over lineages `[P][L]` and its mean
     /// time on its lineages, `[P]` (lineage time, `k T_ℓ/(n − 1)`).
     pub fn posterior(&self, reads: &DeviceReads) -> Result<(Vec<Vec<f64>>, Vec<f64>)> {
-        let (l, n, _, _) = self.dims;
+        let (l, n) = (self.dims.0, self.positions());
         let (u, s) = self.levels()?;
         let z = (u.sum_keepdim(1)? + s.sum_keepdim(1)?)?.log()?;
         let lu = u.log()?.broadcast_sub(&z)?;
@@ -327,6 +357,11 @@ impl Fit {
             time.push(mean);
         }
         Ok((lineage, time))
+    }
+
+    /// Positions per lineage, `(n − 1) sub + 1`.
+    pub fn positions(&self) -> usize {
+        (self.dims.1 - 1) * self.sub + 1
     }
 
     /// The parameters on the host.
@@ -361,6 +396,7 @@ impl Fit {
                         .collect()
                 })
                 .collect(),
+            sub: self.sub,
         })
     }
 }

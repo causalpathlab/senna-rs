@@ -432,6 +432,7 @@ fn the_path_block_carries_the_genes_prior_through_the_path_mean() {
         base: vec![base],
         t_len: vec![1.0],
         path: vec![vec![vec![0.0]; n]],
+        sub: 1,
     };
     let reads = Reads::new(&[], &[], 0, 1);
     let c: Vec<f64> = (0..n)

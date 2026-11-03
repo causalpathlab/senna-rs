@@ -78,6 +78,7 @@ fn from_scratch_branching_lineages_keep_their_trunk() {
         kappa: cfg.kappa,
         steps: 2500,
         lr: 0.03,
+        sub: 1,
     };
     let (fit, objective) = climb(&train, &opts, &dev).unwrap();
     let all = first(&sim, sim.n_pb);

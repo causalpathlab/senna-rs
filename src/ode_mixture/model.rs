@@ -4,7 +4,7 @@
 //! transcription `α_gℓk = exp(ρ_gᵀ z_ℓ(t_k) + b_g)` and the trajectory's
 //! levels `ū_gℓk`, `s̄_gℓk` ([`super::kinetics`]), shared rates `β_g`, `γ_g`.
 
-use super::kinetics::trajectory;
+use super::kinetics::fine_trajectory;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
@@ -20,9 +20,15 @@ pub struct Params {
     pub t_len: Vec<f64>,
     /// `[L][n][H]` every lineage's path on its grid.
     pub path: Vec<Vec<Vec<f64>>>,
+    /// Positions per grid step a pseudobulk's time can take (`1`: the nodes
+    /// alone). The levels are exact between nodes, so time is as fine as
+    /// this, the path no finer.
+    pub sub: usize,
 }
 
-/// Every `(lineage, grid point)`'s levels, rows `ℓ n + k`, a column per gene.
+/// Every `(lineage, position)`'s levels, rows `ℓ points + k` (positions
+/// [`Params::positions`]: the nodes and `sub − 1` between each two), a
+/// column per gene.
 pub struct Levels {
     pub lineages: usize,
     pub points: usize,
@@ -39,6 +45,16 @@ impl Levels {
 }
 
 impl Params {
+    /// Positions per lineage, `(n − 1) sub + 1`.
+    pub fn positions(&self) -> usize {
+        (self.path[0].len() - 1) * self.sub.max(1) + 1
+    }
+
+    /// The time of lineage `l`'s position `k`.
+    pub fn time_at(&self, l: usize, k: usize) -> f64 {
+        k as f64 * self.t_len[l] / (self.positions() - 1) as f64
+    }
+
     /// The paths' mean over every lineage's grid points, `[H]`.
     pub fn path_mean(&self) -> Vec<f64> {
         let h = self.rho.first().map_or(0, Vec::len);
@@ -63,7 +79,7 @@ impl Params {
                 .map(|z| (z.iter().zip(rho).map(|(a, b)| a * b).sum::<f64>() + base).exp())
                 .collect();
             let h = t_len / (path.len() - 1) as f64;
-            let (ul, sl) = trajectory(&alpha, beta, gamma, h);
+            let (ul, sl) = fine_trajectory(&alpha, beta, gamma, h, self.sub);
             u.extend(ul);
             s.extend(sl);
         }
@@ -73,7 +89,11 @@ impl Params {
     /// Every gene's levels, in parallel over genes.
     pub fn levels(&self) -> Levels {
         let (lineages, genes) = (self.path.len(), self.beta.len());
-        let points = self.path.first().map_or(0, Vec::len);
+        let points = if self.path.is_empty() {
+            0
+        } else {
+            self.positions()
+        };
         let cols: Vec<(Vec<f64>, Vec<f64>)> = (0..genes)
             .into_par_iter()
             .map(|g| self.gene_levels(g))

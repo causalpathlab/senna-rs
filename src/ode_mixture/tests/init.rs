@@ -63,6 +63,7 @@ fn from_scratch_the_climb_finds_time_and_its_direction() {
         kappa: cfg.kappa,
         steps: 2500,
         lr: 0.03,
+        sub: 1,
     };
     let (fit, objective) = climb(&train, &opts, &dev).unwrap();
     let at_truth = {
@@ -106,6 +107,7 @@ fn from_scratch_two_lineages_come_apart() {
         kappa: cfg.kappa,
         steps: 2500,
         lr: 0.03,
+        sub: 1,
     };
     let (fit, objective) = climb(&train, &opts, &dev).unwrap();
     let all = first(&sim, sim.n_pb);
@@ -202,11 +204,11 @@ fn a_tree_start_gives_both_lineages_the_trunk() {
     );
 }
 
-/// The climb's time origin is right to within half a grid step: a path one
-/// grid point late (a near-degenerate optimum no gradient leaves) is tried
-/// against its shifts.
+/// The climb's time origin is right to within half a grid step once a
+/// pseudobulk's time can sit between nodes (four positions a step): on the
+/// nodes alone the climb stays a grid step late, an optimum no gradient
+/// leaves.
 #[test]
-#[ignore = "fails: the climb's time origin is a grid step late (a near-degenerate optimum); shift restarts overshoot, as neighbouring shifts differ by less than Adam's run-to-run spread"]
 fn the_climbs_time_is_not_a_grid_step_late() {
     let cfg = SimConfig {
         fine: 133,
@@ -221,6 +223,7 @@ fn the_climbs_time_is_not_a_grid_step_late() {
         kappa: cfg.kappa,
         steps: 2500,
         lr: 0.03,
+        sub: 4,
     };
     let (fit, _) = climb(&train, &opts, &Device::Cpu).unwrap();
     let (_, time) = fit.posterior(&fit.reads(&train).unwrap()).unwrap();
