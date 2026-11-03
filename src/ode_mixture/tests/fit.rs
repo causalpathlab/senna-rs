@@ -108,3 +108,27 @@ fn adam_climbs_from_the_prior_rates_to_the_truth() {
     assert!(f64::from(after) > f64::from(at_truth) - 50.0);
     assert!(err[err.len() / 2] < 0.05);
 }
+
+/// A stop flag already set ends Adam before its first step: the objective
+/// is the start's.
+#[test]
+fn a_stop_ends_adam_at_once() {
+    use std::sync::atomic::AtomicBool;
+    let cfg = SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let prior = GridPrior::new(45, 1.0, cfg.kappa).unwrap();
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let fit = Fit::from_params(&truth_params(&sim, 133, 45), &prior, &Device::Cpu).unwrap();
+    let before = fit
+        .objective(&fit.reads(&reads).unwrap())
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    let after = fit
+        .adam_until(&reads, 1000, 0.03, Some(&AtomicBool::new(true)))
+        .unwrap();
+    assert_eq!(before, after);
+}

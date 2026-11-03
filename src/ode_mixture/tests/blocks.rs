@@ -499,3 +499,95 @@ fn the_path_block_carries_the_genes_prior_through_the_path_mean() {
         );
     }
 }
+
+/// The collapsed path density's gradient (every pseudobulk's lineage and
+/// grid point summed out) is its finite difference.
+#[test]
+fn the_collapsed_paths_gradient_is_its_finite_difference() {
+    use crate::ode_mixture::blocks::{collapsed_newton, collapsed_path_log_density};
+    use crate::ode_mixture::kernel::GridPrior;
+    let cfg = SimConfig {
+        lineages: 2,
+        n_pb: 120,
+        fine: 133,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let truth = truth_params(&sim, 133, 23);
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let grid = GridPrior::new(23, 1.0, cfg.kappa).unwrap();
+    let prior = GenePrior::default();
+    let log_w = vec![0.5f64.ln(); 2];
+    let h = truth.rho[0].len();
+    let l = 1;
+    let eta: Vec<nalgebra::DVector<f64>> = (0..h)
+        .map(|d| grid.whiten(&nalgebra::DVector::from_fn(23, |k, _| truth.path[l][k][d])))
+        .collect();
+    let density = |eta: &[nalgebra::DVector<f64>]| {
+        let mut p = truth.clone();
+        let dims: Vec<_> = eta.iter().map(|e| grid.colour(e)).collect();
+        p.path[l] = (0..23)
+            .map(|k| dims.iter().map(|d| d[k]).collect())
+            .collect();
+        collapsed_path_log_density(&p, &reads, &log_w, &prior)
+            - 0.5 * eta.iter().map(|e| e.norm_squared()).sum::<f64>()
+    };
+    let (grad, _) = collapsed_newton(&truth, l, &grid, &reads, &log_w, &prior);
+    for (d, k) in [(0, 0), (1, 5), (2, 11), (0, 22)] {
+        let eps = 1e-5;
+        let (mut up, mut down) = (eta.clone(), eta.clone());
+        up[d][k] += eps;
+        down[d][k] -= eps;
+        let fd = (density(&up) - density(&down)) / (2.0 * eps);
+        let an = grad[d * 23 + k];
+        assert!(
+            (fd - an).abs() < 1e-3 * fd.abs().max(1.0),
+            "({d}, {k}): analytic {an} vs {fd}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "diagnostic: timing of the collapsed path pieces"]
+fn diagnostic_collapsed_timing() {
+    use crate::ode_mixture::blocks::{
+        collapsed_laplace, collapsed_newton, collapsed_path_log_density,
+    };
+    use crate::ode_mixture::kernel::GridPrior;
+    use std::time::Instant;
+    let cfg = SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let truth = truth_params(&sim, 133, 45);
+    let reads = Reads::new(
+        &sim.u[..240 * sim.n_genes],
+        &sim.s[..240 * sim.n_genes],
+        240,
+        sim.n_genes,
+    );
+    let grid = GridPrior::new(45, 1.0, cfg.kappa).unwrap();
+    let prior = GenePrior::default();
+    let log_w = vec![0.0];
+    let t = Instant::now();
+    for _ in 0..20 {
+        collapsed_path_log_density(&truth, &reads, &log_w, &prior);
+    }
+    eprintln!("density {:.1} ms", t.elapsed().as_secs_f64() * 50.0);
+    let t = Instant::now();
+    for _ in 0..3 {
+        collapsed_newton(&truth, 0, &grid, &reads, &log_w, &prior);
+    }
+    eprintln!("newton {:.1} ms", t.elapsed().as_secs_f64() * 1000.0 / 3.0);
+    let h = truth.rho[0].len();
+    let eta: Vec<nalgebra::DVector<f64>> = (0..h)
+        .map(|d| grid.whiten(&nalgebra::DVector::from_fn(45, |k, _| truth.path[0][k][d])))
+        .collect();
+    let t = Instant::now();
+    collapsed_laplace(&truth, 0, &eta, &grid, &reads, &log_w, &prior, 20);
+    eprintln!(
+        "laplace from the truth {:.1} ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
+}

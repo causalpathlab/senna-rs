@@ -20,6 +20,7 @@ use crate::rbm_core::adam;
 use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var, D};
 use legume_numeric::candle::candle_nn::ops::log_softmax;
 use legume_numeric::candle::candle_nn::Optimizer;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Below this `|x|`, `expm1(x)/x` by its series (the division is lost).
 const SMALL: f64 = 1e-4;
@@ -232,12 +233,31 @@ impl Fit {
 
     /// `steps` of Adam at `lr` on the objective per read; the objective after.
     pub fn adam(&self, reads: &Reads, steps: usize, lr: f64) -> Result<f32> {
+        self.adam_until(reads, steps, lr, None)
+    }
+
+    /// [`Self::adam`], ended early once `stop` is set (as Ctrl+C sets it),
+    /// with a progress bar as senna's other fits show.
+    pub fn adam_until(
+        &self,
+        reads: &Reads,
+        steps: usize,
+        lr: f64,
+        stop: Option<&AtomicBool>,
+    ) -> Result<f32> {
         let dev = self.reads(reads)?;
         let mut opt = adam(self.vars(), lr)?;
+        let bar = crate::logging::new_progress_bar(steps as u64).with_message("ode-mixture climb");
         for _ in 0..steps {
+            if stop.is_some_and(|s| s.load(Ordering::Relaxed)) {
+                log::info!("ode-mixture climb: stopped");
+                break;
+            }
             let loss = (self.objective(&dev)? / -dev.total)?;
             opt.backward_step(&loss)?;
+            bar.inc(1);
         }
+        bar.finish_and_clear();
         self.objective(&dev)?.to_scalar::<f32>()
     }
 

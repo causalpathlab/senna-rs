@@ -228,11 +228,7 @@ fn four_chains_in_the_truths_basin_agree_on_the_invariants() {
 }
 
 /// From the same start, 90% intervals of time cover the truth for most
-/// pseudobulks, of `log γ/β` for most genes. What this does not see: a
-/// warp of every time shared by the pseudobulks (with the path along) is
-/// not crossed by any block (each pseudobulk's time is pinned to a grid
-/// point or two given the path, the path given the times), so the chains
-/// keep their start's warp; this start has the truth's.
+/// pseudobulks, of `log γ/β` for most genes.
 #[test]
 fn in_the_truths_basin_posterior_intervals_cover_the_truth() {
     let (t, r, _) = coverage(from_truths_basin());
@@ -240,14 +236,13 @@ fn in_the_truths_basin_posterior_intervals_cover_the_truth() {
     assert!((0.8..=0.98).contains(&r), "log γ/β coverage {r}");
 }
 
-/// The gate as asked, from the climb's mode: `log γ/β` is covered, time at
-/// about half the rate. The climb's times are later than the truth's by
-/// about a grid step at the same reads' likelihood (a warp the reads
-/// barely see), and the chains keep that warp
-/// ([`diagnostic_long_chains_from_the_climb`]); the intervals do not
-/// carry it.
+/// The gate, from the climb's mode: 90% intervals cover time and `log γ/β`.
+/// The climb's times sit about a grid step from the truth's: an optimum of
+/// genes, path and times together (shifting the path with the genes held
+/// costs thousands of nats), which no block leaves, the collapsed path block
+/// (the latents summed out) included ([`diagnostic_warp_trace`]).
 #[test]
-#[ignore = "fails: the shared warp of time is not explored, chains keep the climb's"]
+#[ignore = "fails: time coverage about half; the climb's mode has its time origin a grid step off, a joint optimum of genes, path and times the blocks (the collapsed path block too) do not leave"]
 fn from_the_climb_posterior_intervals_cover_the_truth() {
     let (t, r, _) = coverage(from_climb());
     assert!((0.8..=0.98).contains(&t), "time coverage {t}");
@@ -330,5 +325,164 @@ fn diagnostic_the_two_modes() {
         let shift = (0..TRAIN).map(|i| time[i] - t[i]).sum::<f64>() / TRAIN as f64;
         let rms = ((0..TRAIN).map(|i| (time[i] - t[i]).powi(2)).sum::<f64>() / TRAIN as f64).sqrt();
         eprintln!("{name}: objective {obj:.1}; mean time − truth {shift:.4}, rms {rms:.4}");
+    }
+}
+
+/// A stop flag already set (as Ctrl+C sets it) ends every chain before its
+/// first sweep: nothing kept, and quickly.
+#[test]
+fn a_stop_ends_the_chains_at_once() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    let t0 = std::time::Instant::now();
+    let draws = run(
+        &first(sim(), TRAIN),
+        &truth_params(sim(), 133, POINTS),
+        &Options {
+            kappa: KAPPA,
+            chains: 2,
+            sweeps: 1000,
+            burn: 0,
+            stop: Some(Arc::new(AtomicBool::new(true))),
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert!(draws.iter().all(|d| d.time.is_empty()));
+    assert!(t0.elapsed().as_secs_f64() < 5.0);
+}
+
+#[test]
+#[ignore = "diagnostic: does the warp move, with and without the collapsed block"]
+fn diagnostic_warp_trace() {
+    let start = climb_mode();
+    for collapsed_moves in [0, 2, 8] {
+        let draws = run(
+            &first(sim(), TRAIN),
+            &start,
+            &Options {
+                kappa: KAPPA,
+                chains: 1,
+                sweeps: 400,
+                burn: 0,
+                collapsed_moves,
+                collapsed_refresh: 10,
+                seed: 5,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let shift: Vec<String> = draws[0]
+            .time
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 50 == 0 || *i == 399)
+            .map(|(i, t)| {
+                let m = (0..TRAIN).map(|p| t[p] - sim().truth.time[p]).sum::<f64>() / TRAIN as f64;
+                format!("{i}:{m:.4}")
+            })
+            .collect();
+        eprintln!(
+            "collapsed moves {collapsed_moves}: mean time − truth {}",
+            shift.join(" ")
+        );
+    }
+}
+
+#[test]
+#[ignore = "diagnostic: does a longer, decaying climb reach the truth's basin"]
+fn diagnostic_longer_climb() {
+    let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
+    let reads = first(sim(), TRAIN);
+    let fit = Fit::from_params(&climb_mode(), &grid, &Device::Cpu).unwrap();
+    let dev = fit.reads(&reads).unwrap();
+    let shift = |p: &Params| {
+        let f = Fit::from_params(p, &grid, &Device::Cpu).unwrap();
+        let (_, t) = f.posterior(&f.reads(&reads).unwrap()).unwrap();
+        (0..TRAIN).map(|i| t[i] - sim().truth.time[i]).sum::<f64>() / TRAIN as f64
+    };
+    eprintln!(
+        "start: objective {:.1}, shift {:.4}",
+        fit.objective(&dev).unwrap().to_scalar::<f32>().unwrap(),
+        shift(&fit.params().unwrap())
+    );
+    for (steps, lr) in [(3000, 0.03), (3000, 0.01), (3000, 0.003), (3000, 0.001)] {
+        let obj = fit.adam(&reads, steps, lr).unwrap();
+        eprintln!(
+            "+{steps} at {lr}: objective {obj:.1}, shift {:.4}",
+            shift(&fit.params().unwrap())
+        );
+    }
+}
+
+#[test]
+#[ignore = "diagnostic: does shifting the climb's path by grid steps reach the truth's basin"]
+fn diagnostic_shifted_climb() {
+    let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
+    let reads = first(sim(), TRAIN);
+    let base = climb_mode();
+    for shift in [-2i32, -1, 0, 1] {
+        let mut p = base.clone();
+        let n = POINTS as i32;
+        p.path[0] = (0..n)
+            .map(|k| base.path[0][(k - shift).clamp(0, n - 1) as usize].clone())
+            .collect();
+        let fit = Fit::from_params(&p, &grid, &Device::Cpu).unwrap();
+        let obj = fit.adam(&reads, 3000, 0.01).unwrap();
+        let f = fit.params().unwrap();
+        let ff = Fit::from_params(&f, &grid, &Device::Cpu).unwrap();
+        let (_, t) = ff.posterior(&ff.reads(&reads).unwrap()).unwrap();
+        let m = (0..TRAIN).map(|i| t[i] - sim().truth.time[i]).sum::<f64>() / TRAIN as f64;
+        eprintln!("path shifted {shift}: objective {obj:.1}, mean time − truth {m:.4}");
+    }
+}
+
+#[test]
+#[ignore = "diagnostic: the collapsed density of the climb's path shifted, genes held"]
+fn diagnostic_shift_cost_with_genes_held() {
+    use crate::ode_mixture::blocks::{collapsed_path_log_density, GenePrior};
+    let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
+    let reads = first(sim(), TRAIN);
+    let base = climb_mode();
+    let h = base.rho[0].len();
+    let n = POINTS as i32;
+    for shift in [-2i32, -1, 0, 1] {
+        let mut p = base.clone();
+        p.path[0] = (0..n)
+            .map(|k| base.path[0][(k - shift).clamp(0, n - 1) as usize].clone())
+            .collect();
+        let eta2: f64 = (0..h)
+            .map(|d| {
+                grid.whiten(&nalgebra::DVector::from_fn(POINTS, |k, _| p.path[0][k][d]))
+                    .norm_squared()
+            })
+            .sum();
+        let dens =
+            collapsed_path_log_density(&p, &reads, &[0.0], &GenePrior::default()) - 0.5 * eta2;
+        eprintln!("shift {shift}: collapsed log density {dens:.1}");
+    }
+}
+
+#[test]
+#[ignore = "diagnostic: genes whose speed differs between the climb's mode and the truth's basin"]
+fn diagnostic_gene_speeds_between_modes() {
+    let (a, b) = (climb_mode(), truths_mode());
+    let t = &sim().truth;
+    let mut rows: Vec<(f64, usize)> = (0..a.gamma.len())
+        .map(|g| ((a.gamma[g] / b.gamma[g]).ln(), g))
+        .collect();
+    rows.sort_by(|x, y| y.0.abs().total_cmp(&x.0.abs()));
+    let big = rows.iter().filter(|r| r.0.abs() > 0.5).count();
+    eprintln!(
+        "genes with |log γ_climb − log γ_basin| > 0.5: {big} of {}",
+        rows.len()
+    );
+    for &(d, g) in rows.iter().take(8) {
+        eprintln!(
+            "gene {g}: climb log γ {:.2}, basin {:.2}, truth {:.2} (Δ {d:.2})",
+            a.gamma[g].ln(),
+            b.gamma[g].ln(),
+            t.gamma[g].ln()
+        );
     }
 }

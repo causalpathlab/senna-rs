@@ -5,7 +5,7 @@
 
 use super::kernel::GridPrior;
 use super::kinetics::trajectory;
-use super::likelihood::{gene_log_likelihood, Reads};
+use super::likelihood::{gene_log_likelihood, table, Reads};
 use super::model::Params;
 use legume_numeric::mcmc::engine::elliptical_slice_step;
 use nalgebra::{DMatrix, DVector};
@@ -24,6 +24,27 @@ pub fn stream(seed: u64, item: u64, sweep: u64) -> StdRng {
     StdRng::seed_from_u64(mix(seed ^ mix(item ^ mix(sweep))))
 }
 
+/// Pseudobulk `p`'s log posterior over every row `ℓ n + k`, `tab + log π_ℓ`
+/// normalised (time uniform on the grid), and the log normaliser
+/// `log Σ_r e^{tab + log π}` (the grid's `1/n` aside). A row with every
+/// entry `−∞` gives `−∞` throughout, not NaN.
+pub fn log_posterior_row(
+    tab: &DMatrix<f64>,
+    log_w: &[f64],
+    points: usize,
+    p: usize,
+) -> (Vec<f64>, f64) {
+    let logit: Vec<f64> = (0..tab.ncols())
+        .map(|r| tab[(p, r)] + log_w[r / points])
+        .collect();
+    let top = logit.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if !top.is_finite() {
+        return (vec![f64::NEG_INFINITY; logit.len()], f64::NEG_INFINITY);
+    }
+    let norm = top + logit.iter().map(|x| (x - top).exp()).sum::<f64>().ln();
+    (logit.iter().map(|x| x - norm).collect(), norm)
+}
+
 /// Every pseudobulk's row `ℓ n + k` drawn from `table + log π_ℓ` (time
 /// uniform on the grid), in parallel over pseudobulks.
 pub fn draw_latents(
@@ -36,11 +57,8 @@ pub fn draw_latents(
     (0..tab.nrows())
         .into_par_iter()
         .map(|p| {
-            let logit: Vec<f64> = (0..tab.ncols())
-                .map(|r| tab[(p, r)] + log_w[r / points])
-                .collect();
-            let top = logit.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let w: Vec<f64> = logit.iter().map(|x| (x - top).exp()).collect();
+            let (log_post, _) = log_posterior_row(tab, log_w, points, p);
+            let w: Vec<f64> = log_post.iter().map(|x| x.exp()).collect();
             let mut rng = stream(seed, p as u64, sweep);
             let mut at = rng.random::<f64>() * w.iter().sum::<f64>();
             for (r, &x) in w.iter().enumerate() {
@@ -180,6 +198,7 @@ impl GenePrior {
 /// Where a gene's conditional is, as a normal: its mode and the Cholesky
 /// factor `L` of the precision `P = L Lᵀ` (the negative Hessian there,
 /// over [`WIDEN`]²).
+#[derive(Clone)]
 pub struct GeneProposal {
     pub mode: Vec<f64>,
     precision_chol: DMatrix<f64>,
@@ -563,7 +582,7 @@ fn path_newton(
     for &(p, k) in &on {
         pooled[k] += lambda[p];
     }
-    let c = prior.chol();
+
     // Summed over genes: the gradient wrt z `[n × H]`, the Fisher `[Hn × Hn]`.
     let (grad_z, fisher_z) = (0..genes)
         .into_par_iter()
@@ -600,12 +619,31 @@ fn path_newton(
             || (DMatrix::zeros(n, h), DMatrix::zeros(h * n, h * n)),
             |a, b| (a.0 + b.0, a.1 + b.1),
         );
-    // The genes' prior through z̄: −½ Σ_g ((b_g + ρ_gᵀz̄ − log γ_g − m)/s)².
+    whitened(params, l, prior, gene_prior, &grad_z, &fisher_z)
+}
+
+/// From the reads' gradient `[n × H]` and information `[Hn × Hn]` in `z`
+/// (flattened `d n + k`) of lineage `l`'s path: the gradient and precision
+/// in its whitened coordinates, with `η`'s `N(0, I)` and the genes' prior's
+/// exact curvature through `z̄`:
+/// `−½ Σ_g ((b_g + ρ_gᵀz̄ − log γ_g − m)/s)²`, `∂z̄_d/∂η_di = (Cᵀ1)_i / (L n)`.
+fn whitened(
+    params: &Params,
+    l: usize,
+    prior: &GridPrior,
+    gene_prior: &GenePrior,
+    grad_z: &DMatrix<f64>,
+    fisher_z: &DMatrix<f64>,
+) -> (DVector<f64>, DMatrix<f64>) {
+    let path = &params.path[l];
+    let n = path.len();
+    let h = params.rho.first().map_or(0, Vec::len);
+    let c = prior.chol();
     let (m, sd) = gene_prior.log_spliced;
     let z_bar = params.path_mean();
     let mut prior_grad = vec![0.0; h];
     let mut prior_curv = DMatrix::<f64>::zeros(h, h);
-    for g in 0..genes {
+    for g in 0..params.beta.len() {
         let rho = &params.rho[g];
         let r = params.base[g] + dot(rho, &z_bar) - params.gamma[g].ln() - m;
         for d in 0..h {
@@ -615,7 +653,6 @@ fn path_newton(
             }
         }
     }
-    // ∂z̄_d/∂η_di = (Cᵀ1)_i over every lineage's grid points.
     let points = (params.path.len() * n) as f64;
     let col = DVector::from_fn(n, |i, _| (i..n).map(|k| c[(k, i)]).sum::<f64>() / points);
     let mut grad = DVector::zeros(h * n);
@@ -637,6 +674,7 @@ fn path_newton(
 /// The normal approximation of a path's conditional, as [`GeneProposal`]
 /// (its mode and the Cholesky factor of its precision over [`WIDEN`]²), in
 /// whitened coordinates flattened `d n + k`.
+#[derive(Clone)]
 pub struct PathProposal {
     normal: GeneProposal,
 }
@@ -673,29 +711,54 @@ pub fn path_laplace(
     lambda: &[f64],
     gene_prior: &GenePrior,
 ) -> PathProposal {
+    scoring(
+        params,
+        l,
+        anchor,
+        prior,
+        &|p: &Params| path_log_density(p, l, reads, rows, lambda, gene_prior),
+        &|p: &Params| path_newton(p, l, prior, reads, rows, lambda, gene_prior),
+        20,
+    )
+}
+
+/// A gradient and a precision.
+type Newton = (DVector<f64>, DMatrix<f64>);
+
+/// Damped Fisher scoring of `density` (`η`'s prior aside) in lineage `l`'s
+/// whitened path from `anchor`, `newton` its gradient and precision (`η`'s
+/// prior in); stopped when the predicted rise `gᵀP⁻¹g` is under a
+/// hundredth of a nat. The normal at the end, as a [`PathProposal`].
+fn scoring(
+    params: &Params,
+    l: usize,
+    anchor: &[DVector<f64>],
+    prior: &GridPrior,
+    density: &dyn Fn(&Params) -> f64,
+    newton: &dyn Fn(&Params) -> Newton,
+    max_iter: usize,
+) -> PathProposal {
     let h = anchor.len();
     let n = anchor.first().map_or(0, |e| e.len());
     let mut probe = params.clone();
     let objective = |p: &mut Params, x: &DVector<f64>| {
         p.path[l] = coloured(prior, &unflatten(x.as_slice(), h, n));
-        path_log_density(p, l, reads, rows, lambda, gene_prior) - 0.5 * x.norm_squared()
+        density(p) - 0.5 * x.norm_squared()
     };
     let mut x = DVector::from_fn(h * n, |i, _| anchor[i / n][i % n]);
     let mut fx = objective(&mut probe, &x);
-    // Damped Gauss–Newton, stopped when the predicted rise `gᵀP⁻¹g` is
-    // under a hundredth of a nat (the objective's own rounding is near it).
     let mut prec;
     let mut iter = 0;
     loop {
         let grad;
-        (grad, prec) = path_newton(&probe, l, prior, reads, rows, lambda, gene_prior);
+        (grad, prec) = newton(&probe);
         let step = prec
             .clone()
             .cholesky()
             .expect("I plus a Fisher information is positive definite")
             .solve(&grad);
         iter += 1;
-        if grad.dot(&step) < 1e-2 || iter > 20 {
+        if grad.dot(&step) < 1e-2 || iter > max_iter {
             break;
         }
         let mut scale = 1.0;
@@ -748,6 +811,33 @@ pub fn path_gess_step(
     prop: &PathProposal,
     rng: &mut impl Rng,
 ) -> (Vec<DVector<f64>>, f64) {
+    t_ess(
+        params,
+        l,
+        eta,
+        cur_ll,
+        prior,
+        prop,
+        &|p: &Params| path_log_density(p, l, reads, rows, lambda, gene_prior),
+        rng,
+    )
+}
+
+/// One generalized elliptical slice move of lineage `l`'s whitened path on
+/// `prop` for `N(η; 0, I)` times `density`; `params.path[l]` is left at the
+/// new path. `cur_ll` (`density` at `eta`) may be `−∞`; the new `η` and
+/// `density` there.
+#[allow(clippy::too_many_arguments)]
+fn t_ess(
+    params: &mut Params,
+    l: usize,
+    eta: &[DVector<f64>],
+    cur_ll: f64,
+    prior: &GridPrior,
+    prop: &PathProposal,
+    density: &dyn Fn(&Params) -> f64,
+    rng: &mut impl Rng,
+) -> (Vec<DVector<f64>>, f64) {
     let (h, n) = (eta.len(), eta.first().map_or(0, |e| e.len()));
     let dim = (h * n) as f64;
     let normal = &prop.normal;
@@ -755,7 +845,7 @@ pub fn path_gess_step(
     let cur_ll = if cur_ll.is_finite() {
         cur_ll
     } else {
-        path_log_density(params, l, reads, rows, lambda, gene_prior)
+        density(params)
     };
     let theta: Vec<f64> = (0..h * n).map(|i| eta[i / n][i % n]).collect();
     // log t_ν up to a constant, and η's own prior.
@@ -784,12 +874,226 @@ pub fn path_gess_step(
         let t = at(y);
         let mut p = probe.clone();
         p.path[l] = coloured(prior, &unflatten(&t, h, n));
-        let ll = path_log_density(&p, l, reads, rows, lambda, gene_prior);
-        (ll + own(&t) - log_t(&t) - base) as f32
+        (density(&p) + own(&t) - log_t(&t) - base) as f32
     };
     let (next, _) = elliptical_slice_step(&x, &nu, &lnpdf, 0.0, rng);
     let eta = unflatten(&at(&next), h, n);
     params.path[l] = coloured(prior, &eta);
-    let ll = path_log_density(params, l, reads, rows, lambda, gene_prior);
+    let ll = density(params);
     (eta, ll)
+}
+
+/// The paths' log density with every pseudobulk's lineage and grid point
+/// summed out (`η`'s own prior aside): the multinomial marginal
+/// `Σ_p log Σ_{ℓ,k} π_ℓ (1/n) p(x_p | ℓ, k)` plus [`genes_log_prior`].
+pub fn collapsed_path_log_density(
+    params: &Params,
+    reads: &Reads,
+    log_w: &[f64],
+    gene_prior: &GenePrior,
+) -> f64 {
+    let lv = params.levels();
+    let n = lv.points;
+    let tab = table(reads, &lv);
+    let ln_n = (n as f64).ln();
+    let marginal: f64 = (0..tab.nrows())
+        .map(|p| log_posterior_row(&tab, log_w, n, p).1 - ln_n)
+        .sum();
+    marginal + genes_log_prior(params, gene_prior)
+}
+
+/// Lineage `l`'s path with the latents summed out: the gradient of
+/// [`collapsed_path_log_density`] (with `η`'s prior) in its whitened
+/// coordinates and the collapsed precision by Louis's identity,
+///
+/// ```text
+/// I_c = Σ_p E_q[I_pk] − Var_q[s_pk]
+/// ```
+///
+/// `s_pk` pseudobulk `p`'s score at grid point `k` of lineage `l`
+/// (`∂/∂ū_gk = u_pg/ū_gk − N_p/Z_k`, the multinomial's), `q` its posterior
+/// over every lineage's grid points (a score on another lineage is 0),
+/// `E_q[I_pk]` the multinomial's information (the Poisson's at the profiled
+/// depth `N_p/Z_k`, less its fixed total's `N_p/Z_k² ∂Z ∂Zᵀ`). The variance
+/// is the information the latents take away: a shift of the path with every
+/// time along. The whitened precision is clipped at `η`'s prior's.
+pub fn collapsed_newton(
+    params: &Params,
+    l: usize,
+    prior: &GridPrior,
+    reads: &Reads,
+    log_w: &[f64],
+    gene_prior: &GenePrior,
+) -> (DVector<f64>, DMatrix<f64>) {
+    let lv = params.levels();
+    let n = lv.points;
+    let h = params.rho.first().map_or(0, Vec::len);
+    let (genes, pbs, hn) = (params.beta.len(), reads.u.nrows(), h * n);
+    let tab = table(reads, &lv);
+    // Every pseudobulk's posterior weight on lineage `l`'s grid points.
+    let q: Vec<Vec<f64>> = (0..pbs)
+        .map(|p| {
+            let (log_post, _) = log_posterior_row(&tab, log_w, n, p);
+            (0..n).map(|k| log_post[l * n + k].exp()).collect()
+        })
+        .collect();
+    let z: Vec<f64> = (0..n)
+        .map(|k| lv.u.row(l * n + k).sum() + lv.s.row(l * n + k).sum())
+        .collect();
+    let total: Vec<f64> = (0..pbs).map(|p| reads.total(p)).collect();
+    // Σ_p q_pk N_p/Z_k (the Poisson information's depth) and Σ_p q_pk N_p/Z_k²
+    // (the multinomial's correction for the fixed total).
+    let pooled: Vec<f64> = (0..n)
+        .map(|k| (0..pbs).map(|p| q[p][k] * total[p] / z[k]).sum())
+        .collect();
+    let pooled2: Vec<f64> = (0..n).map(|k| pooled[k] / z[k]).collect();
+    let step = params.t_len[l] / (n - 1) as f64;
+    let path = &params.path[l];
+    // Per gene, folded in parallel: the score's pieces `W_u, W_s` (rows of
+    // `[G × n·Hn]`, to be weighted by the reads in one product), `R = ∂Z/∂z`
+    // `[n × Hn]` and the Poisson expected information `[Hn × Hn]`, the last
+    // two summed as they go (never one per gene held).
+    type Acc = (Vec<(usize, Vec<f64>, Vec<f64>)>, DMatrix<f64>, DMatrix<f64>);
+    let (rows_w, r_sum, expected): Acc = (0..genes)
+        .into_par_iter()
+        .fold(
+            || (Vec::new(), DMatrix::zeros(n, hn), DMatrix::zeros(hn, hn)),
+            |(mut rows_w, mut r_sum, mut expected), g| {
+                let rho = &params.rho[g];
+                let alpha: Vec<f64> = path
+                    .iter()
+                    .map(|zk| (dot(zk, rho) + params.base[g]).exp())
+                    .collect();
+                let (a_u, a_s) = response(params.beta[g], params.gamma[g], step, n);
+                let (u, s): (Vec<f64>, Vec<f64>) = (0..n)
+                    .map(|k| (lv.u[(l * n + k, g)], lv.s[(l * n + k, g)]))
+                    .unzip();
+                let (mut wu, mut ws) = (vec![0.0; n * hn], vec![0.0; n * hn]);
+                for k in 0..n {
+                    for c in 0..hn {
+                        let (d, j) = (c / n, c % n);
+                        let lead = rho[d] * alpha[j];
+                        wu[k * hn + c] = lead * a_u[(k, j)] / u[k];
+                        ws[k * hn + c] = lead * a_s[(k, j)] / s[k];
+                        r_sum[(k, c)] += lead * (a_u[(k, j)] + a_s[(k, j)]);
+                    }
+                }
+                rows_w.push((g, wu, ws));
+                let wu_f = DMatrix::from_fn(n, n, |i, j| a_u[(i, j)] * pooled[i] / u[i]);
+                let ws_f = DMatrix::from_fn(n, n, |i, j| a_s[(i, j)] * pooled[i] / s[i]);
+                let fa = a_u.transpose() * wu_f + a_s.transpose() * ws_f;
+                for a in 0..hn {
+                    for b in 0..hn {
+                        let (d, i, e, j) = (a / n, a % n, b / n, b % n);
+                        expected[(a, b)] += rho[d] * rho[e] * alpha[i] * alpha[j] * fa[(i, j)];
+                    }
+                }
+                (rows_w, r_sum, expected)
+            },
+        )
+        .reduce(
+            || (Vec::new(), DMatrix::zeros(n, hn), DMatrix::zeros(hn, hn)),
+            |mut a, b| {
+                a.0.extend(b.0);
+                (a.0, a.1 + b.1, a.2 + b.2)
+            },
+        );
+    let (mut w_u, mut w_s) = (DMatrix::zeros(genes, n * hn), DMatrix::zeros(genes, n * hn));
+    for (g, wu, ws) in &rows_w {
+        w_u.row_mut(*g).copy_from_slice(wu);
+        w_s.row_mut(*g).copy_from_slice(ws);
+    }
+    // Every pseudobulk's scores on every grid point at once, `[P × n·Hn]`.
+    let weighted = &reads.u * &w_u + &reads.s * &w_s;
+    let (grad, second, outer) = (0..pbs)
+        .into_par_iter()
+        .map(|p| {
+            let sc = DMatrix::from_fn(n, hn, |k, c| {
+                weighted[(p, k * hn + c)] - r_sum[(k, c)] * total[p] / z[k]
+            });
+            let w = DVector::from_column_slice(&q[p]);
+            let mean = sc.transpose() * &w;
+            let root = DMatrix::from_fn(n, hn, |k, c| sc[(k, c)] * w[k].sqrt());
+            let second = root.transpose() * &root;
+            let outer = &mean * mean.transpose();
+            (mean, second, outer)
+        })
+        .reduce(
+            || {
+                (
+                    DVector::zeros(hn),
+                    DMatrix::zeros(hn, hn),
+                    DMatrix::zeros(hn, hn),
+                )
+            },
+            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
+        );
+    // The multinomial's fixed total: `− Σ_k (Σ_p q_pk N_p/Z_k²) ∂Z_k ∂Z_kᵀ`.
+    let mut fixed_total = DMatrix::<f64>::zeros(hn, hn);
+    for (k, &w) in pooled2.iter().enumerate() {
+        let rk = r_sum.row(k).transpose();
+        fixed_total += &rk * rk.transpose() * w;
+    }
+    let info = expected - fixed_total - (second - outer);
+    let grad_z = DMatrix::from_fn(n, h, |j, d| grad[d * n + j]);
+    let (g, prec) = whitened(params, l, prior, gene_prior, &grad_z, &info);
+    // The whole whitened precision (data and the genes' prior through z̄)
+    // clipped at `η`'s prior: eigenvalues at least 1.
+    let eig = prec.symmetric_eigen();
+    let clipped = eig.eigenvalues.map(|v| v.max(1.0));
+    let prec = &eig.eigenvectors * DMatrix::from_diagonal(&clipped) * eig.eigenvectors.transpose();
+    (g, prec)
+}
+
+/// The Laplace approximation of lineage `l`'s path with the latents summed
+/// out, by at most `max_iter` steps of Fisher scoring from `anchor` (the
+/// previous mode).
+#[allow(clippy::too_many_arguments)]
+pub fn collapsed_laplace(
+    params: &Params,
+    l: usize,
+    anchor: &[DVector<f64>],
+    prior: &GridPrior,
+    reads: &Reads,
+    log_w: &[f64],
+    gene_prior: &GenePrior,
+    max_iter: usize,
+) -> PathProposal {
+    scoring(
+        params,
+        l,
+        anchor,
+        prior,
+        &|p: &Params| collapsed_path_log_density(p, reads, log_w, gene_prior),
+        &|p: &Params| collapsed_newton(p, l, prior, reads, log_w, gene_prior),
+        max_iter,
+    )
+}
+
+/// One generalized elliptical slice move of lineage `l`'s whitened path
+/// for [`collapsed_path_log_density`] (latents summed out): the path and
+/// every time move together. The sampler must draw the latents next.
+#[allow(clippy::too_many_arguments)]
+pub fn collapsed_path_step(
+    params: &mut Params,
+    l: usize,
+    eta: &[DVector<f64>],
+    cur: f64,
+    prior: &GridPrior,
+    reads: &Reads,
+    log_w: &[f64],
+    gene_prior: &GenePrior,
+    prop: &PathProposal,
+    rng: &mut impl Rng,
+) -> (Vec<DVector<f64>>, f64) {
+    t_ess(
+        params,
+        l,
+        eta,
+        cur,
+        prior,
+        prop,
+        &|p: &Params| collapsed_path_log_density(p, reads, log_w, gene_prior),
+        rng,
+    )
 }

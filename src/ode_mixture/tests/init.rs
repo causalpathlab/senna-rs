@@ -201,3 +201,34 @@ fn a_tree_start_gives_both_lineages_the_trunk() {
         "no start finds the tree: {scored:?}"
     );
 }
+
+/// The climb's time origin is right to within half a grid step: a path one
+/// grid point late (a near-degenerate optimum no gradient leaves) is tried
+/// against its shifts.
+#[test]
+#[ignore = "fails: the climb's time origin is a grid step late (a near-degenerate optimum); shift restarts overshoot, as neighbouring shifts differ by less than Adam's run-to-run spread"]
+fn the_climbs_time_is_not_a_grid_step_late() {
+    let cfg = SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let train = first(&sim, 240);
+    let opts = Climb {
+        lineages: 1,
+        points: 45,
+        dim: 3,
+        kappa: cfg.kappa,
+        steps: 2500,
+        lr: 0.03,
+    };
+    let (fit, _) = climb(&train, &opts, &Device::Cpu).unwrap();
+    let (_, time) = fit.posterior(&fit.reads(&train).unwrap()).unwrap();
+    let shift = (0..240).map(|p| time[p] - sim.truth.time[p]).sum::<f64>() / 240.0;
+    let step = 1.0 / 44.0;
+    eprintln!("mean time − truth {shift:.4} (grid step {step:.4})");
+    assert!(
+        shift.abs() < 0.5 * step,
+        "the climb's times are off by {shift}"
+    );
+}
