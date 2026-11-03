@@ -4,6 +4,8 @@
 
 pub mod kernel;
 pub mod kinetics;
+#[cfg(test)]
+pub mod sim;
 
 #[cfg(test)]
 mod tests;
