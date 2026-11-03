@@ -3,6 +3,8 @@
 //! Every random stream is keyed by `(seed, item, sweep)`, so a draw does
 //! not depend on how the items were split across threads.
 
+use super::kernel::GridPrior;
+use super::kinetics::trajectory;
 use super::likelihood::{gene_log_likelihood, Reads};
 use super::model::Params;
 use legume_numeric::mcmc::engine::elliptical_slice_step;
@@ -393,4 +395,87 @@ pub fn gene_step(
     let t = at(&next);
     let new_ll = ll(&t);
     (t, new_ll)
+}
+
+/// The log-likelihood (no `log x!`) of the pseudobulks on lineage `l`, at
+/// their rows and depths, every gene's levels on `l` from `params`; in
+/// parallel over genes.
+pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda: &[f64]) -> f64 {
+    let n = params.path[l].len();
+    let on: Vec<(usize, usize)> = rows
+        .iter()
+        .enumerate()
+        .filter(|&(_, &r)| r / n == l)
+        .map(|(p, &r)| (p, r - l * n))
+        .collect();
+    let h = params.t_len[l] / (n - 1) as f64;
+    (0..params.beta.len())
+        .into_par_iter()
+        .map(|g| {
+            let alpha: Vec<f64> = params.path[l]
+                .iter()
+                .map(|z| (dot(z, &params.rho[g]) + params.base[g]).exp())
+                .collect();
+            let (u, s) = trajectory(&alpha, params.beta[g], params.gamma[g], h);
+            on.iter()
+                .map(|&(p, k)| {
+                    let (mu, ms) = (lambda[p] * u[k], lambda[p] * s[k]);
+                    reads.u[(p, g)] * mu.ln() - mu + reads.s[(p, g)] * ms.ln() - ms
+                })
+                .sum::<f64>()
+        })
+        .sum()
+}
+
+/// `[n][H]` the path from its whitened coordinates, one `[n]` per dimension.
+fn coloured(prior: &GridPrior, eta: &[DVector<f64>]) -> Vec<Vec<f64>> {
+    let dims: Vec<DVector<f64>> = eta.iter().map(|e| prior.colour(e)).collect();
+    let n = dims.first().map_or(0, |d| d.len());
+    (0..n)
+        .map(|k| dims.iter().map(|d| d[k]).collect())
+        .collect()
+}
+
+/// One elliptical slice move of lineage `l`'s whitened path `η` (every
+/// dimension at once, prior `N(0, I)`), genes, latents and depths held;
+/// `params.path[l]` is left at the new path. `cur_ll` may be `−∞`.
+#[allow(clippy::too_many_arguments)]
+pub fn path_step(
+    params: &mut Params,
+    l: usize,
+    eta: &[DVector<f64>],
+    cur_ll: f64,
+    prior: &GridPrior,
+    reads: &Reads,
+    rows: &[usize],
+    lambda: &[f64],
+    rng: &mut impl Rng,
+) -> (Vec<DVector<f64>>, f64) {
+    let (h, n) = (eta.len(), eta.first().map_or(0, |e| e.len()));
+    params.path[l] = coloured(prior, eta);
+    let cur_ll = if cur_ll.is_finite() {
+        cur_ll
+    } else {
+        path_ll(params, l, reads, rows, lambda)
+    };
+    let split = |x: &DVector<f32>| -> Vec<DVector<f64>> {
+        (0..h)
+            .map(|d| DVector::from_fn(n, |k, _| f64::from(x[d * n + k])))
+            .collect()
+    };
+    let x = DVector::from_fn(h * n, |i, _| eta[i / n][i % n] as f32);
+    let nu = DVector::from_fn(h * n, |_, _| {
+        let e: f64 = StandardNormal.sample(rng);
+        e as f32
+    });
+    let probe = params.clone();
+    let lnpdf = |y: &DVector<f32>| {
+        let mut p = probe.clone();
+        p.path[l] = coloured(prior, &split(y));
+        (path_ll(&p, l, reads, rows, lambda) - cur_ll) as f32
+    };
+    let (next, rel) = elliptical_slice_step(&x, &nu, &lnpdf, 0.0, rng);
+    let eta = split(&next);
+    params.path[l] = coloured(prior, &eta);
+    (eta, cur_ll + f64::from(rel))
 }

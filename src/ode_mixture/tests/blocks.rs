@@ -299,3 +299,76 @@ fn diagnostic_gene_laplace() {
         legume_numeric::mcmc::engine::diagnostics::ess(&lb)
     );
 }
+
+/// From a flat path, a lineage's path is found: the chain reaches the
+/// truth's log-likelihood and every gene's log transcription over time.
+#[test]
+#[ignore = "prior-shaped ESS from a flat path is too slow (8400 nats short after 400 sweeps); the sampler starts paths at the Adam mode"]
+fn a_lineages_path_is_found_from_a_flat_start() {
+    use crate::ode_mixture::blocks::{path_ll, path_step};
+    use crate::ode_mixture::kernel::GridPrior;
+    let cfg = SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let truth = truth_params(&sim, 133, 45);
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let lv = truth.levels();
+    let rows: Vec<usize> = (0..sim.n_pb)
+        .map(|p| (sim.truth.time[p] / (cfg.t_len / 44.0)).round() as usize)
+        .collect();
+    let lambda = reads.depths(&rows, &lv);
+    let prior = GridPrior::new(45, cfg.t_len, cfg.kappa * cfg.t_len).unwrap();
+    let h = truth.rho[0].len();
+    let at_truth = path_ll(&truth, 0, &reads, &rows, &lambda);
+
+    let mut params = truth.clone();
+    params.path[0] = vec![vec![0.0; h]; 45];
+    let mut eta = vec![nalgebra::DVector::<f64>::zeros(45); h];
+    let mut ll = f64::NEG_INFINITY;
+    let mut rng = StdRng::seed_from_u64(4);
+    let mut lls = Vec::new();
+    for _ in 0..400 {
+        (eta, ll) = path_step(
+            &mut params,
+            0,
+            &eta,
+            ll,
+            &prior,
+            &reads,
+            &rows,
+            &lambda,
+            &mut rng,
+        );
+        lls.push(ll);
+    }
+    let late: f64 = lls[300..].iter().sum::<f64>() / 100.0;
+    let err: f64 = (0..sim.n_genes)
+        .map(|g| {
+            (0..45)
+                .map(|k| {
+                    let fit: f64 = params.path[0][k]
+                        .iter()
+                        .zip(&truth.rho[g])
+                        .map(|(a, b)| a * b)
+                        .sum();
+                    let tru: f64 = truth.path[0][k]
+                        .iter()
+                        .zip(&truth.rho[g])
+                        .map(|(a, b)| a * b)
+                        .sum();
+                    (fit - tru).abs()
+                })
+                .sum::<f64>()
+                / 45.0
+        })
+        .sum::<f64>()
+        / sim.n_genes as f64;
+    eprintln!("log-likelihood: truth {at_truth:.1}, chain late {late:.1}; mean |Δ log α| {err:.3}");
+    assert!(
+        late > at_truth - 3.0 * ((45 * h) as f64).sqrt(),
+        "the chain is short of the truth"
+    );
+    assert!(err < 0.1, "log transcription off by {err}");
+}

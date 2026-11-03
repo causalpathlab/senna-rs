@@ -45,6 +45,11 @@ impl GridPrior {
         Ok(Self { chol })
     }
 
+    /// The Cholesky factor `C`, `[n × n]` lower triangular.
+    pub fn chol(&self) -> &DMatrix<f64> {
+        &self.chol
+    }
+
     /// `z = C η`.
     pub fn colour(&self, eta: &DVector<f64>) -> DVector<f64> {
         &self.chol * eta

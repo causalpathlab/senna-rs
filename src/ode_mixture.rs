@@ -3,6 +3,7 @@
 //! transcription. Built bottom up; see each module.
 
 pub mod blocks;
+pub mod fit;
 pub mod kernel;
 pub mod kinetics;
 pub mod likelihood;
