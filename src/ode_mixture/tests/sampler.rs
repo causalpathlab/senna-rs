@@ -240,10 +240,9 @@ fn in_the_truths_basin_posterior_intervals_cover_the_truth() {
 }
 
 /// The gate, from the climb's mode: 90% intervals cover time and `log γ/β`.
-/// The climb's times sit about a grid step from the truth's: an optimum of
-/// genes, path and times together (shifting the path with the genes held
-/// costs thousands of nats), which no block leaves, the collapsed path block
-/// (the latents summed out) included ([`diagnostic_warp_trace`]).
+/// With times on the grid's nodes alone the climb sat a grid step late, an
+/// optimum of genes, path and times no block left; times between the nodes
+/// ([`CLIMB_SUB`] positions a step) take that away.
 #[test]
 fn from_the_climb_posterior_intervals_cover_the_truth() {
     let (t, r, _) = coverage(from_climb(), CLIMB_SUB);
@@ -356,43 +355,6 @@ fn a_stop_ends_the_chains_at_once() {
 }
 
 #[test]
-#[ignore = "diagnostic: does the warp move, with and without the collapsed block"]
-fn diagnostic_warp_trace() {
-    let start = climb_mode();
-    for collapsed_moves in [0, 2, 8] {
-        let draws = run(
-            &first(sim(), TRAIN),
-            &start,
-            &Options {
-                kappa: KAPPA,
-                chains: 1,
-                sweeps: 400,
-                burn: 0,
-                collapsed_moves,
-                collapsed_refresh: 10,
-                seed: 5,
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        let shift: Vec<String> = draws[0]
-            .time
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| i % 50 == 0 || *i == 399)
-            .map(|(i, t)| {
-                let m = (0..TRAIN).map(|p| t[p] - sim().truth.time[p]).sum::<f64>() / TRAIN as f64;
-                format!("{i}:{m:.4}")
-            })
-            .collect();
-        eprintln!(
-            "collapsed moves {collapsed_moves}: mean time − truth {}",
-            shift.join(" ")
-        );
-    }
-}
-
-#[test]
 #[ignore = "diagnostic: does a longer, decaying climb reach the truth's basin"]
 fn diagnostic_longer_climb() {
     let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
@@ -437,32 +399,6 @@ fn diagnostic_shifted_climb() {
         let (_, t) = ff.posterior(&ff.reads(&reads).unwrap()).unwrap();
         let m = (0..TRAIN).map(|i| t[i] - sim().truth.time[i]).sum::<f64>() / TRAIN as f64;
         eprintln!("path shifted {shift}: objective {obj:.1}, mean time − truth {m:.4}");
-    }
-}
-
-#[test]
-#[ignore = "diagnostic: the collapsed density of the climb's path shifted, genes held"]
-fn diagnostic_shift_cost_with_genes_held() {
-    use crate::ode_mixture::blocks::{collapsed_path_log_density, GenePrior};
-    let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
-    let reads = first(sim(), TRAIN);
-    let base = climb_mode();
-    let h = base.rho[0].len();
-    let n = POINTS as i32;
-    for shift in [-2i32, -1, 0, 1] {
-        let mut p = base.clone();
-        p.path[0] = (0..n)
-            .map(|k| base.path[0][(k - shift).clamp(0, n - 1) as usize].clone())
-            .collect();
-        let eta2: f64 = (0..h)
-            .map(|d| {
-                grid.whiten(&nalgebra::DVector::from_fn(POINTS, |k, _| p.path[0][k][d]))
-                    .norm_squared()
-            })
-            .sum();
-        let dens =
-            collapsed_path_log_density(&p, &reads, &[0.0], &GenePrior::default()) - 0.5 * eta2;
-        eprintln!("shift {shift}: collapsed log density {dens:.1}");
     }
 }
 

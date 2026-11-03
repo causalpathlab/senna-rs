@@ -2,10 +2,6 @@
 //!
 //! One sweep, every block a move that leaves its conditional invariant:
 //!
-//! 0. every lineage's whitened path with the latents summed out
-//!    ([`collapsed_path_step`] on [`collapsed_laplace`]): the path and every
-//!    pseudobulk's time move together, which no conditional block can (a
-//!    shared warp of time the reads barely see); the latents are drawn next;
 //! 1. the levels on every lineage's grid ([`Params::levels`]);
 //! 2. every pseudobulk's `(ℓ, k)` drawn exactly ([`draw_latents`]), its
 //!    depth `λ_p = N_p / Z` at the drawn row;
@@ -33,8 +29,8 @@
 //! `z` against `ρ` and the baseline's shared shift, do not show in them).
 
 use super::blocks::{
-    collapsed_laplace, collapsed_path_step, draw_latents, draw_weights, from_theta, gene_laplace,
-    gene_step, path_gess_step, path_laplace, path_ll, stream, to_theta, GenePrior, PathProposal,
+    draw_latents, draw_weights, from_theta, gene_laplace, gene_step, path_gess_step, path_laplace,
+    path_ll, stream, to_theta, GenePrior,
 };
 use super::kernel::GridPrior;
 use super::likelihood::{table, Reads};
@@ -58,14 +54,6 @@ pub struct Options {
     /// every path.
     pub gene_moves: usize,
     pub path_moves: usize,
-    /// Moves per sweep of every path with the latents summed out (the path
-    /// and every time together; off by default: it does not leave the
-    /// climb's grid-step-late optimum, which runs through the genes too, and
-    /// costs mixing elsewhere), on a proposal rebuilt every
-    /// `collapsed_refresh` sweeps during burn-in and frozen after it (so the
-    /// kept sweeps run one fixed kernel).
-    pub collapsed_moves: usize,
-    pub collapsed_refresh: usize,
     /// The weights' Dirichlet prior.
     pub a0: f64,
     pub seed: u64,
@@ -83,8 +71,6 @@ impl Default for Options {
             burn: 100,
             gene_moves: 5,
             path_moves: 1,
-            collapsed_moves: 0,
-            collapsed_refresh: 10,
             a0: 1.0,
             seed: 1,
             stop: None,
@@ -117,9 +103,6 @@ struct State {
     /// `[L][H]` the paths' likewise.
     modes: Vec<Vec<f64>>,
     path_modes: Vec<Vec<DVector<f64>>>,
-    /// `[L]` every path's collapsed proposal, and the mode it was built at.
-    collapsed: Vec<Option<PathProposal>>,
-    collapsed_modes: Vec<Vec<DVector<f64>>>,
 }
 
 /// Every block's seed of its own, from the chain's.
@@ -133,9 +116,6 @@ const GENES: u64 = 2;
 const PATHS: u64 = 3;
 const DURATIONS: u64 = 4;
 const WEIGHTS: u64 = 5;
-const COLLAPSED: u64 = 6;
-/// Fisher-scoring steps per rebuild of a collapsed proposal (from the last).
-const COLLAPSED_STEPS: usize = 5;
 
 fn start(params: &Params, grid: &GridPrior) -> State {
     let lineages = params.path.len();
@@ -164,8 +144,6 @@ fn start(params: &Params, grid: &GridPrior) -> State {
     State {
         params: params.clone(),
         path_modes: eta.clone(),
-        collapsed: vec![None; lineages],
-        collapsed_modes: eta.clone(),
         eta,
         log_w: vec![-(lineages as f64).ln(); lineages],
         modes,
@@ -216,47 +194,6 @@ fn sweep(
     let lineages = state.params.path.len();
     // Rows are positions (a pseudobulk's time may sit between the nodes).
     let n = state.params.positions();
-    // 0. Every path with the latents summed out, so the path and every time
-    // move together; the latents are drawn next, as a partially collapsed
-    // sampler must (van Dyk and Park, *JASA* (2008)).
-    for l in (0..lineages).filter(|_| opts.collapsed_moves > 0) {
-        let mut rng = stream(block_seed(seed, COLLAPSED), l as u64, it);
-        let refresh = (it as usize) < opts.burn
-            && (it as usize).is_multiple_of(opts.collapsed_refresh.max(1));
-        if refresh || state.collapsed[l].is_none() {
-            let prop = collapsed_laplace(
-                &state.params,
-                l,
-                &state.collapsed_modes[l],
-                grid,
-                reads,
-                &state.log_w,
-                prior,
-                COLLAPSED_STEPS,
-            );
-            state.collapsed_modes[l] = prop.mode(state.eta[l].len());
-            state.collapsed[l] = Some(prop);
-        }
-        let prop = state.collapsed[l].as_ref().expect("built above");
-        let mut cur = f64::NEG_INFINITY;
-        for _ in 0..opts.collapsed_moves {
-            let (eta, ll) = collapsed_path_step(
-                &mut state.params,
-                l,
-                &state.eta[l],
-                cur,
-                grid,
-                reads,
-                &state.log_w,
-                prior,
-                prop,
-                &mut rng,
-            );
-            state.eta[l] = eta;
-            cur = ll;
-        }
-    }
-
     // 1–2. Levels, latents and depths.
     let lv = state.params.levels();
     let rows = draw_latents(
