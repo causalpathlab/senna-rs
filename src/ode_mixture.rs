@@ -4,6 +4,7 @@
 
 pub mod blocks;
 pub mod fit;
+pub mod init;
 pub mod kernel;
 pub mod kinetics;
 pub mod likelihood;

@@ -241,6 +241,42 @@ impl Fit {
         self.objective(&dev)?.to_scalar::<f32>()
     }
 
+    /// Every pseudobulk's posterior over lineages `[P][L]` and its mean
+    /// time on its lineages, `[P]` (lineage time, `k T_ℓ/(n − 1)`).
+    pub fn posterior(&self, reads: &DeviceReads) -> Result<(Vec<Vec<f64>>, Vec<f64>)> {
+        let (l, n, _, _) = self.dims;
+        let (u, s) = self.levels()?;
+        let z = (u.sum_keepdim(1)? + s.sum_keepdim(1)?)?.log()?;
+        let lu = u.log()?.broadcast_sub(&z)?;
+        let ls = s.log()?.broadcast_sub(&z)?;
+        let tab = (reads.u.matmul(&lu.t()?)? + reads.s.matmul(&ls.t()?)?)?;
+        let log_pi = log_softmax(self.logit_pi.as_tensor(), D::Minus1)?;
+        let prior = log_pi
+            .unsqueeze(2)?
+            .broadcast_as((1, l, n))?
+            .reshape((1, l * n))?;
+        let post = legume_numeric::candle::candle_nn::ops::softmax(
+            &tab.broadcast_add(&prior)?,
+            D::Minus1,
+        )?
+        .to_vec2::<f32>()?;
+        let t = self.t_len()?.flatten_all()?.to_vec1::<f32>()?;
+        let mut lineage = Vec::with_capacity(post.len());
+        let mut time = Vec::with_capacity(post.len());
+        for row in &post {
+            let mut w = vec![0.0; l];
+            let mut mean = 0.0;
+            for (r, &q) in row.iter().enumerate() {
+                let (li, k) = (r / n, r % n);
+                w[li] += f64::from(q);
+                mean += f64::from(q) * k as f64 * f64::from(t[li]) / (n - 1) as f64;
+            }
+            lineage.push(w);
+            time.push(mean);
+        }
+        Ok((lineage, time))
+    }
+
     /// The parameters on the host.
     pub fn params(&self) -> Result<Params> {
         let (l, n, _, _) = self.dims;
