@@ -207,8 +207,8 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "style of a group: colour, shape, opacity, size, hidden",
             ),
             ("t", "labels on the map: small, medium, large, largest, off, in turn"),
-            ("y", "colour the cells by a td-rbm run's time; again to stop"),
-            ("v", "a td-rbm run's velocity field over the cells: streamlines, arrows, off, in turn"),
+            ("y", "colour the cells by the run's time (its cell_time table); again to stop"),
+            ("v", "the run's velocity field (its cell_velocity table) over the cells: streamlines, arrows, off, in turn"),
             ("(  )", "streamlines sparser, denser"),
             ("space  b", "sidebar on or off"),
             (

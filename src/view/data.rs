@@ -150,9 +150,9 @@ pub enum LabelKind {
     Changed,
     /// The source round's annotation.
     Previous,
-    /// A td-rbm run's lineage of each cell.
+    /// A run's lineage of each cell, from its `cell_time` table.
     Lineage,
-    /// The clusters a td-rbm run's lineage forest is built on.
+    /// The clusters a run's lineage forest is built on, from its `cell_time` table.
     TreeCluster,
 }
 
@@ -339,12 +339,12 @@ pub struct Dataset {
     /// The run's slow reads (data files, model tables, feature embedding):
     /// each done once, shared by every view of the run.
     pub loads: super::activity::RunLoads,
-    /// A td-rbm run's time of each cell (`cell_time`'s `tau`), when it has
+    /// A run's time of each cell (`cell_time`'s `tau`), when it has
     /// one.
     pub times: Option<std::sync::Arc<HashMap<Box<str>, f32>>>,
 }
 
-/// A td-rbm run's `cell_time` table's `tau` by cell.
+/// A run's `cell_time` table's `tau` by cell.
 fn read_times(path: &Path) -> anyhow::Result<HashMap<Box<str>, f32>> {
     let (strs, nums) = legume_numeric::matrix::parquet::read_table_columns(
         &path.to_string_lossy(),
@@ -609,7 +609,7 @@ fn load_labels(
     labels
 }
 
-/// A td-rbm run's `cell_time` table's string column `column` as labels.
+/// A run's `cell_time` table's string column `column` as labels.
 fn read_time_labels(path: &Path, column: &str, kind: LabelKind) -> anyhow::Result<Labels> {
     let (strs, _) = legume_numeric::matrix::parquet::read_table_columns(
         &path.to_string_lossy(),

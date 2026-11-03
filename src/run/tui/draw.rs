@@ -576,15 +576,6 @@ impl App {
                 );
                 lines.push(Line::from(""));
             }
-            if r.on {
-                // What review would refuse, said where the fit is queued.
-                if let Some(problem) = self.two_track_problem(r) {
-                    note(&mut lines, &format!("✗ {problem}"), bold());
-                }
-                if let Some(warn) = self.shape_warning(r) {
-                    note(&mut lines, &warn, hint());
-                }
-            }
         }
         // The heading stays; the rows scroll to keep the cursor in sight.
         let room = usize::from(area.height).saturating_sub(HEAD);

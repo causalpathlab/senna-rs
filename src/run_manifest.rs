@@ -404,13 +404,6 @@ pub enum RunKind {
     Simba,
     /// `senna rbm`: a feature-embedded restricted Boltzmann machine.
     Rbm,
-    /// `senna td-rbm` — every cell's lineage, time, state and velocity from
-    /// two-track counts. `cell_embedding` is the map space, every cell's
-    /// expression on its leading principal components, and `cell_velocity`
-    /// every cell's velocity in the same coordinates; `cell_time` its
-    /// lineage and time. `feature_embedding` holds the genes' ρ. Not a
-    /// frozen gene table, and no decoder a viewer can read: the RBM's.
-    TdRbm,
 }
 
 /// How a run's tables give each cell's expected level of each feature, up
@@ -474,13 +467,9 @@ impl RunKind {
             RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => CellSpace::LogSimplex,
             // masked-vae is a Gaussian z despite its simplex β; svd is signed
             // loadings; vae is an unconstrained latent.
-            // td-rbm's map space is principal-component scores, signed as svd's.
-            RunKind::MaskedVae
-            | RunKind::Vae
-            | RunKind::Svd
-            | RunKind::JointSvd
-            | RunKind::Rbm
-            | RunKind::TdRbm => CellSpace::Signed,
+            RunKind::MaskedVae | RunKind::Vae | RunKind::Svd | RunKind::JointSvd | RunKind::Rbm => {
+                CellSpace::Signed
+            }
         }
     }
 
@@ -499,7 +488,6 @@ impl RunKind {
             RunKind::ResolveEmbeddingSpace => "resolve-embedding-space",
             RunKind::Simba => "simba",
             RunKind::Rbm => "rbm",
-            RunKind::TdRbm => "td-rbm",
         }
     }
 
@@ -522,8 +510,7 @@ impl RunKind {
             | RunKind::Bge
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
-            | RunKind::Simba
-            | RunKind::TdRbm => false,
+            | RunKind::Simba => false,
         }
     }
 
@@ -557,8 +544,7 @@ impl RunKind {
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace
-            | RunKind::TdRbm => false,
+            | RunKind::ResolveEmbeddingSpace => false,
         }
     }
 
@@ -582,8 +568,7 @@ impl RunKind {
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace
-            | RunKind::TdRbm => false,
+            | RunKind::ResolveEmbeddingSpace => false,
         }
     }
 
@@ -604,8 +589,7 @@ impl RunKind {
             | RunKind::JointSvd
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
-            | RunKind::Simba
-            | RunKind::TdRbm => false,
+            | RunKind::Simba => false,
         }
     }
 
@@ -626,8 +610,7 @@ impl RunKind {
             | RunKind::JointSvd
             | RunKind::Bge
             | RunKind::ResolveEmbeddingSpace
-            | RunKind::Simba
-            | RunKind::TdRbm => true,
+            | RunKind::Simba => true,
         }
     }
 
@@ -652,9 +635,8 @@ impl RunKind {
         match self {
             RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => ExpressionModel::Topic,
             RunKind::MaskedVae => ExpressionModel::TopicOfLogits,
-            // vae's decoder, rbm's visible units given the hidden, td-rbm's
-            // spliced reads given the place on the curves and the state.
-            RunKind::Vae | RunKind::Rbm | RunKind::TdRbm => ExpressionModel::LatentLoadings,
+            // vae's decoder, rbm's visible units given the hidden.
+            RunKind::Vae | RunKind::Rbm => ExpressionModel::LatentLoadings,
             RunKind::Bge | RunKind::ResolveEmbeddingSpace | RunKind::Simba => {
                 ExpressionModel::Embedding
             }
@@ -978,16 +960,16 @@ pub struct RunOutputs {
     /// by the topic-family fits whose collapse rewrote the high bits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_tree: Option<String>,
-    /// `{out}.cell_time.parquet` — `senna td-rbm` only: every cell's lineage,
+    /// `{out}.cell_time.parquet` — a time fit's: every cell's lineage,
     /// time within it and its spread, start, tree cluster and lineage
     /// posterior (string and number columns, keyed by `cell`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_time: Option<String>,
-    /// `{out}.cell_velocity.parquet` — `senna td-rbm` only: every cell's
+    /// `{out}.cell_velocity.parquet` — a time fit's: every cell's
     /// velocity in the coordinates of `cell_embedding`, row for row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_velocity: Option<String>,
-    /// `{out}.cell_state.parquet` — `senna td-rbm` only: every cell's state.
+    /// `{out}.cell_state.parquet` — a time fit's: every cell's state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_state: Option<String>,
     /// Fields this version does not know, written by another tool or a
@@ -1928,19 +1910,7 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
              use a bge / fne / topic-family run as the source",
             m.kind
         ),
-        RunKind::TdRbm => anyhow::bail!(
-            "--from: a td-rbm run fits two-track counts and is not a source to inherit; \
-             use a bge / fne / topic-family run"
-        ),
     }
-    inherited(m, &dir)
-}
-
-/// The data, batches and partition alone from any run that records them,
-/// td-rbm's among them: for a command that takes no feature table from
-/// its source (`senna td-rbm --from`).
-pub fn inherit_data_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest> {
-    let (m, dir) = RunManifest::load(Path::new(manifest_path))?;
     inherited(m, &dir)
 }
 

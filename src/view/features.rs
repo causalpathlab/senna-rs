@@ -416,12 +416,12 @@ impl Scene {
     }
 
     /// Drop the activity view. Returns whether there was one.
-    /// Colour the cells by a td-rbm run's time, or stop.
+    /// Colour the cells by the run's time, or stop.
     pub fn toggle_time(&mut self) {
         if self.pick == Some(Pick::Time) {
             self.clear_pick();
         } else if self.data.times.is_none() {
-            self.note = Some("this run has no cell times (a td-rbm run's)".into());
+            self.note = Some("this run has no cell times (no cell_time table)".into());
         } else {
             self.set_pick(Pick::Time);
         }

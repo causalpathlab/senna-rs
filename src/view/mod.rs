@@ -105,7 +105,7 @@ pub struct ViewArgs {
         value_enum,
         num_args = 0..=1,
         default_missing_value = "stream",
-        help = "Draw the run's velocity field over the cells, as streamlines (the default) or arrows (a td-rbm run's; v cycles it)"
+        help = "Draw the run's velocity field over the cells, as streamlines (the default) or arrows (a run with a cell_velocity table; v cycles it)"
     )]
     pub velocity: Option<VelocityStyle>,
 
@@ -225,7 +225,7 @@ pub(crate) struct ZoomRequest {
 pub(crate) enum Pick {
     One(Box<str>),
     Markers(Box<str>),
-    /// A td-rbm run's time of each cell.
+    /// A run's time of each cell, from its `cell_time` table.
     Time,
     /// A summary of each cell over a count source's features.
     Stat(Stat),
@@ -392,7 +392,7 @@ impl Scene {
             stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
             velocity_moved: std::cell::RefCell::new(None),
         };
-        // `--colour-by tau` (or `time`) colours a td-rbm run's cells by
+        // `--colour-by tau` (or `time`) colours a run's cells by
         // their time; any other name is a grouping.
         let by_time = args
             .colour_by
