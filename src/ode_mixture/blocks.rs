@@ -436,9 +436,40 @@ fn coloured(prior: &GridPrior, eta: &[DVector<f64>]) -> Vec<Vec<f64>> {
         .collect()
 }
 
+/// The genes' prior at the current paths, `Σ_g log p₀(θ_g)`: through
+/// `b̃ = b + ρᵀz̄ − log γ` it moves with the paths' mean `z̄`.
+pub fn genes_log_prior(params: &Params, prior: &GenePrior) -> f64 {
+    let z_bar = params.path_mean();
+    (0..params.beta.len())
+        .map(|g| {
+            prior.log_density(&to_theta(
+                params.beta[g],
+                params.gamma[g],
+                &params.rho[g],
+                params.base[g],
+                &z_bar,
+            ))
+        })
+        .sum()
+}
+
+/// Lineage `l`'s path's conditional up to a constant, `η`'s own prior
+/// aside: [`path_ll`] plus [`genes_log_prior`].
+pub fn path_log_density(
+    params: &Params,
+    l: usize,
+    reads: &Reads,
+    rows: &[usize],
+    lambda: &[f64],
+    gene_prior: &GenePrior,
+) -> f64 {
+    path_ll(params, l, reads, rows, lambda) + genes_log_prior(params, gene_prior)
+}
+
 /// One elliptical slice move of lineage `l`'s whitened path `η` (every
-/// dimension at once, prior `N(0, I)`), genes, latents and depths held;
-/// `params.path[l]` is left at the new path. `cur_ll` may be `−∞`.
+/// dimension at once, prior `N(0, I)`) for [`path_log_density`], genes,
+/// latents and depths held; `params.path[l]` is left at the new path.
+/// `cur_ll` (that density) may be `−∞`.
 #[allow(clippy::too_many_arguments)]
 pub fn path_step(
     params: &mut Params,
@@ -449,6 +480,7 @@ pub fn path_step(
     reads: &Reads,
     rows: &[usize],
     lambda: &[f64],
+    gene_prior: &GenePrior,
     rng: &mut impl Rng,
 ) -> (Vec<DVector<f64>>, f64) {
     let (h, n) = (eta.len(), eta.first().map_or(0, |e| e.len()));
@@ -456,7 +488,7 @@ pub fn path_step(
     let cur_ll = if cur_ll.is_finite() {
         cur_ll
     } else {
-        path_ll(params, l, reads, rows, lambda)
+        path_log_density(params, l, reads, rows, lambda, gene_prior)
     };
     let split = |x: &DVector<f32>| -> Vec<DVector<f64>> {
         (0..h)
@@ -472,7 +504,7 @@ pub fn path_step(
     let lnpdf = |y: &DVector<f32>| {
         let mut p = probe.clone();
         p.path[l] = coloured(prior, &split(y));
-        (path_ll(&p, l, reads, rows, lambda) - cur_ll) as f32
+        (path_log_density(&p, l, reads, rows, lambda, gene_prior) - cur_ll) as f32
     };
     let (next, rel) = elliptical_slice_step(&x, &nu, &lnpdf, 0.0, rng);
     let eta = split(&next);

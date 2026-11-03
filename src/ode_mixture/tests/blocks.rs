@@ -339,6 +339,7 @@ fn a_lineages_path_is_found_from_a_flat_start() {
             &reads,
             &rows,
             &lambda,
+            &GenePrior::default(),
             &mut rng,
         );
         lls.push(ll);
@@ -371,4 +372,66 @@ fn a_lineages_path_is_found_from_a_flat_start() {
         "the chain is short of the truth"
     );
     assert!(err < 0.1, "log transcription off by {err}");
+}
+
+/// The path's conditional carries the genes' prior: `b̃ = b + ρᵀz̄ − log γ`
+/// moves with the path mean `z̄`. With no reads, one gene and one
+/// dimension, `z̄ = cᵀη` (`c = Cᵀ1/n`) and the conditional of `η` is normal:
+///
+/// ```text
+/// E z̄ = −ρ d q / (s² + ρ² q),   var z̄ = q s² / (s² + ρ² q),   q = cᵀc
+/// ```
+///
+/// `d = b − log γ − m`, `(m, s)` the prior on `b̃`.
+#[test]
+fn the_path_block_carries_the_genes_prior_through_the_path_mean() {
+    use crate::ode_mixture::blocks::path_step;
+    use crate::ode_mixture::kernel::GridPrior;
+    use crate::ode_mixture::model::Params;
+    let n = 5;
+    let grid = GridPrior::new(n, 1.0, 0.25).unwrap();
+    let gene_prior = GenePrior::default();
+    let (rho, base) = (2.0, 3.0);
+    let mut params = Params {
+        beta: vec![1.0],
+        gamma: vec![1.0],
+        rho: vec![vec![rho]],
+        base: vec![base],
+        t_len: vec![1.0],
+        path: vec![vec![vec![0.0]; n]],
+    };
+    let reads = Reads::new(&[], &[], 0, 1);
+    let c: Vec<f64> = (0..n)
+        .map(|j| (0..n).map(|k| grid.chol()[(k, j)]).sum::<f64>() / n as f64)
+        .collect();
+    let q: f64 = c.iter().map(|x| x * x).sum();
+    let (m, s) = gene_prior.log_spliced;
+    let d = base - m;
+    let want_mean = -rho * d * q / (s * s + rho * rho * q);
+    let want_var = q * s * s / (s * s + rho * rho * q);
+
+    let mut eta = vec![nalgebra::DVector::<f64>::zeros(n)];
+    let mut ll = f64::NEG_INFINITY;
+    let mut rng = StdRng::seed_from_u64(3);
+    let mut z_bar = Vec::new();
+    for _ in 0..40_000 {
+        (eta, ll) = path_step(
+            &mut params,
+            0,
+            &eta,
+            ll,
+            &grid,
+            &reads,
+            &[],
+            &[],
+            &gene_prior,
+            &mut rng,
+        );
+        z_bar.push(params.path_mean()[0]);
+    }
+    let mean = z_bar.iter().sum::<f64>() / z_bar.len() as f64;
+    let var = z_bar.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / z_bar.len() as f64;
+    eprintln!("z̄: mean {mean:.3} (want {want_mean:.3}), var {var:.3} (want {want_var:.3})");
+    assert!((mean - want_mean).abs() < 0.03, "mean {mean} vs {want_mean}");
+    assert!((var / want_var - 1.0).abs() < 0.1, "var {var} vs {want_var}");
 }
