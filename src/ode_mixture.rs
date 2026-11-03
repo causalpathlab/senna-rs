@@ -9,6 +9,7 @@ pub mod kernel;
 pub mod kinetics;
 pub mod likelihood;
 pub mod model;
+pub mod sampler;
 #[cfg(test)]
 pub mod sim;
 
