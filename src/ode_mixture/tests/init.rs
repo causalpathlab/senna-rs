@@ -1,6 +1,6 @@
 use super::model::truth_params;
 use crate::ode_mixture::fit::Fit;
-use crate::ode_mixture::init::{climb, start_order, Climb};
+use crate::ode_mixture::init::{climb, start_order, tree_starts, Climb};
 use crate::ode_mixture::likelihood::Reads;
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 use legume_numeric::candle::candle_core::Device;
@@ -138,5 +138,66 @@ fn from_scratch_two_lineages_come_apart() {
     assert!(
         per.iter().all(|&r| r > 0.95),
         "per-lineage Spearman {per:?}"
+    );
+}
+
+/// On a tree, one of the starts (one per end taken as the root) puts the
+/// trunk on both lineages and each branch on one of its own, roughly in
+/// order. Rough: on the leading axes the branches part well after the
+/// branch (the ramp starts flat, the levels lag), so the start's trunk runs
+/// on into both branches and only the late branch pseudobulks are judged;
+/// the climb sorts out the rest.
+#[test]
+fn a_tree_start_gives_both_lineages_the_trunk() {
+    let cfg = SimConfig {
+        lineages: 2,
+        n_pb: 480,
+        fine: 133,
+        branch_at: Some(0.4),
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let t = &sim.truth;
+    let reads = first(&sim, sim.n_pb);
+    let starts = tree_starts(&reads, 3);
+    assert_eq!(starts.len(), 3, "a start per end");
+    let score = |places: &Vec<Vec<(usize, f64)>>| {
+        let (mut tab, mut shared, mut trunk, mut late) = ([[0usize; 2]; 2], 0, 0, 0);
+        for p in 0..sim.n_pb {
+            if t.trunk[p] {
+                trunk += 1;
+                shared += usize::from(places[p].len() == 2);
+            } else if t.time[p] > 0.8 * cfg.t_len {
+                late += 1;
+                if places[p].len() == 1 {
+                    tab[t.lineage[p]][places[p][0].0] += 1;
+                }
+            }
+        }
+        let purity = (tab[0][0] + tab[1][1]).max(tab[0][1] + tab[1][0]) as f64 / late as f64;
+        let swap = tab[0][1] + tab[1][0] > tab[0][0] + tab[1][1];
+        let per: Vec<f64> = (0..2)
+            .map(|lin| {
+                let fitted = if swap { 1 - lin } else { lin };
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                for (p, at) in places.iter().enumerate() {
+                    let on = at.iter().find(|(l, _)| *l == fitted);
+                    if let (true, Some(&(_, x))) = (t.trunk[p] || t.lineage[p] == lin, on) {
+                        a.push(x);
+                        b.push(t.time[p]);
+                    }
+                }
+                spearman(&a, &b)
+            })
+            .collect();
+        (purity, shared as f64 / trunk as f64, per)
+    };
+    let scored: Vec<_> = starts.iter().map(score).collect();
+    eprintln!("tree starts (purity, trunk shared, per-lineage Spearman): {scored:?}");
+    assert!(
+        scored.iter().any(|(purity, shared, per)| *purity > 0.95
+            && *shared > 0.8
+            && per.iter().all(|r| *r > 0.75)),
+        "no start finds the tree: {scored:?}"
     );
 }

@@ -1,4 +1,5 @@
 mod blocks;
+mod branch;
 mod fit;
 mod init;
 mod kernel;
