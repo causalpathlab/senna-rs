@@ -39,24 +39,31 @@ impl Levels {
 }
 
 impl Params {
-    /// Gene `g`'s transcription on lineage `l`'s grid.
-    pub fn alpha(&self, g: usize, l: usize) -> Vec<f64> {
-        self.path[l]
-            .iter()
-            .map(|z| {
-                let dot: f64 = z.iter().zip(&self.rho[g]).map(|(a, b)| a * b).sum();
-                (dot + self.base[g]).exp()
-            })
+    /// The paths' mean over every lineage's grid points, `[H]`.
+    pub fn path_mean(&self) -> Vec<f64> {
+        let h = self.rho.first().map_or(0, Vec::len);
+        let points: Vec<&Vec<f64>> = self.path.iter().flatten().collect();
+        (0..h)
+            .map(|d| points.iter().map(|z| z[d]).sum::<f64>() / points.len().max(1) as f64)
             .collect()
     }
 
     /// Gene `g`'s levels on every lineage, `([L·n], [L·n])`.
     pub fn gene_levels(&self, g: usize) -> (Vec<f64>, Vec<f64>) {
+        self.levels_of(self.beta[g], self.gamma[g], &self.rho[g], self.base[g])
+    }
+
+    /// The levels on every lineage of a gene with these rates, embedding and
+    /// baseline, on the current paths.
+    pub fn levels_of(&self, beta: f64, gamma: f64, rho: &[f64], base: f64) -> (Vec<f64>, Vec<f64>) {
         let (mut u, mut s) = (Vec::new(), Vec::new());
-        for l in 0..self.path.len() {
-            let n = self.path[l].len();
-            let h = self.t_len[l] / (n - 1) as f64;
-            let (ul, sl) = trajectory(&self.alpha(g, l), self.beta[g], self.gamma[g], h);
+        for (path, &t_len) in self.path.iter().zip(&self.t_len) {
+            let alpha: Vec<f64> = path
+                .iter()
+                .map(|z| (z.iter().zip(rho).map(|(a, b)| a * b).sum::<f64>() + base).exp())
+                .collect();
+            let h = t_len / (path.len() - 1) as f64;
+            let (ul, sl) = trajectory(&alpha, beta, gamma, h);
             u.extend(ul);
             s.extend(sl);
         }

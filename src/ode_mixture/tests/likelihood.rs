@@ -41,7 +41,13 @@ fn the_genes_terms_add_up_to_the_table_at_the_depth_it_implies() {
     let rows: Vec<usize> = (0..sim.n_pb).map(|p| (p * 7) % 41).collect();
     let lambda = reads.depths(&rows, &lv);
     let genes: f64 = (0..sim.n_genes)
-        .map(|g| gene_log_likelihood(&reads, g, &rows, &lambda, &lv))
+        .map(|g| {
+            let (u, s): (Vec<f64>, Vec<f64>) = (
+                lv.u.column(g).iter().copied().collect(),
+                lv.s.column(g).iter().copied().collect(),
+            );
+            gene_log_likelihood(&reads, g, &rows, &lambda, (&u, &s))
+        })
         .sum();
     let n: Vec<f64> = (0..sim.n_pb).map(|p| reads.total(p)).collect();
     let want: f64 = (0..sim.n_pb)

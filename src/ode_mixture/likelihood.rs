@@ -57,18 +57,18 @@ pub fn table(reads: &Reads, lv: &Levels) -> DMatrix<f64> {
 }
 
 /// Gene `g`'s Poisson log-likelihood (no `log x!`) with every pseudobulk at
-/// its row `rows[p]` and depth `lambda[p]`.
+/// its row `rows[p]` and depth `lambda[p]`, the gene's levels `(ū, s̄)` by row.
 pub fn gene_log_likelihood(
     reads: &Reads,
     g: usize,
     rows: &[usize],
     lambda: &[f64],
-    lv: &Levels,
+    (u, s): (&[f64], &[f64]),
 ) -> f64 {
     rows.iter()
         .enumerate()
         .map(|(p, &r)| {
-            let (mu, ms) = (lambda[p] * lv.u[(r, g)], lambda[p] * lv.s[(r, g)]);
+            let (mu, ms) = (lambda[p] * u[r], lambda[p] * s[r]);
             reads.u[(p, g)] * mu.ln() - mu + reads.s[(p, g)] * ms.ln() - ms
         })
         .sum()
