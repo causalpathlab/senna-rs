@@ -592,3 +592,82 @@ fn diagnostic_collapsed_timing() {
         t.elapsed().as_secs_f64() * 1000.0
     );
 }
+
+/// With times between the nodes, the path block's likelihood is the genes'
+/// summed: both read the levels at the same positions.
+#[test]
+fn with_time_between_nodes_the_path_likelihood_is_the_genes() {
+    use crate::ode_mixture::blocks::path_ll;
+    use crate::ode_mixture::likelihood::gene_log_likelihood;
+    let sim = simulate(&SimConfig {
+        lineages: 2,
+        fine: 133,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let mut params = truth_params(&sim, 133, 23);
+    params.sub = 4;
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let lv = params.levels();
+    let positions = params.positions();
+    let rows: Vec<usize> = (0..sim.n_pb).map(|p| (p * 37) % (2 * positions)).collect();
+    let lambda = reads.depths(&rows, &lv);
+    let blocks: f64 = (0..2)
+        .map(|l| path_ll(&params, l, &reads, &rows, &lambda))
+        .sum();
+    let genes: f64 = (0..sim.n_genes)
+        .map(|g| {
+            let (u, s) = params.gene_levels(g);
+            gene_log_likelihood(&reads, g, &rows, &lambda, (&u, &s))
+        })
+        .sum();
+    assert!(
+        (blocks - genes).abs() < 1e-8 * genes.abs(),
+        "{blocks} vs {genes}"
+    );
+}
+
+/// The collapsed gradient with times between the nodes is its finite
+/// difference.
+#[test]
+fn between_nodes_the_collapsed_gradient_is_its_finite_difference() {
+    use crate::ode_mixture::blocks::{collapsed_newton, collapsed_path_log_density};
+    use crate::ode_mixture::kernel::GridPrior;
+    let cfg = SimConfig {
+        n_pb: 120,
+        fine: 133,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let mut truth = truth_params(&sim, 133, 23);
+    truth.sub = 3;
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let grid = GridPrior::new(23, 1.0, cfg.kappa).unwrap();
+    let prior = GenePrior::default();
+    let h = truth.rho[0].len();
+    let eta: Vec<nalgebra::DVector<f64>> = (0..h)
+        .map(|d| grid.whiten(&nalgebra::DVector::from_fn(23, |k, _| truth.path[0][k][d])))
+        .collect();
+    let density = |eta: &[nalgebra::DVector<f64>]| {
+        let mut p = truth.clone();
+        let dims: Vec<_> = eta.iter().map(|e| grid.colour(e)).collect();
+        p.path[0] = (0..23)
+            .map(|k| dims.iter().map(|d| d[k]).collect())
+            .collect();
+        collapsed_path_log_density(&p, &reads, &[0.0], &prior)
+            - 0.5 * eta.iter().map(|e| e.norm_squared()).sum::<f64>()
+    };
+    let (grad, _) = collapsed_newton(&truth, 0, &grid, &reads, &[0.0], &prior);
+    for (d, k) in [(0, 0), (1, 5), (2, 11), (0, 22)] {
+        let eps = 1e-5;
+        let (mut up, mut down) = (eta.clone(), eta.clone());
+        up[d][k] += eps;
+        down[d][k] -= eps;
+        let fd = (density(&up) - density(&down)) / (2.0 * eps);
+        let an = grad[d * 23 + k];
+        assert!(
+            (fd - an).abs() < 1e-3 * fd.abs().max(1.0),
+            "({d}, {k}): analytic {an} vs {fd}"
+        );
+    }
+}

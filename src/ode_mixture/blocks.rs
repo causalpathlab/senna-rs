@@ -4,7 +4,7 @@
 //! not depend on how the items were split across threads.
 
 use super::kernel::GridPrior;
-use super::kinetics::trajectory;
+use super::kinetics::fine_trajectory;
 use super::likelihood::{gene_log_likelihood, table, Reads};
 use super::model::Params;
 use legume_numeric::mcmc::engine::elliptical_slice_step;
@@ -420,12 +420,12 @@ pub fn gene_step(
 /// their rows and depths, every gene's levels on `l` from `params`; in
 /// parallel over genes.
 pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda: &[f64]) -> f64 {
-    let n = params.path[l].len();
+    let (n, positions) = (params.path[l].len(), params.positions());
     let on: Vec<(usize, usize)> = rows
         .iter()
         .enumerate()
-        .filter(|&(_, &r)| r / n == l)
-        .map(|(p, &r)| (p, r - l * n))
+        .filter(|&(_, &r)| r / positions == l)
+        .map(|(p, &r)| (p, r - l * positions))
         .collect();
     let h = params.t_len[l] / (n - 1) as f64;
     (0..params.beta.len())
@@ -435,7 +435,7 @@ pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda:
                 .iter()
                 .map(|z| (dot(z, &params.rho[g]) + params.base[g]).exp())
                 .collect();
-            let (u, s) = trajectory(&alpha, params.beta[g], params.gamma[g], h);
+            let (u, s) = fine_trajectory(&alpha, params.beta[g], params.gamma[g], h, params.sub);
             on.iter()
                 .map(|&(p, k)| {
                     let (mu, ms) = (lambda[p] * u[k], lambda[p] * s[k]);
@@ -531,17 +531,18 @@ pub fn path_step(
     (eta, cur_ll + f64::from(rel))
 }
 
-/// `(A_u, A_s)`, `[n × n]` each: the trajectory is linear in the
-/// transcription for fixed rates, `ū = A_u α`, `s̄ = A_s α`
-/// ([`trajectory`] from the steady state of `α_0`); column `j` the
-/// response to `α = e_j`.
-fn response(beta: f64, gamma: f64, h: f64, n: usize) -> (DMatrix<f64>, DMatrix<f64>) {
-    let (mut a_u, mut a_s) = (DMatrix::zeros(n, n), DMatrix::zeros(n, n));
+/// `(A_u, A_s)`, `[positions × n]` each: the trajectory is linear in the
+/// transcription at the nodes for fixed rates, `ū = A_u α`, `s̄ = A_s α`
+/// ([`fine_trajectory`] from the steady state of `α_0`, at every position);
+/// column `j` the response to `α = e_j`.
+fn response(beta: f64, gamma: f64, h: f64, n: usize, sub: usize) -> (DMatrix<f64>, DMatrix<f64>) {
+    let positions = (n - 1) * sub.max(1) + 1;
+    let (mut a_u, mut a_s) = (DMatrix::zeros(positions, n), DMatrix::zeros(positions, n));
     for j in 0..n {
         let mut e = vec![0.0; n];
         e[j] = 1.0;
-        let (u, s) = trajectory(&e, beta, gamma, h);
-        for k in 0..n {
+        let (u, s) = fine_trajectory(&e, beta, gamma, h, sub);
+        for k in 0..positions {
             a_u[(k, j)] = u[k];
             a_s[(k, j)] = s[k];
         }
@@ -572,13 +573,14 @@ fn path_newton(
     let h = params.rho.first().map_or(0, Vec::len);
     let genes = params.beta.len();
     let step = params.t_len[l] / (n - 1) as f64;
+    let positions = params.positions();
     let on: Vec<(usize, usize)> = rows
         .iter()
         .enumerate()
-        .filter(|&(_, &r)| r / n == l)
-        .map(|(p, &r)| (p, r - l * n))
+        .filter(|&(_, &r)| r / positions == l)
+        .map(|(p, &r)| (p, r - l * positions))
         .collect();
-    let mut pooled = vec![0.0; n];
+    let mut pooled = vec![0.0; positions];
     for &(p, k) in &on {
         pooled[k] += lambda[p];
     }
@@ -592,22 +594,22 @@ fn path_newton(
                 .iter()
                 .map(|z| (dot(z, rho) + params.base[g]).exp())
                 .collect();
-            let (a_u, a_s) = response(params.beta[g], params.gamma[g], step, n);
+            let (a_u, a_s) = response(params.beta[g], params.gamma[g], step, n, params.sub);
             let av = DVector::from_column_slice(&alpha);
             let (u, s) = (&a_u * &av, &a_s * &av);
-            let (mut ru, mut rs) = (vec![0.0; n], vec![0.0; n]);
+            let (mut ru, mut rs) = (vec![0.0; positions], vec![0.0; positions]);
             for &(p, k) in &on {
                 ru[k] += reads.u[(p, g)];
                 rs[k] += reads.s[(p, g)];
             }
-            let eu = DVector::from_fn(n, |k, _| ru[k] / u[k] - pooled[k]);
-            let es = DVector::from_fn(n, |k, _| rs[k] / s[k] - pooled[k]);
+            let eu = DVector::from_fn(positions, |k, _| ru[k] / u[k] - pooled[k]);
+            let es = DVector::from_fn(positions, |k, _| rs[k] / s[k] - pooled[k]);
             // ∂ℓ/∂α_j, then ∂ℓ/∂z_jd = α_j ρ_d ∂ℓ/∂α_j.
             let d_alpha = a_u.transpose() * eu + a_s.transpose() * es;
             let gz = DMatrix::from_fn(n, h, |j, d| alpha[j] * rho[d] * d_alpha[j]);
             // Wrt α: A_uᵀ W_u A_u + A_sᵀ W_s A_s; wrt z, α_i α_j ρ_d ρ_e times it.
-            let wu = DMatrix::from_fn(n, n, |i, j| a_u[(i, j)] * pooled[i] / u[i]);
-            let ws = DMatrix::from_fn(n, n, |i, j| a_s[(i, j)] * pooled[i] / s[i]);
+            let wu = DMatrix::from_fn(positions, n, |i, j| a_u[(i, j)] * pooled[i] / u[i]);
+            let ws = DMatrix::from_fn(positions, n, |i, j| a_s[(i, j)] * pooled[i] / s[i]);
             let fa = a_u.transpose() * wu + a_s.transpose() * ws;
             let fz = DMatrix::from_fn(h * n, h * n, |a, b| {
                 let (d, i, e, j) = (a / n, a % n, b / n, b % n);
@@ -926,27 +928,29 @@ pub fn collapsed_newton(
     gene_prior: &GenePrior,
 ) -> (DVector<f64>, DMatrix<f64>) {
     let lv = params.levels();
-    let n = lv.points;
+    // Positions (where a pseudobulk's time sits) index the data; nodes (the
+    // path's) index the transcription and the path's coordinates.
+    let (np, n) = (lv.points, params.path[l].len());
     let h = params.rho.first().map_or(0, Vec::len);
     let (genes, pbs, hn) = (params.beta.len(), reads.u.nrows(), h * n);
     let tab = table(reads, &lv);
     // Every pseudobulk's posterior weight on lineage `l`'s grid points.
     let q: Vec<Vec<f64>> = (0..pbs)
         .map(|p| {
-            let (log_post, _) = log_posterior_row(&tab, log_w, n, p);
-            (0..n).map(|k| log_post[l * n + k].exp()).collect()
+            let (log_post, _) = log_posterior_row(&tab, log_w, np, p);
+            (0..np).map(|k| log_post[l * np + k].exp()).collect()
         })
         .collect();
-    let z: Vec<f64> = (0..n)
-        .map(|k| lv.u.row(l * n + k).sum() + lv.s.row(l * n + k).sum())
+    let z: Vec<f64> = (0..np)
+        .map(|k| lv.u.row(l * np + k).sum() + lv.s.row(l * np + k).sum())
         .collect();
     let total: Vec<f64> = (0..pbs).map(|p| reads.total(p)).collect();
     // Σ_p q_pk N_p/Z_k (the Poisson information's depth) and Σ_p q_pk N_p/Z_k²
     // (the multinomial's correction for the fixed total).
-    let pooled: Vec<f64> = (0..n)
+    let pooled: Vec<f64> = (0..np)
         .map(|k| (0..pbs).map(|p| q[p][k] * total[p] / z[k]).sum())
         .collect();
-    let pooled2: Vec<f64> = (0..n).map(|k| pooled[k] / z[k]).collect();
+    let pooled2: Vec<f64> = (0..np).map(|k| pooled[k] / z[k]).collect();
     let step = params.t_len[l] / (n - 1) as f64;
     let path = &params.path[l];
     // Per gene, folded in parallel: the score's pieces `W_u, W_s` (rows of
@@ -957,19 +961,19 @@ pub fn collapsed_newton(
     let (rows_w, r_sum, expected): Acc = (0..genes)
         .into_par_iter()
         .fold(
-            || (Vec::new(), DMatrix::zeros(n, hn), DMatrix::zeros(hn, hn)),
+            || (Vec::new(), DMatrix::zeros(np, hn), DMatrix::zeros(hn, hn)),
             |(mut rows_w, mut r_sum, mut expected), g| {
                 let rho = &params.rho[g];
                 let alpha: Vec<f64> = path
                     .iter()
                     .map(|zk| (dot(zk, rho) + params.base[g]).exp())
                     .collect();
-                let (a_u, a_s) = response(params.beta[g], params.gamma[g], step, n);
-                let (u, s): (Vec<f64>, Vec<f64>) = (0..n)
-                    .map(|k| (lv.u[(l * n + k, g)], lv.s[(l * n + k, g)]))
+                let (a_u, a_s) = response(params.beta[g], params.gamma[g], step, n, params.sub);
+                let (u, s): (Vec<f64>, Vec<f64>) = (0..np)
+                    .map(|k| (lv.u[(l * np + k, g)], lv.s[(l * np + k, g)]))
                     .unzip();
-                let (mut wu, mut ws) = (vec![0.0; n * hn], vec![0.0; n * hn]);
-                for k in 0..n {
+                let (mut wu, mut ws) = (vec![0.0; np * hn], vec![0.0; np * hn]);
+                for k in 0..np {
                     for c in 0..hn {
                         let (d, j) = (c / n, c % n);
                         let lead = rho[d] * alpha[j];
@@ -979,8 +983,8 @@ pub fn collapsed_newton(
                     }
                 }
                 rows_w.push((g, wu, ws));
-                let wu_f = DMatrix::from_fn(n, n, |i, j| a_u[(i, j)] * pooled[i] / u[i]);
-                let ws_f = DMatrix::from_fn(n, n, |i, j| a_s[(i, j)] * pooled[i] / s[i]);
+                let wu_f = DMatrix::from_fn(np, n, |i, j| a_u[(i, j)] * pooled[i] / u[i]);
+                let ws_f = DMatrix::from_fn(np, n, |i, j| a_s[(i, j)] * pooled[i] / s[i]);
                 let fa = a_u.transpose() * wu_f + a_s.transpose() * ws_f;
                 for a in 0..hn {
                     for b in 0..hn {
@@ -992,13 +996,16 @@ pub fn collapsed_newton(
             },
         )
         .reduce(
-            || (Vec::new(), DMatrix::zeros(n, hn), DMatrix::zeros(hn, hn)),
+            || (Vec::new(), DMatrix::zeros(np, hn), DMatrix::zeros(hn, hn)),
             |mut a, b| {
                 a.0.extend(b.0);
                 (a.0, a.1 + b.1, a.2 + b.2)
             },
         );
-    let (mut w_u, mut w_s) = (DMatrix::zeros(genes, n * hn), DMatrix::zeros(genes, n * hn));
+    let (mut w_u, mut w_s) = (
+        DMatrix::zeros(genes, np * hn),
+        DMatrix::zeros(genes, np * hn),
+    );
     for (g, wu, ws) in &rows_w {
         w_u.row_mut(*g).copy_from_slice(wu);
         w_s.row_mut(*g).copy_from_slice(ws);
@@ -1008,12 +1015,12 @@ pub fn collapsed_newton(
     let (grad, second, outer) = (0..pbs)
         .into_par_iter()
         .map(|p| {
-            let sc = DMatrix::from_fn(n, hn, |k, c| {
+            let sc = DMatrix::from_fn(np, hn, |k, c| {
                 weighted[(p, k * hn + c)] - r_sum[(k, c)] * total[p] / z[k]
             });
             let w = DVector::from_column_slice(&q[p]);
             let mean = sc.transpose() * &w;
-            let root = DMatrix::from_fn(n, hn, |k, c| sc[(k, c)] * w[k].sqrt());
+            let root = DMatrix::from_fn(np, hn, |k, c| sc[(k, c)] * w[k].sqrt());
             let second = root.transpose() * &root;
             let outer = &mean * mean.transpose();
             (mean, second, outer)

@@ -214,7 +214,8 @@ fn sweep(
     it: u64,
 ) -> (Vec<usize>, f64) {
     let lineages = state.params.path.len();
-    let n = state.params.path[0].len();
+    // Rows are positions (a pseudobulk's time may sit between the nodes).
+    let n = state.params.positions();
     // 0. Every path with the latents summed out, so the path and every time
     // move together; the latents are drawn next, as a partially collapsed
     // sampler must (van Dyk and Park, *JASA* (2008)).
@@ -353,8 +354,8 @@ fn sweep(
 /// `opts.chains` chains from `start` (the Adam mode, [`super::fit::Fit::params`]),
 /// in parallel; every chain's kept draws.
 pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<Vec<Draws>> {
-    let n = start_at.path[0].len();
-    let grid = GridPrior::new(n, 1.0, opts.kappa)?;
+    let n = start_at.positions();
+    let grid = GridPrior::new(start_at.path[0].len(), 1.0, opts.kappa)?;
     let prior = GenePrior::default();
     let bar = crate::logging::new_progress_bar((opts.chains * opts.sweeps) as u64)
         .with_message("ode-mixture sampler");
@@ -388,11 +389,8 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 }
                 let p = &state.params;
                 d.lineage.push(rows.iter().map(|r| r / n).collect());
-                d.time.push(
-                    rows.iter()
-                        .map(|r| (r % n) as f64 * p.t_len[r / n] / (n - 1) as f64)
-                        .collect(),
-                );
+                d.time
+                    .push(rows.iter().map(|r| p.time_at(r / n, r % n)).collect());
                 d.log_gamma.push(p.gamma.iter().map(|y| y.ln()).collect());
                 d.log_ratio.push(
                     p.gamma

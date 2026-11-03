@@ -13,6 +13,8 @@ use std::sync::OnceLock;
 const POINTS: usize = 45;
 const TRAIN: usize = 240;
 const KAPPA: f64 = 0.25;
+/// Positions per grid step the climb's (and so the chains') times take.
+const CLIMB_SUB: usize = 4;
 
 /// The default one-lineage simulation on a fine grid the model's divides.
 fn sim() -> &'static Sim {
@@ -59,7 +61,7 @@ fn climb_mode() -> Params {
         kappa: KAPPA,
         steps: 2500,
         lr: 0.03,
-        sub: 1,
+        sub: CLIMB_SUB,
     };
     let (fit, _) = climb(&first(sim(), TRAIN), &opts, &Device::Cpu).unwrap();
     fit.params().unwrap()
@@ -162,11 +164,11 @@ fn covers(mut draws: Vec<f64>, truth: f64, slack: f64) -> bool {
 
 /// The shares of training pseudobulks whose 90% interval of time covers
 /// the truth, and of genes whose intervals of `log γ/β` and `log γ` do.
-/// Time draws sit on the grid, the truth between grid points: its
-/// intervals are widened by half a grid step.
-fn coverage(draws: &[Draws]) -> (f64, f64, f64) {
+/// Time draws sit on positions (`sub` a grid step), the truth between
+/// them: its intervals are widened by half a position's step.
+fn coverage(draws: &[Draws], sub: usize) -> (f64, f64, f64) {
     let sim = sim();
-    let step = 1.0 / (POINTS - 1) as f64;
+    let step = 1.0 / ((POINTS - 1) * sub) as f64;
     let all =
         |pick: &dyn Fn(&Draws) -> Vec<f64>| -> Vec<f64> { draws.iter().flat_map(pick).collect() };
     let time = (0..TRAIN)
@@ -232,7 +234,7 @@ fn four_chains_in_the_truths_basin_agree_on_the_invariants() {
 /// pseudobulks, of `log γ/β` for most genes.
 #[test]
 fn in_the_truths_basin_posterior_intervals_cover_the_truth() {
-    let (t, r, _) = coverage(from_truths_basin());
+    let (t, r, _) = coverage(from_truths_basin(), 1);
     assert!((0.8..=0.98).contains(&t), "time coverage {t}");
     assert!((0.8..=0.98).contains(&r), "log γ/β coverage {r}");
 }
@@ -243,9 +245,8 @@ fn in_the_truths_basin_posterior_intervals_cover_the_truth() {
 /// costs thousands of nats), which no block leaves, the collapsed path block
 /// (the latents summed out) included ([`diagnostic_warp_trace`]).
 #[test]
-#[ignore = "fails: time coverage about half; the climb's mode has its time origin a grid step off, a joint optimum of genes, path and times the blocks (the collapsed path block too) do not leave"]
 fn from_the_climb_posterior_intervals_cover_the_truth() {
-    let (t, r, _) = coverage(from_climb());
+    let (t, r, _) = coverage(from_climb(), CLIMB_SUB);
     assert!((0.8..=0.98).contains(&t), "time coverage {t}");
     assert!((0.8..=0.98).contains(&r), "log γ/β coverage {r}");
 }
