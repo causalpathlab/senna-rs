@@ -1,5 +1,6 @@
 mod blocks;
 mod fit;
+mod gates;
 mod init;
 mod kernel;
 mod kinetics;
