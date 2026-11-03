@@ -132,12 +132,13 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
     let branch = cfg.branch_at.filter(|_| l > 1).map(|f| f * cfg.t_len);
     if let Some(tb) = branch {
         let width = cfg.kappa * cfg.t_len;
-        for lin in 1..l {
-            for k in 0..n {
+        let (trunk, others) = path.split_at_mut(1);
+        for other in others {
+            for (k, (z, z0)) in other.iter_mut().zip(&trunk[0]).enumerate() {
                 let after = (k as f64 * step - tb).max(0.0) / width;
                 let ramp = std::f64::consts::SQRT_2 * (1.0 - (-after * after).exp());
-                for d in 0..h {
-                    path[lin][k][d] = path[0][k][d] + ramp * path[lin][k][d];
+                for (zd, z0d) in z.iter_mut().zip(z0) {
+                    *zd = z0d + ramp * *zd;
                 }
             }
         }
