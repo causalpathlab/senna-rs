@@ -48,6 +48,9 @@ pub struct Climb {
     /// Every pseudobulk's unspliced share jitters on its own, `σ` fitted
     /// ([`Fit::with_share`]).
     pub jitter: bool,
+    /// Every other lineage on lineage 0's trunk until a branch time it
+    /// fits, one clock for all ([`Fit::with_trunk`]).
+    pub trunk: bool,
 }
 
 /// Bandwidth, on `[0, 1]`, of the smoothing of scores onto the grid.
@@ -299,6 +302,20 @@ fn tree_from_root(
     Some(places)
 }
 
+/// Where a start's lineages part: the latest time of a pseudobulk on more
+/// than one, or (none shared) [`NO_TRUNK`].
+fn branch_of(places: &Places) -> f64 {
+    places
+        .iter()
+        .filter(|at| at.len() > 1)
+        .flat_map(|at| at.iter().map(|&(_, t)| t))
+        .fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))))
+        .unwrap_or(NO_TRUNK)
+}
+
+/// The branch time of a start with no trunk: the lineages part at once.
+const NO_TRUNK: f64 = 0.05;
+
 /// The k-means start, every lineage `l` with `reversed[l]` turned round.
 fn kmeans_places(scores: &DMatrix<f64>, lineages: usize, reversed: &[bool]) -> Places {
     let (label, order) = order_of(scores, lineages);
@@ -373,8 +390,12 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<(Fit, f32)> {
     let (y, _) = log_shares(reads);
     let (scores, _) = axes(&y, opts.dim);
     let run = |places: &Places| -> Result<(Fit, f32)> {
-        let fit = Fit::from_params(&params_from(reads, opts, places), &prior, dev)?
+        let start = params_from(reads, opts, places);
+        let mut fit = Fit::from_params(&start, &prior, dev)?
             .with_share(opts.jitter.then_some(SHARE_START))?;
+        if opts.trunk && opts.lineages > 1 {
+            fit = fit.with_trunk(&start, &prior, branch_of(places))?;
+        }
         let objective = fit.adam(reads, opts.steps, opts.lr)?;
         Ok((fit, objective))
     };

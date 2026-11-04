@@ -186,3 +186,39 @@ fn the_share_term_is_the_hosts() {
         "{got} vs {want}"
     );
 }
+
+/// With a shared trunk every lineage's levels are lineage 0's up to the
+/// branch, exactly (the same path and clock from the same steady start),
+/// and part after it; the branch time reads back.
+#[test]
+fn with_a_trunk_the_lineages_levels_agree_before_the_branch() {
+    let sim = simulate(&SimConfig {
+        lineages: 2,
+        fine: 133,
+        branch_at: Some(0.4),
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let params = truth_params(&sim, 133, 45);
+    let prior = GridPrior::new(45, 1.0, 0.25).unwrap();
+    let fit = Fit::from_params(&params, &prior, &Device::Cpu)
+        .unwrap()
+        .with_trunk(&params, &prior, 0.4)
+        .unwrap();
+    assert!((fit.branch_at().unwrap().unwrap()[0] - 0.4).abs() < 1e-5);
+    let (u, _) = fit.levels().unwrap();
+    let u = u.to_vec2::<f32>().unwrap();
+    let (mut before, mut after) = (0f64, 0f64);
+    for k in 0..45 {
+        let d = (0..sim.n_genes)
+            .map(|g| rel(f64::from(u[45 + k][g]), f64::from(u[k][g])))
+            .fold(0.0, f64::max);
+        if (k as f64) / 44.0 <= 0.4 {
+            before = before.max(d);
+        } else {
+            after = after.max(d);
+        }
+    }
+    assert!(before < 1e-6, "before the branch {before}");
+    assert!(after > 0.05, "after the branch {after}");
+}

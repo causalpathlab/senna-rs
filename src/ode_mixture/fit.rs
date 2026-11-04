@@ -18,16 +18,37 @@
 //! gradient through `ω̂` vanishes from the first part; the Laplace
 //! determinant's share of it is dropped). The term is a marginal likelihood
 //! for `σ` with `σ → 0` the shared model, so `σ` has no prior.
+//!
+//! With [`Fit::with_trunk`], every other lineage branches off lineage 0 at
+//! its own time `t_b` on one clock (every duration the unit):
+//! `z_ℓ = z_0 + √2 r(t) w_ℓ`, `w_ℓ = C η_ℓ`, `r = 1 − e^{−((t − t_b)₊/κ)²}`,
+//! so before `t_b` the lineages share path, clock and levels, past it they
+//! part smoothly and far past it are as far apart as two independent
+//! paths; `t_b` uniform on `[0, 1]`.
 
 use super::blocks::GenePrior;
 use super::kernel::GridPrior;
 use super::likelihood::Reads;
 use super::model::Params;
 use crate::rbm_core::adam;
-use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var, D};
+use legume_numeric::candle::candle_core::{DType, Device, Error, Result, Tensor, Var, D};
 use legume_numeric::candle::candle_nn::ops::log_softmax;
 use legume_numeric::candle::candle_nn::Optimizer;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// `r(t_k) = 1 − e^{−((t_k − t_b)₊/κ)²}` on `n` grid points over `[0, 1]`.
+fn ramp(n: usize, tb: f64, kappa: f64) -> Vec<f64> {
+    (0..n)
+        .map(|k| {
+            let x = (k as f64 / (n - 1) as f64 - tb).max(0.0) / kappa;
+            1.0 - (-x * x).exp()
+        })
+        .collect()
+}
+
+/// The departure's misfit scale when a start is put on a trunk
+/// ([`Fit::with_trunk`]).
+const TRUNK_FIT: f64 = 0.05;
 
 /// `σ` a jitter starts from: small, so the early climb leaves the share's
 /// signal to the kinetics; Adam on `log σ` grows it where the reads jitter.
@@ -60,6 +81,11 @@ pub struct Fit {
     /// `[L − 1]` the other lineages' log durations (lineage 1's is 0).
     log_t: Option<Var>,
     logit_pi: Var,
+    /// `[L − 1]` every other lineage's branch time off lineage 0, as a
+    /// logit; `None`: lineages apart, each its own duration.
+    branch: Option<Var>,
+    /// The prior's length scale over the duration, the branch's too.
+    kappa: f64,
     /// `[1]` the log sd of the unspliced share's jitter, `None` for none.
     log_share_sd: Option<Var>,
     /// `[n × n]` the prior's Cholesky factor.
@@ -110,6 +136,8 @@ impl Fit {
             log_t,
             logit_pi: var(vec![0.0; l], &[1, l], dev)?,
             log_share_sd: None,
+            branch: None,
+            kappa: prior.kappa(),
             chol: Tensor::from_vec(c.iter().map(|&x| x as f32).collect::<Vec<_>>(), (n, n), dev)?,
             prior: GenePrior::default(),
             dims: (l, n, g, h),
@@ -124,6 +152,69 @@ impl Fit {
             .map(|sd| var(vec![sd.ln()], &[1], self.eta.device()))
             .transpose()?;
         Ok(self)
+    }
+
+    /// With every other lineage on lineage 0's trunk until `branch_at`, one
+    /// clock for all: the paths of `params` taken as the trunk (lineage 0's)
+    /// and every other lineage's departure `d = z_ℓ − z_0` from it, its
+    /// whitened `η_ℓ` the most probable under the prior given `d`,
+    /// `argmin |√2 r ⊙ Cη − d|²/ε² + |η|²` (`ε` [`TRUNK_FIT`]): smooth where
+    /// `r` vanishes, as dividing by `r` is not.
+    pub fn with_trunk(
+        mut self,
+        params: &Params,
+        prior: &GridPrior,
+        branch_at: f64,
+    ) -> Result<Self> {
+        use nalgebra::{DMatrix, DVector};
+        let (l, n, _, h) = self.dims;
+        let dev = self.eta.device().clone();
+        let tb = branch_at.clamp(0.02, 0.98);
+        let r = ramp(n, tb, self.kappa);
+        let a = DMatrix::from_fn(n, n, |i, j| {
+            std::f64::consts::SQRT_2 * r[i] * prior.chol()[(i, j)]
+        });
+        let normal = (a.transpose() * &a) / (TRUNK_FIT * TRUNK_FIT) + DMatrix::identity(n, n);
+        let solve = normal
+            .cholesky()
+            .ok_or_else(|| Error::Msg("trunk fit not positive definite".into()))?;
+        let mut eta = Vec::with_capacity(l * n * h);
+        for (li, path) in params.path.iter().enumerate() {
+            let dims: Vec<DVector<f64>> = (0..h)
+                .map(|d| {
+                    if li == 0 {
+                        prior.whiten(&DVector::from_fn(n, |k, _| path[k][d]))
+                    } else {
+                        let dep = DVector::from_fn(n, |k, _| path[k][d] - params.path[0][k][d]);
+                        solve.solve(&(a.transpose() * dep / (TRUNK_FIT * TRUNK_FIT)))
+                    }
+                })
+                .collect();
+            for k in 0..n {
+                eta.extend(dims.iter().map(|e| e[k]));
+            }
+        }
+        self.eta = var(eta, &[l, n, h], &dev)?;
+        self.log_t = None;
+        self.branch = (l > 1)
+            .then(|| var(vec![(tb / (1.0 - tb)).ln(); l - 1], &[l - 1], &dev))
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// Every other lineage's branch time off lineage 0, `None` with the
+    /// lineages apart.
+    pub fn branch_at(&self) -> Result<Option<Vec<f64>>> {
+        self.branch
+            .as_ref()
+            .map(|b| {
+                Ok(b.as_tensor()
+                    .to_vec1::<f32>()?
+                    .iter()
+                    .map(|&x| 1.0 / (1.0 + (-f64::from(x)).exp()))
+                    .collect())
+            })
+            .transpose()
     }
 
     /// The unspliced share's jitter sd, `None` with no jitter.
@@ -229,15 +320,18 @@ impl Fit {
         ];
         v.extend(self.log_t.clone());
         v.extend(self.log_share_sd.clone());
+        v.extend(self.branch.clone());
         v
     }
 
     /// `[L × 1]` every lineage's duration.
     fn t_len(&self) -> Result<Tensor> {
-        let zero = Tensor::zeros((1,), DType::F32, self.eta.device())?;
         let log_t = match &self.log_t {
-            Some(t) => Tensor::cat(&[&zero, t.as_tensor()], 0)?,
-            None => zero,
+            Some(t) => {
+                let zero = Tensor::zeros((1,), DType::F32, self.eta.device())?;
+                Tensor::cat(&[&zero, t.as_tensor()], 0)?
+            }
+            None => Tensor::zeros((self.dims.0,), DType::F32, self.eta.device())?,
         };
         log_t.exp()?.unsqueeze(1)
     }
@@ -247,7 +341,31 @@ impl Fit {
         // `chol` holds Cᵀ, so a row-vector product: z[k] = Σ_j C[k, j] η[j].
         let (l, n, h) = (self.dims.0, self.dims.1, self.dims.3);
         let eta = self.eta.as_tensor().transpose(1, 2)?.reshape((l * h, n))?;
-        eta.matmul(&self.chol)?.reshape((l, h, n))?.transpose(1, 2)
+        let z = eta
+            .matmul(&self.chol)?
+            .reshape((l, h, n))?
+            .transpose(1, 2)?;
+        let Some(branch) = &self.branch else {
+            return Ok(z);
+        };
+        // z_ℓ = z_0 + √2 r_ℓ(t) w_ℓ, r_ℓ = 1 − exp(−((t − t_b)₊/κ)²).
+        let dev = z.device();
+        let t = Tensor::from_vec(
+            (0..n)
+                .map(|k| k as f32 / (n - 1) as f32)
+                .collect::<Vec<_>>(),
+            (1, n),
+            dev,
+        )?;
+        let tb = (branch.as_tensor().neg()?.exp()? + 1.0)?
+            .recip()?
+            .unsqueeze(1)?; // [L−1 × 1]
+        let x = (t.broadcast_sub(&tb)?.relu()? / self.kappa)?;
+        let r = ((x.sqr()?.neg()?.exp()?.neg()? + 1.0)? * std::f64::consts::SQRT_2)?; // [L−1 × n]
+        let trunk = z.narrow(0, 0, 1)?;
+        let parted =
+            trunk.broadcast_add(&z.narrow(0, 1, l - 1)?.broadcast_mul(&r.unsqueeze(2)?)?)?;
+        Tensor::cat(&[&trunk, &parted], 0)
     }
 
     /// `([L·n × G], [L·n × G])` the levels.
@@ -353,6 +471,14 @@ impl Fit {
         total = (total + gauss(self.eta.as_tensor(), (0.0, 1.0))?)?;
         if let Some(t) = &self.log_t {
             total = (total + gauss(t.as_tensor(), (0.0, 1.0))?)?;
+        }
+        if let Some(b) = &self.branch {
+            // t_b uniform on [0, 1]: on its logit, log σ(x) + log σ(−x).
+            let x = b.as_tensor();
+            let softplus = |x: &Tensor| -> Result<Tensor> {
+                x.relu()? + (x.abs()?.neg()?.exp()? + 1.0)?.log()?
+            };
+            total = (total - (softplus(x)? + softplus(&x.neg()?)?)?.sum_all()?)?;
         }
         Ok(total)
     }

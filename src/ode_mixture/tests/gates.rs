@@ -16,6 +16,7 @@ const POINTS: usize = 45;
 fn opts(cfg: &SimConfig) -> Climb {
     Climb {
         jitter: true,
+        trunk: false,
         lineages: 1,
         points: POINTS,
         dim: cfg.dim,
@@ -224,6 +225,7 @@ fn a_shared_unspliced_drift_alone_is_not_a_direction() {
             &cfg,
             &Climb {
                 jitter: true,
+                trunk: false,
                 ..opts(&cfg)
             },
         );
@@ -302,6 +304,7 @@ fn with_the_jitter_in_the_model_the_gates_survive_a_jitter_of_the_unspliced_shar
             &cfg,
             &Climb {
                 jitter: true,
+                trunk: false,
                 ..opts(&cfg)
             },
         );
@@ -334,6 +337,7 @@ fn with_no_jitter_in_the_reads_the_jitter_in_the_model_stays_small() {
         &cfg,
         &Climb {
             jitter: true,
+            trunk: false,
             ..opts(&cfg)
         },
     );

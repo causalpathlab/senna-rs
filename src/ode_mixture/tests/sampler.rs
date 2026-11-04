@@ -62,6 +62,7 @@ fn chains_from(
 fn climb_mode() -> (Params, Option<f64>) {
     let opts = Climb {
         jitter: true,
+        trunk: false,
         lineages: 1,
         points: POINTS,
         dim: 3,

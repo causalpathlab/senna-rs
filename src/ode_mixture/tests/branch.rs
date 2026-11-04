@@ -71,11 +71,9 @@ fn from_scratch_branching_lineages_keep_their_trunk() {
     let n_train = 480;
     let train = first(&sim, n_train);
     let dev = Device::Cpu;
-    // The shared model: with the jitter the trunk's clocks drift apart
-    // (the unspliced share is part of what ties them), until the trunk is
-    // shared in the model.
     let opts = Climb {
-        jitter: false,
+        trunk: true,
+        jitter: true,
         lineages: 2,
         points: 45,
         dim: 3,
@@ -85,6 +83,8 @@ fn from_scratch_branching_lineages_keep_their_trunk() {
         sub: 1,
     };
     let (fit, objective) = climb(&train, &opts, &dev).unwrap();
+    let branch_at = fit.branch_at().unwrap().unwrap()[0];
+    eprintln!("branch at {branch_at:.3} (truth {tb})");
     let all = first(&sim, sim.n_pb);
     let (weights, time) = fit.posterior(&fit.reads(&all).unwrap()).unwrap();
     let held: Vec<usize> = (n_train..sim.n_pb).collect();
@@ -153,6 +153,8 @@ fn from_scratch_branching_lineages_keep_their_trunk() {
         "per-lineage Spearman {per:?}"
     );
     assert!(trunk_r > 0.95, "trunk Spearman across lineages {trunk_r}");
-    // Within two grid steps of lineage 0's unit on average.
-    assert!(mean_gap < 0.05, "trunk mean gap {mean_gap}");
+    // One clock and one trunk: a trunk pseudobulk's time is the same on
+    // either lineage but where it sits near the branch.
+    assert!(mean_gap < 0.01, "trunk mean gap {mean_gap}");
+    assert!((branch_at - tb).abs() < 0.1, "branch at {branch_at}");
 }

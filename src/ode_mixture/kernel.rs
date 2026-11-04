@@ -34,6 +34,8 @@ pub fn grid_cov(n: usize, t_len: f64, kappa: f64) -> DMatrix<f64> {
 /// The prior on one grid: its Cholesky factor, to colour and whiten.
 pub struct GridPrior {
     chol: DMatrix<f64>,
+    /// The length scale over the duration.
+    kappa: f64,
 }
 
 impl GridPrior {
@@ -42,7 +44,15 @@ impl GridPrior {
             .cholesky()
             .ok_or_else(|| anyhow::anyhow!("grid covariance not positive definite"))?
             .l();
-        Ok(Self { chol })
+        Ok(Self {
+            chol,
+            kappa: kappa / t_len,
+        })
+    }
+
+    /// The length scale as a share of the duration.
+    pub fn kappa(&self) -> f64 {
+        self.kappa
     }
 
     /// The Cholesky factor `C`, `[n × n]` lower triangular.
