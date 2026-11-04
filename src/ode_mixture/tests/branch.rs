@@ -71,6 +71,9 @@ fn from_scratch_branching_lineages_keep_their_trunk() {
     let n_train = 480;
     let train = first(&sim, n_train);
     let dev = Device::Cpu;
+    // The shared model: with the jitter the trunk's clocks drift apart
+    // (the unspliced share is part of what ties them), until the trunk is
+    // shared in the model.
     let opts = Climb {
         jitter: false,
         lineages: 2,

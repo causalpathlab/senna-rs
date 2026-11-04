@@ -15,7 +15,7 @@ const POINTS: usize = 45;
 
 fn opts(cfg: &SimConfig) -> Climb {
     Climb {
-        jitter: false,
+        jitter: true,
         lineages: 1,
         points: POINTS,
         dim: cfg.dim,

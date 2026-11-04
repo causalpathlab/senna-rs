@@ -1,6 +1,6 @@
 use super::init::first;
 use super::model::truth_params;
-use crate::ode_mixture::fit::Fit;
+use crate::ode_mixture::fit::{Fit, SHARE_START};
 use crate::ode_mixture::init::{climb, Climb};
 use crate::ode_mixture::kernel::GridPrior;
 use crate::ode_mixture::model::Params;
@@ -30,7 +30,12 @@ fn sim() -> &'static Sim {
 }
 
 /// Four chains from `mode` on the first [`TRAIN`] pseudobulks.
-fn chains_from(mode: &Params, sweeps: usize, burn: usize, seed: u64) -> Vec<Draws> {
+fn chains_from(
+    (mode, share): &(Params, Option<f64>),
+    sweeps: usize,
+    burn: usize,
+    seed: u64,
+) -> Vec<Draws> {
     let t0 = std::time::Instant::now();
     let draws = run(
         &first(sim(), TRAIN),
@@ -41,6 +46,7 @@ fn chains_from(mode: &Params, sweeps: usize, burn: usize, seed: u64) -> Vec<Draw
             sweeps,
             burn,
             seed,
+            share: *share,
             ..Options::default()
         },
     )
@@ -52,10 +58,10 @@ fn chains_from(mode: &Params, sweeps: usize, burn: usize, seed: u64) -> Vec<Draw
     draws
 }
 
-/// The Adam mode from the reads alone ([`climb`]).
-fn climb_mode() -> Params {
+/// The Adam mode from the reads alone ([`climb`]) and its jitter sd.
+fn climb_mode() -> (Params, Option<f64>) {
     let opts = Climb {
-        jitter: false,
+        jitter: true,
         lineages: 1,
         points: POINTS,
         dim: 3,
@@ -65,15 +71,19 @@ fn climb_mode() -> Params {
         sub: CLIMB_SUB,
     };
     let (fit, _) = climb(&first(sim(), TRAIN), &opts, &Device::Cpu).unwrap();
-    fit.params().unwrap()
+    (fit.params().unwrap(), fit.share_sd().unwrap())
 }
 
-/// The Adam mode in the truth's basin: Adam from the truth.
-fn truths_mode() -> Params {
+/// The Adam mode in the truth's basin: Adam from the truth, the jitter in
+/// the model as in the climb.
+fn truths_mode() -> (Params, Option<f64>) {
     let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
-    let fit = Fit::from_params(&truth_params(sim(), 133, POINTS), &grid, &Device::Cpu).unwrap();
+    let fit = Fit::from_params(&truth_params(sim(), 133, POINTS), &grid, &Device::Cpu)
+        .unwrap()
+        .with_share(Some(SHARE_START))
+        .unwrap();
     fit.adam(&first(sim(), TRAIN), 2000, 0.01).unwrap();
-    fit.params().unwrap()
+    (fit.params().unwrap(), fit.share_sd().unwrap())
 }
 
 fn from_climb() -> &'static Vec<Draws> {
@@ -320,7 +330,7 @@ fn diagnostic_the_two_modes() {
     let train = first(sim(), TRAIN);
     let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
     for (name, p) in [("climb", climb_mode()), ("truth's basin", truths_mode())] {
-        let f = Fit::from_params(&p, &grid, &Device::Cpu).unwrap();
+        let f = Fit::from_params(&p.0, &grid, &Device::Cpu).unwrap();
         let r = f.reads(&train).unwrap();
         let obj = f.objective(&r).unwrap().to_scalar::<f32>().unwrap();
         let (_, time) = f.posterior(&r).unwrap();
@@ -360,7 +370,7 @@ fn a_stop_ends_the_chains_at_once() {
 fn diagnostic_longer_climb() {
     let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
     let reads = first(sim(), TRAIN);
-    let fit = Fit::from_params(&climb_mode(), &grid, &Device::Cpu).unwrap();
+    let fit = Fit::from_params(&climb_mode().0, &grid, &Device::Cpu).unwrap();
     let dev = fit.reads(&reads).unwrap();
     let shift = |p: &Params| {
         let f = Fit::from_params(p, &grid, &Device::Cpu).unwrap();
@@ -386,7 +396,7 @@ fn diagnostic_longer_climb() {
 fn diagnostic_shifted_climb() {
     let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
     let reads = first(sim(), TRAIN);
-    let base = climb_mode();
+    let base = climb_mode().0;
     for shift in [-2i32, -1, 0, 1] {
         let mut p = base.clone();
         let n = POINTS as i32;
@@ -406,7 +416,7 @@ fn diagnostic_shifted_climb() {
 #[test]
 #[ignore = "diagnostic: genes whose speed differs between the climb's mode and the truth's basin"]
 fn diagnostic_gene_speeds_between_modes() {
-    let (a, b) = (climb_mode(), truths_mode());
+    let (a, b) = (climb_mode().0, truths_mode().0);
     let t = &sim().truth;
     let mut rows: Vec<(f64, usize)> = (0..a.gamma.len())
         .map(|g| ((a.gamma[g] / b.gamma[g]).ln(), g))

@@ -29,8 +29,9 @@ use legume_numeric::candle::candle_nn::ops::log_softmax;
 use legume_numeric::candle::candle_nn::Optimizer;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// `σ` a jitter starts from.
-pub const SHARE_START: f64 = 0.1;
+/// `σ` a jitter starts from: small, so the early climb leaves the share's
+/// signal to the kinetics; Adam on `log σ` grows it where the reads jitter.
+pub const SHARE_START: f64 = 0.01;
 
 /// Newton steps to the jitter's mode, from its Gaussian guess (as
 /// [`super::likelihood::share_mode`]).

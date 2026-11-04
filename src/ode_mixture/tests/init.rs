@@ -57,7 +57,7 @@ fn from_scratch_the_climb_finds_time_and_its_direction() {
     let train = first(&sim, n_train);
     let dev = Device::Cpu;
     let opts = Climb {
-        jitter: false,
+        jitter: true,
         lineages: 1,
         points: 45,
         dim: 3,
@@ -102,7 +102,7 @@ fn from_scratch_two_lineages_come_apart() {
     let train = first(&sim, n_train);
     let dev = Device::Cpu;
     let opts = Climb {
-        jitter: false,
+        jitter: true,
         lineages: 2,
         points: 45,
         dim: 3,
@@ -219,7 +219,7 @@ fn the_climbs_time_is_not_a_grid_step_late() {
     let sim = simulate(&cfg).unwrap();
     let train = first(&sim, 240);
     let opts = Climb {
-        jitter: false,
+        jitter: true,
         lineages: 1,
         points: 45,
         dim: 3,
@@ -232,7 +232,10 @@ fn the_climbs_time_is_not_a_grid_step_late() {
     let (_, time) = fit.posterior(&fit.reads(&train).unwrap()).unwrap();
     let shift = (0..240).map(|p| time[p] - sim.truth.time[p]).sum::<f64>() / 240.0;
     let step = 1.0 / 44.0;
-    eprintln!("mean time − truth {shift:.4} (grid step {step:.4})");
+    eprintln!(
+        "mean time − truth {shift:.4} (grid step {step:.4}); jitter sd {:?}",
+        fit.share_sd().unwrap()
+    );
     assert!(
         shift.abs() < 0.5 * step,
         "the climb's times are off by {shift}"
