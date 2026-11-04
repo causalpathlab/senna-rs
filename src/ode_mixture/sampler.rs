@@ -22,6 +22,12 @@
 //!    does not move with `T`, only the grid's step does;
 //! 6. the lineages' weights ([`draw_weights`]).
 //!
+//! On a shared trunk ([`Params::branch`]) the trunk's path block (lineage
+//! 0's) moves every lineage and the others are departures from it
+//! ([`super::blocks::place_path`]), each departure's block moving its
+//! branch time with it (alone the two trade off along a ridge;
+//! [`super::blocks::Space`]); the clock is shared, step 5 skipped.
+//!
 //! With a jitter of the unspliced share ([`Options::share`]), every
 //! pseudobulk's `ω_p` is a latent too: the rows are drawn given it
 //! ([`jittered_table`]), then `ω_p` given its row ([`share_step`]), then
@@ -35,8 +41,8 @@
 //! `z` against `ρ` and the baseline's shared shift, do not show in them).
 
 use super::blocks::{
-    draw_latents, draw_share_sd, draw_weights, from_theta, gene_laplace, gene_step, path_gess_step,
-    path_laplace, path_ll, share_step, stream, to_theta, GenePrior,
+    draw_latents, draw_share_sd, draw_weights, from_theta, gene_laplace, gene_step, path_eta,
+    path_gess_step, path_laplace, path_ll, share_step, stream, to_theta, GenePrior,
 };
 use super::kernel::GridPrior;
 use super::likelihood::{jittered_table, table, Depth, Reads};
@@ -105,6 +111,9 @@ pub struct Draws {
     /// with no jitter).
     pub share_sd: Vec<f64>,
     pub omega: Vec<Vec<f64>>,
+    /// `[S][L − 1]` every other lineage's branch time off the trunk (empty
+    /// with the lineages apart).
+    pub branch: Vec<Vec<f64>>,
 }
 
 /// A chain's state.
@@ -138,16 +147,7 @@ const JITTER_SD: u64 = 7;
 
 fn start(params: &Params, grid: &GridPrior, pseudobulks: usize, share: Option<f64>) -> State {
     let lineages = params.path.len();
-    let h = params.rho.first().map_or(0, Vec::len);
-    let eta: Vec<Vec<DVector<f64>>> = params
-        .path
-        .iter()
-        .map(|path| {
-            (0..h)
-                .map(|d| grid.whiten(&DVector::from_fn(path.len(), |k, _| path[k][d])))
-                .collect()
-        })
-        .collect();
+    let eta: Vec<Vec<DVector<f64>>> = (0..lineages).map(|l| path_eta(params, grid, l)).collect();
     let z_bar = params.path_mean();
     let modes = (0..params.beta.len())
         .map(|g| {
@@ -314,8 +314,9 @@ fn sweep(
         state.path_modes[l] = prop.mode(state.eta[l].len());
     }
 
-    // 5. Durations, lineage 0's the unit.
-    for l in 1..lineages {
+    // 5. Durations, lineage 0's the unit (on a trunk, one clock).
+    let apart = state.params.branch.is_none();
+    for l in (1..lineages).filter(|_| apart) {
         let mut rng = stream(block_seed(seed, DURATIONS), l as u64, it);
         duration_step(&mut state.params, l, reads, &rows, &lambda, &mut rng);
     }
@@ -357,6 +358,7 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 path_ll: Vec::with_capacity(kept),
                 share_sd: Vec::new(),
                 omega: Vec::new(),
+                branch: Vec::new(),
             };
             for it in 0..opts.sweeps {
                 if stopped() {
@@ -381,6 +383,9 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 );
                 d.log_t.push(p.t_len.iter().map(|t| t.ln()).collect());
                 d.path_ll.push(ll);
+                if let Some(b) = &state.params.branch {
+                    d.branch.push(b.clone());
+                }
                 if let Some(sd) = state.share_sd {
                     d.share_sd.push(sd);
                     d.omega.push(state.omega.clone());

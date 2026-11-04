@@ -29,22 +29,12 @@
 use super::blocks::GenePrior;
 use super::kernel::GridPrior;
 use super::likelihood::Reads;
-use super::model::Params;
+use super::model::{branch_ramp, Params};
 use crate::rbm_core::adam;
-use legume_numeric::candle::candle_core::{DType, Device, Error, Result, Tensor, Var, D};
+use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var, D};
 use legume_numeric::candle::candle_nn::ops::log_softmax;
 use legume_numeric::candle::candle_nn::Optimizer;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-/// `r(t_k) = 1 − e^{−((t_k − t_b)₊/κ)²}` on `n` grid points over `[0, 1]`.
-fn ramp(n: usize, tb: f64, kappa: f64) -> Vec<f64> {
-    (0..n)
-        .map(|k| {
-            let x = (k as f64 / (n - 1) as f64 - tb).max(0.0) / kappa;
-            1.0 - (-x * x).exp()
-        })
-        .collect()
-}
 
 /// The departure's misfit scale when a start is put on a trunk
 /// ([`Fit::with_trunk`]).
@@ -157,27 +147,19 @@ impl Fit {
     /// With every other lineage on lineage 0's trunk until `branch_at`, one
     /// clock for all: the paths of `params` taken as the trunk (lineage 0's)
     /// and every other lineage's departure `d = z_ℓ − z_0` from it, its
-    /// whitened `η_ℓ` the most probable under the prior given `d`,
-    /// `argmin |√2 r ⊙ Cη − d|²/ε² + |η|²` (`ε` [`TRUNK_FIT`]): smooth where
-    /// `r` vanishes, as dividing by `r` is not.
+    /// whitened `η_ℓ` the most probable under the prior given `d`
+    /// ([`GridPrior::whiten_scaled`] to within [`TRUNK_FIT`]).
     pub fn with_trunk(
         mut self,
         params: &Params,
         prior: &GridPrior,
         branch_at: f64,
     ) -> Result<Self> {
-        use nalgebra::{DMatrix, DVector};
+        use nalgebra::DVector;
         let (l, n, _, h) = self.dims;
         let dev = self.eta.device().clone();
         let tb = branch_at.clamp(0.02, 0.98);
-        let r = ramp(n, tb, self.kappa);
-        let a = DMatrix::from_fn(n, n, |i, j| {
-            std::f64::consts::SQRT_2 * r[i] * prior.chol()[(i, j)]
-        });
-        let normal = (a.transpose() * &a) / (TRUNK_FIT * TRUNK_FIT) + DMatrix::identity(n, n);
-        let solve = normal
-            .cholesky()
-            .ok_or_else(|| Error::Msg("trunk fit not positive definite".into()))?;
+        let r = branch_ramp(n, tb, self.kappa);
         let mut eta = Vec::with_capacity(l * n * h);
         for (li, path) in params.path.iter().enumerate() {
             let dims: Vec<DVector<f64>> = (0..h)
@@ -186,7 +168,7 @@ impl Fit {
                         prior.whiten(&DVector::from_fn(n, |k, _| path[k][d]))
                     } else {
                         let dep = DVector::from_fn(n, |k, _| path[k][d] - params.path[0][k][d]);
-                        solve.solve(&(a.transpose() * dep / (TRUNK_FIT * TRUNK_FIT)))
+                        prior.whiten_scaled(&r, &dep, TRUNK_FIT)
                     }
                 })
                 .collect();
@@ -626,6 +608,7 @@ impl Fit {
                 })
                 .collect(),
             sub: self.sub,
+            branch: self.branch_at()?,
         })
     }
 }

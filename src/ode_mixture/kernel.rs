@@ -72,6 +72,20 @@ impl GridPrior {
             .expect("a Cholesky factor has a nonzero diagonal")
     }
 
+    /// The most probable `η` under `N(0, I)` given `z ≈ diag(scale) C η`
+    /// to within `eps`: `argmin |diag(scale) Cη − z|²/ε² + |η|²`. Smooth
+    /// where `scale` vanishes (those points say nothing of `η`), as
+    /// dividing by it is not.
+    pub fn whiten_scaled(&self, scale: &[f64], z: &DVector<f64>, eps: f64) -> DVector<f64> {
+        let n = self.chol.nrows();
+        let a = DMatrix::from_fn(n, n, |i, j| scale[i] * self.chol[(i, j)]);
+        let normal = (a.transpose() * &a) / (eps * eps) + DMatrix::identity(n, n);
+        normal
+            .cholesky()
+            .expect("I plus a Gram matrix is positive definite")
+            .solve(&(a.transpose() * z / (eps * eps)))
+    }
+
     /// One draw of the path.
     pub fn draw(&self, rng: &mut impl Rng) -> DVector<f64> {
         let eta = DVector::from_fn(self.chol.nrows(), |_, _| StandardNormal.sample(rng));

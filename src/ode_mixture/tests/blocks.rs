@@ -434,6 +434,7 @@ fn the_path_block_carries_the_genes_prior_through_the_path_mean() {
         t_len: vec![1.0],
         path: vec![vec![vec![0.0]; n]],
         sub: 1,
+        branch: None,
     };
     let reads = Reads::new(&[], &[], 0, 1);
     let c: Vec<f64> = (0..n)
@@ -591,3 +592,214 @@ fn the_jitter_sd_is_drawn_from_its_conditional() {
         "mean {mean} vs spread {spread}"
     );
 }
+
+/// The branching simulation's truth put on a shared trunk at the truth's
+/// branch by Adam (the mode the sampler starts from), its reads, their rows
+/// at the truth and depths.
+fn trunk_mode() -> (
+    crate::ode_mixture::model::Params,
+    Reads,
+    Vec<usize>,
+    Vec<crate::ode_mixture::likelihood::Depth>,
+) {
+    use crate::ode_mixture::fit::Fit;
+    use crate::ode_mixture::kernel::GridPrior;
+    use legume_numeric::candle::candle_core::Device;
+    let sim = simulate(&SimConfig {
+        lineages: 2,
+        fine: 133,
+        branch_at: Some(0.4),
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let grid = GridPrior::new(45, 1.0, 0.25).unwrap();
+    let truth = truth_params(&sim, 133, 45);
+    let fit = Fit::from_params(&truth, &grid, &Device::Cpu)
+        .unwrap()
+        .with_trunk(&truth, &grid, 0.4)
+        .unwrap();
+    fit.adam(&reads, 1000, 0.01).unwrap();
+    let params = fit.params().unwrap();
+    let rows: Vec<usize> = (0..sim.n_pb)
+        .map(|p| {
+            let k = (sim.truth.time[p] * 44.0).round() as usize;
+            sim.truth.lineage[p] * 45 + k
+        })
+        .collect();
+    let lambda = reads.depths(&rows, &params.levels());
+    (params, reads, rows, lambda)
+}
+
+/// On a trunk, a move of the trunk (lineage 0's block) moves every lineage
+/// and keeps every departure; a move of a departure moves its lineage
+/// alone and keeps it on the trunk before the branch.
+#[test]
+fn on_a_trunk_a_trunk_move_moves_every_lineage_and_a_departure_its_own() {
+    use crate::ode_mixture::blocks::{path_eta, path_step};
+    use crate::ode_mixture::kernel::GridPrior;
+    let (params, reads, rows, lambda) = trunk_mode();
+    let grid = GridPrior::new(45, 1.0, 0.25).unwrap();
+    let prior = GenePrior::default();
+    let tb = params.branch.as_ref().unwrap()[0];
+    let gap = |p: &crate::ode_mixture::model::Params, k: usize| -> f64 {
+        p.path[1][k]
+            .iter()
+            .zip(&p.path[0][k])
+            .map(|(a, b)| (a - b).abs())
+            .sum()
+    };
+    let mut rng = StdRng::seed_from_u64(3);
+    let mut moved = params.clone();
+    let eta0 = path_eta(&params, &grid, 0);
+    path_step(
+        &mut moved,
+        0,
+        &eta0,
+        f64::NEG_INFINITY,
+        &grid,
+        &reads,
+        &rows,
+        &lambda,
+        &prior,
+        &mut rng,
+    );
+    let mut changed = 0f64;
+    for k in 0..45 {
+        changed = changed.max((moved.path[0][k][0] - params.path[0][k][0]).abs());
+        for d in 0..3 {
+            let (a, b) = (
+                moved.path[1][k][d] - moved.path[0][k][d],
+                params.path[1][k][d] - params.path[0][k][d],
+            );
+            assert!((a - b).abs() < 1e-9, "departure at {k} moved");
+        }
+    }
+    assert!(changed > 1e-6, "the trunk did not move");
+    let mut moved = params.clone();
+    let eta1 = path_eta(&params, &grid, 1);
+    path_step(
+        &mut moved,
+        1,
+        &eta1,
+        f64::NEG_INFINITY,
+        &grid,
+        &reads,
+        &rows,
+        &lambda,
+        &prior,
+        &mut rng,
+    );
+    assert_eq!(moved.path[0], params.path[0]);
+    for k in (0..45).filter(|&k| k as f64 / 44.0 <= tb) {
+        assert!(gap(&moved, k) < 1e-9, "off the trunk at {k}");
+    }
+    assert!((0..45).any(|k| (gap(&moved, k) - gap(&params, k)).abs() > 1e-6));
+}
+
+/// On a trunk the Laplace mode of the trunk's block and of a departure's is
+/// a stationary point of the density they approximate: along any
+/// direction it rises no more either way than its curvature allows.
+#[test]
+fn on_a_trunk_a_paths_laplace_mode_is_the_densitys() {
+    use crate::ode_mixture::blocks::{path_eta, path_laplace, path_log_density, place_path};
+    use crate::ode_mixture::kernel::GridPrior;
+    use nalgebra::DVector;
+    let (params, reads, rows, lambda) = trunk_mode();
+    let grid = GridPrior::new(45, 1.0, 0.25).unwrap();
+    let prior = GenePrior::default();
+    for block in [0, 1] {
+        let anchor = path_eta(&params, &grid, block);
+        let prop = path_laplace(
+            &params, block, &anchor, &grid, &reads, &rows, &lambda, &prior,
+        );
+        let mode = prop.mode(3);
+        // At the mode's branch time too (a departure's block moves it).
+        let mut at_mode = params.clone();
+        if let Some(t) = prop.branch_time(3, 45) {
+            at_mode.branch.as_mut().unwrap()[0] = t;
+        }
+        let f = |eta: &[DVector<f64>]| {
+            let mut p = at_mode.clone();
+            place_path(&mut p, &at_mode, &grid, block, eta);
+            path_log_density(&p, block, &reads, &rows, &lambda, &prior)
+                - 0.5 * eta.iter().map(|e| e.norm_squared()).sum::<f64>()
+        };
+        let mut rng = StdRng::seed_from_u64(7);
+        for _ in 0..5 {
+            let v: Vec<DVector<f64>> = (0..3)
+                .map(|_| {
+                    DVector::from_fn(45, |_, _| {
+                        <rand_distr::StandardNormal as rand_distr::Distribution<f64>>::sample(
+                            &rand_distr::StandardNormal,
+                            &mut rng,
+                        )
+                    })
+                })
+                .collect();
+            let eps = 1e-3;
+            let at = |s: f64| -> Vec<DVector<f64>> {
+                mode.iter().zip(&v).map(|(m, d)| m + d * s).collect()
+            };
+            let (up, mid, down) = (f(&at(eps)), f(&at(0.0)), f(&at(-eps)));
+            let slope = (up - down) / (2.0 * eps);
+            let curve = -(up - 2.0 * mid + down) / (eps * eps);
+            // A Newton step along v from the mode would be slope/curve.
+            assert!(
+                (slope / curve).abs() < 0.02,
+                "block {block}: slope {slope}, curvature {curve}"
+            );
+        }
+    }
+}
+
+/// With no reads and no genes, a departure's block follows its own prior:
+/// its whitened path `N(0, I)` and its branch time uniform.
+#[test]
+fn with_no_reads_a_departure_and_its_branch_time_follow_their_prior() {
+    use crate::ode_mixture::blocks::{path_eta, path_gess_step, path_laplace};
+    use crate::ode_mixture::kernel::GridPrior;
+    let (params, reads, _, _) = trunk_mode();
+    let grid = GridPrior::new(45, 1.0, 0.25).unwrap();
+    let prior = GenePrior::default();
+    let mut p = params.clone();
+    p.beta.clear();
+    p.gamma.clear();
+    p.rho.clear();
+    p.base.clear();
+    let mut eta = path_eta(&params, &grid, 1);
+    let prop = path_laplace(&p, 1, &eta, &grid, &reads, &[], &[], &prior);
+    let mut rng = StdRng::seed_from_u64(5);
+    let n = 20_000;
+    let (mut m, mut v, mut e2) = (0.0, 0.0, 0.0);
+    let mut ll = f64::NEG_INFINITY;
+    for _ in 0..n {
+        (eta, ll) = path_gess_step(
+            &mut p,
+            1,
+            &eta,
+            ll,
+            &grid,
+            &reads,
+            &[],
+            &[],
+            &prior,
+            &prop,
+            &mut rng,
+        );
+        let t = p.branch.as_ref().unwrap()[0];
+        m += t / n as f64;
+        v += t * t / n as f64;
+        e2 += eta[0][10] * eta[0][10] / n as f64;
+    }
+    let var = v - m * m;
+    assert!(
+        (m - 0.5).abs() < 0.03 && (var - 1.0 / 12.0).abs() < 0.008,
+        "branch time: mean {m} var {var}"
+    );
+    assert!(
+        (e2 - 1.0).abs() < 0.08,
+        "a whitened coordinate's second moment {e2}"
+    );
+}
+

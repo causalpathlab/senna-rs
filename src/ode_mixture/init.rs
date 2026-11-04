@@ -378,6 +378,7 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
         t_len: vec![1.0; opts.lineages],
         path,
         sub: opts.sub,
+        branch: None,
     }
 }
 

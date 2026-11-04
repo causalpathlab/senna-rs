@@ -24,6 +24,23 @@ pub struct Params {
     /// alone). The levels are exact between nodes, so time is as fine as
     /// this, the path no finer.
     pub sub: usize,
+    /// `[L − 1]` every other lineage's branch time off lineage 0 on one
+    /// clock (every duration the unit): `z_ℓ = z_0 + √2 r(t) w_ℓ`
+    /// ([`branch_ramp`]); `None`: the lineages apart.
+    pub branch: Option<Vec<f64>>,
+}
+
+/// `r(t_k) = √2 (1 − e^{−((t_k − t_b)₊/κ)²})` on `n` grid points over
+/// `[0, 1]`: a lineage's departure from the trunk is `r ⊙ w`, `w` a path
+/// from the prior, so it parts smoothly at `t_b` and far past it is as far
+/// from the trunk as two independent paths are from each other.
+pub fn branch_ramp(n: usize, tb: f64, kappa: f64) -> Vec<f64> {
+    (0..n)
+        .map(|k| {
+            let x = (k as f64 / (n - 1) as f64 - tb).max(0.0) / kappa;
+            std::f64::consts::SQRT_2 * (1.0 - (-x * x).exp())
+        })
+        .collect()
 }
 
 /// Every `(lineage, position)`'s levels, rows `ℓ points + k` (positions
