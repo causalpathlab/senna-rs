@@ -202,3 +202,41 @@ fn the_genes_terms_add_up_to_the_jittered_table_at_its_depths() {
         "{genes} vs {want}"
     );
 }
+
+/// A gene's likelihood from its reads summed by row ([`GeneRows`]) is the
+/// per-pseudobulk one up to a constant in the gene's parameters: the same
+/// offset at its levels and at other levels.
+#[test]
+fn a_genes_likelihood_by_rows_is_the_per_pseudobulk_one() {
+    use crate::ode_mixture::likelihood::{GeneRows, RowLayout};
+    let sim = simulate(&SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let mut params = truth_params(&sim, 133, 23);
+    params.sub = 4;
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let lv = params.levels();
+    // Many pseudobulks to a row, some rows empty.
+    let rows: Vec<usize> = (0..sim.n_pb).map(|p| (p * 7) % 40).collect();
+    let omega: Vec<f64> = (0..sim.n_pb)
+        .map(|p| 0.1 * ((p % 5) as f64 - 2.0))
+        .collect();
+    let lambda = reads.jittered_depths(&rows, &lv, &omega);
+    let layout = RowLayout::new(&rows, &lambda);
+    for g in 0..sim.n_genes {
+        let (u, s) = params.gene_levels(g);
+        let (u2, s2): (Vec<f64>, Vec<f64>) = (
+            u.iter().map(|x| 1.3 * x).collect(),
+            s.iter().map(|x| 0.8 * x).collect(),
+        );
+        let by_row = GeneRows::new(&layout, &reads, g);
+        let offset = |u: &[f64], s: &[f64]| {
+            gene_log_likelihood(&reads, g, &rows, &lambda, (u, s)) - by_row.log_likelihood((u, s))
+        };
+        let (a, b) = (offset(&u, &s), offset(&u2, &s2));
+        let want = gene_log_likelihood(&reads, g, &rows, &lambda, (&u, &s)).abs();
+        assert!((a - b).abs() < 1e-9 * want, "gene {g}: offsets {a} vs {b}");
+    }
+}

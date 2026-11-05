@@ -75,6 +75,8 @@ tempfile = "3.2"
 rand = "0.10.1"
 rand_distr = "0.6"
 nalgebra = "0.34"
+# Threaded GEMM for nalgebra's dense products (the tables, the readout).
+matrixmultiply = { version = "0.3", features = ["threading"] }
 nalgebra-sparse = "0.11"
 
 special = "0.13"

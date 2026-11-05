@@ -121,8 +121,80 @@ pub fn integrated_table(reads: &Reads, lv: &Levels, sd: f64) -> DMatrix<f64> {
     tab
 }
 
+/// The rows the pseudobulks take and their depths summed per row,
+/// `Λ_r = Σ_{p at r} λ_p` per track: the same for every gene.
+pub struct RowLayout {
+    /// The rows taken, ascending, and every pseudobulk's place among them.
+    rows: Vec<usize>,
+    slot: Vec<usize>,
+    depth: Vec<[f64; 2]>,
+}
+
+impl RowLayout {
+    pub fn new(rows: &[usize], lambda: &[Depth]) -> Self {
+        let n_rows = rows.iter().max().map_or(0, |r| r + 1);
+        let mut at = vec![usize::MAX; n_rows];
+        let taken: Vec<usize> = {
+            let mut t: Vec<usize> = rows.to_vec();
+            t.sort_unstable();
+            t.dedup();
+            t
+        };
+        for (i, &r) in taken.iter().enumerate() {
+            at[r] = i;
+        }
+        let slot: Vec<usize> = rows.iter().map(|&r| at[r]).collect();
+        let mut depth = vec![[0.0; 2]; taken.len()];
+        for (&i, l) in slot.iter().zip(lambda) {
+            depth[i][0] += l[0];
+            depth[i][1] += l[1];
+        }
+        Self {
+            rows: taken,
+            slot,
+            depth,
+        }
+    }
+}
+
+/// Gene `g`'s reads summed by row on a [`RowLayout`]: its likelihood at
+/// the cost of the rows taken, not the pseudobulks. Pseudobulks at one row
+/// share its levels, so with `X_r = Σ_{p at r} x_p` per track it is
+/// `Σ_r X_r log ū_r − Λ_r ū_r` (and likewise `s̄`): [`gene_log_likelihood`]
+/// up to `Σ_p x_p log λ_p`, constant in the gene's parameters.
+pub struct GeneRows<'a> {
+    layout: &'a RowLayout,
+    reads: Vec<[f64; 2]>,
+}
+
+impl<'a> GeneRows<'a> {
+    pub fn new(layout: &'a RowLayout, reads: &Reads, g: usize) -> Self {
+        let mut x = vec![[0.0; 2]; layout.rows.len()];
+        for (p, &i) in layout.slot.iter().enumerate() {
+            x[i][0] += reads.u[(p, g)];
+            x[i][1] += reads.s[(p, g)];
+        }
+        Self { layout, reads: x }
+    }
+
+    /// The log-likelihood at the gene's levels `(ū, s̄)` by row, up to the
+    /// constant ([`GeneRows`]).
+    pub fn log_likelihood(&self, (u, s): (&[f64], &[f64])) -> f64 {
+        self.layout
+            .rows
+            .iter()
+            .zip(self.reads.iter().zip(&self.layout.depth))
+            .map(|(&r, ([xu, xs], [lu, ls]))| {
+                xu * u[r].ln() - lu * u[r] + xs * s[r].ln() - ls * s[r]
+            })
+            .sum()
+    }
+}
+
 /// Gene `g`'s Poisson log-likelihood (no `log x!`) with every pseudobulk at
-/// its row `rows[p]` and depths `lambda[p]`, the gene's levels `(ū, s̄)` by row.
+/// its row `rows[p]` and depths `lambda[p]`, the gene's levels `(ū, s̄)` by
+/// row; one term a pseudobulk, the definition [`GeneRows`] is checked against.
+#[cfg(test)]
 pub fn gene_log_likelihood(
     reads: &Reads,
     g: usize,

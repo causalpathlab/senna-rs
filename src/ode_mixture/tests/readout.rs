@@ -185,3 +185,31 @@ fn a_cell_no_row_explains_is_unknown() {
     assert!(out.velocity_s.row(1).iter().all(|x| x.is_nan()));
     assert!(out.time_mean[0].is_finite() && out.time_mean[2].is_finite());
 }
+
+/// The readout's time at a larger size: 20k cells, 1000 genes, 4 draws.
+#[test]
+#[ignore = "benchmark"]
+fn benchmark_the_readout() {
+    let sim = simulate(&SimConfig {
+        lineages: 2,
+        n_genes: 1000,
+        n_pb: 20_000,
+        depth: 800.0,
+        fine: FINE,
+        seed: 5,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let reads = first(&sim, sim.n_pb);
+    let snaps = vec![truth_snap(&sim, Some(0.1)); 4];
+    let t0 = std::time::Instant::now();
+    let out = read_cells(&reads, &snaps);
+    eprintln!(
+        "readout of {} cells × {} genes over {} draws: {:.2} s",
+        sim.n_pb,
+        sim.n_genes,
+        snaps.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    assert!(out.time_mean.iter().all(|t| t.is_finite()));
+}

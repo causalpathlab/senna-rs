@@ -3,6 +3,7 @@ use super::model::truth_params;
 use crate::ode_mixture::fit::{Fit, SHARE_START};
 use crate::ode_mixture::init::{climb, Climb};
 use crate::ode_mixture::kernel::GridPrior;
+use crate::ode_mixture::likelihood::Reads;
 use crate::ode_mixture::model::Params;
 use crate::ode_mixture::sampler::{run, Draws, Options};
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
@@ -484,4 +485,120 @@ fn held_out_pseudobulks_are_read_out_from_the_chains_snapshots() {
     let rho = spearman(&out.time_mean, &sim().truth.time[TRAIN..]);
     eprintln!("held out: time Spearman {rho:.4}");
     assert!(rho > 0.99, "Spearman {rho}");
+}
+
+/// One chain of `sweeps` from `start_at`, no burn-in, with the jitter;
+/// every block's seconds a sweep printed. The run's wall time too.
+fn timed_run(reads: &Reads, start_at: &Params, sweeps: usize) -> (Vec<Draws>, f64) {
+    use crate::ode_mixture::sampler::BLOCKS;
+    let t0 = std::time::Instant::now();
+    let draws = run(
+        reads,
+        start_at,
+        &Options {
+            kappa: KAPPA,
+            chains: 1,
+            sweeps,
+            burn: 0,
+            share: Some(0.1),
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let wall = t0.elapsed().as_secs_f64();
+    eprintln!("{sweeps} sweeps in {wall:.2} s");
+    for (name, s) in BLOCKS.iter().zip(&draws[0].block_secs) {
+        eprintln!("  {name}: {:.3} s a sweep", s / sweeps as f64);
+    }
+    (draws, wall)
+}
+
+/// Every chain reports the seconds each block of the sweep took, every
+/// block some, together no more than the run.
+#[test]
+fn every_chain_reports_its_blocks_time() {
+    use crate::ode_mixture::sampler::BLOCKS;
+    let mut start_at = truth_params(sim(), 133, POINTS);
+    start_at.sub = CLIMB_SUB;
+    let (draws, wall) = timed_run(&first(sim(), TRAIN), &start_at, 5);
+    let secs = &draws[0].block_secs;
+    assert_eq!(secs.len(), BLOCKS.len());
+    assert!(secs.iter().all(|&s| s > 0.0), "{secs:?}");
+    assert!(secs.iter().sum::<f64>() <= wall, "{secs:?} of {wall}");
+}
+
+/// Every block's time at a larger size: 2000 pseudobulks, 1000 genes, one
+/// chain from the truth.
+#[test]
+#[ignore = "benchmark"]
+fn benchmark_the_sweep() {
+    let big = simulate(&SimConfig {
+        n_genes: 1000,
+        n_pb: 2000,
+        fine: 133,
+        kappa: KAPPA,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let mut start_at = truth_params(&big, 133, POINTS);
+    start_at.sub = CLIMB_SUB;
+    timed_run(&first(&big, big.n_pb), &start_at, 5);
+}
+
+/// With the default proposals (refitted every fifth burn-in sweep, frozen
+/// after: the kept sweeps a homogeneous chain), chains in the truth's basin
+/// cover, and the kept sweeps fit no Laplace approximation at all.
+#[test]
+fn with_frozen_proposals_the_intervals_still_cover() {
+    let (mode, share) = truths_mode();
+    let t0 = std::time::Instant::now();
+    let draws = run(
+        &first(sim(), TRAIN),
+        &mode,
+        &Options {
+            kappa: KAPPA,
+            chains: 4,
+            sweeps: 1500,
+            burn: 250,
+            seed: 23,
+            share,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    eprintln!(
+        "1500 sweeps (250 burn-in) × 4 chains in {:.1} s",
+        t0.elapsed().as_secs_f64()
+    );
+    agreement(&draws);
+    let (t, r, _) = coverage(&draws, 1);
+    assert!((0.8..=0.98).contains(&t), "time coverage {t}");
+    assert!((0.8..=0.98).contains(&r), "log γ/β coverage {r}");
+    assert!(draws.iter().all(|d| d.refits.iter().all(|&s| s < 250)));
+}
+
+/// After burn-in no proposal is refitted (the kept sweeps one fixed,
+/// target-invariant kernel: a homogeneous Markov chain); during it, every
+/// [`Options::laplace_every`]-th sweep and the last.
+#[test]
+fn no_proposal_is_refitted_after_burn_in() {
+    let mut start_at = truth_params(sim(), 133, POINTS);
+    start_at.sub = CLIMB_SUB;
+    let draws = run(
+        &first(sim(), TRAIN),
+        &start_at,
+        &Options {
+            kappa: KAPPA,
+            chains: 2,
+            sweeps: 30,
+            burn: 12,
+            laplace_every: 5,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    for d in &draws {
+        // Sweeps 0, 5 and 10 of the twelve, and the last.
+        assert_eq!(d.refits, vec![0, 5, 10, 11]);
+    }
 }

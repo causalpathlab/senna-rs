@@ -5,22 +5,26 @@
 //! 1. the levels on every lineage's grid ([`Params::levels`]);
 //! 2. every pseudobulk's `(ℓ, k)` drawn exactly ([`draw_latents`]), its
 //!    depth `λ_p = N_p / Z` at the drawn row;
-//! 3. every gene: the Laplace approximation of its conditional by Newton
-//!    from the previous sweep's mode (never the current `θ`), then
-//!    [`gene_step`] a few times on it (one Laplace costs many moves); in
+//! 3. every gene: [`gene_step`] a few times on a Student-t shaped like the
+//!    Laplace approximation of its conditional ([`gene_laplace`]); in
 //!    parallel over genes, a stream per gene and sweep;
 //! 4. every lineage's whitened path, one lineage after another (they meet
-//!    in the genes' prior through the paths' mean): the Laplace
-//!    approximation by Gauss–Newton from the previous sweep's mode
-//!    ([`path_laplace`]), then generalized elliptical slice moves on it
-//!    ([`path_gess_step`]; plain ESS on the prior gives a handful of
-//!    effective draws in a thousand moves even from the mode);
+//!    in the genes' prior through the paths' mean): generalized elliptical
+//!    slice moves ([`path_gess_step`]) on its Laplace approximation by
+//!    Gauss–Newton ([`path_laplace`]; plain ESS on the prior gives a handful
+//!    of effective draws in a thousand moves even from the mode);
 //! 5. every other lineage's log duration `log T_ℓ` (lineage 0's is the
 //!    unit) by a scalar elliptical slice move on its `N(0, 1)` prior, the
 //!    path's whitened coordinates held. The length scale stays a fixed share
 //!    of the duration (`κ/T` held, as in the climb): the path on its grid
 //!    does not move with `T`, only the grid's step does;
 //! 6. the lineages' weights ([`draw_weights`]).
+//!
+//! The Laplace approximations (the moves' proposals) are refitted, each
+//! from the last one's mode, every [`Options::laplace_every`]-th burn-in
+//! sweep and at the last; after burn-in they are kept as they are, so the
+//! kept sweeps are one fixed kernel leaving the posterior invariant (a
+//! homogeneous Markov chain, not an adaptive one).
 //!
 //! On a shared trunk ([`Params::branch`]) the trunk's path block (lineage
 //! 0's) moves every lineage and the others are departures from it
@@ -42,10 +46,11 @@
 
 use super::blocks::{
     draw_latents, draw_share_sd, draw_weights, from_theta, gene_laplace, gene_step, path_eta,
-    path_gess_step, path_laplace, path_ll, share_step, stream, to_theta, GenePrior,
+    path_gess_step, path_laplace, path_ll, share_step, stream, to_theta, GenePrior, GeneProposal,
+    PathProposal,
 };
 use super::kernel::GridPrior;
-use super::likelihood::{jittered_table, table, Depth, Reads};
+use super::likelihood::{jittered_table, table, Depth, GeneRows, Reads, RowLayout};
 use super::model::Params;
 use super::readout::Snapshot;
 use legume_numeric::mcmc::engine::elliptical_slice_step;
@@ -79,6 +84,12 @@ pub struct Options {
     /// Keep every this many kept sweeps' parameters for the cells' readout
     /// ([`super::readout::read_cells`]); `0`: none.
     pub snapshot_every: usize,
+    /// During burn-in, refit every gene's and path's Laplace approximation
+    /// (the moves' proposals) every this many sweeps (`0` as `1`: every
+    /// sweep), and at its last sweep, reusing it between. After burn-in none
+    /// is refitted: the kept sweeps are one fixed kernel that leaves the
+    /// posterior invariant (a homogeneous Markov chain), not an adaptive one.
+    pub laplace_every: usize,
 }
 
 impl Default for Options {
@@ -95,6 +106,7 @@ impl Default for Options {
             stop: None,
             share: None,
             snapshot_every: 0,
+            laplace_every: 5,
         }
     }
 }
@@ -121,7 +133,32 @@ pub struct Draws {
     pub branch: Vec<Vec<f64>>,
     /// Every [`Options::snapshot_every`]-th kept sweep's parameters.
     pub snapshots: Vec<Snapshot>,
+    /// The sweeps whose proposals were refitted (all in burn-in, the first
+    /// and the last always; [`Options::laplace_every`]).
+    pub refits: Vec<usize>,
+    /// Seconds the chain spent in every block of its sweeps ([`BLOCKS`]).
+    pub block_secs: Vec<f64>,
 }
+
+/// [`BLOCKS`]' indices.
+const LATENTS_BLOCK: usize = 0;
+const JITTER_BLOCK: usize = 1;
+const GENES_BLOCK: usize = 2;
+const PATH_LAPLACE: usize = 3;
+const PATH_MOVES: usize = 4;
+const DURATIONS_BLOCK: usize = 5;
+const LL_BLOCK: usize = 6;
+
+/// The sweep's blocks as [`Draws::block_secs`] times them.
+pub const BLOCKS: [&str; 7] = [
+    "levels and latents",
+    "jitter and depths",
+    "genes",
+    "paths' Laplace",
+    "paths' moves",
+    "durations and weights",
+    "reads' log-likelihood",
+];
 
 /// A chain's state.
 struct State {
@@ -129,10 +166,14 @@ struct State {
     /// `[L][H]` the whitened paths.
     eta: Vec<Vec<DVector<f64>>>,
     log_w: Vec<f64>,
-    /// `[G]` the previous sweep's Laplace modes, the next Newton's anchors;
-    /// `[L][H]` the paths' likewise.
+    /// `[G]` the start's `θ` and `[L][H]` its whitened paths: the first
+    /// Laplace fits' anchors (later ones start from the last fit's mode).
     modes: Vec<Vec<f64>>,
     path_modes: Vec<Vec<DVector<f64>>>,
+    /// The proposals last fitted (`None` before the first sweep), reused
+    /// until the next refit ([`refit_at`]).
+    gene_props: Vec<Option<GeneProposal>>,
+    path_props: Vec<Option<PathProposal>>,
     /// `[P]` every pseudobulk's jitter and their sd, `None` with no jitter.
     omega: Vec<f64>,
     share_sd: Option<f64>,
@@ -167,7 +208,7 @@ fn start(params: &Params, grid: &GridPrior, pseudobulks: usize, share: Option<f6
     let lineages = params.path.len();
     let eta: Vec<Vec<DVector<f64>>> = (0..lineages).map(|l| path_eta(params, grid, l)).collect();
     let z_bar = params.path_mean();
-    let modes = (0..params.beta.len())
+    let modes: Vec<Vec<f64>> = (0..params.beta.len())
         .map(|g| {
             to_theta(
                 params.beta[g],
@@ -183,6 +224,8 @@ fn start(params: &Params, grid: &GridPrior, pseudobulks: usize, share: Option<f6
         path_modes: eta.clone(),
         eta,
         log_w: vec![-(lineages as f64).ln(); lineages],
+        gene_props: vec![None; modes.len()],
+        path_props: vec![None; lineages],
         modes,
         omega: vec![0.0; pseudobulks],
         share_sd: share,
@@ -220,7 +263,16 @@ pub fn duration_step(
     params.t_len[l] = f64::from(next[0]).exp();
 }
 
+/// Whether sweep `it` refits the proposals: the first, every
+/// [`Options::laplace_every`]-th of burn-in and its last; none after.
+pub fn refit_at(opts: &Options, it: usize) -> bool {
+    it == 0
+        || it + 1 == opts.burn
+        || (it < opts.burn && it.is_multiple_of(opts.laplace_every.max(1)))
+}
+
 /// One sweep of a chain; the drawn rows and the reads' log-likelihood there.
+#[allow(clippy::too_many_arguments)]
 fn sweep(
     state: &mut State,
     reads: &Reads,
@@ -229,7 +281,14 @@ fn sweep(
     opts: &Options,
     seed: u64,
     it: u64,
+    refit: bool,
+    secs: &mut [f64],
 ) -> (Vec<usize>, f64) {
+    let mut clock = std::time::Instant::now();
+    let mut lap = |block: usize| {
+        secs[block] += clock.elapsed().as_secs_f64();
+        clock = std::time::Instant::now();
+    };
     let lineages = state.params.path.len();
     // Rows are positions (a pseudobulk's time may sit between the nodes).
     let n = state.params.positions();
@@ -240,6 +299,7 @@ fn sweep(
         None => table(reads, &lv),
     };
     let rows = draw_latents(&tab, &state.log_w, n, block_seed(seed, LATENTS), it);
+    lap(LATENTS_BLOCK);
     if let Some(sd) = state.share_sd {
         let jitter_seed = block_seed(seed, JITTERS);
         let z = lv.totals();
@@ -264,54 +324,72 @@ fn sweep(
         state.share_sd = Some(draw_share_sd(&state.omega, block_seed(seed, JITTER_SD), it));
     }
     let lambda = reads.jittered_depths(&rows, &lv, &state.omega);
+    lap(JITTER_BLOCK);
 
-    // 3. Genes, every other parameter held.
+    // 3. Genes, every other parameter held, each on its reads by row; the
+    // proposal refitted (from the last one's mode) when the schedule says.
     let z_bar = state.params.path_mean();
-    let params = &state.params;
-    let moved: Vec<(Vec<f64>, Vec<f64>)> = (0..params.beta.len())
-        .into_par_iter()
-        .map(|g| {
+    let layout = RowLayout::new(&rows, &lambda);
+    let (params, starts) = (&state.params, &state.modes);
+    let moved: Vec<Vec<f64>> = state
+        .gene_props
+        .par_iter_mut()
+        .enumerate()
+        .map(|(g, slot)| {
             let mut rng = stream(block_seed(seed, GENES), g as u64, it);
-            let theta = to_theta(
+            let by_row = GeneRows::new(&layout, reads, g);
+            if refit {
+                let anchor = slot.as_ref().map_or(&starts[g], |p| &p.mode);
+                *slot = Some(gene_laplace(params, &by_row, &z_bar, prior, anchor));
+            }
+            let prop = slot.as_ref().expect("fitted at the first sweep");
+            let mut theta = to_theta(
                 params.beta[g],
                 params.gamma[g],
                 &params.rho[g],
                 params.base[g],
                 &z_bar,
             );
-            let prop = gene_laplace(params, g, reads, &rows, &lambda, prior, &state.modes[g]);
-            let (mut theta, mut ll) = (theta, f64::NEG_INFINITY);
+            let mut ll = f64::NEG_INFINITY;
             for _ in 0..opts.gene_moves {
-                (theta, ll) = gene_step(
-                    params, g, &theta, ll, reads, &rows, &lambda, prior, &prop, &mut rng,
-                );
+                (theta, ll) = gene_step(params, &theta, ll, &by_row, &z_bar, prior, prop, &mut rng);
             }
-            (theta, prop.mode)
+            theta
         })
         .collect();
-    for (g, (theta, mode)) in moved.into_iter().enumerate() {
+    for (g, theta) in moved.into_iter().enumerate() {
         let (beta, gamma, rho, base) = from_theta(&theta, &z_bar);
         state.params.beta[g] = beta;
         state.params.gamma[g] = gamma;
         state.params.rho[g] = rho.to_vec();
         state.params.base[g] = base;
-        state.modes[g] = mode;
     }
+    lap(GENES_BLOCK);
 
-    // 4. Paths, one lineage after another: the Laplace approximation by
-    // Gauss–Newton from the previous sweep's mode, then generalized ESS.
+    // 4. Paths, one lineage after another: generalized ESS on the Laplace
+    // approximation by Gauss–Newton, refitted as the genes' are.
     for l in 0..lineages {
         let mut rng = stream(block_seed(seed, PATHS), l as u64, it);
-        let prop = path_laplace(
-            &state.params,
-            l,
-            &state.path_modes[l],
-            grid,
-            reads,
-            &rows,
-            &lambda,
-            prior,
-        );
+        if refit {
+            let h = state.eta[l].len();
+            let anchor = state.path_props[l]
+                .as_ref()
+                .map_or_else(|| state.path_modes[l].clone(), |p| p.mode(h));
+            state.path_props[l] = Some(path_laplace(
+                &state.params,
+                l,
+                &anchor,
+                grid,
+                reads,
+                &rows,
+                &lambda,
+                prior,
+            ));
+        }
+        let prop = state.path_props[l]
+            .as_ref()
+            .expect("fitted at the first sweep");
+        lap(PATH_LAPLACE);
         let mut cur = f64::NEG_INFINITY;
         for _ in 0..opts.path_moves {
             let (eta, ll) = path_gess_step(
@@ -324,13 +402,13 @@ fn sweep(
                 &rows,
                 &lambda,
                 prior,
-                &prop,
+                prop,
                 &mut rng,
             );
             state.eta[l] = eta;
             cur = ll;
         }
-        state.path_modes[l] = prop.mode(state.eta[l].len());
+        lap(PATH_MOVES);
     }
 
     // 5. Durations, lineage 0's the unit (on a trunk, one clock).
@@ -343,9 +421,11 @@ fn sweep(
     // 6. Weights.
     state.log_w = draw_weights(&rows, lineages, n, opts.a0, block_seed(seed, WEIGHTS), it);
 
+    lap(DURATIONS_BLOCK);
     let total: f64 = (0..lineages)
         .map(|l| path_ll(&state.params, l, reads, &rows, &lambda))
         .sum();
+    lap(LL_BLOCK);
     (rows, total)
 }
 
@@ -353,6 +433,11 @@ fn sweep(
 /// in parallel; every chain's kept draws.
 pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<Vec<Draws>> {
     let n = start_at.positions();
+    if opts.burn == 0 {
+        log::warn!(
+            "ode-mixture sampler: no burn-in, so the moves keep the proposals fitted at the start"
+        );
+    }
     let grid = GridPrior::new(start_at.path[0].len(), 1.0, opts.kappa)?;
     let prior = GenePrior::default();
     let bar = crate::logging::new_progress_bar((opts.chains * opts.sweeps) as u64)
@@ -379,12 +464,28 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 omega: Vec::new(),
                 branch: Vec::new(),
                 snapshots: Vec::new(),
+                block_secs: vec![0.0; BLOCKS.len()],
+                refits: Vec::new(),
             };
             for it in 0..opts.sweeps {
                 if stopped() {
                     break;
                 }
-                let (rows, ll) = sweep(&mut state, reads, &grid, &prior, opts, seed, it as u64);
+                let refit = refit_at(opts, it);
+                if refit {
+                    d.refits.push(it);
+                }
+                let (rows, ll) = sweep(
+                    &mut state,
+                    reads,
+                    &grid,
+                    &prior,
+                    opts,
+                    seed,
+                    it as u64,
+                    refit,
+                    &mut d.block_secs,
+                );
                 bar.inc(1);
                 if it < opts.burn {
                     continue;

@@ -121,9 +121,11 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
         };
         n_cells
     ];
+    // `[G × C]`, transposed at the end: `duᵀ · post` is a plain product
+    // (threaded), where `postᵀ · du` would not be.
     let (mut vel_u, mut vel_s) = (
-        DMatrix::zeros(n_cells, genes),
-        DMatrix::zeros(n_cells, genes),
+        DMatrix::zeros(genes, n_cells),
+        DMatrix::zeros(genes, n_cells),
     );
     let rows = lineages * positions;
     // `[rows × cells]`, a cell's posterior one contiguous column, reused.
@@ -162,8 +164,8 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
                 }
             });
         let (du, ds) = p.velocities_of(&lv);
-        vel_u.gemm_tr(1.0, &post, &du, 1.0);
-        vel_s.gemm_tr(1.0, &post, &ds, 1.0);
+        vel_u.gemm(1.0, &du.transpose(), &post, 1.0);
+        vel_s.gemm(1.0, &ds.transpose(), &post, 1.0);
     }
     let nan_rows = |mut m: DMatrix<f64>| {
         for c in (0..n_cells).filter(|&c| acc[c].unknown) {
@@ -171,7 +173,7 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
         }
         m
     };
-    let (velocity_u, velocity_s) = (nan_rows(vel_u), nan_rows(vel_s));
+    let (velocity_u, velocity_s) = (nan_rows(vel_u.transpose()), nan_rows(vel_s.transpose()));
     let pick = |f: &dyn Fn(&Acc) -> f64| -> Vec<f64> {
         acc.iter()
             .map(|a| if a.unknown { f64::NAN } else { f(a) })

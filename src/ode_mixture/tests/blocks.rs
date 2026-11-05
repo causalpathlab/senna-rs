@@ -3,7 +3,7 @@ use crate::ode_mixture::blocks::{
     draw_latents, draw_share_sd, draw_weights, from_theta, gene_laplace, gene_step, share_step,
     to_theta, GenePrior,
 };
-use crate::ode_mixture::likelihood::Reads;
+use crate::ode_mixture::likelihood::{GeneRows, Reads, RowLayout};
 use crate::ode_mixture::sim::{simulate, SimConfig};
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
@@ -73,39 +73,50 @@ fn a_genes_rates_are_found_from_a_wrong_start() {
         .collect();
     let lambda = reads.depths(&rows, &lv);
     let prior = GenePrior::default();
-    let mut rng = StdRng::seed_from_u64(9);
+    let layout = RowLayout::new(&rows, &lambda);
+    let z_bar = truth.path_mean();
     for g in [0, 3, 11, 25, 40, 77] {
-        let mut theta = prior.mean(truth.rho[g].len());
-        let mut ll = f64::NEG_INFINITY;
+        // From the prior mean, Newton finds the conditional's mode; four
+        // chains start there, the proposal built on it once.
+        let by_row = GeneRows::new(&layout, &reads, g);
+        let prop = gene_laplace(
+            &truth,
+            &by_row,
+            &z_bar,
+            &prior,
+            &prior.mean(truth.rho[g].len()),
+        );
         let (mut b, mut y, mut r) = (Vec::new(), Vec::new(), Vec::new());
-        // From the prior mean, Newton finds the conditional's mode; the
-        // chain starts there, the proposal built on it once.
-        let prop = gene_laplace(&truth, g, &reads, &rows, &lambda, &prior, &theta);
-        theta = prop.mode.clone();
-        for it in 0..4000 {
-            (theta, ll) = gene_step(
-                &truth, g, &theta, ll, &reads, &rows, &lambda, &prior, &prop, &mut rng,
-            );
-            if it >= 300 {
-                let (beta, gamma, _, _) = from_theta(&theta, &truth.path_mean());
-                b.push(beta.ln());
-                y.push(gamma.ln());
-                r.push((gamma / beta).ln());
+        let mut ess_b = 0.0;
+        for chain in 0..4 {
+            let mut rng = StdRng::seed_from_u64(9 + 1000 * chain + g as u64);
+            let (mut theta, mut ll) = (prop.mode.clone(), f64::NEG_INFINITY);
+            let mut kept = Vec::new();
+            for it in 0..4000 {
+                (theta, ll) =
+                    gene_step(&truth, &theta, ll, &by_row, &z_bar, &prior, &prop, &mut rng);
+                if it >= 300 {
+                    let (beta, gamma, _, _) = from_theta(&theta, &z_bar);
+                    kept.push(beta.ln());
+                    b.push(beta.ln());
+                    y.push(gamma.ln());
+                    r.push((gamma / beta).ln());
+                }
             }
+            ess_b += legume_numeric::mcmc::engine::diagnostics::ess(
+                &kept.iter().map(|&x| x as f32).collect::<Vec<_>>(),
+            );
         }
         let z = |v: &[f64], truth: f64| {
             let m = v.iter().sum::<f64>() / v.len() as f64;
             let sd = (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
             ((m - truth) / sd.max(1e-3), m - truth)
         };
-        let ess_b = legume_numeric::mcmc::engine::diagnostics::ess(
-            &b.iter().map(|&x| x as f32).collect::<Vec<_>>(),
-        );
         eprintln!(
-            "gene {g}: effective draws of log β {ess_b:.0} of {}",
+            "gene {g}: effective draws of log β {ess_b:.0} of {} over four chains",
             b.len()
         );
-        assert!(ess_b > 100.0, "gene {g}: {ess_b:.0} effective draws");
+        assert!(ess_b > 400.0, "gene {g}: {ess_b:.0} effective draws");
         let (zb, _) = z(&b, truth.beta[g].ln());
         let (zy, _) = z(&y, truth.gamma[g].ln());
         let (zr, er) = z(&r, (truth.gamma[g] / truth.beta[g]).ln());
@@ -633,5 +644,109 @@ fn with_no_reads_a_departure_and_its_branch_time_follow_their_prior() {
     assert!(
         (e2 - 1.0).abs() < 0.08,
         "a whitened coordinate's second moment {e2}"
+    );
+}
+
+/// The trajectory's response to the transcription at every node, built
+/// from a few trajectories (a pulse inside the grid is a shift of the
+/// first one), is the definition, one trajectory a node, exactly.
+#[test]
+fn the_response_to_every_node_is_one_trajectory_a_node() {
+    use crate::ode_mixture::blocks::response;
+    use crate::ode_mixture::kinetics::fine_trajectory;
+    for (beta, gamma, h, n, sub) in [
+        (2.0, 1.0, 0.05, 23, 4),
+        (1.0, 1.0, 0.1, 9, 1),
+        (5.0, 0.3, 0.02, 45, 3),
+    ] {
+        let (a_u, a_s) = response(beta, gamma, h, n, sub);
+        for j in 0..n {
+            let mut e = vec![0.0; n];
+            e[j] = 1.0;
+            let (u, s) = fine_trajectory(&e, beta, gamma, h, sub);
+            for k in 0..u.len() {
+                assert_eq!(
+                    (a_u[(k, j)], a_s[(k, j)]),
+                    (u[k], s[k]),
+                    "node {j}, position {k}"
+                );
+            }
+        }
+    }
+}
+
+/// A lineage's reads' gradient and Fisher information in its path, as one
+/// gene's contribution after another summed (the definition, written out
+/// here), however they are accumulated.
+#[test]
+fn a_lineages_information_is_every_genes_summed() {
+    use crate::ode_mixture::blocks::{lineage_information, response};
+    use nalgebra::DVector;
+    let sim = simulate(&SimConfig {
+        lineages: 2,
+        fine: 133,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let mut params = truth_params(&sim, 133, 23);
+    params.sub = 4;
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let lv = params.levels();
+    let positions = params.positions();
+    let rows: Vec<usize> = (0..sim.n_pb).map(|p| (p * 13) % (2 * positions)).collect();
+    let lambda = reads.depths(&rows, &lv);
+    let l = 1;
+    let (n, h) = (params.path[l].len(), params.rho[0].len());
+    let step = params.t_len[l] / (n - 1) as f64;
+    let on: Vec<(usize, usize)> = rows
+        .iter()
+        .enumerate()
+        .filter(|&(_, &r)| r / positions == l)
+        .map(|(p, &r)| (p, r - l * positions))
+        .collect();
+    let (mut want_g, mut want_f) = (DMatrix::zeros(n, h), DMatrix::zeros(h * n, h * n));
+    for g in 0..sim.n_genes {
+        let rho = &params.rho[g];
+        let alpha: Vec<f64> = params.path[l]
+            .iter()
+            .map(|z| (z.iter().zip(rho).map(|(a, b)| a * b).sum::<f64>() + params.base[g]).exp())
+            .collect();
+        let (a_u, a_s) = response(params.beta[g], params.gamma[g], step, n, params.sub);
+        let av = DVector::from_column_slice(&alpha);
+        let (u, s) = (&a_u * &av, &a_s * &av);
+        let (mut eu, mut es) = (DVector::zeros(positions), DVector::zeros(positions));
+        let (mut wu, mut ws) = (DVector::zeros(positions), DVector::zeros(positions));
+        for &(p, k) in &on {
+            eu[k] += reads.u[(p, g)] / u[k] - lambda[p][0];
+            es[k] += reads.s[(p, g)] / s[k] - lambda[p][1];
+            wu[k] += lambda[p][0] / u[k];
+            ws[k] += lambda[p][1] / s[k];
+        }
+        let d_alpha = a_u.transpose() * eu + a_s.transpose() * es;
+        let fa = a_u.transpose() * DMatrix::from_diagonal(&wu) * &a_u
+            + a_s.transpose() * DMatrix::from_diagonal(&ws) * &a_s;
+        for j in 0..n {
+            for d in 0..h {
+                want_g[(j, d)] += alpha[j] * rho[d] * d_alpha[j];
+            }
+        }
+        for a in 0..h * n {
+            for b in 0..h * n {
+                let (d, i, e, j) = (a / n, a % n, b / n, b % n);
+                want_f[(a, b)] += rho[d] * rho[e] * alpha[i] * alpha[j] * fa[(i, j)];
+            }
+        }
+    }
+    let (got_g, got_f) = lineage_information(&params, l, &reads, &rows, &lambda);
+    let rel = |a: &DMatrix<f64>, b: &DMatrix<f64>| (a - b).abs().max() / b.abs().max();
+    assert!(
+        rel(&got_g, &want_g) < 1e-10,
+        "gradient {}",
+        rel(&got_g, &want_g)
+    );
+    assert!(
+        rel(&got_f, &want_f) < 1e-10,
+        "Fisher {}",
+        rel(&got_f, &want_f)
     );
 }

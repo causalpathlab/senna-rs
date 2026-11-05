@@ -5,7 +5,7 @@
 
 use super::kernel::GridPrior;
 use super::kinetics::fine_trajectory;
-use super::likelihood::{gene_log_likelihood, share_mode, softplus, Depth, Reads};
+use super::likelihood::{share_mode, softplus, Depth, GeneRows, Reads};
 use super::model::{branch_ramp, Params};
 use legume_numeric::mcmc::engine::elliptical_slice_step;
 use nalgebra::{DMatrix, DVector};
@@ -168,18 +168,12 @@ impl GenePrior {
     }
 }
 
-/// Gene `g`'s log-likelihood at `θ`, every other parameter from `params`.
-fn gene_ll(
-    params: &Params,
-    theta: &[f64],
-    reads: &Reads,
-    g: usize,
-    rows: &[usize],
-    lambda: &[Depth],
-) -> f64 {
-    let (beta, gamma, rho, base) = from_theta(theta, &params.path_mean());
+/// Gene `g`'s log-likelihood at `θ` from its reads by row, every other
+/// parameter from `params` (`z_bar` their paths' mean).
+fn gene_ll(params: &Params, z_bar: &[f64], theta: &[f64], by_row: &GeneRows) -> f64 {
+    let (beta, gamma, rho, base) = from_theta(theta, z_bar);
     let lv = params.levels_of(beta, gamma, rho, base);
-    gene_log_likelihood(reads, g, rows, lambda, (&lv.0, &lv.1))
+    by_row.log_likelihood((&lv.0, &lv.1))
 }
 
 impl GenePrior {
@@ -208,21 +202,19 @@ pub struct GeneProposal {
 /// conditional, so its tails are covered.
 const WIDEN: f64 = 1.5;
 
-/// The Laplace approximation of gene `g`'s conditional (likelihood times
-/// prior), by Newton's method from `anchor`, numerical derivatives (a gene
-/// has `H + 3` coordinates). `anchor` must not be the chain's current `θ`
-/// (the previous sweep's mode is), so the move built on it stays exact.
-#[allow(clippy::too_many_arguments)]
+/// The Laplace approximation of a gene's conditional (likelihood from its
+/// reads by row, times prior; `z_bar` the paths' mean), by Newton's method
+/// from `anchor`, numerical derivatives (a gene has `H + 3` coordinates).
+/// The sampler fits it only during burn-in ([`super::sampler::Options::laplace_every`])
+/// and keeps the last one after, so the kept moves are one fixed kernel.
 pub fn gene_laplace(
     params: &Params,
-    g: usize,
-    reads: &Reads,
-    rows: &[usize],
-    lambda: &[Depth],
+    by_row: &GeneRows,
+    z_bar: &[f64],
     prior: &GenePrior,
     anchor: &[f64],
 ) -> GeneProposal {
-    let f = |t: &[f64]| gene_ll(params, t, reads, g, rows, lambda) + prior.log_density(t);
+    let f = |t: &[f64]| gene_ll(params, z_bar, t, by_row) + prior.log_density(t);
     let n = anchor.len();
     let eps = 1e-4;
     let hessian = |t: &[f64]| -> (DVector<f64>, DMatrix<f64>) {
@@ -234,10 +226,13 @@ pub fn gene_laplace(
             }
             f(&x)
         };
-        let grad = DVector::from_fn(n, |i, _| (at(&[(i, eps)]) - at(&[(i, -eps)])) / (2.0 * eps));
+        // `f(t ± ε e_i)`, shared by the gradient and the diagonal.
+        let (up, down): (Vec<f64>, Vec<f64>) =
+            (0..n).map(|i| (at(&[(i, eps)]), at(&[(i, -eps)]))).unzip();
+        let grad = DVector::from_fn(n, |i, _| (up[i] - down[i]) / (2.0 * eps));
         let mut hess = DMatrix::zeros(n, n);
         for i in 0..n {
-            hess[(i, i)] = (at(&[(i, eps)]) - 2.0 * f0 + at(&[(i, -eps)])) / (eps * eps);
+            hess[(i, i)] = (up[i] - 2.0 * f0 + down[i]) / (eps * eps);
             for j in 0..i {
                 let v = (at(&[(i, eps), (j, eps)])
                     - at(&[(i, eps), (j, -eps)])
@@ -346,19 +341,17 @@ const T_DF: f64 = 4.0;
 #[allow(clippy::too_many_arguments)]
 pub fn gene_step(
     params: &Params,
-    g: usize,
     theta: &[f64],
     cur_ll: f64,
-    reads: &Reads,
-    rows: &[usize],
-    lambda: &[Depth],
+    by_row: &GeneRows,
+    z_bar: &[f64],
     prior: &GenePrior,
     prop: &GeneProposal,
     rng: &mut impl Rng,
 ) -> (Vec<f64>, f64) {
     let n = theta.len();
     let d = n as f64;
-    let ll = |t: &[f64]| gene_ll(params, t, reads, g, rows, lambda);
+    let ll = |t: &[f64]| gene_ll(params, z_bar, t, by_row);
     let mut cur = theta.to_vec();
     let mut cur_ll = if cur_ll.is_finite() {
         cur_ll
@@ -416,17 +409,22 @@ pub fn gene_step(
     (t, new_ll)
 }
 
+/// The pseudobulks whose rows are on lineage `l` (`positions` rows a
+/// lineage), each with its position there: `(p, k)`.
+pub(super) fn on_lineage(rows: &[usize], positions: usize, l: usize) -> Vec<(usize, usize)> {
+    rows.iter()
+        .enumerate()
+        .filter(|&(_, &r)| r / positions == l)
+        .map(|(p, &r)| (p, r - l * positions))
+        .collect()
+}
+
 /// The log-likelihood (no `log x!`) of the pseudobulks on lineage `l`, at
 /// their rows and depths, every gene's levels on `l` from `params`; in
 /// parallel over genes.
 pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda: &[Depth]) -> f64 {
     let (n, positions) = (params.path[l].len(), params.positions());
-    let on: Vec<(usize, usize)> = rows
-        .iter()
-        .enumerate()
-        .filter(|&(_, &r)| r / positions == l)
-        .map(|(p, &r)| (p, r - l * positions))
-        .collect();
+    let on = on_lineage(rows, positions, l);
     let h = params.t_len[l] / (n - 1) as f64;
     (0..params.beta.len())
         .into_par_iter()
@@ -637,16 +635,32 @@ pub fn path_step(
 /// transcription at the nodes for fixed rates, `ū = A_u α`, `s̄ = A_s α`
 /// ([`fine_trajectory`] from the steady state of `α_0`, at every position);
 /// column `j` the response to `α = e_j`.
-fn response(beta: f64, gamma: f64, h: f64, n: usize, sub: usize) -> (DMatrix<f64>, DMatrix<f64>) {
-    let positions = (n - 1) * sub.max(1) + 1;
+pub(super) fn response(
+    beta: f64,
+    gamma: f64,
+    h: f64,
+    n: usize,
+    sub: usize,
+) -> (DMatrix<f64>, DMatrix<f64>) {
+    let sub = sub.max(1);
+    let positions = (n - 1) * sub + 1;
     let (mut a_u, mut a_s) = (DMatrix::zeros(positions, n), DMatrix::zeros(positions, n));
-    for j in 0..n {
+    // The first node sets the start too, the last nothing past it (its
+    // column zero); a pulse between them is the first such pulse later by
+    // whole steps (exact zeros before it: the system is time-invariant from
+    // rest), so two trajectories make every column.
+    for j in 0..(n - 1).min(2) {
         let mut e = vec![0.0; n];
         e[j] = 1.0;
         let (u, s) = fine_trajectory(&e, beta, gamma, h, sub);
-        for k in 0..positions {
-            a_u[(k, j)] = u[k];
-            a_s[(k, j)] = s[k];
+        a_u.column_mut(j).copy_from_slice(&u);
+        a_s.column_mut(j).copy_from_slice(&s);
+    }
+    for j in 2..n.saturating_sub(1) {
+        let shift = (j - 1) * sub;
+        for k in shift..positions {
+            a_u[(k, j)] = a_u[(k - shift, 1)];
+            a_s[(k, j)] = a_s[(k - shift, 1)];
         }
     }
     (a_u, a_s)
@@ -681,7 +695,7 @@ fn path_newton(
 
 /// The reads' gradient `[n × H]` and Fisher information `[Hn × Hn]`
 /// (flattened `d n + k`) in lineage `l`'s path `z`, as [`path_newton`].
-fn lineage_information(
+pub(super) fn lineage_information(
     params: &Params,
     l: usize,
     reads: &Reads,
@@ -694,12 +708,7 @@ fn lineage_information(
     let genes = params.beta.len();
     let step = params.t_len[l] / (n - 1) as f64;
     let positions = params.positions();
-    let on: Vec<(usize, usize)> = rows
-        .iter()
-        .enumerate()
-        .filter(|&(_, &r)| r / positions == l)
-        .map(|(p, &r)| (p, r - l * positions))
-        .collect();
+    let on = on_lineage(rows, positions, l);
     // The depths pooled per position and track.
     let (mut pooled_u, mut pooled_s) = (vec![0.0; positions], vec![0.0; positions]);
     for &(p, k) in &on {
@@ -707,10 +716,19 @@ fn lineage_information(
         pooled_s[k] += lambda[p][1];
     }
 
-    // Summed over genes: the gradient wrt z `[n × H]`, the Fisher `[Hn × Hn]`.
-    (0..genes)
+    // Summed over genes, per thread: the gradient wrt z `[n × H]` and the
+    // Fisher's `H × H` blocks of `[n × n]` (the upper ones, `d ≤ e`).
+    // Block `(d, e)`, `d ≤ e`, at `upper(d, e)`.
+    let upper = |d: usize, e: usize| d * h - d * (d + 1) / 2 + e;
+    let zero = || {
+        (
+            DMatrix::zeros(n, h),
+            vec![DMatrix::zeros(n, n); h * (h + 1) / 2],
+        )
+    };
+    let (gz, blocks) = (0..genes)
         .into_par_iter()
-        .map(|g| {
+        .fold(zero, |(mut gz, mut blocks), g| {
             let rho = &params.rho[g];
             let alpha: Vec<f64> = path
                 .iter()
@@ -727,22 +745,42 @@ fn lineage_information(
             let eu = DVector::from_fn(positions, |k, _| ru[k] / u[k] - pooled_u[k]);
             let es = DVector::from_fn(positions, |k, _| rs[k] / s[k] - pooled_s[k]);
             // ∂ℓ/∂α_j, then ∂ℓ/∂z_jd = α_j ρ_d ∂ℓ/∂α_j.
-            let d_alpha = a_u.transpose() * eu + a_s.transpose() * es;
-            let gz = DMatrix::from_fn(n, h, |j, d| alpha[j] * rho[d] * d_alpha[j]);
+            let d_alpha = a_u.tr_mul(&eu) + a_s.tr_mul(&es);
             // Wrt α: A_uᵀ W_u A_u + A_sᵀ W_s A_s; wrt z, α_i α_j ρ_d ρ_e times it.
             let wu = DMatrix::from_fn(positions, n, |i, j| a_u[(i, j)] * pooled_u[i] / u[i]);
             let ws = DMatrix::from_fn(positions, n, |i, j| a_s[(i, j)] * pooled_s[i] / s[i]);
-            let fa = a_u.transpose() * wu + a_s.transpose() * ws;
-            let fz = DMatrix::from_fn(h * n, h * n, |a, b| {
-                let (d, i, e, j) = (a / n, a % n, b / n, b % n);
-                rho[d] * rho[e] * alpha[i] * alpha[j] * fa[(i, j)]
-            });
-            (gz, fz)
+            let fa = a_u.tr_mul(&wu) + a_s.tr_mul(&ws);
+            // `diag(α) F_α diag(α)`, to be scaled by `ρ_d ρ_e` per block.
+            let m = DMatrix::from_fn(n, n, |i, j| alpha[i] * alpha[j] * fa[(i, j)]);
+            gz += DMatrix::from_fn(n, h, |j, d| alpha[j] * rho[d] * d_alpha[j]);
+            for d in 0..h {
+                for e in d..h {
+                    let c = rho[d] * rho[e];
+                    for (x, y) in blocks[upper(d, e)]
+                        .as_mut_slice()
+                        .iter_mut()
+                        .zip(m.as_slice())
+                    {
+                        *x += c * y;
+                    }
+                }
+            }
+            (gz, blocks)
         })
-        .reduce(
-            || (DMatrix::zeros(n, h), DMatrix::zeros(h * n, h * n)),
-            |a, b| (a.0 + b.0, a.1 + b.1),
-        )
+        .reduce(zero, |(ga, ba), (gb, bb)| {
+            (
+                ga + gb,
+                ba.into_iter().zip(bb).map(|(x, y)| x + y).collect(),
+            )
+        });
+    // Wrt z: block `(d, e)` is `Σ_g ρ_gd ρ_ge diag(α_g) F_α,g diag(α_g)`.
+    let fz = DMatrix::from_fn(h * n, h * n, |a, b| {
+        let (d, i, e, j) = (a / n, a % n, b / n, b % n);
+        let (lo, hi) = (d.min(e), d.max(e));
+        let (i, j) = if d <= e { (i, j) } else { (j, i) };
+        blocks[upper(lo, hi)][(i, j)]
+    });
+    (gz, fz)
 }
 
 /// A path block's coordinates, flattened: its whitened path `η` (`d n + k`)
@@ -944,10 +982,10 @@ fn unflatten(x: &[f64], h: usize, n: usize) -> Vec<DVector<f64>> {
 }
 
 /// The Laplace approximation of path block `l`'s conditional (rows,
-/// depths, genes held) by damped Gauss–Newton from `anchor` (whitened; not
-/// the chain's current path but, in the sampler, the previous sweep's
-/// mode; a departure's branch time from `params`), the Fisher information
-/// analytic ([`path_newton`]).
+/// depths, genes held) by damped Gauss–Newton from `anchor` (whitened; in
+/// the sampler the last fit's mode; a departure's branch time from
+/// `params`), the Fisher information analytic ([`path_newton`]). Fitted
+/// during burn-in only, as [`gene_laplace`].
 #[allow(clippy::too_many_arguments)]
 pub fn path_laplace(
     params: &Params,
