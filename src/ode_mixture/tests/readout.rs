@@ -112,6 +112,29 @@ fn at_the_truth_cells_velocities_track_the_truths() {
     }
 }
 
+/// At the truth, every cell's rate of change of its log level (both
+/// tracks, `d log(ū + s̄)/dt`) tracks the truth's at the cell's place.
+#[test]
+fn at_the_truth_cells_log_velocities_track_the_truths() {
+    let sim = cells();
+    let out = read_cells(&first(&sim, sim.n_pb), &[truth_snap(&sim, None)]);
+    let fine = truth_params(&sim, FINE, FINE);
+    let lv = fine.levels();
+    let (du, ds) = fine.velocities_of(&lv);
+    let t = &sim.truth;
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for c in 0..sim.n_pb {
+        let row = t.lineage[c] * FINE + (t.time[c] * (FINE - 1) as f64).round() as usize;
+        for g in 0..sim.n_genes {
+            a.push(out.velocity_log[(c, g)]);
+            b.push((du[(row, g)] + ds[(row, g)]) / (lv.u[(row, g)] + lv.s[(row, g)]));
+        }
+    }
+    let r = pearson(&a, &b);
+    eprintln!("log velocity: Pearson with the truth's {r:.4}");
+    assert!(r > 0.9, "Pearson {r}");
+}
+
 /// The intervals are the mixture's own 5% and 95% points, to within a
 /// position of the lineages' own grid: here with one draw, from every
 /// cell's posterior over the rows, on lineages of the unit duration and of

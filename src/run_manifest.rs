@@ -404,6 +404,12 @@ pub enum RunKind {
     Simba,
     /// `senna rbm`: a feature-embedded restricted Boltzmann machine.
     Rbm,
+    /// `senna ode` — every cell's lineage, time and velocity from two-track
+    /// counts, by a mixture of splicing ODEs. `cell_embedding` is the map
+    /// space (every cell's expression on its leading principal components),
+    /// `cell_velocity` every cell's velocity there, `cell_time` its lineage
+    /// and time. No gene table or decoder a viewer can read.
+    Ode,
 }
 
 /// How a run's tables give each cell's expected level of each feature, up
@@ -467,9 +473,12 @@ impl RunKind {
             RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => CellSpace::LogSimplex,
             // masked-vae is a Gaussian z despite its simplex β; svd is signed
             // loadings; vae is an unconstrained latent.
-            RunKind::MaskedVae | RunKind::Vae | RunKind::Svd | RunKind::JointSvd | RunKind::Rbm => {
-                CellSpace::Signed
-            }
+            RunKind::MaskedVae
+            | RunKind::Vae
+            | RunKind::Svd
+            | RunKind::JointSvd
+            | RunKind::Rbm
+            | RunKind::Ode => CellSpace::Signed,
         }
     }
 
@@ -488,6 +497,7 @@ impl RunKind {
             RunKind::ResolveEmbeddingSpace => "resolve-embedding-space",
             RunKind::Simba => "simba",
             RunKind::Rbm => "rbm",
+            RunKind::Ode => "ode",
         }
     }
 
@@ -505,6 +515,7 @@ impl RunKind {
             RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::JointTopic => true,
             RunKind::Vae
             | RunKind::Rbm
+            | RunKind::Ode
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Bge
@@ -541,6 +552,7 @@ impl RunKind {
             | RunKind::JointTopic
             | RunKind::Vae
             | RunKind::Rbm
+            | RunKind::Ode
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
@@ -565,6 +577,7 @@ impl RunKind {
             | RunKind::JointTopic
             | RunKind::Vae
             | RunKind::Rbm
+            | RunKind::Ode
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
@@ -585,6 +598,7 @@ impl RunKind {
             | RunKind::JointTopic
             | RunKind::Vae
             | RunKind::Rbm
+            | RunKind::Ode
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
@@ -606,6 +620,7 @@ impl RunKind {
             | RunKind::JointTopic
             | RunKind::Vae
             | RunKind::Rbm
+            | RunKind::Ode
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Bge
@@ -640,7 +655,9 @@ impl RunKind {
             RunKind::Bge | RunKind::ResolveEmbeddingSpace | RunKind::Simba => {
                 ExpressionModel::Embedding
             }
-            RunKind::Svd | RunKind::JointSvd | RunKind::Fne => ExpressionModel::Unmodelled,
+            RunKind::Svd | RunKind::JointSvd | RunKind::Fne | RunKind::Ode => {
+                ExpressionModel::Unmodelled
+            }
         }
     }
 }
@@ -1903,7 +1920,7 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         | RunKind::Vae
         | RunKind::Simba
         | RunKind::Rbm => {}
-        RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
+        RunKind::Svd | RunKind::JointSvd | RunKind::Ode => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
              use a bge / fne / topic-family run as the source",
             m.kind

@@ -35,6 +35,66 @@ fn the_levels_are_the_hosts() {
     assert!(worst < 1e-3, "worst relative error {worst}");
 }
 
+/// A gene whose `γ` is far faster than its `β` (`(γ − β) δ` past f32's
+/// exp range a step) still has the host's finite levels.
+#[test]
+fn a_fast_genes_levels_stay_finite() {
+    let sim = simulate(&SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let mut params = truth_params(&sim, 133, 45);
+    params.gamma[0] = 9000.0;
+    params.beta[0] = 0.05;
+    let prior = GridPrior::new(45, 1.0, 0.25).unwrap();
+    let fit = Fit::from_params(&params, &prior, &Device::Cpu).unwrap();
+    let (u, s) = fit.levels().unwrap();
+    let (u, s) = (u.to_vec2::<f32>().unwrap(), s.to_vec2::<f32>().unwrap());
+    let lv = params.levels();
+    for r in 0..lv.u.nrows() {
+        assert!(
+            u[r][0].is_finite() && s[r][0].is_finite(),
+            "row {r}: {} {}",
+            u[r][0],
+            s[r][0]
+        );
+        assert!(rel(f64::from(s[r][0]), lv.s[(r, 0)]) < 1e-3, "row {r}");
+    }
+}
+
+/// Genes whose rates are nearly equal, `(γ − β) δ` across the series'
+/// switch, have the host's levels to f32's precision, not the cancelling
+/// difference's.
+#[test]
+fn near_equal_rates_keep_their_precision() {
+    let sim = simulate(&SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let mut params = truth_params(&sim, 133, 45);
+    params.sub = 1;
+    let delta = params.t_len[0] / 44.0;
+    for (g, x) in [2e-4, 1e-3, 3e-3, 5e-3, 2e-2].iter().enumerate() {
+        params.beta[g] = 2.0;
+        params.gamma[g] = 2.0 + x / delta;
+    }
+    let prior = GridPrior::new(45, 1.0, 0.25).unwrap();
+    let fit = Fit::from_params(&params, &prior, &Device::Cpu).unwrap();
+    let (_, s) = fit.levels().unwrap();
+    let s = s.to_vec2::<f32>().unwrap();
+    let lv = params.levels();
+    let worst = s
+        .iter()
+        .enumerate()
+        .flat_map(|(r, row)| (0..5).map(move |g| (r, g, row[g])))
+        .map(|(r, g, x)| rel(f64::from(x), lv.s[(r, g)]))
+        .fold(0f64, f64::max);
+    eprintln!("near-equal rates: worst relative error {worst:.2e}");
+    assert!(worst < 5e-6, "worst relative error {worst}");
+}
+
 #[test]
 fn the_marginal_is_the_hosts() {
     let cfg = SimConfig {

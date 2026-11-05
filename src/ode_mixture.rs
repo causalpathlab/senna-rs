@@ -3,6 +3,8 @@
 //! transcription. Built bottom up; see each module.
 
 pub mod blocks;
+pub mod command;
+pub mod counts;
 pub mod direction;
 pub mod fit;
 pub mod init;
@@ -10,6 +12,7 @@ pub mod kernel;
 pub mod kinetics;
 pub mod likelihood;
 pub mod model;
+pub mod output;
 pub mod readout;
 pub mod sampler;
 #[cfg(test)]

@@ -54,6 +54,44 @@ pub struct Direction {
 /// smallest.
 pub const UNDETERMINED_PER_PB: f64 = 5.0;
 
+/// What the evidence says of a lineage's direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Call {
+    /// The climb's own direction fits better.
+    Forward,
+    /// The lineage turned round fits better.
+    Reversed,
+    /// The reads do not tell the two ways apart.
+    Undetermined,
+    /// A held refit was not finite: no evidence either way.
+    Diverged,
+}
+
+impl Call {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Call::Forward => "forward",
+            Call::Reversed => "reversed",
+            Call::Undetermined => "undetermined",
+            Call::Diverged => "diverged",
+        }
+    }
+}
+
+/// The call from `evidence` (forward minus reversed) over `n` pseudobulks
+/// ([`UNDETERMINED_PER_PB`] a pseudobulk the threshold).
+pub fn call_of(evidence: f64, n: usize) -> Call {
+    if !evidence.is_finite() {
+        Call::Diverged
+    } else if evidence.abs() <= UNDETERMINED_PER_PB * n as f64 {
+        Call::Undetermined
+    } else if evidence > 0.0 {
+        Call::Forward
+    } else {
+        Call::Reversed
+    }
+}
+
 impl Direction {
     /// The forward held objective minus the reversed: positive when the
     /// climb's own direction fits better.
@@ -61,9 +99,14 @@ impl Direction {
         f64::from(self.forward_objective) - f64::from(self.reversed_objective)
     }
 
+    /// What the evidence calls ([`call_of`]).
+    pub fn call(&self) -> Call {
+        call_of(self.evidence(), self.rows.len())
+    }
+
     /// Whether the evidence calls a direction.
     pub fn determined(&self) -> bool {
-        self.evidence().abs() > UNDETERMINED_PER_PB * self.rows.len() as f64
+        matches!(self.call(), Call::Forward | Call::Reversed)
     }
 }
 
@@ -95,11 +138,24 @@ fn held_rows(fit: &Fit, reads: &Reads, points: usize) -> Result<Vec<u32>> {
 }
 
 /// Lineage `lineage`'s direction: climbed from scratch, then refitted with
-/// its order held both ways round.
+/// its order held both ways round ([`direction_of`]).
 pub fn direction(reads: &Reads, opts: &Climb, lineage: usize, dev: &Device) -> Result<Direction> {
+    let (fit, objective) = climb(reads, opts, dev)?;
+    direction_of(fit, objective, reads, opts, lineage, dev)
+}
+
+/// Lineage `lineage`'s direction from a climbed `fit` (its objective
+/// `objective`): refitted with its order held both ways round.
+pub fn direction_of(
+    fit: Fit,
+    objective: f32,
+    reads: &Reads,
+    opts: &Climb,
+    lineage: usize,
+    dev: &Device,
+) -> Result<Direction> {
     let prior =
         GridPrior::new(opts.points, 1.0, opts.kappa).map_err(|e| Error::Msg(e.to_string()))?;
-    let (fit, objective) = climb(reads, opts, dev)?;
     let n = opts.points;
     let rows = held_rows(&fit, reads, n)?;
     let turned: Vec<u32> = rows

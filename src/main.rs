@@ -489,6 +489,23 @@ enum Commands {
     Fne(FneArgs),
 
     #[command(
+        name = "ode",
+        about = "Every cell's lineage, time and velocity: a mixture of splicing ODEs on two-track counts",
+        long_about = "A mixture of splicing ODEs on two-track count backends (rows\n\
+                      `{gene}/count/spliced` and `{gene}/count/unspliced`): every\n\
+                      pseudobulk on one lineage's trajectory at one time, the trajectory\n\
+                      the splicing ODE solved exactly, driven by the lineage's\n\
+                      transcription. Fitted on the finest pseudobulks and the most\n\
+                      variable genes by a climb to a mode, then blocked Gibbs chains\n\
+                      from it; every cell is read out from the chains' draws. Writes\n\
+                      {out}.cell_time.parquet (lineage, time, its sd and 90% interval,\n\
+                      lineage posteriors), cell_embedding and cell_velocity (the map\n\
+                      space and every cell's velocity there) and gene_rates (every\n\
+                      gene's rates with R̂ and ESS, flagged above 1.05)."
+    )]
+    Ode(ode_mixture::command::OdeArgs),
+
+    #[command(
         name = "rbm",
         about = "A feature-embedded RBM: cells as hidden units over their reads",
         long_about = "A restricted Boltzmann machine whose weights are factored through a\n\
@@ -991,6 +1008,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Fne(args) => {
             fit_fne(args)?;
+        }
+        Commands::Ode(args) => {
+            ode_mixture::command::run_ode(args)?;
         }
         Commands::Rbm(args) => {
             rbm::run::fit_rbm(args)?;

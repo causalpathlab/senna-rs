@@ -107,3 +107,16 @@ fn between_the_nodes_the_levels_are_the_odes() {
     let (u1, _) = fine_trajectory(&alpha, beta, gamma, h, 1);
     close(&u1, &un, 1e-12);
 }
+
+/// A step past f64's exp range, `(γ − β) h > 709`, is still the limit's
+/// finite levels: `s` relaxes to `α/γ`'s neighbourhood, never NaN.
+#[test]
+fn a_decay_far_faster_than_splicing_stays_finite() {
+    use crate::ode_mixture::kinetics::step;
+    let (beta, gamma, h) = (0.05, 40_000.0, 0.05);
+    let (u, s) = step(2.0, 1.0, 3.0, beta, gamma, h);
+    assert!(u.is_finite() && s.is_finite(), "{u} {s}");
+    // `γ h` is so large that `s` sits at its quasi-steady state `β u/γ`.
+    let quasi = beta * u / gamma;
+    assert!((s - quasi).abs() < 1e-3 * quasi + 1e-12, "{s} vs {quasi}");
+}

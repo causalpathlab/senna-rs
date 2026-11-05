@@ -248,3 +248,14 @@ fn the_climbs_time_is_not_a_grid_step_late() {
         "the climb's times are off by {shift}"
     );
 }
+
+/// A start whose objective is NaN never beats one that is finite, and a
+/// finite one always beats NaN.
+#[test]
+fn a_nan_start_is_never_the_best() {
+    use crate::ode_mixture::init::beats;
+    assert!(!beats(f32::NAN, -10.0));
+    assert!(beats(-10.0, f32::NAN));
+    assert!(beats(-1.0, -10.0) && !beats(-10.0, -1.0));
+    assert!(!beats(f32::NAN, f32::NAN));
+}

@@ -382,6 +382,12 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
     }
 }
 
+/// Whether a start's objective `new` beats the best so far: a NaN (a climb
+/// that diverged) never does, and any finite one beats a NaN best.
+pub fn beats(new: f32, best: f32) -> bool {
+    new > best || (best.is_nan() && !new.is_nan())
+}
+
 /// Adam from the start, then from the start with each lineage in turn
 /// turned round, a turn kept when it raises the objective; with two
 /// lineages also from every tree start. The best fit and its objective.
@@ -405,7 +411,7 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<(Fit, f32)> {
     for l in 0..opts.lineages {
         reversed[l] = true;
         let other = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
-        if other.1 > best.1 {
+        if beats(other.1, best.1) {
             best = other;
         } else {
             reversed[l] = false;
@@ -414,10 +420,15 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<(Fit, f32)> {
     if opts.lineages == 2 {
         for places in tree_places(&scores) {
             let other = run(&places)?;
-            if other.1 > best.1 {
+            if beats(other.1, best.1) {
                 best = other;
             }
         }
+    }
+    if best.1.is_nan() {
+        return Err(legume_numeric::candle::candle_core::Error::Msg(
+            "ode-mixture climb: every start diverged (objective NaN)".into(),
+        ));
     }
     Ok(best)
 }

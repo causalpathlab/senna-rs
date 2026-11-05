@@ -13,21 +13,28 @@
 //! E(h)    = (e^{−βh} − e^{−γh})/(γ − β) = h e^{−γh} expm1(dh)/(dh),  d = γ − β
 //! ```
 //!
-//! the last form finite at `β = γ`, where `E(h) = h e^{−γh}`.
+//! the first form where `dh` is away from `0` (both exponentials at most 1,
+//! so it cannot overflow however far apart the rates are), the second by
+//! its series near `0`, where the first cancels (`E(h) = h e^{−γh}` at
+//! `β = γ`).
 
-/// `expm1(x)/x`, `1` at `x = 0`.
-fn expm1_ratio(x: f64) -> f64 {
-    if x.abs() < 1e-12 {
-        1.0
+/// Below this `|dh|`, `E(h)` by its series.
+const SERIES: f64 = 1e-3;
+
+/// `E(h)` of a step, from `e^{−βh}`, `e^{−γh}` and `dh`.
+fn splice_factor(eb: f64, eg: f64, beta: f64, gamma: f64, delta: f64) -> f64 {
+    let x = (gamma - beta) * delta;
+    if x.abs() < SERIES {
+        delta * eg * (1.0 + x / 2.0 + x * x / 6.0)
     } else {
-        x.exp_m1() / x
+        (eb - eg) / (gamma - beta)
     }
 }
 
 /// `(u, s)` a time `delta` after `(u0, s0)`, transcription held at `alpha`.
 pub fn step(u0: f64, s0: f64, alpha: f64, beta: f64, gamma: f64, delta: f64) -> (f64, f64) {
     let (eb, eg) = ((-beta * delta).exp(), (-gamma * delta).exp());
-    let e = delta * eg * expm1_ratio((gamma - beta) * delta);
+    let e = splice_factor(eb, eg, beta, gamma, delta);
     let s = s0 * eg + alpha / gamma * (1.0 - eg) + (beta * u0 - alpha) * e;
     let u = alpha / beta + (u0 - alpha / beta) * eb;
     (u, s)

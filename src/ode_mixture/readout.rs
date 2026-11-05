@@ -6,7 +6,7 @@
 //! its unspliced share integrated out ([`share_term`]) when the model has
 //! one. Over the draws the posteriors are averaged (the parameters' draws
 //! integrated out); from that mixture every cell's lineage probabilities
-//! and the mean, sd and 90% interval of its time, and its mean velocities.
+//! and the mean, sd and 90% interval of its time, and its mean velocities (and of its log level).
 
 use super::blocks::log_posterior_row;
 use super::likelihood::{integrated_table, table, Reads};
@@ -36,6 +36,9 @@ pub struct CellReadout {
     /// ([`Params::velocities`]), in the levels' units.
     pub velocity_u: DMatrix<f64>,
     pub velocity_s: DMatrix<f64>,
+    /// `[C × G]` the posterior mean of `d log(ū + s̄)/dt`, every gene's
+    /// relative rate of change on both tracks.
+    pub velocity_log: DMatrix<f64>,
     /// The time bins' width the intervals sit on: a position of the
     /// shortest lineage, wider only past [`MAX_BINS`] bins.
     pub time_bin: f64,
@@ -81,6 +84,7 @@ impl CellReadout {
             time_hi: nan,
             velocity_u: DMatrix::from_element(n_cells, genes, f64::NAN),
             velocity_s: DMatrix::from_element(n_cells, genes, f64::NAN),
+            velocity_log: DMatrix::from_element(n_cells, genes, f64::NAN),
             time_bin: f64::NAN,
         }
     }
@@ -123,7 +127,8 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
     ];
     // `[G × C]`, transposed at the end: `duᵀ · post` is a plain product
     // (threaded), where `postᵀ · du` would not be.
-    let (mut vel_u, mut vel_s) = (
+    let (mut vel_u, mut vel_s, mut vel_log) = (
+        DMatrix::zeros(genes, n_cells),
         DMatrix::zeros(genes, n_cells),
         DMatrix::zeros(genes, n_cells),
     );
@@ -166,6 +171,11 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
         let (du, ds) = p.velocities_of(&lv);
         vel_u.gemm(1.0, &du.transpose(), &post, 1.0);
         vel_s.gemm(1.0, &ds.transpose(), &post, 1.0);
+        // `[G × rows]`, as the product takes it.
+        let dlog_t = DMatrix::from_fn(genes, rows, |g, r| {
+            (du[(r, g)] + ds[(r, g)]) / (lv.u[(r, g)] + lv.s[(r, g)]).max(f64::MIN_POSITIVE)
+        });
+        vel_log.gemm(1.0, &dlog_t, &post, 1.0);
     }
     let nan_rows = |mut m: DMatrix<f64>| {
         for c in (0..n_cells).filter(|&c| acc[c].unknown) {
@@ -173,7 +183,11 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
         }
         m
     };
-    let (velocity_u, velocity_s) = (nan_rows(vel_u.transpose()), nan_rows(vel_s.transpose()));
+    let (velocity_u, velocity_s, velocity_log) = (
+        nan_rows(vel_u.transpose()),
+        nan_rows(vel_s.transpose()),
+        nan_rows(vel_log.transpose()),
+    );
     let pick = |f: &dyn Fn(&Acc) -> f64| -> Vec<f64> {
         acc.iter()
             .map(|a| if a.unknown { f64::NAN } else { f(a) })
@@ -196,6 +210,7 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
             .collect(),
         velocity_u,
         velocity_s,
+        velocity_log,
         time_bin: width,
     }
 }

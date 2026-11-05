@@ -48,8 +48,10 @@ pub const SHARE_START: f64 = 0.01;
 /// [`super::likelihood::share_mode`]).
 const SHARE_NEWTON: usize = 8;
 
-/// Below this `|x|`, `expm1(x)/x` by its series (the division is lost).
-const SMALL: f64 = 1e-4;
+/// Below this `|x|`, `x = (γ − β)δ`, `E(δ)` by its series: in f32 the
+/// difference of exponentials loses `ε/|x|` of `E` (`6·10⁻⁶` here), the
+/// second-order series `x³/24` (`4·10⁻⁸`).
+const SMALL: f64 = 1e-2;
 
 /// Pseudobulks' reads on the device, `[P × G]` per track.
 pub struct DeviceReads {
@@ -365,18 +367,22 @@ impl Fit {
         );
         let step = (self.t_len()? / (n - 1) as f64)?; // [L × 1]
         let m = self.sub;
-        // `e^{−βδ}`, `e^{−γδ}` and `E(δ) = δ e^{−γδ} expm1((γ−β)δ)/((γ−β)δ)`
-        // for a step `δ` `[L × 1]`, each `[L × G]`.
+        // `e^{−βδ}`, `e^{−γδ}` and `E(δ) = (e^{−βδ} − e^{−γδ})/(γ − β)`
+        // (`δ e^{−γδ} (1 + x/2 + x²/6)` near `x = (γ − β)δ = 0`, where the
+        // difference cancels) for a step `δ` `[L × 1]`, each `[L × G]`. Both
+        // exponentials are at most 1, so `E` cannot overflow however far
+        // apart the rates are.
         let factors = |delta: &Tensor| -> Result<(Tensor, Tensor, Tensor)> {
             let bh = delta.broadcast_mul(&beta)?;
             let gh = delta.broadcast_mul(&gamma)?;
             let (eb, eg) = (bh.neg()?.exp()?, gh.neg()?.exp()?);
             let x = (&gh - &bh)?;
             let small = x.abs()?.lt(SMALL)?;
-            let safe = small.where_cond(&x.ones_like()?, &x)?;
-            let ratio =
-                small.where_cond(&(x.affine(0.5, 1.0))?, &((safe.exp()? - 1.0)? / &safe)?)?;
-            let e = (delta.broadcast_mul(&eg)? * ratio)?;
+            let gap =
+                small.where_cond(&x.ones_like()?, &(&gamma - &beta)?.broadcast_as(x.shape())?)?;
+            let series = ((x.affine(1.0 / 6.0, 0.5)? * &x)? + 1.0)?;
+            let near = (delta.broadcast_mul(&eg)? * series)?;
+            let e = small.where_cond(&near, &((&eb - &eg)? / gap)?)?;
             Ok((eb, eg, e))
         };
         let full = factors(&step)?;
