@@ -978,8 +978,8 @@ pub struct RunOutputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_tree: Option<String>,
     /// `{out}.cell_time.parquet`, read by `senna view` when present: every
-    /// cell's lineage, time within it and its spread, start, tree cluster
-    /// and lineage posterior (string and number columns, keyed by `cell`).
+    /// cell's lineage, time within it and its spread, and lineage
+    /// posteriors (string and number columns, keyed by `cell`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_time: Option<String>,
     /// `{out}.cell_velocity.parquet`, read by `senna view` when present:

@@ -52,6 +52,27 @@ fn a_cell_without_a_velocity_does_not_move() {
     assert!(moved[2][0].is_nan());
 }
 
+/// A cell whose velocity is not finite (a time model could not place it)
+/// is left out of the field as if it had none, and its neighbours' moves
+/// stay finite.
+#[test]
+fn a_cell_with_a_nan_velocity_is_left_out() {
+    let names: Vec<Box<str>> = ["a", "b", "c", "d"].map(Into::into).to_vec();
+    let z = Mat::from_fn(4, 2, |i, d| (i * 2 + d) as f32);
+    let v = Mat::from_fn(4, 2, |i, d| if i == 2 { f32::NAN } else { d as f32 });
+    let field = Field::new(&names, &z, &names, &v).unwrap();
+    let points = Points::new(names, vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]]);
+    let moved = field.embed(&points);
+    assert!(moved[2][0].is_nan());
+    for i in [0, 1, 3] {
+        assert!(
+            moved[i].iter().all(|x| x.is_finite()),
+            "cell {i}: {:?}",
+            moved[i]
+        );
+    }
+}
+
 /// A field along +x gives streamlines running left to right, spread over
 /// the map, none of them crossing back.
 #[test]

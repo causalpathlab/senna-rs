@@ -87,25 +87,26 @@ fn a_genes_rates_are_found_from_a_wrong_start() {
             &prior.mean(truth.rho[g].len()),
         );
         let (mut b, mut y, mut r) = (Vec::new(), Vec::new(), Vec::new());
-        let mut ess_r = 0.0;
+        let (mut ess_r, mut ess_b) = (0.0, 0.0);
         for chain in 0..4 {
             let mut rng = StdRng::seed_from_u64(9 + 1000 * chain + g as u64);
             let (mut theta, mut ll) = (prop.mode.clone(), f64::NEG_INFINITY);
-            let mut kept = Vec::new();
+            let (mut kept, mut kept_b) = (Vec::new(), Vec::new());
             for it in 0..4000 {
                 (theta, ll) =
                     gene_step(&truth, &theta, ll, &by_row, &z_bar, &prior, &prop, &mut rng);
                 if it >= 300 {
                     let (beta, gamma, _, _) = from_theta(&theta, &z_bar);
                     kept.push((gamma / beta).ln());
+                    kept_b.push(beta.ln());
                     b.push(beta.ln());
                     y.push(gamma.ln());
                     r.push((gamma / beta).ln());
                 }
             }
-            ess_r += legume_numeric::mcmc::engine::diagnostics::ess(
-                &kept.iter().map(|&x| x as f32).collect::<Vec<_>>(),
-            );
+            let f32s = |v: &[f64]| v.iter().map(|&x| x as f32).collect::<Vec<_>>();
+            ess_r += legume_numeric::mcmc::engine::diagnostics::ess(&f32s(&kept));
+            ess_b += legume_numeric::mcmc::engine::diagnostics::ess(&f32s(&kept_b));
         }
         let z = |v: &[f64], truth: f64| {
             let m = v.iter().sum::<f64>() / v.len() as f64;
@@ -114,12 +115,20 @@ fn a_genes_rates_are_found_from_a_wrong_start() {
         };
         // The identified coordinate mixes: `log γ/β`, the steady share. The
         // rates' common scale runs along a ridge the reads barely pin (weak
-        // identifiability, reported per gene by R̂), so its ESS is not gated.
+        // identifiability, reported per gene by R̂): it mixes slowly, and is
+        // gated only against a sampler that stops moving it.
         eprintln!(
-            "gene {g}: effective draws of log γ/β {ess_r:.0} of {} over four chains",
+            "gene {g}: effective draws of log γ/β {ess_r:.0}, of log β {ess_b:.0}, of {} over four chains",
             r.len()
         );
-        assert!(ess_r > 400.0, "gene {g}: {ess_r:.0} effective draws");
+        assert!(
+            ess_r > 400.0,
+            "gene {g}: {ess_r:.0} effective draws of log γ/β"
+        );
+        assert!(
+            ess_b > 100.0,
+            "gene {g}: {ess_b:.0} effective draws of log β"
+        );
         let (zb, _) = z(&b, truth.beta[g].ln());
         let (zy, _) = z(&y, truth.gamma[g].ln());
         let (zr, er) = z(&r, (truth.gamma[g] / truth.beta[g]).ln());

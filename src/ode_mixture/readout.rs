@@ -5,8 +5,9 @@
 //! entry plus `log π_ℓ` normalised ([`log_posterior_row`]), the jitter of
 //! its unspliced share integrated out ([`share_term`]) when the model has
 //! one. Over the draws the posteriors are averaged (the parameters' draws
-//! integrated out); from that mixture every cell's lineage probabilities
-//! and the mean, sd and 90% interval of its time, and its mean velocities (and of its log level).
+//! integrated out); from that mixture every cell's lineage probabilities,
+//! the mean, sd and 90% interval of its time, and its mean velocities, on
+//! each track and of its log level ([`log_rate`]).
 
 use super::blocks::log_posterior_row;
 use super::likelihood::{integrated_table, table, Reads};
@@ -87,6 +88,19 @@ impl CellReadout {
             velocity_log: DMatrix::from_element(n_cells, genes, f64::NAN),
             time_bin: f64::NAN,
         }
+    }
+}
+
+/// `d log(ū + s̄)/dt` from the velocities and levels; `0` where the level
+/// is not a normal positive number (underflowed: no transcription to speak
+/// of), so it never turns the readout's products infinite.
+pub fn log_rate(du: f64, ds: f64, u: f64, s: f64) -> f64 {
+    let level = u + s;
+    let rate = (du + ds) / level;
+    if level.is_normal() && level > 0.0 && rate.is_finite() {
+        rate
+    } else {
+        0.0
     }
 }
 
@@ -171,11 +185,12 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
         let (du, ds) = p.velocities_of(&lv);
         vel_u.gemm(1.0, &du.transpose(), &post, 1.0);
         vel_s.gemm(1.0, &ds.transpose(), &post, 1.0);
-        // `[G × rows]`, as the product takes it.
-        let dlog_t = DMatrix::from_fn(genes, rows, |g, r| {
-            (du[(r, g)] + ds[(r, g)]) / (lv.u[(r, g)] + lv.s[(r, g)]).max(f64::MIN_POSITIVE)
+        // Filled `[rows × G]` (the inputs' own order), transposed once for
+        // the product.
+        let dlog = DMatrix::from_fn(rows, genes, |r, g| {
+            log_rate(du[(r, g)], ds[(r, g)], lv.u[(r, g)], lv.s[(r, g)])
         });
-        vel_log.gemm(1.0, &dlog_t, &post, 1.0);
+        vel_log.gemm(1.0, &dlog.transpose(), &post, 1.0);
     }
     let nan_rows = |mut m: DMatrix<f64>| {
         for c in (0..n_cells).filter(|&c| acc[c].unknown) {

@@ -236,3 +236,14 @@ fn benchmark_the_readout() {
     );
     assert!(out.time_mean.iter().all(|t| t.is_finite()));
 }
+
+/// A level's relative rate of change is `(dū + ds̄)/(ū + s̄)`; a level not
+/// a normal positive number (underflowed) has none, not an infinite one.
+#[test]
+fn an_underflowed_level_has_no_log_velocity() {
+    use crate::ode_mixture::readout::log_rate;
+    assert_eq!(log_rate(1.0, 2.0, 1.0, 2.0), 1.0);
+    assert_eq!(log_rate(1.0, 0.0, 0.0, 0.0), 0.0);
+    assert_eq!(log_rate(1.0, 0.0, 1e-320, 0.0), 0.0);
+    assert_eq!(log_rate(-1.0, 0.0, f64::NAN, 1.0), 0.0);
+}

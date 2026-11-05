@@ -90,7 +90,7 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
 
     let (strs, nums) = read_table_columns(
         &format!("{out}.cell_time.parquet"),
-        &["cell", "lineage"],
+        &["cell", "lineage", "direction"],
         &["tau", "tau_sd", "tau_lo", "tau_hi", "p_L1"],
     )
     .unwrap();
@@ -98,6 +98,13 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
     // QC may leave a few near-empty cells out.
     assert!(cells.len() <= sim.n_pb && cells.len() * 100 >= sim.n_pb * 99);
     assert!(strs[1].iter().all(|l| l.as_ref() == "L1"));
+    // A lone lineage with kinetics runs forward in the output, as called
+    // or turned round.
+    assert!(
+        strs[2].iter().all(|d| d.as_ref() == "forward"),
+        "{:?}",
+        &strs[2][..3]
+    );
     for (name, col) in ["tau", "tau_sd", "tau_lo", "tau_hi", "p_L1"]
         .iter()
         .zip(&nums)

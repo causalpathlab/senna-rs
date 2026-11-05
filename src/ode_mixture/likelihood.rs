@@ -37,10 +37,16 @@ pub struct Reads {
 impl Reads {
     /// From row-major `[P × G]` reads.
     pub fn new(u: &[f64], s: &[f64], p: usize, g: usize) -> Self {
-        let (u, s) = (
+        Self::from_matrices(
             DMatrix::from_row_slice(p, g, u),
             DMatrix::from_row_slice(p, g, s),
-        );
+        )
+    }
+
+    /// From `[P × G]` reads per track.
+    pub fn from_matrices(u: DMatrix<f64>, s: DMatrix<f64>) -> Self {
+        assert_eq!(u.shape(), s.shape(), "both tracks the same shape");
+        let p = u.nrows();
         let unspliced: Vec<f64> = (0..p).map(|i| u.row(i).sum()).collect();
         let total = (0..p).map(|i| unspliced[i] + s.row(i).sum()).collect();
         Self {

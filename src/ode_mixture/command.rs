@@ -202,15 +202,6 @@ fn f32_columns(cols: &[(Box<str>, Vec<f32>)]) -> Vec<(Box<str>, Column<'_>)> {
         .collect()
 }
 
-/// Rows `rows` and columns `cols` of `m`, row-major, as f64.
-fn gather(m: &DMatrix<f32>, rows: &[usize], cols: &[usize]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(rows.len() * cols.len());
-    for &i in rows {
-        out.extend(cols.iter().map(|&j| f64::from(m[(i, j)])));
-    }
-    out
-}
-
 /// `[N × k]` rows, written with columns `{prefix}0..`, rows named `cell`.
 fn write_rows(
     path: &str,
@@ -227,14 +218,14 @@ fn write_rows(
     )
 }
 
-/// The label of the likeliest lineage, `NA` when nothing is known.
-fn lineage_label(probs: &[f64]) -> Box<str> {
+/// The likeliest lineage, `None` when nothing is known.
+fn lineage_index(probs: &[f64]) -> Option<usize> {
     probs
         .iter()
         .enumerate()
         .filter(|(_, x)| x.is_finite())
         .max_by(|a, b| a.1.total_cmp(b.1))
-        .map_or_else(|| "NA".into(), |(l, _)| format!("L{}", l + 1).into())
+        .map(|(l, _)| l)
 }
 
 /// What the fit is run on, from the collapse.
@@ -281,12 +272,9 @@ fn finest_reads(
     let genes = select_genes(&tracks, args.min_reads, args.max_genes);
     anyhow::ensure!(!genes.is_empty(), "no gene with --min-reads on both tracks");
     let names = genes.iter().map(|&j| tracks.genes[j].clone()).collect();
-    let all: Vec<usize> = (0..pbs.len()).collect();
-    let reads = Reads::new(
-        &gather(&tracks.unspliced, &all, &genes),
-        &gather(&tracks.spliced, &all, &genes),
-        pbs.len(),
-        genes.len(),
+    let reads = Reads::from_matrices(
+        tracks.unspliced.select_columns(&genes).cast(),
+        tracks.spliced.select_columns(&genes).cast(),
     );
     Ok(Finest {
         reads,
@@ -417,8 +405,9 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     };
     let (fit, objective) = climb(&reads, &opts, &dev)?;
     info!("ode: the climb's objective {objective:.4}");
-    let fit = if args.no_direction {
-        fit
+    // Every lineage's state in the output, as each of its cells reports it.
+    let (fit, runs) = if args.no_direction {
+        (fit, vec![None; args.lineages])
     } else {
         lineage_directions(&args.out, fit, objective, &reads, &opts, &dev)?
     };
@@ -431,7 +420,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     } else {
         kept.div_ceil(SNAPSHOTS_A_CHAIN).max(1)
     };
-    let draws = sampler::run(
+    let mut draws = sampler::run(
         &reads,
         &start_at,
         &sampler::Options {
@@ -450,7 +439,6 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     report_chains(&draws);
 
     // Nothing to report or read out from chains stopped in burn-in.
-    let mut draws = draws;
     let snaps: Vec<Snapshot> = draws
         .iter_mut()
         .flat_map(|d| std::mem::take(&mut d.snapshots))
@@ -470,91 +458,17 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         let x = &reads.u + &reads.s;
         MapBasis::new(&x, args.map_pcs)?
     };
-    let kept_cell: Option<Vec<bool>> = keep.as_ref().map(|k| {
-        let mut m = vec![false; all_cells.len()];
-        k.iter().for_each(|&i| m[i] = true);
-        m
-    });
-    let (k, lineages) = (map.dim(), args.lineages);
-    let (mut cells, mut lineage, mut p_lineage) =
-        (Vec::new(), Vec::new(), vec![Vec::new(); lineages]);
-    let (mut tau, mut tau_sd, mut tau_lo, mut tau_hi) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let (mut place, mut velocity) = (Vec::<f32>::new(), Vec::<f32>::new());
-    let all_genes: Vec<usize> = (0..g).collect();
-    for_cell_blocks(
+    let table = read_out_cells(
         &data,
         &names,
-        args.block_size,
         delta.as_ref(),
-        |start, u, s| {
-            let rows: Vec<usize> = (0..u.nrows())
-                .filter(|i| kept_cell.as_ref().is_none_or(|k| k[start + i]))
-                .collect();
-            let block = Reads::new(
-                &gather(&u, &rows, &all_genes),
-                &gather(&s, &rows, &all_genes),
-                rows.len(),
-                g,
-            );
-            let out = read_cells(&block, &snaps);
-            cells.extend(rows.iter().map(|&i| all_cells[start + i].clone()));
-            lineage.extend(out.lineage.iter().map(|p| lineage_label(p)));
-            for (l, col) in p_lineage.iter_mut().enumerate() {
-                col.extend(
-                    out.lineage
-                        .iter()
-                        .map(|p| p.get(l).map_or(f32::NAN, |&x| x as f32)),
-                );
-            }
-            let f32s = |v: &[f64]| v.iter().map(|&x| x as f32).collect::<Vec<_>>();
-            tau.extend(f32s(&out.time_mean));
-            tau_sd.extend(f32s(&out.time_sd));
-            tau_lo.extend(f32s(&out.time_lo));
-            tau_hi.extend(f32s(&out.time_hi));
-            for c in 0..rows.len() {
-                let x: Vec<f64> = (0..g).map(|j| block.u[(c, j)] + block.s[(c, j)]).collect();
-                let dlog: Vec<f64> = out.velocity_log.row(c).iter().copied().collect();
-                place.extend(f32s(&map.place(&x)));
-                velocity.extend(f32s(&map.velocity(&x, &dlog)));
-            }
-            Ok(())
-        },
+        keep.as_deref(),
+        &snaps,
+        &map,
+        &runs,
+        args.block_size,
     )?;
-
-    let p_cols: Vec<(Box<str>, Vec<f32>)> = p_lineage
-        .into_iter()
-        .enumerate()
-        .map(|(l, v)| (format!("p_L{}", l + 1).into(), v))
-        .collect();
-    let mut cols: Vec<(Box<str>, Column)> = vec![
-        ("lineage".into(), Column::Str(&lineage)),
-        ("tau".into(), Column::F32(&tau)),
-        ("tau_sd".into(), Column::F32(&tau_sd)),
-        ("tau_lo".into(), Column::F32(&tau_lo)),
-        ("tau_hi".into(), Column::F32(&tau_hi)),
-    ];
-    cols.extend(f32_columns(&p_cols));
-    write_named_table(
-        &format!("{}.cell_time.parquet", args.out),
-        "cell",
-        &cells,
-        &cols,
-    )?;
-    write_rows(
-        &format!("{}.cell_embedding.parquet", args.out),
-        &cells,
-        "pc",
-        &place,
-        k,
-    )?;
-    write_rows(
-        &format!("{}.cell_velocity.parquet", args.out),
-        &cells,
-        "pc",
-        &velocity,
-        k,
-    )?;
+    table.write(&args.out, map.dim())?;
     let keep = keep.as_deref();
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &all_cells, keep)?;
     crate::postprocess::viz_prep::write_cell_to_pb(&args.out, &cell_to_pb, &all_cells, keep)?;
@@ -569,12 +483,151 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How every lineage runs in the output, `None` where its direction was
+/// not called (`--no-direction`).
+type Runs = Vec<Option<Call>>;
+
+/// A lineage's state as its cells report it.
+fn run_label(run: Option<Call>) -> &'static str {
+    run.map_or("not called", Call::as_str)
+}
+
+/// Every cell's readout, as the tables have it.
+struct CellTable {
+    cells: Vec<Box<str>>,
+    lineage: Vec<Box<str>>,
+    direction: Vec<Box<str>>,
+    /// `[L][C]` the lineages' posteriors.
+    p_lineage: Vec<Vec<f32>>,
+    tau: Vec<f32>,
+    tau_sd: Vec<f32>,
+    tau_lo: Vec<f32>,
+    tau_hi: Vec<f32>,
+    /// `[C × k]` row-major, every cell's place on the map and its velocity.
+    place: Vec<f32>,
+    velocity: Vec<f32>,
+}
+
+/// Every cell of `data` read out from `snaps` a block at a time (QC's
+/// near-empty cells, those not in `keep`, left out), placed on `map` with
+/// its velocity there, and its lineage's state from `runs`.
+#[allow(clippy::too_many_arguments)]
+fn read_out_cells(
+    data: &data_beans::sparse_io_vector::SparseIoVec,
+    names: &[Box<str>],
+    delta: Option<&DMatrix<f32>>,
+    keep: Option<&[usize]>,
+    snaps: &[Snapshot],
+    map: &MapBasis,
+    runs: &Runs,
+    block_size: usize,
+) -> anyhow::Result<CellTable> {
+    let all_cells = data.column_names()?;
+    let kept_cell: Option<Vec<bool>> = keep.map(|k| {
+        let mut m = vec![false; all_cells.len()];
+        k.iter().for_each(|&i| m[i] = true);
+        m
+    });
+    let mut t = CellTable {
+        cells: Vec::new(),
+        lineage: Vec::new(),
+        direction: Vec::new(),
+        p_lineage: vec![Vec::new(); runs.len()],
+        tau: Vec::new(),
+        tau_sd: Vec::new(),
+        tau_lo: Vec::new(),
+        tau_hi: Vec::new(),
+        place: Vec::new(),
+        velocity: Vec::new(),
+    };
+    let f32s = |v: &[f64]| v.iter().map(|&x| x as f32).collect::<Vec<_>>();
+    for_cell_blocks(data, names, block_size, delta, |start, u, s| {
+        let rows: Vec<usize> = (0..u.nrows())
+            .filter(|i| kept_cell.as_ref().is_none_or(|k| k[start + i]))
+            .collect();
+        let block = Reads::from_matrices(u.select_rows(&rows).cast(), s.select_rows(&rows).cast());
+        let out = read_cells(&block, snaps);
+        t.cells
+            .extend(rows.iter().map(|&i| all_cells[start + i].clone()));
+        for p in &out.lineage {
+            let best = lineage_index(p);
+            t.lineage
+                .push(best.map_or_else(|| "NA".into(), |l| format!("L{}", l + 1).into()));
+            t.direction
+                .push(best.map_or("NA", |l| run_label(runs[l])).into());
+        }
+        for (l, col) in t.p_lineage.iter_mut().enumerate() {
+            col.extend(
+                out.lineage
+                    .iter()
+                    .map(|p| p.get(l).map_or(f32::NAN, |&x| x as f32)),
+            );
+        }
+        t.tau.extend(f32s(&out.time_mean));
+        t.tau_sd.extend(f32s(&out.time_sd));
+        t.tau_lo.extend(f32s(&out.time_lo));
+        t.tau_hi.extend(f32s(&out.time_hi));
+        let total = &block.u + &block.s;
+        for c in 0..rows.len() {
+            let x: Vec<f64> = total.row(c).iter().copied().collect();
+            let dlog: Vec<f64> = out.velocity_log.row(c).iter().copied().collect();
+            t.place.extend(f32s(&map.place(&x)));
+            t.velocity.extend(f32s(&map.velocity(&x, &dlog)));
+        }
+        Ok(())
+    })?;
+    Ok(t)
+}
+
+impl CellTable {
+    /// `{out}.cell_time.parquet`, and the map's `cell_embedding` and
+    /// `cell_velocity` (`k` components).
+    fn write(&self, out: &str, k: usize) -> anyhow::Result<()> {
+        let p_cols: Vec<(Box<str>, Vec<f32>)> = self
+            .p_lineage
+            .iter()
+            .enumerate()
+            .map(|(l, v)| (format!("p_L{}", l + 1).into(), v.clone()))
+            .collect();
+        let mut cols: Vec<(Box<str>, Column)> = vec![
+            ("lineage".into(), Column::Str(&self.lineage)),
+            ("direction".into(), Column::Str(&self.direction)),
+            ("tau".into(), Column::F32(&self.tau)),
+            ("tau_sd".into(), Column::F32(&self.tau_sd)),
+            ("tau_lo".into(), Column::F32(&self.tau_lo)),
+            ("tau_hi".into(), Column::F32(&self.tau_hi)),
+        ];
+        cols.extend(f32_columns(&p_cols));
+        write_named_table(
+            &format!("{out}.cell_time.parquet"),
+            "cell",
+            &self.cells,
+            &cols,
+        )?;
+        write_rows(
+            &format!("{out}.cell_embedding.parquet"),
+            &self.cells,
+            "pc",
+            &self.place,
+            k,
+        )?;
+        write_rows(
+            &format!("{out}.cell_velocity.parquet"),
+            &self.cells,
+            "pc",
+            &self.velocity,
+            k,
+        )
+    }
+}
+
 /// `{out}.lineages.tsv`: every lineage's direction evidence from `fit`
 /// ([`direction_of`]: the climbed order held, refitted both ways round)
 /// and its [`Call`]. A lineage the evidence reverses is turned round (the
 /// fit carried on is the held refit turned round) only with the lineages
 /// apart: on a shared trunk every lineage starts at the trunk's root, so
 /// one cannot run the other way alone, and it is reported, not turned.
+/// The fit carried on, and how every lineage runs in it.
 fn lineage_directions(
     out: &str,
     mut fit: super::fit::Fit,
@@ -582,7 +635,8 @@ fn lineage_directions(
     reads: &Reads,
     opts: &Climb,
     dev: &legume_numeric::candle::candle_core::Device,
-) -> anyhow::Result<super::fit::Fit> {
+) -> anyhow::Result<(super::fit::Fit, Runs)> {
+    let mut runs: Runs = Vec::with_capacity(opts.lineages);
     let mut tsv = String::from("lineage\tevidence\tper_pseudobulk\tdirection\tturned\n");
     for l in 0..opts.lineages {
         let on_trunk = fit.branch_at()?.is_some();
@@ -594,10 +648,12 @@ fn lineage_directions(
             "ode: lineage {}'s direction {}: evidence {evidence:.1} ({per:.2} a pseudobulk){}",
             l + 1,
             call.as_str(),
-            match (call == Call::Reversed, on_trunk) {
-                (true, true) => "; on the trunk, not turned",
-                (true, false) => "; turned round",
-                _ => "",
+            if turned {
+                "; turned round"
+            } else if call == Call::Reversed {
+                "; on the trunk, not turned"
+            } else {
+                ""
             }
         );
         tsv.push_str(&format!(
@@ -606,6 +662,9 @@ fn lineage_directions(
             call.as_str(),
             if turned { "yes" } else { "no" }
         ));
+        // How the lineage runs in the output: a reversal turned round now
+        // runs forward; one left (on the trunk) still runs backwards.
+        runs.push(Some(if turned { Call::Forward } else { call }));
         (fit, objective) = if turned {
             (dir.reversed, dir.reversed_objective)
         } else {
@@ -613,7 +672,7 @@ fn lineage_directions(
         };
     }
     std::fs::write(format!("{out}.lineages.tsv"), tsv)?;
-    Ok(fit)
+    Ok((fit, runs))
 }
 
 /// The chains' lineage durations and branch times, and how well they mix.

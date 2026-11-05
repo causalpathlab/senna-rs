@@ -152,8 +152,6 @@ pub enum LabelKind {
     Previous,
     /// A run's lineage of each cell, from its `cell_time` table.
     Lineage,
-    /// The clusters a run's lineage forest is built on, from its `cell_time` table.
-    TreeCluster,
 }
 
 impl LabelKind {
@@ -172,7 +170,6 @@ impl LabelKind {
             LabelKind::Changed => "changed",
             LabelKind::Previous => "previous annotation",
             LabelKind::Lineage => "lineage",
-            LabelKind::TreeCluster => "tree cluster",
         }
     }
 
@@ -574,12 +571,7 @@ fn load_labels(
         keep("clusters", read_cluster_labels(&at(p), LabelKind::Cluster));
     }
     if let Some(p) = &m.outputs.cell_time {
-        for (column, kind) in [
-            ("lineage", LabelKind::Lineage),
-            ("cluster", LabelKind::TreeCluster),
-        ] {
-            keep(column, read_time_labels(&at(p), column, kind));
-        }
+        keep("lineage", read_lineage_labels(&at(p)));
     }
     // An embedding run's `latent` is log θ only when Z went to
     // `cell_embedding`; older manifests kept Z there instead.
@@ -609,11 +601,11 @@ fn load_labels(
     labels
 }
 
-/// A run's `cell_time` table's string column `column` as labels.
-fn read_time_labels(path: &Path, column: &str, kind: LabelKind) -> anyhow::Result<Labels> {
+/// A run's `cell_time` table's `lineage` column as labels.
+fn read_lineage_labels(path: &Path) -> anyhow::Result<Labels> {
     let (strs, _) = legume_numeric::matrix::parquet::read_table_columns(
         &path.to_string_lossy(),
-        &["cell", column],
+        &["cell", "lineage"],
         &[],
     )?;
     let mut cols = strs.into_iter();
@@ -621,7 +613,11 @@ fn read_time_labels(path: &Path, column: &str, kind: LabelKind) -> anyhow::Resul
         cols.next().unwrap_or_default(),
         cols.next().unwrap_or_default(),
     );
-    Ok(Labels::new(kind, cells.into_iter().zip(levels), &[]))
+    Ok(Labels::new(
+        LabelKind::Lineage,
+        cells.into_iter().zip(levels),
+        &[],
+    ))
 }
 
 impl Dataset {

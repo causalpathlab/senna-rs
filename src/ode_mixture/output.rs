@@ -129,8 +129,10 @@ impl MapBasis {
     }
 
     fn project(&self, e: &[f64]) -> Vec<f64> {
-        (0..self.v.ncols())
-            .map(|c| e.iter().enumerate().map(|(j, x)| x * self.v[(j, c)]).sum())
+        self.v
+            .tr_mul(&nalgebra::DVector::from_column_slice(e))
+            .iter()
+            .copied()
             .collect()
     }
 }
