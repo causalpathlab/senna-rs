@@ -47,6 +47,7 @@ use super::blocks::{
 use super::kernel::GridPrior;
 use super::likelihood::{jittered_table, table, Depth, Reads};
 use super::model::Params;
+use super::readout::Snapshot;
 use legume_numeric::mcmc::engine::elliptical_slice_step;
 use nalgebra::DVector;
 use rand_distr::{Distribution, StandardNormal};
@@ -75,6 +76,9 @@ pub struct Options {
     /// The jitter of the unspliced share's sd to start from (the climb's,
     /// [`super::fit::Fit::share_sd`]); `None`: no jitter, the shared model.
     pub share: Option<f64>,
+    /// Keep every this many kept sweeps' parameters for the cells' readout
+    /// ([`super::readout::read_cells`]); `0`: none.
+    pub snapshot_every: usize,
 }
 
 impl Default for Options {
@@ -90,6 +94,7 @@ impl Default for Options {
             seed: 1,
             stop: None,
             share: None,
+            snapshot_every: 0,
         }
     }
 }
@@ -114,6 +119,8 @@ pub struct Draws {
     /// `[S][L − 1]` every other lineage's branch time off the trunk (empty
     /// with the lineages apart).
     pub branch: Vec<Vec<f64>>,
+    /// Every [`Options::snapshot_every`]-th kept sweep's parameters.
+    pub snapshots: Vec<Snapshot>,
 }
 
 /// A chain's state.
@@ -129,6 +136,17 @@ struct State {
     /// `[P]` every pseudobulk's jitter and their sd, `None` with no jitter.
     omega: Vec<f64>,
     share_sd: Option<f64>,
+}
+
+impl State {
+    /// What the cells' readout needs of this state.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            params: self.params.clone(),
+            log_w: self.log_w.clone(),
+            share_sd: self.share_sd,
+        }
+    }
 }
 
 /// Every block's seed of its own, from the chain's.
@@ -224,13 +242,14 @@ fn sweep(
     let rows = draw_latents(&tab, &state.log_w, n, block_seed(seed, LATENTS), it);
     if let Some(sd) = state.share_sd {
         let jitter_seed = block_seed(seed, JITTERS);
+        let z = lv.totals();
         state.omega = rows
             .par_iter()
             .zip(&state.omega)
             .enumerate()
             .map(|(p, (&r, &w))| {
                 let mut rng = stream(jitter_seed, p as u64, it);
-                let (z_u, z_s) = (lv.u.row(r).sum(), lv.s.row(r).sum());
+                let (z_u, z_s) = z[r];
                 share_step(
                     reads.unspliced(p),
                     reads.total(p),
@@ -359,6 +378,7 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 share_sd: Vec::new(),
                 omega: Vec::new(),
                 branch: Vec::new(),
+                snapshots: Vec::new(),
             };
             for it in 0..opts.sweeps {
                 if stopped() {
@@ -385,6 +405,11 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 d.path_ll.push(ll);
                 if let Some(b) = &state.params.branch {
                     d.branch.push(b.clone());
+                }
+                if opts.snapshot_every > 0
+                    && (it - opts.burn + 1).is_multiple_of(opts.snapshot_every)
+                {
+                    d.snapshots.push(state.snapshot());
                 }
                 if let Some(sd) = state.share_sd {
                     d.share_sd.push(sd);

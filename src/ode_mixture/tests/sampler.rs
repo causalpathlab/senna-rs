@@ -300,51 +300,6 @@ fn a_duration_with_no_reads_follows_its_prior() {
     );
 }
 
-/// Long chains from the climb: do they leave its basin? The mean time
-/// against the truth and the reads' log-likelihood per block of sweeps.
-#[test]
-#[ignore = "diagnostic, minutes"]
-fn diagnostic_long_chains_from_the_climb() {
-    let sweeps: usize = std::env::var("SWEEPS").map_or(3000, |v| v.parse().unwrap());
-    let draws = chains_from(&climb_mode(), sweeps, 0, 31);
-    let truth = &sim().truth.time[..TRAIN];
-    let block = 250;
-    for (c, d) in draws.iter().enumerate() {
-        let rows: Vec<String> = (0..sweeps / block)
-            .map(|b| {
-                let s = &d.time[b * block..(b + 1) * block];
-                let shift = s
-                    .iter()
-                    .map(|t| (0..TRAIN).map(|p| t[p] - truth[p]).sum::<f64>() / TRAIN as f64)
-                    .sum::<f64>()
-                    / block as f64;
-                let ll = d.path_ll[b * block..(b + 1) * block].iter().sum::<f64>() / block as f64;
-                format!("{shift:.4}/{ll:.0}")
-            })
-            .collect();
-        eprintln!("chain {c}: mean time − truth / reads' ll per {block} sweeps: {rows:?}");
-    }
-}
-
-/// Where the climb's mode and the truth's basin's sit: the objective, and
-/// the time against the truth.
-#[test]
-#[ignore = "diagnostic"]
-fn diagnostic_the_two_modes() {
-    let train = first(sim(), TRAIN);
-    let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
-    for (name, p) in [("climb", climb_mode()), ("truth's basin", truths_mode())] {
-        let f = Fit::from_params(&p.0, &grid, &Device::Cpu).unwrap();
-        let r = f.reads(&train).unwrap();
-        let obj = f.objective(&r).unwrap().to_scalar::<f32>().unwrap();
-        let (_, time) = f.posterior(&r).unwrap();
-        let t = &sim().truth.time[..TRAIN];
-        let shift = (0..TRAIN).map(|i| time[i] - t[i]).sum::<f64>() / TRAIN as f64;
-        let rms = ((0..TRAIN).map(|i| (time[i] - t[i]).powi(2)).sum::<f64>() / TRAIN as f64).sqrt();
-        eprintln!("{name}: objective {obj:.1}; mean time − truth {shift:.4}, rms {rms:.4}");
-    }
-}
-
 /// A stop flag already set (as Ctrl+C sets it) ends every chain before its
 /// first sweep: nothing kept, and quickly.
 #[test]
@@ -367,78 +322,6 @@ fn a_stop_ends_the_chains_at_once() {
     .unwrap();
     assert!(draws.iter().all(|d| d.time.is_empty()));
     assert!(t0.elapsed().as_secs_f64() < 5.0);
-}
-
-#[test]
-#[ignore = "diagnostic: does a longer, decaying climb reach the truth's basin"]
-fn diagnostic_longer_climb() {
-    let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
-    let reads = first(sim(), TRAIN);
-    let fit = Fit::from_params(&climb_mode().0, &grid, &Device::Cpu).unwrap();
-    let dev = fit.reads(&reads).unwrap();
-    let shift = |p: &Params| {
-        let f = Fit::from_params(p, &grid, &Device::Cpu).unwrap();
-        let (_, t) = f.posterior(&f.reads(&reads).unwrap()).unwrap();
-        (0..TRAIN).map(|i| t[i] - sim().truth.time[i]).sum::<f64>() / TRAIN as f64
-    };
-    eprintln!(
-        "start: objective {:.1}, shift {:.4}",
-        fit.objective(&dev).unwrap().to_scalar::<f32>().unwrap(),
-        shift(&fit.params().unwrap())
-    );
-    for (steps, lr) in [(3000, 0.03), (3000, 0.01), (3000, 0.003), (3000, 0.001)] {
-        let obj = fit.adam(&reads, steps, lr).unwrap();
-        eprintln!(
-            "+{steps} at {lr}: objective {obj:.1}, shift {:.4}",
-            shift(&fit.params().unwrap())
-        );
-    }
-}
-
-#[test]
-#[ignore = "diagnostic: does shifting the climb's path by grid steps reach the truth's basin"]
-fn diagnostic_shifted_climb() {
-    let grid = GridPrior::new(POINTS, 1.0, KAPPA).unwrap();
-    let reads = first(sim(), TRAIN);
-    let base = climb_mode().0;
-    for shift in [-2i32, -1, 0, 1] {
-        let mut p = base.clone();
-        let n = POINTS as i32;
-        p.path[0] = (0..n)
-            .map(|k| base.path[0][(k - shift).clamp(0, n - 1) as usize].clone())
-            .collect();
-        let fit = Fit::from_params(&p, &grid, &Device::Cpu).unwrap();
-        let obj = fit.adam(&reads, 3000, 0.01).unwrap();
-        let f = fit.params().unwrap();
-        let ff = Fit::from_params(&f, &grid, &Device::Cpu).unwrap();
-        let (_, t) = ff.posterior(&ff.reads(&reads).unwrap()).unwrap();
-        let m = (0..TRAIN).map(|i| t[i] - sim().truth.time[i]).sum::<f64>() / TRAIN as f64;
-        eprintln!("path shifted {shift}: objective {obj:.1}, mean time − truth {m:.4}");
-    }
-}
-
-#[test]
-#[ignore = "diagnostic: genes whose speed differs between the climb's mode and the truth's basin"]
-fn diagnostic_gene_speeds_between_modes() {
-    let (a, b) = (climb_mode().0, truths_mode().0);
-    let t = &sim().truth;
-    let mut rows: Vec<(f64, usize)> = (0..a.gamma.len())
-        .map(|g| ((a.gamma[g] / b.gamma[g]).ln(), g))
-        .collect();
-    rows.sort_by(|x, y| y.0.abs().total_cmp(&x.0.abs()));
-    let big = rows.iter().filter(|r| r.0.abs() > 0.5).count();
-    eprintln!(
-        "genes with |log γ_climb − log γ_basin| > 0.5: {big} of {}",
-        rows.len()
-    );
-    for &(d, g) in rows.iter().take(8) {
-        eprintln!(
-            "gene {g}: climb log γ {:.2}, basin {:.2}, truth {:.2} (Δ {d:.2})",
-            a.gamma[g].ln(),
-            b.gamma[g].ln(),
-            t.gamma[g].ln()
-        );
-    }
 }
 
 /// With the jitter in the model, chains in the truth's basin on reads with
@@ -568,4 +451,37 @@ fn on_a_trunk_the_chains_find_the_branch() {
     assert!((mean - 0.4).abs() < 0.1, "branch mean {mean}");
     assert!(rhat < 1.1, "branch R̂ {rhat}");
     assert!(spearmans.iter().all(|&r| r > 0.95), "{spearmans:?}");
+}
+
+/// The chains keep every `snapshot_every`-th kept sweep's parameters, and
+/// the held-out pseudobulks read out from them as cells sit where the
+/// truth has them.
+#[test]
+fn held_out_pseudobulks_are_read_out_from_the_chains_snapshots() {
+    use super::init::spearman;
+    use crate::ode_mixture::likelihood::Reads;
+    use crate::ode_mixture::readout::read_cells;
+    let mut start_at = truth_params(sim(), 133, POINTS);
+    start_at.sub = CLIMB_SUB;
+    let draws = run(
+        &first(sim(), TRAIN),
+        &start_at,
+        &Options {
+            kappa: KAPPA,
+            chains: 2,
+            sweeps: 60,
+            burn: 20,
+            snapshot_every: 10,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert!(draws.iter().all(|d| d.snapshots.len() == 4));
+    let snaps: Vec<_> = draws.iter().flat_map(|d| d.snapshots.clone()).collect();
+    let (g, held) = (sim().n_genes, sim().n_pb - TRAIN);
+    let cells = Reads::new(&sim().u[TRAIN * g..], &sim().s[TRAIN * g..], held, g);
+    let out = read_cells(&cells, &snaps);
+    let rho = spearman(&out.time_mean, &sim().truth.time[TRAIN..]);
+    eprintln!("held out: time Spearman {rho:.4}");
+    assert!(rho > 0.99, "Spearman {rho}");
 }

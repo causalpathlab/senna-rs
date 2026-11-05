@@ -247,48 +247,6 @@ fn with_kinetics_the_direction_survives_a_shared_unspliced_drift() {
     assert!(c.for_truth() > 0.0, "the wrong way: {}", c.for_truth());
 }
 
-/// The rate gate under the drift. It fails, with the jitter in the model
-/// too at the smaller drift: a drift smooth in time is read as a shared
-/// change of rates, and nothing in the reads tells the two apart.
-#[test]
-#[ignore = "fails: a drift smooth in time is not identifiable from kinetics; the jitter in the model absorbs only its rough part"]
-fn with_kinetics_the_rates_survive_a_shared_unspliced_drift() {
-    for drift in [1.0, 3.0] {
-        let c = call(&config(false, drift, 1));
-        let (gamma, _) = rate_errors(&c, &pinned(&c.sim));
-        assert!(
-            gamma < 1.25f64.ln(),
-            "drift {drift}: median |log γ̂/γ| {gamma}"
-        );
-    }
-}
-
-/// Every gate's numbers over three seeds.
-#[test]
-#[ignore = "a sweep for the record, slow"]
-fn sweep() {
-    for seed in [1u64, 2, 3] {
-        for (steady, drift) in [
-            (false, 0.0),
-            (true, 0.0),
-            (true, 1.0),
-            (true, 3.0),
-            (false, 1.0),
-            (false, 3.0),
-        ] {
-            let c = call(&config(steady, drift, seed));
-            if !steady {
-                let genes = pinned(&c.sim);
-                let (gamma, beta) = rate_errors(&c, &genes);
-                eprintln!(
-                    "  {} pinned genes: median |log γ̂/γ| {gamma:.3}, |log β̂/β| {beta:.3}",
-                    genes.len()
-                );
-            }
-        }
-    }
-}
-
 /// With the jitter in the model ([`Climb::jitter`]), a jitter of the
 /// unspliced share from pseudobulk to pseudobulk leaves the gates as they
 /// are without it: rates, time and direction. (The shared model loses the

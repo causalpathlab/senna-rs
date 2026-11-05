@@ -94,3 +94,32 @@ fn the_levels_sit_between_the_nodes_too() {
     }
     assert!((params.time_at(1, 40) - 0.7).abs() < 1e-12);
 }
+
+/// The levels' velocities, `dū/dt = α − β ū` and `ds̄/dt = β ū − γ s̄`
+/// (`α` held over its step), are the trajectory's slope within a step.
+#[test]
+fn the_velocities_are_the_trajectorys_slope() {
+    let sim = simulate(&SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let mut params = truth_params(&sim, 133, 23);
+    params.sub = 8;
+    let lv = params.levels();
+    let (du, ds) = params.velocities();
+    assert_eq!((du.nrows(), du.ncols()), (lv.u.nrows(), lv.u.ncols()));
+    let delta = params.t_len[0] / (lv.points - 1) as f64;
+    let mut worst = 0f64;
+    for k in (0..lv.points - 1).filter(|k| k % 8 >= 1 && k % 8 <= 6) {
+        for g in 0..lv.genes {
+            for (lev, vel) in [(&lv.u, &du), (&lv.s, &ds)] {
+                let fd = (lev[(k + 1, g)] - lev[(k - 1, g)]) / (2.0 * delta);
+                let scale = vel.column(g).abs().max().max(1e-9);
+                worst = worst.max((fd - vel[(k, g)]).abs() / scale);
+            }
+        }
+    }
+    eprintln!("worst relative gap to the slope {worst:.2e}");
+    assert!(worst < 1e-2, "{worst}");
+}

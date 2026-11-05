@@ -5,6 +5,19 @@ use crate::ode_mixture::likelihood::Reads;
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 use legume_numeric::candle::candle_core::Device;
 
+/// Pearson's correlation.
+pub(super) fn pearson(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
+    let (mut c, mut va, mut vb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        c += (x - ma) * (y - mb);
+        va += (x - ma).powi(2);
+        vb += (y - mb).powi(2);
+    }
+    c / (va * vb).sqrt()
+}
+
 /// Spearman's rank correlation.
 pub(super) fn spearman(a: &[f64], b: &[f64]) -> f64 {
     let rank = |v: &[f64]| {
@@ -16,16 +29,7 @@ pub(super) fn spearman(a: &[f64], b: &[f64]) -> f64 {
         }
         r
     };
-    let (ra, rb) = (rank(a), rank(b));
-    let n = a.len() as f64;
-    let m = (n - 1.0) / 2.0;
-    let (mut c, mut va, mut vb) = (0.0, 0.0, 0.0);
-    for (x, y) in ra.iter().zip(&rb) {
-        c += (x - m) * (y - m);
-        va += (x - m).powi(2);
-        vb += (y - m).powi(2);
-    }
-    c / (va * vb).sqrt()
+    pearson(&rank(a), &rank(b))
 }
 
 /// The first `n` pseudobulks' reads.

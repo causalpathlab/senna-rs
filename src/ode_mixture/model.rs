@@ -59,6 +59,20 @@ impl Levels {
     pub fn row(&self, l: usize, k: usize) -> usize {
         l * self.points + k
     }
+
+    /// Every row's totals over the genes, `(Z_u, Z_s)`.
+    pub fn totals(&self) -> Vec<(f64, f64)> {
+        (0..self.u.nrows())
+            .map(|r| (self.u.row(r).sum(), self.s.row(r).sum()))
+            .collect()
+    }
+}
+
+/// The transcription at every node of a path, `α_k = exp(ρᵀ z_k + b)`.
+pub fn alpha_on(path: &[Vec<f64>], rho: &[f64], base: f64) -> Vec<f64> {
+    path.iter()
+        .map(|z| (z.iter().zip(rho).map(|(a, b)| a * b).sum::<f64>() + base).exp())
+        .collect()
 }
 
 impl Params {
@@ -91,10 +105,7 @@ impl Params {
     pub fn levels_of(&self, beta: f64, gamma: f64, rho: &[f64], base: f64) -> (Vec<f64>, Vec<f64>) {
         let (mut u, mut s) = (Vec::new(), Vec::new());
         for (path, &t_len) in self.path.iter().zip(&self.t_len) {
-            let alpha: Vec<f64> = path
-                .iter()
-                .map(|z| (z.iter().zip(rho).map(|(a, b)| a * b).sum::<f64>() + base).exp())
-                .collect();
+            let alpha = alpha_on(path, rho, base);
             let h = t_len / (path.len() - 1) as f64;
             let (ul, sl) = fine_trajectory(&alpha, beta, gamma, h, self.sub);
             u.extend(ul);
@@ -123,5 +134,43 @@ impl Params {
             u: DMatrix::from_fn(rows, genes, |r, g| cols[g].0[r]),
             s: DMatrix::from_fn(rows, genes, |r, g| cols[g].1[r]),
         }
+    }
+
+    /// Every `(lineage, position)`'s velocities, rows as [`Levels`]:
+    /// `dū/dt = α − β ū`, `ds̄/dt = β ū − γ s̄`, `α` the step's the
+    /// position is in (the last step's at the last node).
+    #[cfg(test)]
+    pub fn velocities(&self) -> (DMatrix<f64>, DMatrix<f64>) {
+        self.velocities_of(&self.levels())
+    }
+
+    /// [`Params::velocities`] from these parameters' levels `lv`.
+    pub fn velocities_of(&self, lv: &Levels) -> (DMatrix<f64>, DMatrix<f64>) {
+        let sub = self.sub.max(1);
+        let cols: Vec<(Vec<f64>, Vec<f64>)> = (0..lv.genes)
+            .into_par_iter()
+            .map(|g| {
+                let (b, y) = (self.beta[g], self.gamma[g]);
+                let (mut du, mut ds) = (Vec::new(), Vec::new());
+                for (l, path) in self.path.iter().enumerate() {
+                    let alpha = alpha_on(path, &self.rho[g], self.base[g]);
+                    for k in 0..lv.points {
+                        let a = alpha[(k / sub).min(path.len() - 2)];
+                        let r = lv.row(l, k);
+                        let (u, s) = (lv.u[(r, g)], lv.s[(r, g)]);
+                        du.push(a - b * u);
+                        ds.push(b * u - y * s);
+                    }
+                }
+                (du, ds)
+            })
+            .collect();
+        // Every gene's column, in column-major order.
+        let rows = lv.u.nrows();
+        let (du, ds): (Vec<Vec<f64>>, Vec<Vec<f64>>) = cols.into_iter().unzip();
+        (
+            DMatrix::from_vec(rows, lv.genes, du.concat()),
+            DMatrix::from_vec(rows, lv.genes, ds.concat()),
+        )
     }
 }

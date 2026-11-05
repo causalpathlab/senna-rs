@@ -20,6 +20,7 @@
 
 use super::model::Levels;
 use nalgebra::DMatrix;
+use rayon::prelude::*;
 
 /// A pseudobulk's depth per track, `[λ^u, λ^s]` (the same with no jitter;
 /// `λ^u = e^{ω_p} λ^s` with one).
@@ -83,9 +84,7 @@ impl Reads {
 
 /// `[P × L·n]` every pseudobulk's log-likelihood at every grid point.
 pub fn table(reads: &Reads, lv: &Levels) -> DMatrix<f64> {
-    let z: Vec<f64> = (0..lv.u.nrows())
-        .map(|r| lv.u.row(r).sum() + lv.s.row(r).sum())
-        .collect();
+    let z: Vec<f64> = lv.totals().iter().map(|(u, s)| u + s).collect();
     let log_share =
         |m: &DMatrix<f64>| DMatrix::from_fn(m.ncols(), m.nrows(), |g, r| (m[(r, g)] / z[r]).ln());
     &reads.u * log_share(&lv.u) + &reads.s * log_share(&lv.s)
@@ -96,15 +95,29 @@ pub fn table(reads: &Reads, lv: &Levels) -> DMatrix<f64> {
 /// `N^u_p ω_p − N_p log((e^{ω_p} Z_u + Z_s)/(Z_u + Z_s))` at every point.
 pub fn jittered_table(reads: &Reads, lv: &Levels, omega: &[f64]) -> DMatrix<f64> {
     let mut tab = table(reads, lv);
-    let z: Vec<(f64, f64)> = (0..lv.u.nrows())
-        .map(|r| (lv.u.row(r).sum(), lv.s.row(r).sum()))
-        .collect();
+    let z = lv.totals();
     for (p, &w) in omega.iter().enumerate() {
         let (n_u, n, e) = (reads.unspliced[p], reads.total[p], w.exp());
         for (r, &(z_u, z_s)) in z.iter().enumerate() {
             tab[(p, r)] += n_u * w - n * ((e * z_u + z_s) / (z_u + z_s)).ln();
         }
     }
+    tab
+}
+
+/// [`table`] with every pseudobulk's jitter of sd `sd` integrated out:
+/// [`share_term`] added at every point (the climb's marginal; a cell's).
+pub fn integrated_table(reads: &Reads, lv: &Levels, sd: f64) -> DMatrix<f64> {
+    let mut tab = table(reads, lv);
+    let n = tab.nrows();
+    tab.as_mut_slice()
+        .par_chunks_mut(n)
+        .zip(lv.totals())
+        .for_each(|(col, (z_u, z_s))| {
+            for (p, x) in col.iter_mut().enumerate() {
+                *x += share_term(reads.unspliced[p], reads.total[p], z_u, z_s, sd);
+            }
+        });
     tab
 }
 
