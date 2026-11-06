@@ -482,19 +482,10 @@ impl Scene {
     /// Show the run's velocity field as `style`; read on the first ask.
     pub fn show_velocity_as(&mut self, style: super::VelocityStyle) {
         if self.velocity.is_none() {
-            let Some((m, dir)) = self.data.run.clone() else {
-                self.note = Some("no manifest to read a velocity from".into());
-                return;
-            };
-            match super::velocity::Field::load(&m, &dir) {
-                Ok(Some(field)) => self.velocity = Some(std::sync::Arc::new(field)),
-                Ok(None) => {
-                    self.note =
-                        Some("this run has no cell velocity (no cell_velocity table)".into());
-                    return;
-                }
+            match super::velocity::Field::of_run(self.data.run.as_ref()) {
+                Ok(field) => self.velocity = Some(std::sync::Arc::new(field)),
                 Err(e) => {
-                    self.note = Some(format!("no velocity field: {e}"));
+                    self.note = Some(format!("{e:#}"));
                     return;
                 }
             }

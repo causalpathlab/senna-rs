@@ -62,6 +62,15 @@ impl Field {
         Self::new(&z.rows, &z.mat, &v.rows, &v.mat).map(Some)
     }
 
+    /// The field of `run` (its manifest and folder), or why there is none.
+    pub fn of_run(run: Option<&(RunManifest, std::path::PathBuf)>) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        let (m, dir) = run.context("no manifest to read a velocity from")?;
+        Self::load(m, dir)
+            .context("no velocity field")?
+            .context("this run has no cell velocity (no cell_velocity table)")
+    }
+
     /// The field of cells `z_names` at `z` (`[N × K]`) with velocities `v`
     /// (`[M × K]`, rows `v_names`): the cells in both.
     pub fn new(

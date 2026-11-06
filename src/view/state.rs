@@ -213,6 +213,8 @@ impl Scene {
         } else {
             self.batches_taken = false;
             self.answered = 0;
+            // The other run's velocities are its own.
+            self.velocity = None;
             self.redo = None;
             // An extra data file was matched to the other run's cells.
             self.extra_pending = false;
@@ -221,6 +223,8 @@ impl Scene {
             }
         }
         self.near = None;
+        // Displacements are cached by map, and the maps are new.
+        self.velocity_moved.borrow_mut().take();
         self.locked.clear();
         self.orders.borrow_mut().clear();
         self.feature_index.borrow_mut().take();

@@ -377,3 +377,38 @@ fn a_cell_says_its_time_when_the_run_has_one() {
         .unwrap();
     assert!(state(&s).get("time").is_none());
 }
+
+#[test]
+fn another_runs_data_drops_the_velocity_field_read_for_this_one() {
+    let mut o = timed();
+    o.scene.replace_data(crate::view::tests::scene().data);
+    assert!(o.scene.velocity.is_none());
+    assert_eq!(o.summary()["velocity"], false);
+}
+
+#[test]
+fn on_a_map_of_features_neither_time_nor_velocity_is_drawn_or_said() {
+    let mut o = timed();
+    o.map(args(
+        json!({"time": true, "velocity": "arrows", "width": 16}),
+    ))
+    .unwrap();
+    let s = o
+        .map(args(json!({"space": "features", "width": 16})))
+        .unwrap();
+    assert_eq!(state(&s)["time"], false);
+    assert_eq!(state(&s)["velocity"], "off");
+}
+
+#[test]
+fn a_feature_has_no_time_even_named_as_a_cell() {
+    let mut o = timed();
+    let times = std::sync::Arc::new([("g1".into(), 0.5)].into_iter().collect());
+    o.scene.data.times = Some(times);
+    o.map(args(json!({"space": "features", "width": 16})))
+        .unwrap();
+    let s = o
+        .cell(serde_json::from_value(json!({"name": "g1"})).unwrap())
+        .unwrap();
+    assert!(state(&s).get("time").is_none());
+}

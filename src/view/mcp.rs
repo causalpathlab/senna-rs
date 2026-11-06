@@ -510,8 +510,10 @@ impl Open {
             "colour_by": s.colour.map(|i| s.data.labels[i].title()),
             "focus": s.focused_name(),
             "feature": feature,
-            "time": s.pick == Some(Pick::Time),
-            "velocity": VelocityArg::name(s.velocity_style),
+            "time": s.pick == Some(Pick::Time) && s.current_shown().is_some(),
+            "velocity": VelocityArg::name(s.velocity_style.filter(|_| {
+                s.velocity.is_some() && sp.axis() == Axis::Cells
+            })),
             "legend": legend,
         })
     }
@@ -672,13 +674,13 @@ impl Open {
             })
             .collect();
         let mut out = json!({"name": name, "at": points.xy[i], "groups": groups});
-        if let Some(t) = self
+        let times = self
             .scene
             .data
             .times
             .as_ref()
-            .and_then(|t| t.get(name.as_ref()))
-        {
+            .filter(|_| axis == Axis::Cells);
+        if let Some(t) = times.and_then(|t| t.get(name.as_ref())) {
             out["time"] = json!(t);
         }
         // A round's account of the cell's cluster, when it labels it.
@@ -817,19 +819,13 @@ pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         a.time != Some(true) || data.times.is_some(),
         "this run has no cell times (no cell_time table)"
     );
-    // The field, read now if it is asked for and not read yet.
+    // The field, read now if it is asked for and not read yet: the run's
+    // a round swaps in, if it is another run's.
+    let keeps_field = round.is_none() && s.velocity.is_some();
     let field = match a.velocity.and_then(VelocityArg::style) {
-        Some(_) if s.velocity.is_none() => {
-            let (m, dir) = s
-                .data
-                .run
-                .as_ref()
-                .context("no run manifest to read a velocity from")?;
-            Some(std::sync::Arc::new(
-                super::velocity::Field::load(m, dir)?
-                    .context("this run has no cell velocity (no cell_velocity table)")?,
-            ))
-        }
+        Some(_) if !keeps_field => Some(std::sync::Arc::new(super::velocity::Field::of_run(
+            data.run.as_ref(),
+        )?)),
         _ => None,
     };
 
