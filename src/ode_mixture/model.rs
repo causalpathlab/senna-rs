@@ -37,10 +37,29 @@ pub struct Params {
 pub fn branch_ramp(n: usize, tb: f64, kappa: f64) -> Vec<f64> {
     (0..n)
         .map(|k| {
-            let x = (k as f64 / (n - 1) as f64 - tb).max(0.0) / kappa;
+            let x = (phase(k, n) - tb).max(0.0) / kappa;
             std::f64::consts::SQRT_2 * (1.0 - (-x * x).exp())
         })
         .collect()
+}
+
+/// A branch time is kept this far off either end of the grid.
+pub const BRANCH_EDGE: f64 = 0.02;
+
+/// Branch time `tb` kept [`BRANCH_EDGE`] off either end.
+pub fn off_the_edges(tb: f64) -> f64 {
+    tb.clamp(BRANCH_EDGE, 1.0 - BRANCH_EDGE)
+}
+
+/// Positions per lineage of a grid of `points` nodes, `sub` a step,
+/// `(points − 1) sub + 1`.
+pub fn positions(points: usize, sub: usize) -> usize {
+    points.saturating_sub(1) * sub.max(1) + 1
+}
+
+/// Position `k`'s phase on a grid of `n` positions, `k/(n − 1)`.
+pub fn phase(k: usize, n: usize) -> f64 {
+    k as f64 / (n.max(2) - 1) as f64
 }
 
 /// Every `(lineage, position)`'s levels, rows `ℓ points + k` (positions
@@ -74,6 +93,20 @@ pub fn lineage_label(l: usize) -> Box<str> {
     format!("L{}", l + 1).into()
 }
 
+/// [`lineage_label`]'s lineage, `"L{n}"`'s `n − 1`.
+pub fn lineage_of(label: &str) -> Option<usize> {
+    label
+        .strip_prefix('L')?
+        .parse::<usize>()
+        .ok()?
+        .checked_sub(1)
+}
+
+/// `cell_time`'s column of every cell's posterior on lineage `l`, `p_L…`.
+pub fn lineage_p_column(l: usize) -> Box<str> {
+    format!("p_{}", lineage_label(l)).into()
+}
+
 /// The transcription at every node of a path, `α_k = exp(ρᵀ z_k + b)`.
 pub fn alpha_on(path: &[Vec<f64>], rho: &[f64], base: f64) -> Vec<f64> {
     path.iter()
@@ -84,7 +117,7 @@ pub fn alpha_on(path: &[Vec<f64>], rho: &[f64], base: f64) -> Vec<f64> {
 impl Params {
     /// Positions per lineage, `(n − 1) sub + 1`.
     pub fn positions(&self) -> usize {
-        (self.path[0].len() - 1) * self.sub.max(1) + 1
+        positions(self.path[0].len(), self.sub)
     }
 
     /// The time of lineage `l`'s position `k`.
@@ -95,7 +128,7 @@ impl Params {
     /// Position `k`'s share of a lineage's grid, `k/(positions − 1)`: the
     /// clock every lineage shares and the branch times are on.
     pub fn phase_at(&self, k: usize) -> f64 {
-        k as f64 / (self.positions() - 1).max(1) as f64
+        phase(k, self.positions())
     }
 
     /// The paths' mean over every lineage's grid points, `[H]`.

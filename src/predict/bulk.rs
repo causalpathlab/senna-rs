@@ -61,7 +61,8 @@ pub(crate) fn model_gene_names(kind: RunKind, model: &str) -> anyhow::Result<Vec
         | RunKind::Fne
         | RunKind::ResolveEmbeddingSpace
         | RunKind::Rbm
-        | RunKind::Ode => {
+        | RunKind::Ode
+        | RunKind::EmbedOde => {
             anyhow::bail!(
                 "predict: a {kind} run has no gene dictionary to align a query against, and \
              predict does not score this family"

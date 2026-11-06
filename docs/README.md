@@ -9,6 +9,8 @@ it were a description of the code is how people end up debugging things that wer
 |---|---|
 | [`deconvolve.md`](deconvolve.md) | The `senna deconvolve` model and its inputs. |
 | [`rbm.md`](rbm.md) | The `senna rbm` model: cells as hidden units over their reads, weights through a feature embedding. |
+| [`ode.md`](ode.md) | The `senna ode` model: every cell's lineage, time and velocity from a mixture of splicing ODEs. |
+| [`embed-ode.md`](embed-ode.md) | The `senna embed-ode` model: one embedding of pseudobulks, genes and cells, every lineage of an ode run a curve in it. |
 
 ## Moved to lupin
 

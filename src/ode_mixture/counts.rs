@@ -54,10 +54,55 @@ pub fn two_track_genes(rows: &[Box<str>]) -> (usize, bool) {
 }
 
 /// The cells of `data` one block of columns at a time: `f(first column,
+/// reads)`, `reads` `[B × width]`, backend row `r` summed into column
+/// `column[r]` (a row with none is not read). With `delta` (`[D ×
+/// batches]`, `data`'s rows), every cell's reads are divided by its
+/// batch's effect and scaled back to its own reads on the rows read.
+pub fn for_column_blocks(
+    data: &SparseIoVec,
+    column: &[Option<usize>],
+    width: usize,
+    block: usize,
+    delta: Option<&DMatrix<f32>>,
+    mut f: impl FnMut(usize, DMatrix<f32>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let (n, block) = (data.num_columns(), block.max(1));
+    let bar = new_progress_bar(n.div_ceil(block) as u64).with_message("reading cells");
+    for start in (0..n).step_by(block) {
+        bar.inc(1);
+        let end = (start + block).min(n);
+        let mut reads = DMatrix::<f32>::zeros(end - start, width);
+        let batch = delta.map(|_| data.get_batch_membership(start..end));
+        let mut raw = vec![0f32; end - start];
+        data.for_each_triplet(start..end, block, |row, col, v| {
+            let (r, c) = (row as usize, col as usize);
+            let Some(j) = column[r] else {
+                return;
+            };
+            raw[c] += v;
+            reads[(c, j)] += match (delta, batch.as_ref()) {
+                (Some(d), Some(b)) => v / d[(r, b[c])].max(1e-8),
+                _ => v,
+            };
+        })?;
+        if delta.is_some() {
+            for (i, &total) in raw.iter().enumerate() {
+                let now = reads.row(i).sum();
+                if now > 0.0 {
+                    reads.row_mut(i).scale_mut(total / now);
+                }
+            }
+        }
+        f(start, reads)?;
+    }
+    bar.finish_and_clear();
+    Ok(())
+}
+
+/// The cells of `data` one block of columns at a time: `f(first column,
 /// unspliced, spliced)` with each block's `[B × G]` reads on the genes
-/// named `genes`, in that order. With `delta` (`[D × batches]`, `data`'s
-/// rows), every cell's reads are divided by its batch's effect and scaled
-/// back to its own reads on these genes.
+/// named `genes`, in that order ([`for_column_blocks`], a cell's total
+/// over both tracks).
 pub fn for_cell_blocks(
     data: &SparseIoVec,
     genes: &[Box<str>],
@@ -67,50 +112,24 @@ pub fn for_cell_blocks(
 ) -> anyhow::Result<()> {
     let rows = data.row_names()?;
     let (all, role) = track_rows(&rows);
-    let column: HashMap<&str, usize> = genes
+    let g = genes.len();
+    let at: HashMap<&str, usize> = genes
         .iter()
         .enumerate()
         .map(|(c, g)| (g.as_ref(), c))
         .collect();
-    // Backend row → (fitted gene column, unspliced?).
-    let role: Vec<Role> = role
+    // Backend row → its column: spliced `c`, unspliced `G + c`.
+    let column: Vec<Option<usize>> = role
         .iter()
-        .map(|r| r.and_then(|(j, u)| column.get(all[j]).map(|&c| (c, u))))
+        .map(|r| r.and_then(|(j, u)| at.get(all[j]).map(|&c| if u { g + c } else { c })))
         .collect();
-    let n = data.num_columns();
-    let bar = new_progress_bar(n.div_ceil(block.max(1)) as u64).with_message("reading cells");
-    for start in (0..n).step_by(block.max(1)) {
-        bar.inc(1);
-        let end = (start + block).min(n);
-        let mut unspliced = DMatrix::<f32>::zeros(end - start, genes.len());
-        let mut spliced = DMatrix::<f32>::zeros(end - start, genes.len());
-        let batch = delta.map(|_| data.get_batch_membership(start..end));
-        let mut raw = vec![0f32; end - start];
-        data.for_each_triplet(start..end, block, |row, col, v| {
-            let Some((c, u)) = role[row as usize] else {
-                return;
-            };
-            raw[col as usize] += v;
-            let v = match (delta, batch.as_ref()) {
-                (Some(d), Some(b)) => v / d[(row as usize, b[col as usize])].max(1e-8),
-                _ => v,
-            };
-            let m = if u { &mut unspliced } else { &mut spliced };
-            m[(col as usize, c)] += v;
-        })?;
-        if delta.is_some() {
-            for (i, &n) in raw.iter().enumerate() {
-                let now = unspliced.row(i).sum() + spliced.row(i).sum();
-                if now > 0.0 {
-                    unspliced.row_mut(i).scale_mut(n / now);
-                    spliced.row_mut(i).scale_mut(n / now);
-                }
-            }
-        }
-        f(start, unspliced, spliced)?;
-    }
-    bar.finish_and_clear();
-    Ok(())
+    for_column_blocks(data, &column, 2 * g, block, delta, |start, reads| {
+        let (spliced, unspliced) = (
+            reads.columns(0, g).into_owned(),
+            reads.columns(g, g).into_owned(),
+        );
+        f(start, unspliced, spliced)
+    })
 }
 
 /// The pseudobulks' reads `counts` `[D × P]` on `data`'s rows `rows`, as

@@ -229,6 +229,16 @@ fn emit(flag: &str, many: Many, vs: Vec<String>) -> Vec<String> {
     }
 }
 
+/// The flags whose value is a path (an earlier run or its table), typed
+/// from where `senna run` started.
+pub const PATH_FLAGS: [&str; 5] = [
+    "from",
+    "init-from",
+    "freeze-feature-embedding",
+    "init-feature-embedding",
+    "lora-feature-embedding",
+];
+
 /// One embedding method as a form.
 #[derive(Clone, Debug)]
 pub struct Method {
@@ -277,9 +287,17 @@ impl Method {
     }
 
     /// The command line, without the program: method, data files, batch
-    /// files, `--out`, then every changed flag.
+    /// files, `--out`, then every changed flag, the value of one of
+    /// [`PATH_FLAGS`] through `path` (as the data are, from where it was
+    /// typed to where the fit runs).
     #[must_use]
-    pub fn argv(&self, data: &[String], batches: &[String], out: &str) -> Vec<String> {
+    pub fn argv(
+        &self,
+        data: &[String],
+        batches: &[String],
+        out: &str,
+        path: impl Fn(&str) -> String,
+    ) -> Vec<String> {
         let mut argv = vec![self.name.clone()];
         argv.extend(data.iter().cloned());
         if let (Some(many), false) = (self.batch, batches.is_empty()) {
@@ -287,7 +305,11 @@ impl Method {
         }
         argv.extend(["--out".to_string(), out.to_string()]);
         for f in &self.fields {
-            argv.extend(f.argv());
+            let mut a = f.argv();
+            if PATH_FLAGS.contains(&f.long.as_str()) {
+                a.iter_mut().skip(1).for_each(|v| *v = path(v));
+            }
+            argv.extend(a);
         }
         argv
     }

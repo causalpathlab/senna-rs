@@ -20,6 +20,7 @@ fn job(
         labels: Vec::new(),
         clones: None,
         pb_from: None,
+        from: None,
         lane: 0,
     }
 }
@@ -380,6 +381,86 @@ while [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; don
     after.pb_from = Some("topic.senna.json".into());
     let started = std::time::Instant::now();
     let q = Queue::start(vec![job2("topic", 0), after]);
+    while !q.finished() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1900),
+        "waited"
+    );
+    assert_eq!(q.states(), [State::Done, State::Done]);
+}
+
+/// A fit reading another queued fit's run (`--from`, as embed-ode reads an
+/// ode run) does not start when that one fails, and waits for it across
+/// lanes.
+#[cfg(unix)]
+#[test]
+fn a_fit_reading_a_queued_fits_run_waits_for_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let builder = job(
+        dir.path(),
+        Tool::Senna,
+        Path::new("/bin/false"),
+        "ode",
+        &["ode", "--out", "ode"],
+    );
+    let mut user = job(
+        dir.path(),
+        Tool::Senna,
+        Path::new("/bin/true"),
+        "embed-ode",
+        &["embed-ode", "--from", "ode", "--out", "embed-ode"],
+    );
+    user.from = Some("ode".into());
+    let q = Queue::start(vec![builder, user]);
+    while !q.finished() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let s = q.shared.lock().unwrap();
+    match &s.states[1] {
+        State::Failed(why) => assert!(why.contains("ode did not finish"), "{why}"),
+        other => panic!("embed-ode should not start: {other:?}"),
+    }
+    drop(s);
+    assert!(!dir.path().join("embed-ode.cmd.sh").exists());
+
+    // In another lane, named by its manifest: waited for.
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("fake-senna");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh
+sleep 1
+while [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let builder = job(
+        dir.path(),
+        Tool::Senna,
+        &fake,
+        "ode",
+        &["ode", "--out", "ode"],
+    );
+    let mut user = job(
+        dir.path(),
+        Tool::Senna,
+        &fake,
+        "embed-ode",
+        &[
+            "embed-ode",
+            "--from",
+            "ode.senna.json",
+            "--out",
+            "embed-ode",
+        ],
+    );
+    user.from = Some("ode.senna.json".into());
+    user.lane = 1;
+    let started = std::time::Instant::now();
+    let q = Queue::start(vec![builder, user]);
     while !q.finished() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
