@@ -70,6 +70,12 @@ fn cli_on_devices(devices: bool) -> clap::Command {
         } else {
             c
         };
+        // embed-ode reads an ode run.
+        let c = if name == "embed-ode" {
+            c.arg(clap::Arg::new("from").long("from").required(true))
+        } else {
+            c
+        };
         // Two name a flag alike that means something else in each.
         let c = match name {
             "vae" => c.arg(clap::Arg::new("depth").long("depth").default_value("20")),
@@ -298,24 +304,29 @@ fn every_method_of_senna_parses_from_an_untouched_form() {
     let mut cli = crate::Cli::command();
     cli.build();
     for m in METHODS {
-        let form = Method::new(&cli, m).unwrap();
+        let mut form = Method::new(&cli, m).unwrap();
         assert!(!form.fields.is_empty(), "{m} has no flags");
         assert!(form.takes_batches(), "{m} takes no batch files");
+        // What a method cannot run without (embed-ode's `--from`) is typed
+        // in; nothing else is touched.
+        for f in form.fields.iter_mut().filter(|f| f.required) {
+            f.value = "run".into();
+        }
         let argv = form.argv(
             &["d1.zarr".into(), "d2.zarr".into()],
             &["b1.tsv".into(), "b2.tsv".into()],
             "o",
+            str::to_owned,
         );
         assert_eq!(form::check(&cli, &argv), Ok(()), "{m}: {argv:?}");
         // A switch flipped on reaches the command line as clap takes it.
-        let mut form = form;
         if let Some(f) = form
             .fields
             .iter_mut()
             .find(|f| matches!(f.kind, Kind::Flag { .. }) && !f.advanced)
         {
             f.toggle();
-            let argv = form.argv(&["d.zarr".into()], &[], "o");
+            let argv = form.argv(&["d.zarr".into()], &[], "o", str::to_owned);
             assert_eq!(form::check(&cli, &argv), Ok(()), "{m}: {argv:?}");
         }
     }
@@ -1315,6 +1326,82 @@ fn a_fit_given_whole_out_of_here_has_its_data_whole() {
 }
 
 #[test]
-fn ode_is_one_of_the_methods() {
-    assert!(METHODS.contains(&"ode"));
+fn ode_and_embed_ode_are_methods_the_embedding_after_the_run_it_reads() {
+    let at = |m: &str| METHODS.iter().position(|x| *x == m).expect(m);
+    assert!(at("ode") < at("embed-ode"), "an embed-ode reads an ode run");
+}
+
+#[test]
+fn an_embed_ode_without_its_ode_run_is_blamed_on_from() {
+    use clap::CommandFactory;
+    let mut cli = crate::Cli::command();
+    cli.build();
+    let form = Method::new(&cli, "embed-ode").unwrap();
+    let from = form.fields.iter().find(|f| f.long == "from").unwrap();
+    assert!(from.required);
+    let argv = form.argv(&["d.zarr".into()], &[], "o", str::to_owned);
+    let why = form::check(&cli, &argv).unwrap_err();
+    assert_eq!(form::blamed(&why, &form.fields), Some("from"), "{why}");
+}
+
+/// A `--from` typed from where senna run started is passed relative to
+/// the folder the fit runs in, as its data are.
+#[test]
+fn a_from_typed_here_is_passed_from_the_fits_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.pairs = data(dir.path(), &["d1.zarr.zip"]);
+    a.screen = Screen::Methods;
+    for m in ["ode", "embed-ode"] {
+        a.method_row = METHODS.iter().position(|x| *x == m).unwrap();
+        key(&mut a, KeyCode::Char(' '));
+    }
+    let row = |a: &App, m: &str| a.rows.iter().position(|r| r.form.name == m).unwrap();
+    let (ode, emb) = (row(&a, "ode"), row(&a, "embed-ode"));
+    a.rows[ode].out = "results/ode".into();
+    a.rows[emb].out = "results/emb".into();
+    let from = a.rows[emb]
+        .form
+        .fields
+        .iter()
+        .position(|f| f.long == "from")
+        .unwrap();
+    a.rows[emb].form.fields[from].value = "results/ode".into();
+    let planned = a.plan();
+    let job = &planned
+        .iter()
+        .find(|p| p.job.method == "embed-ode")
+        .unwrap()
+        .job;
+    let at = job.argv.iter().position(|v| v == "--from").unwrap();
+    assert_eq!(job.argv[at + 1], "ode");
+    assert_eq!(job.from.as_deref(), Some("ode"));
+}
+
+/// An earlier run's table typed from where senna run started is passed
+/// relative to the folder the fit runs in, as `--from` is.
+#[test]
+fn a_feature_table_typed_here_is_passed_from_the_fits_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    a.pairs = data(dir.path(), &["d1.zarr.zip"]);
+    let bge = row_of(&a, "bge");
+    a.rows[bge].on = true;
+    a.rows[bge].out = "results/bge".into();
+    let lora = a.rows[bge]
+        .form
+        .fields
+        .iter()
+        .position(|f| f.long == "lora-feature-embedding")
+        .unwrap();
+    a.rows[bge].form.fields[lora].value = "old/x.feature_embedding.parquet".into();
+    let planned = a.plan();
+    let job = &planned.iter().find(|p| p.job.method == "bge").unwrap().job;
+    let at = job
+        .argv
+        .iter()
+        .position(|v| v == "--lora-feature-embedding")
+        .unwrap();
+    assert_eq!(job.argv[at + 1], "../old/x.feature_embedding.parquet");
+    assert_eq!(job.from, None);
 }

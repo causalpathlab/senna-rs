@@ -6,7 +6,7 @@ Stochastic embedding with nearest-neighbourhood adjustment.
 
 Annotation, lineage, pseudotime, and plots live in [`lupin`](https://github.com/causalpathlab/lupin-rs); layout/clustering stay here.
 
-**Set up fits in the terminal:** `senna run [DIR]` lets you pick data files and the batch labels of each, queue several methods (topic, masked-topic, masked-vae, masked-sbp, vae, svd, bge, simba, rbm, ode), and change any of their flags. `O` sets an output header that every `--out` starts with (`exp1` gives `exp1_svd`; `results/` puts them all in that folder; any folder the header names, `~/` included, is made as soon as it is entered); `o` names one by hand. Every flag comes with its help, including the hidden ones (marked `·`; `a` hides them) and `--threads`. Ctrl+R shows the exact commands, checked as senna parses them, and Ctrl+R (or Enter) runs them. They run in turn with each one's progress and a scrollable log on screen, and `v` opens the results in `senna view`. Each command is saved first as `{out}.cmd.sh`, so `bash {out}.cmd.sh` runs it again. The script refuses to run over an existing `{out}.senna.json`, and `senna run` never writes over a script.
+**Set up fits in the terminal:** `senna run [DIR]` lets you pick data files and the batch labels of each, queue several methods (topic, masked-topic, masked-vae, masked-sbp, vae, svd, bge, simba, rbm, ode, embed-ode; a fit whose `--from` names one queued before it waits for that one), and change any of their flags. `O` sets an output header that every `--out` starts with (`exp1` gives `exp1_svd`; `results/` puts them all in that folder; any folder the header names, `~/` included, is made as soon as it is entered); `o` names one by hand. Every flag comes with its help, including the hidden ones (marked `·`; `a` hides them) and `--threads`. Ctrl+R shows the exact commands, checked as senna parses them, and Ctrl+R (or Enter) runs them. They run in turn with each one's progress and a scrollable log on screen, and `v` opens the results in `senna view`. Each command is saved first as `{out}.cmd.sh`, so `bash {out}.cmd.sh` runs it again. The script refuses to run over an existing `{out}.senna.json`, and `senna run` never writes over a script.
 
 **Clones first, when donors differ:** with several donors, a donor-private CNV clone can be mixed into other donors by batch correction. `senna run` can queue `mung clones` ([mung-cnv](https://github.com/causalpathlab/mung-cnv), 0.2.7 or later, installed separately) before the fits. When it is done, you see its clones (cells per donor in clones; each clone's size, donor share, purity and malignancy) and choose whether the fits get `--cnv-clones`, run without it, or stop. mung is a separate program, as lupin is: senna reads its form from `mung describe clones`, starts `mung` (or `$SENNA_MUNG`), and reads only the `{out}.clones.parquet` it writes.
 
@@ -246,6 +246,23 @@ chains; every cell is read out from the chains' draws for its lineage, time
 
 ```bash
 senna ode tracks.zarr -o out --lineages 2
+```
+
+## `senna embed-ode` — one embedding shaped by an ode run's lineages and times
+
+An embedding in the manner of `senna bge`, on every gene's spliced reads:
+every pseudobulk of a `senna ode` run a point `x_p`, every gene a vector `w_g`
+and a baseline `b_g`, the reads a full softmax over the genes of
+`x_pᵀ w_g + b_g`. Every lineage is a smooth curve in the same space, on the
+ode run's grid and trunk, and every pseudobulk is held near the curve at the
+lineage and time the ode run put it, a Gaussian whose sd is learned. Every
+cell is then placed by its own reads near its curve, its velocity the curves'
+slope there. The map, the velocity field, the ode run's times and gene
+markers all show in `senna view` and over MCP. `senna docs embed-ode` has the
+model, what it reads from the ode run and the outputs.
+
+```bash
+senna embed-ode --from ode.senna.json -o out --dim 16
 ```
 
 ## `senna vae` — scVI-style Gaussian VAE

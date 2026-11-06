@@ -233,9 +233,7 @@ fn rho_of_run(
         .as_deref()
         .map(|rel| resolve(manifest_dir, rel));
     let legacy_slot = m.kind.dictionary_may_hold_rho();
-    let own = resolve(manifest_dir, &m.prefix)
-        .to_string_lossy()
-        .into_owned();
+    let own = m.prefix_in(manifest_dir).to_string_lossy().into_owned();
     let probe = |p: &str| probe_feature_embedding(p, coembed.as_deref(), legacy_slot);
     match given {
         Some(g) if g != own => probe(g).or_else(|e| probe(&own).map_err(|_| e)),
@@ -410,6 +408,14 @@ pub enum RunKind {
     /// `cell_velocity` every cell's velocity there, `cell_time` its lineage
     /// and time. No gene table or decoder a viewer can read.
     Ode,
+    /// `senna embed-ode` — an embedding shaped by an ode run: every
+    /// pseudobulk, gene and cell in one space where `x_pᵀ w_g + b_g` scores
+    /// the genes (a softmax), the ode run's lineage curves `μ_ℓ` drawn in it
+    /// (`trajectory`) and every pseudobulk and cell held near its curve.
+    /// `cell_embedding` the cells, `feature_embedding` and `feature_bias`
+    /// the genes, `cell_velocity` the curves' slope at every cell,
+    /// `cell_time` the ode run's.
+    EmbedOde,
 }
 
 /// How a run's tables give each cell's expected level of each feature, up
@@ -465,9 +471,11 @@ impl RunKind {
         match self {
             // These write `cell_embedding` (or, for fne, a latent that IS the
             // graph embedding), so `geometry_latent` hands back Euclidean Z.
-            RunKind::Bge | RunKind::Fne | RunKind::ResolveEmbeddingSpace | RunKind::Simba => {
-                CellSpace::Embedding
-            }
+            RunKind::Bge
+            | RunKind::Fne
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Simba
+            | RunKind::EmbedOde => CellSpace::Embedding,
             // `latent` is log θ and `cell_embedding` is absent, so the geometry
             // table is the simplex itself.
             RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => CellSpace::LogSimplex,
@@ -498,6 +506,7 @@ impl RunKind {
             RunKind::Simba => "simba",
             RunKind::Rbm => "rbm",
             RunKind::Ode => "ode",
+            RunKind::EmbedOde => "embed-ode",
         }
     }
 
@@ -516,6 +525,7 @@ impl RunKind {
             RunKind::Vae
             | RunKind::Rbm
             | RunKind::Ode
+            | RunKind::EmbedOde
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Bge
@@ -553,6 +563,7 @@ impl RunKind {
             | RunKind::Vae
             | RunKind::Rbm
             | RunKind::Ode
+            | RunKind::EmbedOde
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
@@ -578,6 +589,7 @@ impl RunKind {
             | RunKind::Vae
             | RunKind::Rbm
             | RunKind::Ode
+            | RunKind::EmbedOde
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
@@ -599,6 +611,7 @@ impl RunKind {
             | RunKind::Vae
             | RunKind::Rbm
             | RunKind::Ode
+            | RunKind::EmbedOde
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
@@ -621,6 +634,7 @@ impl RunKind {
             | RunKind::Vae
             | RunKind::Rbm
             | RunKind::Ode
+            | RunKind::EmbedOde
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Bge
@@ -652,7 +666,7 @@ impl RunKind {
             RunKind::MaskedVae => ExpressionModel::TopicOfLogits,
             // vae's decoder, rbm's visible units given the hidden.
             RunKind::Vae | RunKind::Rbm => ExpressionModel::LatentLoadings,
-            RunKind::Bge | RunKind::ResolveEmbeddingSpace | RunKind::Simba => {
+            RunKind::Bge | RunKind::ResolveEmbeddingSpace | RunKind::Simba | RunKind::EmbedOde => {
                 ExpressionModel::Embedding
             }
             RunKind::Svd | RunKind::JointSvd | RunKind::Fne | RunKind::Ode => {
@@ -998,6 +1012,11 @@ pub struct RunOutputs {
     /// only with a shared trunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_time: Option<String>,
+    /// `{out}.trajectory.parquet`: every lineage's curve in the coordinates
+    /// of `cell_embedding`, a row per `(lineage, position)` with its
+    /// `phase` on the grid (`senna embed-ode`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trajectory: Option<String>,
     /// Fields this version does not know, written by another tool or a
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]
@@ -1232,6 +1251,19 @@ pub struct RunDefaults {
 }
 
 impl RunManifest {
+    /// The run's prefix, its manifest in `dir`: the recorded one
+    /// ([`resolve`]d) while its manifest is there, else its name in `dir`
+    /// (the run moved since it was written).
+    #[must_use]
+    pub fn prefix_in(&self, dir: &Path) -> PathBuf {
+        let at = resolve(dir, &self.prefix);
+        if Path::new(&default_path(&at.to_string_lossy())).is_file() {
+            at
+        } else {
+            dir.join(Path::new(&self.prefix).file_name().unwrap_or_default())
+        }
+    }
+
     pub fn new(kind: RunKind, prefix: &str) -> Self {
         Self {
             version: MANIFEST_VERSION,
@@ -1930,7 +1962,8 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         | RunKind::JointTopic
         | RunKind::Vae
         | RunKind::Simba
-        | RunKind::Rbm => {}
+        | RunKind::Rbm
+        | RunKind::EmbedOde => {}
         RunKind::Svd | RunKind::JointSvd | RunKind::Ode => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
              use a bge / fne / topic-family run as the source",
@@ -2168,6 +2201,7 @@ mod tests {
         assert_eq!(RunKind::Vae.expression_model(), E::LatentLoadings);
         assert_eq!(RunKind::Bge.expression_model(), E::Embedding);
         assert_eq!(RunKind::Svd.expression_model(), E::Unmodelled);
+        assert_eq!(RunKind::EmbedOde.expression_model(), E::Embedding);
         // The log-θ latent rule follows the model.
         assert!(RunKind::Topic.latent_is_log_simplex());
         assert!(!RunKind::MaskedVae.latent_is_log_simplex());

@@ -18,6 +18,8 @@ pub enum Topic {
     Rbm,
     /// Every cell's lineage, time and velocity from a mixture of splicing ODEs.
     Ode,
+    /// One embedding of pseudobulks, genes and cells, shaped by an ode run.
+    EmbedOde,
     // Moved to lupin; kept so the old names say where to look.
     #[value(hide = true)]
     Annotation,
@@ -49,6 +51,11 @@ const DOCS: &[(Topic, &str, &str)] = &[
         Topic::Ode,
         "METHOD  lineage, time and velocity from a mixture of splicing ODEs",
         include_str!("../docs/ode.md"),
+    ),
+    (
+        Topic::EmbedOde,
+        "METHOD  one embedding of pseudobulks, genes and cells, shaped by an ode run",
+        include_str!("../docs/embed-ode.md"),
     ),
 ];
 
@@ -102,4 +109,21 @@ pub fn run_docs(args: &DocsArgs) -> Result<()> {
     };
     println!("{text}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_method_topic_has_its_write_up_under_the_slug_clap_takes() {
+        for (slug, title) in [
+            ("ode", "# `senna ode`"),
+            ("embed-ode", "# `senna embed-ode`"),
+        ] {
+            let topic = Topic::from_str(slug, false).unwrap();
+            let text = DOCS.iter().find(|(t, _, _)| *t == topic).map(|d| d.2);
+            assert!(text.is_some_and(|t| t.starts_with(title)), "{slug}");
+        }
+    }
 }

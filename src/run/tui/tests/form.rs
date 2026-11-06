@@ -91,7 +91,12 @@ fn rows_come_from_the_clap_definition() {
 fn an_untouched_form_passes_only_what_senna_run_fills() {
     let cli = cli();
     let m = Method::new(&cli, "fit").unwrap();
-    let argv = m.argv(&["d1.zarr".into(), "d2.zarr".into()], &[], "o");
+    let argv = m.argv(
+        &["d1.zarr".into(), "d2.zarr".into()],
+        &[],
+        "o",
+        str::to_owned,
+    );
     assert_eq!(argv, ["fit", "d1.zarr", "d2.zarr", "--out", "o"]);
     assert_eq!(check(&cli, &argv), Ok(()));
     assert_eq!(m.changed(), 0);
@@ -107,7 +112,7 @@ fn changed_rows_reach_the_command_line_as_clap_takes_them() {
     field(&mut m, "levels").value = "3, 4".into();
     field(&mut m, "names").value = "a,b".into();
     field(&mut m, "seed").value = "  ".into();
-    let argv = m.argv(&["d.zarr".into()], &["b1.tsv".into()], "o");
+    let argv = m.argv(&["d.zarr".into()], &["b1.tsv".into()], "o", str::to_owned);
     assert_eq!(
         argv,
         [
@@ -151,11 +156,11 @@ fn clap_complaints_name_the_row() {
     let cli = cli();
     let mut m = Method::new(&cli, "fit").unwrap();
     field(&mut m, "steps").value = "many".into();
-    let why = check(&cli, &m.argv(&["d.zarr".into()], &[], "o")).unwrap_err();
+    let why = check(&cli, &m.argv(&["d.zarr".into()], &[], "o", str::to_owned)).unwrap_err();
     assert!(why.contains("--steps"), "{why}");
     assert_eq!(blamed(&why, &m.fields), Some("steps"));
     field(&mut m, "steps").reset();
-    let why = check(&cli, &m.argv(&[], &[], "o")).unwrap_err();
+    let why = check(&cli, &m.argv(&[], &[], "o", str::to_owned)).unwrap_err();
     assert_eq!(blamed(&why, &m.fields), None);
 }
 
@@ -166,6 +171,7 @@ fn batch_paths_pass_whole_even_with_spaces() {
         &["d.zarr".into()],
         &["my labels/b 1.tsv".into(), "b2.tsv".into()],
         "o",
+        str::to_owned,
     );
     assert_eq!(argv[2..4], ["--batch-files", "my labels/b 1.tsv,b2.tsv"]);
 }

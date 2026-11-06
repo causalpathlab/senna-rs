@@ -739,7 +739,7 @@ impl App {
     fn blamed_here(&self) -> Option<String> {
         let m = self.param_method;
         let form = &self.rows[m].form;
-        let argv = form.argv(&["x".to_string()], &[], "x");
+        let argv = form.argv(&["x".to_string()], &[], "x", str::to_owned);
         if let Some((cm, ca, blamed)) = self.blame.borrow().as_ref() {
             if *cm == m && *ca == argv {
                 return blamed.clone();

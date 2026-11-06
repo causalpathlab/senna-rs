@@ -8,7 +8,7 @@ use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
 use super::direction::{direction_of, Call};
 use super::init::{climb, Climb};
 use super::likelihood::Reads;
-use super::model::lineage_label;
+use super::model::{lineage_label, lineage_p_column};
 use super::output::{chain_stats, ChainStat, MapBasis};
 use super::readout::{grid_posterior, read_cells, GridPosterior, Snapshot};
 use super::sampler::{self, Draws};
@@ -596,7 +596,7 @@ impl CellTable {
             .p_lineage
             .iter()
             .enumerate()
-            .map(|(l, v)| (format!("p_L{}", l + 1).into(), v.clone()))
+            .map(|(l, v)| (lineage_p_column(l), v.clone()))
             .collect();
         let mut cols: Vec<(Box<str>, Column)> = vec![
             ("lineage".into(), Column::Str(&self.lineage)),

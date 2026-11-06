@@ -605,7 +605,7 @@ fn read_args(
 /// kept none, or it does not fit this run's files and sketch width.
 fn reuse_preprocessing(args: &LoadProjectArgs, run: &str) -> anyhow::Result<Option<ProjectedData>> {
     let (m, dir) = senna::run_manifest::load_for(run)?;
-    let prefix = senna::run_manifest::resolve(&dir, &m.prefix);
+    let prefix = m.prefix_in(&dir);
     let Some(prep) = crate::topic::prep::Prep::read(&prefix.to_string_lossy())? else {
         return Ok(None);
     };

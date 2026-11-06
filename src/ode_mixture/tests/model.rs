@@ -1,4 +1,4 @@
-use crate::ode_mixture::model::Params;
+use crate::ode_mixture::model::{lineage_label, lineage_of, lineage_p_column, Params};
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 
 /// The simulator's truth as parameters on a grid of `n` points, the paths
@@ -122,4 +122,14 @@ fn the_velocities_are_the_trajectorys_slope() {
     }
     eprintln!("worst relative gap to the slope {worst:.2e}");
     assert!(worst < 1e-2, "{worst}");
+}
+
+#[test]
+fn a_lineage_label_reads_back_as_its_lineage() {
+    for l in 0..12 {
+        assert_eq!(lineage_of(&lineage_label(l)), Some(l));
+    }
+    assert_eq!(lineage_p_column(1).as_ref(), "p_L2");
+    assert_eq!(lineage_of("L0"), None);
+    assert_eq!(lineage_of("T1"), None);
 }
