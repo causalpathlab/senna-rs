@@ -418,15 +418,20 @@ fn mark(
 }
 
 impl Scene {
+    /// How the velocity field is drawn on the map shown: only over cells,
+    /// and only once it is read.
+    pub(super) fn velocity_drawn(&self) -> Option<super::VelocityStyle> {
+        self.velocity_style.filter(|_| {
+            self.velocity.is_some() && self.current().axis() == super::data::Axis::Cells
+        })
+    }
+
     /// The run's velocity field over the cell map, as streamlines or as
     /// arrows, when shown.
     fn draw_velocity(&self, frame: &mut Frame, vp: &Viewport, floor: f32) {
-        let (Some(field), Some(style)) = (self.velocity.as_ref(), self.velocity_style) else {
+        let (Some(field), Some(style)) = (self.velocity.as_ref(), self.velocity_drawn()) else {
             return;
         };
-        if self.current().axis() != super::data::Axis::Cells {
-            return;
-        }
         let points = &self.current().points;
         let moved = {
             let mut cache = self.velocity_moved.borrow_mut();
@@ -482,19 +487,10 @@ impl Scene {
     /// Show the run's velocity field as `style`; read on the first ask.
     pub fn show_velocity_as(&mut self, style: super::VelocityStyle) {
         if self.velocity.is_none() {
-            let Some((m, dir)) = self.data.run.clone() else {
-                self.note = Some("no manifest to read a velocity from".into());
-                return;
-            };
-            match super::velocity::Field::load(&m, &dir) {
-                Ok(Some(field)) => self.velocity = Some(std::sync::Arc::new(field)),
-                Ok(None) => {
-                    self.note =
-                        Some("this run has no cell velocity (no cell_velocity table)".into());
-                    return;
-                }
+            match super::velocity::Field::of_run(self.data.run.as_ref()) {
+                Ok(field) => self.velocity = Some(std::sync::Arc::new(field)),
                 Err(e) => {
-                    self.note = Some(format!("no velocity field: {e}"));
+                    self.note = Some(format!("{e:#}"));
                     return;
                 }
             }

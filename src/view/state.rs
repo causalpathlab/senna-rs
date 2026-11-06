@@ -186,15 +186,7 @@ impl Scene {
         let focus = self.focused_name();
         // A new annotation round of the same run points at the same model
         // and data files; keep what was read from them.
-        let same_run = match (&self.data.run, &data.run) {
-            (Some((a, ad)), Some((b, bd))) => {
-                ad == bd
-                    && serde_json::to_value(&a.outputs).ok()
-                        == serde_json::to_value(&b.outputs).ok()
-                    && serde_json::to_value(&a.data).ok() == serde_json::to_value(&b.data).ok()
-            }
-            _ => false,
-        };
+        let same_run = same_run(&self.data, &data);
         // The same run read again keeps the batches it had (or is reading,
         // or found none of); another run reads its own on the side.
         let batch = self
@@ -213,6 +205,8 @@ impl Scene {
         } else {
             self.batches_taken = false;
             self.answered = 0;
+            // The other run's velocities are its own.
+            self.velocity = None;
             self.redo = None;
             // An extra data file was matched to the other run's cells.
             self.extra_pending = false;
@@ -221,6 +215,8 @@ impl Scene {
             }
         }
         self.near = None;
+        // Displacements are cached by map, and the maps are new.
+        self.velocity_moved.borrow_mut().take();
         self.locked.clear();
         self.orders.borrow_mut().clear();
         self.feature_index.borrow_mut().take();
@@ -476,5 +472,18 @@ impl Scene {
             focus,
             pick
         )
+    }
+}
+
+/// Whether `a` and `b` read the same run: the same folder, outputs and data
+/// files (another annotation round of it, say).
+pub(super) fn same_run(a: &Dataset, b: &Dataset) -> bool {
+    match (&a.run, &b.run) {
+        (Some((a, ad)), Some((b, bd))) => {
+            ad == bd
+                && serde_json::to_value(&a.outputs).ok() == serde_json::to_value(&b.outputs).ok()
+                && serde_json::to_value(&a.data).ok() == serde_json::to_value(&b.data).ok()
+        }
+        _ => false,
     }
 }

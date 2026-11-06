@@ -6,7 +6,7 @@ Stochastic embedding with nearest-neighbourhood adjustment.
 
 Annotation, lineage, pseudotime, and plots live in [`lupin`](https://github.com/causalpathlab/lupin-rs); layout/clustering stay here.
 
-**Set up fits in the terminal:** `senna run [DIR]` lets you pick data files and the batch labels of each, queue several methods (topic, masked-topic, masked-vae, masked-sbp, vae, svd, bge, simba, rbm), and change any of their flags. `O` sets an output header that every `--out` starts with (`exp1` gives `exp1_svd`; `results/` puts them all in that folder; any folder the header names, `~/` included, is made as soon as it is entered); `o` names one by hand. Every flag comes with its help, including the hidden ones (marked `·`; `a` hides them) and `--threads`. Ctrl+R shows the exact commands, checked as senna parses them, and Ctrl+R (or Enter) runs them. They run in turn with each one's progress and a scrollable log on screen, and `v` opens the results in `senna view`. Each command is saved first as `{out}.cmd.sh`, so `bash {out}.cmd.sh` runs it again. The script refuses to run over an existing `{out}.senna.json`, and `senna run` never writes over a script.
+**Set up fits in the terminal:** `senna run [DIR]` lets you pick data files and the batch labels of each, queue several methods (topic, masked-topic, masked-vae, masked-sbp, vae, svd, bge, simba, rbm, ode), and change any of their flags. `O` sets an output header that every `--out` starts with (`exp1` gives `exp1_svd`; `results/` puts them all in that folder; any folder the header names, `~/` included, is made as soon as it is entered); `o` names one by hand. Every flag comes with its help, including the hidden ones (marked `·`; `a` hides them) and `--threads`. Ctrl+R shows the exact commands, checked as senna parses them, and Ctrl+R (or Enter) runs them. They run in turn with each one's progress and a scrollable log on screen, and `v` opens the results in `senna view`. Each command is saved first as `{out}.cmd.sh`, so `bash {out}.cmd.sh` runs it again. The script refuses to run over an existing `{out}.senna.json`, and `senna run` never writes over a script.
 
 **Clones first, when donors differ:** with several donors, a donor-private CNV clone can be mixed into other donors by batch correction. `senna run` can queue `mung clones` ([mung-cnv](https://github.com/causalpathlab/mung-cnv), 0.2.7 or later, installed separately) before the fits. When it is done, you see its clones (cells per donor in clones; each clone's size, donor share, purity and malignancy) and choose whether the fits get `--cnv-clones`, run without it, or stop. mung is a separate program, as lupin is: senna reads its form from `mung describe clones`, starts `mung` (or `$SENNA_MUNG`), and reads only the `{out}.clones.parquet` it writes.
 
@@ -95,9 +95,9 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
 | `run_help` | every flag of one method, with its help |
 | `view_open` | opens a run or a lupin round: its maps, groupings and the groups shown, a missing layout or clustering computed first |
-| `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, window and zoom |
+| `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, the run's time or velocity field, window and zoom |
 | `view_markers` | the features that set one group apart, by the model's expected fold change, and its markers from the run's table |
-| `view_cell` | the point under a pixel of the last map, at a world point, or by name: its position and groups |
+| `view_cell` | the point under a pixel of the last map, at a world point, or by name: its position, groups and time |
 | `view_export` | the view as `.png`/`.pdf` figures; never replaces a file unless asked |
 | `notebook` | (from legume-mcp) an entry in the day's lab notebook |
 | `job_status`, `job_wait`, `job_cancel` | (from legume-mcp) a background fit's state, waiting for it, stopping it |
@@ -230,6 +230,22 @@ has the model, the two phases of the gradient and the role of `--depth`.
 
 ```bash
 senna rbm counts.zarr -o out -t 10 --hidden bernoulli
+```
+
+## `senna ode` — lineage, time and velocity from a mixture of splicing ODEs
+
+Every pseudobulk on one lineage's trajectory at one time, the trajectory the
+splicing ODE solved exactly, driven by the lineage's transcription; splicing
+and decay rates shared by every lineage, so all of them run on one clock.
+Lineages share a trunk until a fitted branch time (`--no-trunk` parts them).
+Fitted on the finest pseudobulks by a climb to a mode, each lineage's direction
+called by refits with its order held both ways round, then blocked Gibbs
+chains; every cell is read out from the chains' draws for its lineage, time
+(with its interval) and velocity. Every gene's rates come with R̂ and ESS.
+`senna docs ode` has the model, the inference and the outputs.
+
+```bash
+senna ode tracks.zarr -o out --lineages 2
 ```
 
 ## `senna vae` — scVI-style Gaussian VAE
