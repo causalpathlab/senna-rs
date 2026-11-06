@@ -489,7 +489,8 @@ impl Scene {
             match super::velocity::Field::load(&m, &dir) {
                 Ok(Some(field)) => self.velocity = Some(std::sync::Arc::new(field)),
                 Ok(None) => {
-                    self.note = Some("this run has no cell velocity (a td-rbm run's)".into());
+                    self.note =
+                        Some("this run has no cell velocity (no cell_velocity table)".into());
                     return;
                 }
                 Err(e) => {

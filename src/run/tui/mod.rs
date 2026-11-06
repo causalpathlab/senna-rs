@@ -21,7 +21,7 @@ use batches::Batch;
 use data::Pair;
 use data::Pick;
 use form::{Field, Kind, Method};
-use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG, TD_RBM};
+use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG};
 use legume_tui::Round;
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
@@ -30,9 +30,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
-/// The methods `senna run` sets up, in the order listed: the embeddings
-/// (rbm among them), then td-rbm (lineages and time on two-track counts).
-pub const METHODS: [&str; 10] = [
+/// The methods `senna run` sets up, in the order listed.
+pub const METHODS: [&str; 9] = [
     "topic",
     "masked-topic",
     "masked-vae",
@@ -42,7 +41,6 @@ pub const METHODS: [&str; 10] = [
     "bge",
     "simba",
     "rbm",
-    TD_RBM,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1061,8 +1059,8 @@ impl App {
     /// order first met, as a form: each with the value they all hold, or
     /// none (and listed even when advanced) where they differ; a choice
     /// offers only the values every fit takes. A flag whose default differs
-    /// between fits means something different in each (rbm's `--depth` is a
-    /// temperature, td-rbm's a read count), so it stays on each fit's page.
+    /// between fits means something different in each, so it stays on each
+    /// fit's page.
     fn shared_form(&self) -> Method {
         let rows = self.shared_rows();
         // Each flag's fields across the fits, in the order first met.
@@ -1444,7 +1442,7 @@ impl App {
                 (Tool::Senna, Some(t)) => Self::clones_for(r, &rel(t)),
                 _ => (None, None, None),
             };
-            let mut notes: Vec<String> = warning.into_iter().chain(self.shape_warning(r)).collect();
+            let mut notes: Vec<String> = warning.into_iter().collect();
             // A partition another queued fit builds is collapsed on, not
             // built again.
             let mut pb_from = None;
@@ -1503,8 +1501,6 @@ impl App {
                 Some("no data files: add some on the Data screen".to_string())
             } else if let Some(p) = batch_problem.or(clones_problem) {
                 Some(p)
-            } else if let Some(p) = self.two_track_problem(r) {
-                Some(p)
             } else if let Some(there) = [job.result(), job.script(), job.batches()]
                 .into_iter()
                 .find(|p| p.exists())
@@ -1550,52 +1546,6 @@ impl App {
                 .and_then(|f| f.value.trim().parse().ok())
                 .filter(|&d: &usize| d < self.gpus),
         )
-    }
-
-    /// Why td-rbm cannot run on the data: every file needs genes with both
-    /// an unspliced and a spliced row. `None` for other methods, or while
-    /// the files are still being read.
-    fn two_track_problem(&self, r: &Row) -> Option<String> {
-        if r.tool != Tool::Senna || r.form.name != TD_RBM {
-            return None;
-        }
-        let none: Vec<String> = self
-            .pairs
-            .iter()
-            .filter(|p| p.two_tracks == Some(0))
-            .map(|p| {
-                p.data.file_name().map_or_else(
-                    || p.data.display().to_string(),
-                    |n| n.to_string_lossy().into_owned(),
-                )
-            })
-            .collect();
-        (!none.is_empty()).then(|| {
-            format!(
-                "td-rbm needs {{gene}}/count/unspliced and {{gene}}/count/spliced rows: no gene has both in {}",
-                none.join(", ")
-            )
-        })
-    }
-
-    /// Whether the data look like what `method` reads: files whose rows are
-    /// all two-track counts are td-rbm's, not another method's.
-    fn shape_warning(&self, r: &Row) -> Option<String> {
-        if r.tool != Tool::Senna {
-            return None;
-        }
-        if r.form.name == TD_RBM {
-            return None;
-        }
-        let known: Vec<bool> = self.pairs.iter().filter_map(|p| p.tracks_only).collect();
-        if !known.is_empty() && known.iter().all(|&t| t) {
-            Some(
-                "these files hold {gene}/count/spliced and /unspliced rows: td-rbm reads them"
-                    .into(),
-            )
-        } else {
-            None
-        }
     }
 
     fn open_confirm(&mut self) {

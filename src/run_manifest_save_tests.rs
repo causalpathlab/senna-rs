@@ -24,7 +24,7 @@ fn an_edit_is_in_the_manifest_from_its_one_write() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = dir.path().join("r").to_string_lossy().into_owned();
     let desc = RunDescription {
-        kind: RunKind::TdRbm,
+        kind: RunKind::Rbm,
         prefix: &prefix,
         train_args: None,
         data_input: &[],

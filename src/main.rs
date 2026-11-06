@@ -57,6 +57,8 @@ mod impute;
 mod joint_topic;
 mod logging;
 mod masked_topic;
+#[cfg_attr(not(test), allow(dead_code))]
+mod ode_mixture;
 mod pbg_train_args;
 #[cfg(test)]
 #[path = "tests/planted.rs"]
@@ -80,7 +82,6 @@ mod seed_replay_tests;
 mod session_cli_tests;
 mod simba;
 mod svd;
-mod td_rbm;
 mod topic;
 #[cfg(feature = "view")]
 mod tui;
@@ -108,8 +109,6 @@ use resolve_topics::{resolve_topics, ResolveTopicsArgs};
 use senna::embed_common::*;
 use simba::{fit_simba, SimbaArgs};
 use svd::*;
-use td_rbm::args::TdRbmArgs;
-use td_rbm::run::run_td_rbm;
 use topic::cmd::*;
 use update::{run_update, UpdateArgs};
 use vae::*;
@@ -490,25 +489,21 @@ enum Commands {
     Fne(FneArgs),
 
     #[command(
-        name = "td-rbm",
-        about = "Every cell's lineage, time, state and velocity: an RBM on two-track counts",
-        long_about = "A restricted Boltzmann machine on two-track count backends (one or\n\
-                      several files, read together on their shared genes): the\n\
-                      visible units are a cell's reads over (gene, track), the hidden units\n\
-                      a (lineage, time) unit on a grid and Gaussian state units. Every\n\
-                      lineage's trajectory in the genes' embedding sets which gene; its\n\
-                      velocity sets the unspliced share by the splicing half of the ODE.\n\
-                      The lineages are the root-to-leaf paths of a forest over clusters of\n\
-                      the pseudobulks (a minimum spanning tree cut where no neighbours\n\
-                      cross). Every tree's root, its lineages' one direction, is read from\n\
-                      the splicing along its edges against reads with no dynamics: the\n\
-                      likeliest root is taken, flagged undetermined when its posterior is\n\
-                      short of a call (--root fixes one). Writes {out}.cell_time.parquet,\n\
-                      cell_state, cell_velocity, gene_direction, gene_rates,\n\
-                      feature_embedding, gene_states and curve tables, and\n\
-                      {out}.{direction,roots,edges}.tsv."
+        name = "ode",
+        about = "Every cell's lineage, time and velocity: a mixture of splicing ODEs on two-track counts",
+        long_about = "A mixture of splicing ODEs on two-track count backends (rows\n\
+                      `{gene}/count/spliced` and `{gene}/count/unspliced`): every\n\
+                      pseudobulk on one lineage's trajectory at one time, the trajectory\n\
+                      the splicing ODE solved exactly, driven by the lineage's\n\
+                      transcription. Fitted on the finest pseudobulks and the most\n\
+                      variable genes by a climb to a mode, then blocked Gibbs chains\n\
+                      from it; every cell is read out from the chains' draws. Writes\n\
+                      {out}.cell_time.parquet (lineage, time, its sd and 90% interval,\n\
+                      lineage posteriors), cell_embedding and cell_velocity (the map\n\
+                      space and every cell's velocity there) and gene_rates (every\n\
+                      gene's rates with R̂ and ESS, flagged above 1.05)."
     )]
-    TdRbm(TdRbmArgs),
+    Ode(ode_mixture::command::OdeArgs),
 
     #[command(
         name = "rbm",
@@ -879,7 +874,7 @@ enum Commands {
                       \n\
                       Pick the data files and the batch labels of each, queue one or\n\
                       more of topic, masked-topic, masked-vae, masked-sbp, vae, svd,\n\
-                      bge, simba, rbm and td-rbm, and change their flags. Every\n\
+                      bge, simba and rbm, and change their flags. Every\n\
                       flag a method has is listed with its help, its own flags first;\n\
                       hidden ones under `a`. Flags the queued fits share are set\n\
                       together on the shared page. `?` lists every key.\n\
@@ -1014,8 +1009,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Fne(args) => {
             fit_fne(args)?;
         }
-        Commands::TdRbm(args) => {
-            run_td_rbm(args)?;
+        Commands::Ode(args) => {
+            ode_mixture::command::run_ode(args)?;
         }
         Commands::Rbm(args) => {
             rbm::run::fit_rbm(args)?;

@@ -1,0 +1,248 @@
+use crate::ode_mixture::counts::*;
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
+use data_beans::aux::feature_names::FeatureNameKind;
+use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
+use data_beans::sparse_io_vector::SparseIoVec;
+use data_beans::sparse_io_vector::{ColumnAlignment, RowAlignment};
+use nalgebra::DMatrix;
+
+/// The backends at `paths` read as `senna ode` reads them: every file's cells
+/// in turn, tagged `@{file}` when there are several, on the rows every file
+/// has, matched by their full names.
+fn open_tracks(paths: &[Box<str>]) -> SparseIoVec {
+    read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: paths.to_vec(),
+        feature_kind: Some(FeatureNameKind::Exact),
+        row_alignment: RowAlignment::Intersect,
+        column_alignment: ColumnAlignment::Disjoint,
+        ..Default::default()
+    })
+    .unwrap()
+    .data
+}
+
+/// Rows: A spliced, B spliced, A unspliced, C unspliced (C has one track
+/// only); cells c1..c4.
+fn backend(dir: &std::path::Path) -> String {
+    let path = dir.join("tracks.zarr").to_string_lossy().into_owned();
+    #[rustfmt::skip]
+    let m = DMatrix::<f32>::from_row_slice(4, 4, &[
+        1.0, 2.0, 3.0, 4.0,
+        5.0, 6.0, 7.0, 8.0,
+        0.0, 1.0, 0.0, 2.0,
+        9.0, 9.0, 9.0, 9.0,
+    ]);
+    let mut b = create_sparse_from_dmatrix(&m, Some(&path), Some(&SparseIoBackend::Zarr)).unwrap();
+    let rows: Vec<Box<str>> = [
+        "A/count/spliced",
+        "B/count/spliced",
+        "A/count/unspliced",
+        "C/count/unspliced",
+    ]
+    .into_iter()
+    .map(Box::from)
+    .collect();
+    let cols: Vec<Box<str>> = ["c1", "c2", "c3", "c4"]
+        .into_iter()
+        .map(Box::from)
+        .collect();
+    b.register_row_names_vec(&rows);
+    b.register_column_names_vec(&cols);
+    path
+}
+
+/// The pseudobulks' counts split into the two tracks of every gene that
+/// has both; a gene with one track is dropped.
+#[test]
+fn counts_split_into_both_tracks_of_every_gene_with_both() {
+    let rows: Vec<Box<str>> = [
+        "A/count/spliced",
+        "B/count/spliced",
+        "A/count/unspliced",
+        "C/count/unspliced",
+    ]
+    .into_iter()
+    .map(Box::from)
+    .collect();
+    #[rustfmt::skip]
+    let counts = DMatrix::<f32>::from_row_slice(4, 3, &[
+        3.0, 3.0, 4.0,
+        7.0, 11.0, 8.0,
+        0.0, 1.0, 2.0,
+        9.0, 18.0, 9.0,
+    ]);
+    let t = pb_tracks(&rows, &counts).unwrap();
+    assert_eq!(
+        t.genes,
+        vec![Box::<str>::from("A")],
+        "only A has both tracks"
+    );
+    assert_eq!(t.spliced.column(0).as_slice(), &[3.0, 3.0, 4.0]);
+    assert_eq!(t.unspliced.column(0).as_slice(), &[0.0, 1.0, 2.0]);
+}
+
+/// Every cell's reads on the named genes, block by block, rows in the
+/// backend's column order.
+#[test]
+fn cell_blocks_read_each_cells_tracks_on_the_named_genes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = backend(dir.path());
+    let mut seen = Vec::new();
+    for_cell_blocks(
+        &open_tracks(&[path.into()]),
+        &[Box::from("A")],
+        // Blocks of three: the fourth cell starts a second.
+        3,
+        None,
+        |start, u, s| {
+            assert_eq!((u.ncols(), s.ncols()), (1, 1));
+            for c in 0..u.nrows() {
+                seen.push((start + c, u[(c, 0)], s[(c, 0)]));
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        seen,
+        vec![(0, 0.0, 1.0), (1, 1.0, 2.0), (2, 0.0, 3.0), (3, 2.0, 4.0)]
+    );
+}
+
+/// A second file with its rows in another order, one gene the first lacks
+/// and cells c1, c2.
+fn second_backend(dir: &std::path::Path) -> String {
+    let path = dir.join("more.zarr").to_string_lossy().into_owned();
+    #[rustfmt::skip]
+    let m = DMatrix::<f32>::from_row_slice(4, 2, &[
+        1.0, 0.0,
+        10.0, 20.0,
+        5.0, 5.0,
+        7.0, 7.0,
+    ]);
+    let mut b = create_sparse_from_dmatrix(&m, Some(&path), Some(&SparseIoBackend::Zarr)).unwrap();
+    let rows: Vec<Box<str>> = [
+        "A/count/unspliced",
+        "A/count/spliced",
+        "D/count/spliced",
+        "D/count/unspliced",
+    ]
+    .into_iter()
+    .map(Box::from)
+    .collect();
+    let cols: Vec<Box<str>> = ["c1", "c2"].into_iter().map(Box::from).collect();
+    b.register_row_names_vec(&rows);
+    b.register_column_names_vec(&cols);
+    path
+}
+
+/// Several files read as one: every file's cells in turn, tagged by file,
+/// on the genes every file has (rows matched by name, not position).
+#[test]
+fn several_files_read_together_on_their_shared_genes() {
+    let dir = tempfile::tempdir().unwrap();
+    let files: Vec<Box<str>> = vec![
+        backend(dir.path()).into(),
+        second_backend(dir.path()).into(),
+    ];
+    let data = open_tracks(&files);
+    let cells = data.column_names().unwrap();
+    assert_eq!(cells.len(), 6);
+    assert!(
+        cells[0].ends_with("@tracks") && cells[4].ends_with("@more"),
+        "{cells:?}"
+    );
+    assert_eq!(
+        data.row_names().unwrap().len(),
+        2,
+        "A's two tracks; D is in one file"
+    );
+    let mut seen = Vec::new();
+    for_cell_blocks(&data, &[Box::from("A")], 4096, None, |start, u, s| {
+        for c in 0..u.nrows() {
+            seen.push((start + c, u[(c, 0)], s[(c, 0)]));
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen[4..], [(4, 1.0, 10.0), (5, 0.0, 20.0)]);
+}
+
+/// With batch effects, a cell's reads are divided by its batch's and
+/// scaled back to the reads it had on the genes.
+#[test]
+fn cell_blocks_adjust_by_the_batch_effect_and_keep_the_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut data = open_tracks(&[backend(dir.path()).into()]);
+    data.register_batch_membership(&[0u32, 0, 1, 1]);
+    // Rows: A spliced, B spliced, A unspliced, C unspliced; batch 1 has
+    // twice the spliced reads of A.
+    let delta = DMatrix::<f32>::from_row_slice(4, 2, &[1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    let mut seen = Vec::new();
+    for_cell_blocks(&data, &[Box::from("A")], 4096, Some(&delta), |_, u, s| {
+        for c in 0..u.nrows() {
+            seen.push((u[(c, 0)], s[(c, 0)]));
+        }
+        Ok(())
+    })
+    .unwrap();
+    // c1 (batch 0) as it is; c4 (batch 1): u 2, s 4 → s 2, then scaled
+    // back to 6 reads: u 3, s 3.
+    assert_eq!(seen[0], (0.0, 1.0));
+    assert_eq!(seen[3], (3.0, 3.0));
+}
+
+#[test]
+fn select_genes_drops_thin_tracks_and_keeps_the_most_variable() {
+    let genes: Vec<Box<str>> = ["flat", "varied", "thin"]
+        .into_iter()
+        .map(Box::from)
+        .collect();
+    #[rustfmt::skip]
+    let spliced = DMatrix::<f32>::from_row_slice(4, 3, &[
+        50.0, 10.0, 50.0,
+        50.0, 90.0, 50.0,
+        50.0, 10.0, 50.0,
+        50.0, 90.0, 50.0,
+    ]);
+    #[rustfmt::skip]
+    let unspliced = DMatrix::<f32>::from_row_slice(4, 3, &[
+        10.0, 10.0, 1.0,
+        10.0, 10.0, 1.0,
+        10.0, 10.0, 1.0,
+        10.0, 10.0, 1.0,
+    ]);
+    let t = PbTracks {
+        genes,
+        unspliced,
+        spliced,
+    };
+    assert_eq!(
+        select_genes(&t, 20.0, 10),
+        vec![0, 1],
+        "thin has 4 unspliced reads"
+    );
+    assert_eq!(select_genes(&t, 20.0, 1), vec![1], "varied beats flat");
+}
+
+/// Only genes with both an unspliced and a spliced row count.
+#[test]
+fn two_track_genes_counts_genes_with_both_rows() {
+    let rows: Vec<Box<str>> = [
+        "GENE1/count/spliced",
+        "GENE1/count/unspliced",
+        "GENE2/count/spliced",
+        "GENE3/count/unspliced",
+        "GENE4",
+    ]
+    .iter()
+    .map(|r| (*r).into())
+    .collect();
+    assert_eq!(two_track_genes(&rows), (1, false));
+    assert_eq!(two_track_genes(&rows[2..]), (0, false));
+    assert_eq!(
+        two_track_genes(&rows[..2]),
+        (1, true),
+        "GENE1's two tracks alone"
+    );
+}

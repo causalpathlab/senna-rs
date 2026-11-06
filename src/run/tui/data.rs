@@ -119,12 +119,6 @@ pub struct Pair {
     /// The `@batch` tag of each cell, when its barcodes carry one: senna's
     /// own batches for the file then.
     pub tags: Option<Vec<String>>,
-    /// How many genes have both an unspliced and a spliced row, what
-    /// td-rbm fits; `None` when unknown.
-    pub two_tracks: Option<usize>,
-    /// Whether every row is an unspliced or spliced track of a gene that
-    /// has both; `None` when unknown.
-    pub tracks_only: Option<bool>,
 }
 
 impl Pair {
@@ -136,8 +130,6 @@ impl Pair {
             info: "reading…".into(),
             cells: None,
             tags: None,
-            two_tracks: None,
-            tracks_only: None,
         }
     }
 
@@ -146,8 +138,6 @@ impl Pair {
         self.info = d.info;
         self.cells = d.cells;
         self.tags = d.tags;
-        self.two_tracks = d.two_tracks;
-        self.tracks_only = d.tracks_only;
     }
 }
 
@@ -158,12 +148,9 @@ pub struct Described {
     pub info: String,
     pub cells: Option<usize>,
     pub tags: Option<Vec<String>>,
-    pub two_tracks: Option<usize>,
-    pub tracks_only: Option<bool>,
 }
 
-/// Its size, its barcodes' `@batch` tags and how many genes are in both
-/// tracks; or why the file does not open.
+/// Its size and its barcodes' `@batch` tags; or why the file does not open.
 pub fn describe(path: &Path) -> Described {
     use data_beans::sparse_io::open_sparse_matrix_by_path;
     let m = match open_sparse_matrix_by_path(&path.to_string_lossy()) {
@@ -191,23 +178,7 @@ pub fn describe(path: &Path) -> Described {
             .map(|n| n.rsplit('@').next().unwrap_or(n).to_string())
             .collect()
     });
-    // td-rbm's own reading of the row grammar decides.
-    let tracks = m
-        .row_names()
-        .ok()
-        .map(|names| crate::td_rbm::counts::two_track_genes(&names));
-    let (two_tracks, tracks_only) = (tracks.map(|t| t.0), tracks.map(|t| t.1));
-    let info = match two_tracks {
-        Some(n) if n > 0 => format!("{info}; {n} genes in two tracks"),
-        _ => info,
-    };
-    Described {
-        info,
-        cells,
-        tags,
-        two_tracks,
-        tracks_only,
-    }
+    Described { info, cells, tags }
 }
 
 /// A file name without the endings data and label files carry.
