@@ -16,7 +16,7 @@ use image::codecs::png::CompressionType;
 use legume_mcp::{Call, Content, Handler, ToolSpec};
 use legume_tui::export::PageSize;
 use senna::run_manifest::{self, RunManifest};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -324,7 +324,7 @@ pub(super) struct MapArgs {
 }
 
 /// How the run's velocity field is drawn over the cells, or not.
-#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum VelocityArg {
     Stream,
@@ -340,12 +340,14 @@ impl VelocityArg {
             Self::Off => None,
         }
     }
+}
 
-    fn name(style: Option<VelocityStyle>) -> &'static str {
+impl From<Option<VelocityStyle>> for VelocityArg {
+    fn from(style: Option<VelocityStyle>) -> Self {
         match style {
-            Some(VelocityStyle::Stream) => "stream",
-            Some(VelocityStyle::Arrows) => "arrows",
-            None => "off",
+            Some(VelocityStyle::Stream) => Self::Stream,
+            Some(VelocityStyle::Arrows) => Self::Arrows,
+            None => Self::Off,
         }
     }
 }
@@ -440,9 +442,10 @@ impl Open {
             .collect();
         // What else a run can colour or draw the cells by.
         let velocity = s.velocity.is_some()
-            || s.data.run.as_ref().is_some_and(|(m, _)| {
-                m.outputs.cell_velocity.is_some() && m.outputs.cell_embedding.is_some()
-            });
+            || s.data
+                .run
+                .as_ref()
+                .is_some_and(|(m, _)| super::velocity::Field::available(m));
         json!({
             "run": self.run,
             "maps": maps,
@@ -472,7 +475,7 @@ impl Open {
             "feature": feature,
             "observed": s.source != Source::Expected,
             "time": s.pick == Some(Pick::Time),
-            "velocity": VelocityArg::name(s.velocity_style),
+            "velocity": VelocityArg::from(s.velocity_style),
             "bbox": self.drawn.map(|vp| vp.window()),
         })
     }
@@ -511,9 +514,7 @@ impl Open {
             "focus": s.focused_name(),
             "feature": feature,
             "time": s.pick == Some(Pick::Time) && s.current_shown().is_some(),
-            "velocity": VelocityArg::name(s.velocity_style.filter(|_| {
-                s.velocity.is_some() && sp.axis() == Axis::Cells
-            })),
+            "velocity": VelocityArg::from(s.velocity_drawn()),
             "legend": legend,
         })
     }
@@ -811,23 +812,23 @@ pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         }),
     };
 
-    ensure!(
-        a.time != Some(true) || a.feature.as_deref().is_none_or(str::is_empty),
-        "colour by time or by a feature, not both"
-    );
-    ensure!(
-        a.time != Some(true) || data.times.is_some(),
-        "this run has no cell times (no cell_time table)"
-    );
-    // The field, read now if it is asked for and not read yet: the run's
-    // a round swaps in, if it is another run's.
-    let keeps_field = round.is_none() && s.velocity.is_some();
-    let field = match a.velocity.and_then(VelocityArg::style) {
-        Some(_) if !keeps_field => Some(std::sync::Arc::new(super::velocity::Field::of_run(
-            data.run.as_ref(),
-        )?)),
-        _ => None,
-    };
+    if a.time == Some(true) {
+        ensure!(
+            a.feature.as_deref().is_none_or(str::is_empty),
+            "colour by time or by a feature, not both"
+        );
+        ensure!(data.times.is_some(), super::features::NO_TIMES);
+    }
+    // The field, read now when it is asked for and the view has none of
+    // this run's: the round's run, when a round is swapped in.
+    let has_field = s.velocity.is_some()
+        && round
+            .as_ref()
+            .is_none_or(|r| super::state::same_run(&s.data, r));
+    let field = (a.velocity.and_then(VelocityArg::style).is_some() && !has_field)
+        .then(|| super::velocity::Field::of_run(data.run.as_ref()))
+        .transpose()?
+        .map(std::sync::Arc::new);
 
     let mut moved = false;
     if let Some(data) = round {
@@ -867,8 +868,8 @@ pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         }
         _ => {}
     }
-    if field.is_some() {
-        scene.velocity = field;
+    if let Some(field) = field {
+        scene.velocity = Some(field);
     }
     if let Some(v) = a.velocity {
         scene.velocity_style = v.style();

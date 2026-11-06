@@ -421,7 +421,7 @@ impl Scene {
         if self.pick == Some(Pick::Time) {
             self.clear_pick();
         } else if self.data.times.is_none() {
-            self.note = Some("this run has no cell times (no cell_time table)".into());
+            self.note = Some(NO_TIMES.into());
         } else {
             self.set_pick(Pick::Time);
         }
@@ -966,6 +966,9 @@ impl Metric {
         }
     }
 }
+
+/// What a run without a `cell_time` table is told when asked for times.
+pub(super) const NO_TIMES: &str = "this run has no cell times (no cell_time table)";
 
 #[cfg(test)]
 mod tests {

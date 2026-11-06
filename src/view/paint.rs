@@ -418,15 +418,20 @@ fn mark(
 }
 
 impl Scene {
+    /// How the velocity field is drawn on the map shown: only over cells,
+    /// and only once it is read.
+    pub(super) fn velocity_drawn(&self) -> Option<super::VelocityStyle> {
+        self.velocity_style.filter(|_| {
+            self.velocity.is_some() && self.current().axis() == super::data::Axis::Cells
+        })
+    }
+
     /// The run's velocity field over the cell map, as streamlines or as
     /// arrows, when shown.
     fn draw_velocity(&self, frame: &mut Frame, vp: &Viewport, floor: f32) {
-        let (Some(field), Some(style)) = (self.velocity.as_ref(), self.velocity_style) else {
+        let (Some(field), Some(style)) = (self.velocity.as_ref(), self.velocity_drawn()) else {
             return;
         };
-        if self.current().axis() != super::data::Axis::Cells {
-            return;
-        }
         let points = &self.current().points;
         let moved = {
             let mut cache = self.velocity_moved.borrow_mut();

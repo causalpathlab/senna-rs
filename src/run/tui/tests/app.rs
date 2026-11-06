@@ -1315,6 +1315,6 @@ fn a_fit_given_whole_out_of_here_has_its_data_whole() {
 }
 
 #[test]
-fn senna_ode_is_offered_to_run_and_to_fit() {
+fn ode_is_one_of_the_methods() {
     assert!(METHODS.contains(&"ode"));
 }

@@ -62,6 +62,12 @@ impl Field {
         Self::new(&z.rows, &z.mat, &v.rows, &v.mat).map(Some)
     }
 
+    /// Whether the run `m` lists a field: a `cell_velocity` beside its
+    /// `cell_embedding`, as [`Field::load`] reads them.
+    pub fn available(m: &RunManifest) -> bool {
+        m.outputs.cell_embedding.is_some() && m.outputs.cell_velocity.is_some()
+    }
+
     /// The field of `run` (its manifest and folder), or why there is none.
     pub fn of_run(run: Option<&(RunManifest, std::path::PathBuf)>) -> anyhow::Result<Self> {
         use anyhow::Context;
