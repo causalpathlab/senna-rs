@@ -1313,3 +1313,8 @@ fn a_fit_given_whole_out_of_here_has_its_data_whole() {
     let data = tmp.path().join("data.zarr").to_string_lossy().into_owned();
     assert_eq!(job.argv, words(&["svd", &data, "--out", &out]));
 }
+
+#[test]
+fn senna_ode_is_offered_to_run_and_to_fit() {
+    assert!(METHODS.contains(&"ode"));
+}

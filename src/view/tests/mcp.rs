@@ -275,3 +275,105 @@ fn the_readme_gives_the_instructions_word_for_word() {
     let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(words(&quoted.join(" ")), words(INSTRUCTIONS));
 }
+
+/// The test run with a time and a velocity of every cell.
+fn timed() -> Open {
+    let mut s = crate::view::tests::scene();
+    let cells: Vec<Box<str>> = ["c1", "c2", "c3", "c4"].map(Into::into).to_vec();
+    s.data.times = Some(std::sync::Arc::new(
+        cells.iter().cloned().zip([0.1, 0.4, 0.7, 0.9]).collect(),
+    ));
+    let z = senna::embed_common::Mat::from_fn(4, 2, |i, d| (i * (d + 1)) as f32);
+    let v = senna::embed_common::Mat::from_fn(4, 2, |_, d| if d == 0 { 1.0 } else { 0.0 });
+    s.velocity = Some(std::sync::Arc::new(
+        crate::view::velocity::Field::new(&cells, &z, &cells, &v).unwrap(),
+    ));
+    Open::of(s, PathBuf::from("r.senna.json"))
+}
+
+#[test]
+fn the_summary_says_whether_the_run_has_times_and_a_velocity() {
+    assert_eq!(open().summary()["time"], false);
+    assert_eq!(open().summary()["velocity"], false);
+    assert_eq!(timed().summary()["time"], true);
+    assert_eq!(timed().summary()["velocity"], true);
+}
+
+#[test]
+fn time_colours_the_cells_until_turned_off() {
+    let mut o = timed();
+    let s = o.map(args(json!({"time": true, "width": 32}))).unwrap();
+    assert_eq!(state(&s)["time"], true);
+    assert_eq!(o.view_state()["time"], true);
+    let s = o.map(args(json!({"time": false, "width": 32}))).unwrap();
+    assert_eq!(state(&s)["time"], false);
+}
+
+#[test]
+fn time_and_a_feature_at_once_is_an_error() {
+    let mut o = timed();
+    assert!(o.map(args(json!({"time": true, "feature": "g1"}))).is_err());
+}
+
+#[test]
+fn time_or_a_velocity_the_run_lacks_is_an_error_and_changes_nothing() {
+    let mut o = open();
+    o.map(args(json!({"colour_by": "cluster", "width": 16})))
+        .unwrap();
+    let e = o.map(args(json!({"time": true}))).unwrap_err().to_string();
+    assert!(e.contains("time"), "{e}");
+    let e = o
+        .map(args(json!({"velocity": "arrows"})))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("velocity"), "{e}");
+    // Turning off what is not on is no error.
+    o.map(args(json!({"time": false, "velocity": "off", "width": 16})))
+        .unwrap();
+    assert_eq!(o.view_state()["colour_by"], "cluster");
+}
+
+#[test]
+fn the_velocity_field_is_drawn_as_asked_and_off_hides_it() {
+    let mut o = timed();
+    for style in ["arrows", "stream", "off"] {
+        let s = o
+            .map(args(json!({"velocity": style, "width": 32})))
+            .unwrap();
+        assert_eq!(state(&s)["velocity"], style);
+        assert_eq!(o.view_state()["velocity"], style);
+    }
+    assert!(serde_json::from_value::<MapArgs>(json!({"velocity": "sideways"})).is_err());
+}
+
+#[test]
+fn a_published_view_carries_its_time_and_velocity() {
+    let mut agent = timed();
+    agent
+        .map(args(
+            json!({"time": true, "velocity": "stream", "width": 16}),
+        ))
+        .unwrap();
+    let (_, a) = agent_view(&agent.view_state()).unwrap();
+    let mut watcher = timed();
+    apply(&mut watcher.scene, &a).unwrap();
+    assert_eq!(watcher.view_state()["time"], true);
+    assert_eq!(watcher.view_state()["velocity"], "stream");
+}
+
+#[test]
+fn a_cell_says_its_time_when_the_run_has_one() {
+    let mut o = timed();
+    let s = o
+        .cell(serde_json::from_value(json!({"name": "c2"})).unwrap())
+        .unwrap();
+    assert_eq!(
+        state(&s)["time"].as_f64().map(|t| (t * 10.0).round()),
+        Some(4.0)
+    );
+    let mut o = open();
+    let s = o
+        .cell(serde_json::from_value(json!({"name": "c2"})).unwrap())
+        .unwrap();
+    assert!(state(&s).get("time").is_none());
+}

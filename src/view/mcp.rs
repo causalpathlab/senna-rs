@@ -10,7 +10,7 @@
 
 use super::data::{Axis, Dataset, LabelKind, NONE};
 use super::render::{self, Viewport};
-use super::{deck, Pick, Scene, Source, ViewArgs};
+use super::{deck, Pick, Scene, Source, VelocityStyle, ViewArgs};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use image::codecs::png::CompressionType;
 use legume_mcp::{Call, Content, Handler, ToolSpec};
@@ -314,11 +314,40 @@ pub(super) struct MapArgs {
     focus: Option<Value>,
     feature: Option<String>,
     observed: Option<bool>,
+    time: Option<bool>,
+    velocity: Option<VelocityArg>,
     pub(super) bbox: Option<[f32; 4]>,
     fit: Option<bool>,
     center: Option<[f32; 2]>,
     zoom: Option<f32>,
     width: Option<usize>,
+}
+
+/// How the run's velocity field is drawn over the cells, or not.
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum VelocityArg {
+    Stream,
+    Arrows,
+    Off,
+}
+
+impl VelocityArg {
+    fn style(self) -> Option<VelocityStyle> {
+        match self {
+            Self::Stream => Some(VelocityStyle::Stream),
+            Self::Arrows => Some(VelocityStyle::Arrows),
+            Self::Off => None,
+        }
+    }
+
+    fn name(style: Option<VelocityStyle>) -> &'static str {
+        match style {
+            Some(VelocityStyle::Stream) => "stream",
+            Some(VelocityStyle::Arrows) => "arrows",
+            None => "off",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -409,10 +438,17 @@ impl Open {
                 })
             })
             .collect();
+        // What else a run can colour or draw the cells by.
+        let velocity = s.velocity.is_some()
+            || s.data.run.as_ref().is_some_and(|(m, _)| {
+                m.outputs.cell_velocity.is_some() && m.outputs.cell_embedding.is_some()
+            });
         json!({
             "run": self.run,
             "maps": maps,
             "groupings": groupings,
+            "time": s.data.times.is_some(),
+            "velocity": velocity,
             "view": self.state(),
         })
     }
@@ -435,6 +471,8 @@ impl Open {
             "focus": s.focused_name().unwrap_or_default(),
             "feature": feature,
             "observed": s.source != Source::Expected,
+            "time": s.pick == Some(Pick::Time),
+            "velocity": VelocityArg::name(s.velocity_style),
             "bbox": self.drawn.map(|vp| vp.window()),
         })
     }
@@ -472,6 +510,8 @@ impl Open {
             "colour_by": s.colour.map(|i| s.data.labels[i].title()),
             "focus": s.focused_name(),
             "feature": feature,
+            "time": s.pick == Some(Pick::Time),
+            "velocity": VelocityArg::name(s.velocity_style),
             "legend": legend,
         })
     }
@@ -632,6 +672,15 @@ impl Open {
             })
             .collect();
         let mut out = json!({"name": name, "at": points.xy[i], "groups": groups});
+        if let Some(t) = self
+            .scene
+            .data
+            .times
+            .as_ref()
+            .and_then(|t| t.get(name.as_ref()))
+        {
+            out["time"] = json!(t);
+        }
         // A round's account of the cell's cluster, when it labels it.
         let s = &self.scene;
         if s.cluster_id_of(name)
@@ -760,6 +809,30 @@ pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         }),
     };
 
+    ensure!(
+        a.time != Some(true) || a.feature.as_deref().is_none_or(str::is_empty),
+        "colour by time or by a feature, not both"
+    );
+    ensure!(
+        a.time != Some(true) || data.times.is_some(),
+        "this run has no cell times (no cell_time table)"
+    );
+    // The field, read now if it is asked for and not read yet.
+    let field = match a.velocity.and_then(VelocityArg::style) {
+        Some(_) if s.velocity.is_none() => {
+            let (m, dir) = s
+                .data
+                .run
+                .as_ref()
+                .context("no run manifest to read a velocity from")?;
+            Some(std::sync::Arc::new(
+                super::velocity::Field::load(m, dir)?
+                    .context("this run has no cell velocity (no cell_velocity table)")?,
+            ))
+        }
+        _ => None,
+    };
+
     let mut moved = false;
     if let Some(data) = round {
         // Another round of the same layout keeps the window.
@@ -791,6 +864,19 @@ pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         None if a.observed.is_some() => scene.refresh_activity(),
         None => {}
     }
+    match a.time {
+        Some(true) => scene.set_pick(Pick::Time),
+        Some(false) if scene.pick == Some(Pick::Time) => {
+            scene.clear_pick();
+        }
+        _ => {}
+    }
+    if field.is_some() {
+        scene.velocity = field;
+    }
+    if let Some(v) = a.velocity {
+        scene.velocity_style = v.style();
+    }
     Ok(moved)
 }
 
@@ -798,7 +884,7 @@ pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
 pub(crate) const SERVER: &str = "senna";
 
 /// The view_map arguments a published view sets.
-const VIEW_KEYS: [&str; 8] = [
+const VIEW_KEYS: [&str; 10] = [
     "round",
     "map",
     "space",
@@ -806,6 +892,8 @@ const VIEW_KEYS: [&str; 8] = [
     "focus",
     "feature",
     "observed",
+    "time",
+    "velocity",
     "bbox",
 ];
 
@@ -950,8 +1038,9 @@ fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "view_open",
-            "Open a run and summarize it: its maps (layout × points), its groupings, and \
-             the view shown with its groups' colours. A layout or clustering the run lacks \
+            "Open a run and summarize it: its maps (layout × points), its groupings, \
+             whether it has cell times and a velocity field, and the view shown with its \
+             groups' colours. A layout or clustering the run lacks \
              is computed first. Opening another run closes the one open.",
             json!({
                 "type": "object",
@@ -977,6 +1066,8 @@ fn specs() -> Vec<ToolSpec> {
                     "focus": {"type": ["string", "integer", "array"], "items": group, "maxItems": 1, "description": "One group of the grouping shown, by name or cluster id (3, C3, K3), alone or as a list of one; the rest are dimmed. \"\" or [] clears"},
                     "feature": {"type": "string", "description": "Colour cells by one feature's level; \"\" shows the groups again"},
                     "observed": {"type": "boolean", "description": "The feature's observed counts instead of the model's expected level"},
+                    "time": {"type": "boolean", "description": "Colour the cells by the run's time (a run view_open says has time); false shows the groups again"},
+                    "velocity": {"enum": ["stream", "arrows", "off"], "description": "Draw the run's velocity field over the cells (a run view_open says has velocity), as streamlines or arrows, or not"},
                     "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "World window [x0, y0, x1, y1]"},
                     "fit": {"type": "boolean", "description": "true: the whole map"},
                     "center": xy("Move the window's centre to this world point"),
@@ -1004,8 +1095,8 @@ fn specs() -> Vec<ToolSpec> {
         spec(
             "view_cell",
             "The point nearest a pixel of the last map, a world point, or by name: its \
-             position, its group in every grouping, and the lupin round's account of its \
-             cluster when a round is shown.",
+             position, its group in every grouping, its time when the run has times, and \
+             the lupin round's account of its cluster when a round is shown.",
             json!({
                 "type": "object",
                 "properties": {

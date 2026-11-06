@@ -16,6 +16,8 @@ pub enum Topic {
     Deconvolve,
     /// The feature-embedded restricted Boltzmann machine.
     Rbm,
+    /// Every cell's lineage, time and velocity from a mixture of splicing ODEs.
+    Ode,
     // Moved to lupin; kept so the old names say where to look.
     #[value(hide = true)]
     Annotation,
@@ -42,6 +44,11 @@ const DOCS: &[(Topic, &str, &str)] = &[
         Topic::Rbm,
         "METHOD  feature-embedded restricted Boltzmann machine",
         include_str!("../docs/rbm.md"),
+    ),
+    (
+        Topic::Ode,
+        "METHOD  lineage, time and velocity from a mixture of splicing ODEs",
+        include_str!("../docs/ode.md"),
     ),
 ];
 
