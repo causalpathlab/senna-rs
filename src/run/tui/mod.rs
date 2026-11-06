@@ -31,7 +31,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 /// The methods `senna run` sets up, in the order listed.
-pub const METHODS: [&str; 10] = [
+pub const METHODS: [&str; 11] = [
     "topic",
     "masked-topic",
     "masked-vae",
@@ -42,6 +42,7 @@ pub const METHODS: [&str; 10] = [
     "simba",
     "rbm",
     "ode",
+    "embed-ode",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -570,6 +571,7 @@ impl App {
             labels: Vec::new(),
             clones: None,
             pb_from: None,
+            from: None,
             lane: 0,
         })
     }
@@ -1471,7 +1473,15 @@ impl App {
             // On several GPUs, the fits on one take them in turn (a
             // `--device-no` given by hand stays): each GPU is a lane, its
             // fits run in turn and the GPUs side by side.
-            let mut argv = r.form.argv(&data, &batch_files, &out);
+            let from_here = |v: &str| rel(&self.here.join(v));
+            let mut argv = r.form.argv(&data, &batch_files, &out, from_here);
+            // The run it reads, as passed.
+            let from = r
+                .form
+                .fields
+                .iter()
+                .find(|f| f.long == "from" && !f.value.trim().is_empty())
+                .map(|f| from_here(f.value.trim()));
             let lane = match self.gpu_of(r) {
                 Some(Some(given)) => given,
                 Some(None) => {
@@ -1495,6 +1505,7 @@ impl App {
                 labels,
                 clones,
                 pb_from,
+                from,
                 lane,
             };
             let mut blamed = None;

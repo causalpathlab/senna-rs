@@ -29,7 +29,7 @@
 use super::blocks::GenePrior;
 use super::kernel::GridPrior;
 use super::likelihood::Reads;
-use super::model::{branch_ramp, clamped_exp, Params, LOG_CLAMP};
+use super::model::{branch_ramp, clamped_exp, off_the_edges, phase, positions, Params, LOG_CLAMP};
 use crate::rbm_core::adam;
 use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var, D};
 use legume_numeric::candle::candle_nn::ops::log_softmax;
@@ -163,7 +163,7 @@ impl Fit {
         use nalgebra::DVector;
         let (l, n, _, h) = self.dims;
         let dev = self.eta.device().clone();
-        let tb = branch_at.clamp(0.02, 0.98);
+        let tb = off_the_edges(branch_at);
         let r = branch_ramp(n, tb, self.kappa);
         let mut eta = Vec::with_capacity(l * n * h);
         for (li, path) in params.path.iter().enumerate() {
@@ -354,9 +354,7 @@ impl Fit {
         // z_ℓ = z_0 + √2 r_ℓ(t) w_ℓ, r_ℓ = 1 − exp(−((t − t_b)₊/κ)²).
         let dev = z.device();
         let t = Tensor::from_vec(
-            (0..n)
-                .map(|k| k as f32 / (n - 1) as f32)
-                .collect::<Vec<_>>(),
+            (0..n).map(|k| phase(k, n) as f32).collect::<Vec<_>>(),
             (1, n),
             dev,
         )?;
@@ -437,7 +435,7 @@ impl Fit {
         }
         us.push(u);
         ss.push(s);
-        let positions = (n - 1) * m + 1;
+        let positions = positions(n, m);
         let stack = |v: &[Tensor]| Tensor::stack(v, 1)?.reshape((l * positions, g));
         Ok((stack(&us)?, stack(&ss)?))
     }
@@ -558,7 +556,7 @@ impl Fit {
 
     /// Positions per lineage, `(n − 1) sub + 1`.
     pub fn positions(&self) -> usize {
-        (self.dims.1 - 1) * self.sub + 1
+        positions(self.dims.1, self.sub)
     }
 
     /// The parameters on the host.

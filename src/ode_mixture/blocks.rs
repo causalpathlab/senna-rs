@@ -7,7 +7,7 @@ use super::band::{dot, Band, Bordered, Factor};
 use super::kernel::{GridPrior, BAND};
 use super::kinetics::fine_trajectory;
 use super::likelihood::{share_mode, softplus, Depth, GeneRows, Reads};
-use super::model::{alpha_on, branch_ramp, clamped_exp, Params, LOG_CLAMP};
+use super::model::{alpha_on, branch_ramp, clamped_exp, phase, positions, Params, LOG_CLAMP};
 use legume_numeric::mcmc::engine::elliptical_slice_step;
 use nalgebra::{DMatrix, DVector};
 use rand::rngs::StdRng;
@@ -836,7 +836,7 @@ pub(super) fn response(
     sub: usize,
 ) -> (DMatrix<f64>, DMatrix<f64>) {
     let sub = sub.max(1);
-    let positions = (n - 1) * sub + 1;
+    let positions = positions(n, sub);
     let (mut a_u, mut a_s) = (DMatrix::zeros(positions, n), DMatrix::zeros(positions, n));
     // The first node sets the start too, the last nothing past it (its
     // column zero); a pulse between them is the first such pulse later by
@@ -1105,7 +1105,7 @@ impl<'a> Space<'a> {
             .map(|e| {
                 let w = self.prior.colour(e);
                 DVector::from_fn(n, |k, _| {
-                    let u = (k as f64 / (n - 1) as f64 - tb).max(0.0) / kappa;
+                    let u = (phase(k, n) - tb).max(0.0) / kappa;
                     let dr = -std::f64::consts::SQRT_2 * 2.0 * u * (-u * u).exp() / kappa;
                     dr * w[k] * tb * (1.0 - tb)
                 })

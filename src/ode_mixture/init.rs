@@ -28,7 +28,7 @@ use super::blocks::GenePrior;
 use super::fit::{Fit, SHARE_START};
 use super::kernel::GridPrior;
 use super::likelihood::Reads;
-use super::model::Params;
+use super::model::{phase, Params};
 use legume_numeric::candle::candle_core::{Device, Result};
 use nalgebra::DMatrix;
 
@@ -347,7 +347,7 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
         .map(|l| {
             (0..n)
                 .map(|k| {
-                    let tau = k as f64 / (n - 1) as f64;
+                    let tau = phase(k, n);
                     let (mut acc, mut wsum) = (vec![0.0; h], 0.0);
                     let on = places.iter().enumerate().flat_map(|(a, at)| {
                         at.iter()

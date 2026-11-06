@@ -121,6 +121,9 @@ pub struct Job {
     /// The manifest of a fit queued before it whose pseudobulk partition it
     /// collapses on, as passed: relative to `dir`.
     pub pb_from: Option<String>,
+    /// The run it reads (`--from`, a prefix or its `.senna.json`), as
+    /// passed: relative to `dir`.
+    pub from: Option<String>,
     /// The lane it runs in: its GPU when the fits are spread over several,
     /// else 0.
     pub lane: usize,
@@ -340,6 +343,27 @@ impl Queue {
     }
 }
 
+/// The job queued before job `i` of `js` that it needs done first, and
+/// what it lacks when that one does not finish: the one whose partition it
+/// collapses on (`--pb-from`), else the one whose run its `--from` names.
+/// Only an earlier job, so a lane never waits on one it has yet to run.
+fn source_of(i: usize, js: &[Job]) -> Option<(usize, &'static str)> {
+    let job = &js[i];
+    let at = |path: PathBuf| {
+        let path = super::script::resolved(&path);
+        js[..i]
+            .iter()
+            .position(|j| super::script::resolved(&j.result()) == path)
+    };
+    if let Some(run) = &job.pb_from {
+        return at(job.dir.join(run)).map(|k| (k, "no pseudobulks to collapse on"));
+    }
+    let from = job.from.as_ref()?;
+    at(job.dir.join(from))
+        .or_else(|| at(job.dir.join(format!("{from}.{}", Tool::Senna.result()))))
+        .map(|k| (k, "no run to read"))
+}
+
 /// Run lane `lane`'s jobs of `js` in order (every job when there is one
 /// lane). A job collapsing on another's partition waits for it, and fails
 /// when it did not finish.
@@ -359,13 +383,10 @@ fn run_lane(
             continue;
         }
         let job = &js[i];
-        // The fit whose partition it collapses on, once that one is through.
-        let source = job.pb_from.as_ref().and_then(|run| {
-            let run = super::script::resolved(&job.dir.join(run));
-            js.iter()
-                .position(|j| super::script::resolved(&j.result()) == run)
-        });
-        let source_state = source.map(|k| loop {
+        // The fit whose partition it collapses on, or whose run it reads,
+        // once that one is through.
+        let source = source_of(i, &js);
+        let source_state = source.map(|(k, _)| loop {
             let state = s
                 .lock()
                 .map(|s| s.states[k].clone())
@@ -379,11 +400,10 @@ fn run_lane(
             State::Stopped
         } else if let (Some(_), Some(why)) = (&job.clones, &no_clones) {
             State::Failed(why.clone())
-        } else if let Some(k) = source.filter(|_| source_state.as_ref() != Some(&State::Done)) {
-            State::Failed(format!(
-                "{} did not finish: no pseudobulks to collapse on",
-                js[k].method
-            ))
+        } else if let Some((k, lacks)) =
+            source.filter(|_| source_state.as_ref() != Some(&State::Done))
+        {
+            State::Failed(format!("{} did not finish: {lacks}", js[k].method))
         } else {
             set(s, i, State::Running);
             run_job(job, i, lanes > 1, s, st)

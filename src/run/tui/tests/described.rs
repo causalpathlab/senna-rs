@@ -50,7 +50,7 @@ fn a_description_becomes_a_form_like_senna_s_own() {
     assert_eq!(field("skip").default, "x,y");
     assert_eq!(field("fast").kind, Kind::Flag { on: true });
     assert!(m.fields.iter().all(|f| f.long != "out" && f.long != "help"));
-    let line = m.argv(&argv(&["a.zarr", "b.zarr"]), &[], "cnv");
+    let line = m.argv(&argv(&["a.zarr", "b.zarr"]), &[], "cnv", str::to_owned);
     assert_eq!(line, argv(&["split", "a.zarr", "b.zarr", "--out", "cnv"]));
     assert_eq!(check(&cmd, &line), Ok(()));
 }

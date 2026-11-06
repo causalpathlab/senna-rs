@@ -46,6 +46,7 @@ mod critique;
 mod deconvolve;
 mod docs;
 mod embed_diag;
+mod embed_ode;
 mod empirical_dict;
 mod eval_topic;
 mod feature_embedding_args;
@@ -506,6 +507,24 @@ enum Commands {
                       branch_time."
     )]
     Ode(ode_mixture::command::OdeArgs),
+
+    #[command(
+        name = "embed-ode",
+        about = "One embedding of pseudobulks, genes and cells, shaped by an ode run's lineages and times",
+        long_about = "An embedding shaped by a `senna ode` run (--from): every pseudobulk of\n\
+                      the ode run a point x_p, every gene a vector w_g and a baseline b_g,\n\
+                      the reads a full softmax over the genes of x_p·w_g + b_g, on every\n\
+                      gene's spliced reads (a backend without tracks, its rows as they\n\
+                      are). Every lineage a smooth curve in the same space, on the ode\n\
+                      run's grid and trunk, and every pseudobulk held near the curve at\n\
+                      the lineage and time the ode run put it, a Gaussian of learned sd.\n\
+                      Every cell is then placed by its own reads, near its curve. Writes\n\
+                      {out}.cell_embedding.parquet, cell_velocity (the curves' slope at\n\
+                      every cell), pb_embedding, feature_embedding and feature_bias (the\n\
+                      genes), trajectory (every lineage's curve), cell_time (the ode\n\
+                      run's), cell_to_pb and senna.json."
+    )]
+    EmbedOde(embed_ode::command::EmbedOdeArgs),
 
     #[command(
         name = "rbm",
@@ -1013,6 +1032,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Ode(args) => {
             ode_mixture::command::run_ode(args)?;
+        }
+        Commands::EmbedOde(args) => {
+            embed_ode::command::run_embed_ode(args)?;
         }
         Commands::Rbm(args) => {
             rbm::run::fit_rbm(args)?;
