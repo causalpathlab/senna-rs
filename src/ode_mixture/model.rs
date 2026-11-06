@@ -68,6 +68,12 @@ impl Levels {
     }
 }
 
+/// Lineage `l`'s name in the outputs, `L1…`. Lineage 0 is the trunk's;
+/// [`Params::branch`]`[i]` is lineage `i + 1`'s.
+pub fn lineage_label(l: usize) -> Box<str> {
+    format!("L{}", l + 1).into()
+}
+
 /// The transcription at every node of a path, `α_k = exp(ρᵀ z_k + b)`.
 pub fn alpha_on(path: &[Vec<f64>], rho: &[f64], base: f64) -> Vec<f64> {
     path.iter()
@@ -83,7 +89,13 @@ impl Params {
 
     /// The time of lineage `l`'s position `k`.
     pub fn time_at(&self, l: usize, k: usize) -> f64 {
-        k as f64 * self.t_len[l] / (self.positions() - 1) as f64
+        self.phase_at(k) * self.t_len[l]
+    }
+
+    /// Position `k`'s share of a lineage's grid, `k/(positions − 1)`: the
+    /// clock every lineage shares and the branch times are on.
+    pub fn phase_at(&self, k: usize) -> f64 {
+        k as f64 / (self.positions() - 1).max(1) as f64
     }
 
     /// The paths' mean over every lineage's grid points, `[H]`.

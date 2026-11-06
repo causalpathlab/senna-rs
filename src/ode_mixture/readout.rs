@@ -113,16 +113,9 @@ const MAX_BINS: usize = 4096;
 /// place anywhere (its row not finite) is NaN throughout.
 pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
     let (n_cells, genes) = (cells.u.nrows(), cells.u.ncols());
-    let Some(first) = snaps.first() else {
+    let Some((lineages, positions)) = grid_shape(snaps) else {
         return CellReadout::empty(n_cells, genes);
     };
-    let (lineages, positions) = (first.params.path.len(), first.params.positions());
-    assert!(
-        snaps
-            .iter()
-            .all(|s| s.params.path.len() == lineages && s.params.positions() == positions),
-        "every snapshot on the same lineages and grid"
-    );
     let weight = 1.0 / snaps.len() as f64;
     let durations = || snaps.iter().flat_map(|s| s.params.t_len.iter().copied());
     let t_max = durations().fold(0.0, f64::max);
@@ -152,10 +145,7 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
     for snap in snaps {
         let p = &snap.params;
         let lv = p.levels();
-        let tab = match snap.share_sd {
-            Some(sd) => integrated_table(cells, &lv, sd),
-            None => table(cells, &lv),
-        };
+        fill_posterior(cells, snap, &lv, weight, &mut post);
         let times: Vec<(usize, f64, usize)> = (0..rows)
             .map(|r| {
                 let (l, k) = (r / positions, r % positions);
@@ -163,23 +153,19 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
                 (l, t, ((t / width).round() as usize).min(n_bins - 1))
             })
             .collect();
-        post.as_mut_slice()
-            .par_chunks_mut(rows)
+        post.as_slice()
+            .par_chunks(rows)
             .zip(acc.par_iter_mut())
-            .enumerate()
-            .for_each(|(c, (col, a))| {
-                let (lp, norm) = log_posterior_row(&tab, &snap.log_w, positions, c);
-                if !norm.is_finite() {
+            .for_each(|(col, a)| {
+                if col[0].is_nan() {
                     a.unknown = true;
-                    col.fill(0.0);
                     return;
                 }
-                for ((x, &l), &(lin, t, bin)) in col.iter_mut().zip(&lp).zip(&times) {
-                    *x = weight * l.exp();
-                    a.lineage[lin] += *x;
-                    a.m1 += *x * t;
-                    a.m2 += *x * t * t;
-                    a.bins[bin] += *x;
+                for (&x, &(lin, t, bin)) in col.iter().zip(&times) {
+                    a.lineage[lin] += x;
+                    a.m1 += x * t;
+                    a.m2 += x * t * t;
+                    a.bins[bin] += x;
                 }
             });
         let (du, ds) = p.velocities_of(&lv);
@@ -227,5 +213,92 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
         velocity_s,
         velocity_log,
         time_bin: width,
+    }
+}
+
+/// The draws' lineages and positions, `None` with no draw; every draw on
+/// the same (checked).
+fn grid_shape(snaps: &[Snapshot]) -> Option<(usize, usize)> {
+    let first = snaps.first()?;
+    let (lineages, positions) = (first.params.path.len(), first.params.positions());
+    assert!(
+        snaps
+            .iter()
+            .all(|s| s.params.path.len() == lineages && s.params.positions() == positions),
+        "every snapshot on the same lineages and grid"
+    );
+    Some((lineages, positions))
+}
+
+/// One draw's posterior of every cell over every row `(ℓ, k)`, times
+/// `weight`, into `post` (`[rows × cells]`, a cell a column); a cell the
+/// draw cannot place (its row not finite) is NaN.
+fn fill_posterior(
+    cells: &Reads,
+    snap: &Snapshot,
+    lv: &super::model::Levels,
+    weight: f64,
+    post: &mut DMatrix<f64>,
+) {
+    let (rows, positions) = (post.nrows(), snap.params.positions());
+    let tab = match snap.share_sd {
+        Some(sd) => integrated_table(cells, lv, sd),
+        None => table(cells, lv),
+    };
+    post.as_mut_slice()
+        .par_chunks_mut(rows)
+        .enumerate()
+        .for_each(|(c, col)| {
+            let (lp, norm) = log_posterior_row(&tab, &snap.log_w, positions, c);
+            if !norm.is_finite() {
+                col.fill(f64::NAN);
+                return;
+            }
+            for (x, &l) in col.iter_mut().zip(&lp) {
+                *x = weight * l.exp();
+            }
+        });
+}
+
+/// Every cell's posterior over the grid, averaged over the draws.
+pub struct GridPosterior {
+    /// `[C × L positions]`, a cell's row summing to one (NaN where some
+    /// draw cannot place it), columns `ℓ positions + k`.
+    pub post: DMatrix<f64>,
+    /// `[L positions]` every column's phase ([`Params::phase_at`]), the same
+    /// in every draw, and its time averaged over the draws.
+    pub phase: Vec<f64>,
+    pub time: Vec<f64>,
+    pub positions: usize,
+}
+
+/// Every cell of `cells` on the grid of the draws `snaps` (at least one; the
+/// same lineages and grid, checked), its posterior averaged over them.
+pub fn grid_posterior(cells: &Reads, snaps: &[Snapshot]) -> GridPosterior {
+    let n_cells = cells.u.nrows();
+    let (lineages, positions) = grid_shape(snaps).expect("at least one draw");
+    let rows = lineages * positions;
+    let weight = 1.0 / snaps.len() as f64;
+    let (mut sum, mut post) = (
+        DMatrix::<f64>::zeros(rows, n_cells),
+        DMatrix::<f64>::zeros(rows, n_cells),
+    );
+    let mut time = vec![0.0; rows];
+    for snap in snaps {
+        let lv = snap.params.levels();
+        fill_posterior(cells, snap, &lv, weight, &mut post);
+        sum += &post;
+        for (r, t) in time.iter_mut().enumerate() {
+            *t += weight * snap.params.time_at(r / positions, r % positions);
+        }
+    }
+    let phase = (0..rows)
+        .map(|r| snaps[0].params.phase_at(r % positions))
+        .collect();
+    GridPosterior {
+        post: sum.transpose(),
+        phase,
+        time,
+        positions,
     }
 }

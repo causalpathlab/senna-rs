@@ -188,4 +188,39 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
             Some(format!("run.{file}.parquet").as_str())
         );
     }
+
+    // Every pseudobulk's posterior over the grid, the cells' pseudobulks
+    // among them; no branch with one lineage.
+    assert_eq!(m.outputs.pb_time.as_deref(), Some("run.pb_time.parquet"));
+    assert_eq!(m.outputs.branch_time, None);
+    let (keys, nums) = read_table_columns(
+        &format!("{out}.pb_time.parquet"),
+        &["pb", "lineage"],
+        &["position", "phase", "time", "q"],
+    )
+    .unwrap();
+    assert!(keys[1].iter().all(|l| l.as_ref() == "L1"));
+    let mut mass = std::collections::HashMap::<&str, f64>::new();
+    for (pb, q) in keys[0].iter().zip(&nums[3]) {
+        *mass.entry(pb.as_ref()).or_default() += q;
+    }
+    assert!(
+        mass.values().all(|m| (m - 1.0).abs() < 1e-3),
+        "{:?}",
+        mass.values().take(3).collect::<Vec<_>>()
+    );
+    // The phase on the grid; the time at it, with the duration drawn, any
+    // nonnegative value.
+    assert!(nums[1].iter().all(|u| (0.0..=1.0).contains(u)));
+    assert!(nums[2].iter().all(|t| t.is_finite() && *t >= 0.0));
+    let member = senna::embed_common::Mat::from_parquet_with_row_names(
+        &format!("{out}.cell_to_pb.parquet"),
+        Some(0),
+    )
+    .unwrap();
+    let finest = member.mat.ncols() - 1;
+    for c in 0..member.mat.nrows() {
+        let pb = (member.mat[(c, finest)] as usize).to_string();
+        assert!(mass.contains_key(pb.as_str()), "cell {c}'s pseudobulk {pb}");
+    }
 }

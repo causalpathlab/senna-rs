@@ -247,3 +247,45 @@ fn an_underflowed_level_has_no_log_velocity() {
     assert_eq!(log_rate(1.0, 0.0, 1e-320, 0.0), 0.0);
     assert_eq!(log_rate(-1.0, 0.0, f64::NAN, 1.0), 0.0);
 }
+
+/// Every cell's posterior on the grid, over two draws, is a distribution
+/// whose lineage masses and mean time are the readout's.
+#[test]
+fn the_grid_posterior_is_the_readouts() {
+    use crate::ode_mixture::readout::grid_posterior;
+    let sim = cells();
+    let a = truth_snap(&sim, None);
+    let mut b = a.clone();
+    b.log_w = vec![0.8f64.ln(), 0.2f64.ln()];
+    let snaps = [a, b];
+    let reads = first(&sim, 200);
+    let out = read_cells(&reads, &snaps);
+    let grid = grid_posterior(&reads, &snaps);
+    let positions = grid.positions;
+    assert_eq!(grid.post.shape(), (200, 2 * positions));
+    assert_eq!(grid.time.len(), 2 * positions);
+    // The phase runs 0 to 1 along each lineage's grid.
+    assert_eq!((grid.phase[0], grid.phase[positions - 1]), (0.0, 1.0));
+    assert_eq!(grid.phase[positions], 0.0);
+    for c in 0..200 {
+        let row = grid.post.row(c);
+        assert!(
+            (row.sum() - 1.0).abs() < 1e-9,
+            "cell {c} sums to {}",
+            row.sum()
+        );
+        for l in 0..2 {
+            let mass: f64 = (0..positions).map(|k| row[l * positions + k]).sum();
+            assert!(
+                (mass - out.lineage[c][l]).abs() < 1e-9,
+                "cell {c} lineage {l}"
+            );
+        }
+        let t: f64 = row.iter().zip(&grid.time).map(|(q, t)| q * t).sum();
+        assert!(
+            (t - out.time_mean[c]).abs() < 1e-9,
+            "cell {c}: {t} vs {}",
+            out.time_mean[c]
+        );
+    }
+}
