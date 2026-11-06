@@ -93,7 +93,7 @@ and flagged above R̂ 1.05.
 | file | holds |
 |---|---|
 | `{out}.cell_time.parquet` | every cell's `lineage`, its `direction`, `tau` with `tau_sd` and the 90% interval `tau_lo`/`tau_hi`, and `p_L1…` lineage posteriors |
-| `{out}.cell_embedding.parquet` | every cell on the map: the leading `--map-pcs` components of log1p reads per 10⁴ |
+| `{out}.cell_embedding.parquet` | every cell on the map: its log1p reads per 10⁴ on the leading `--map-pcs` components of the fitted trajectories (every lineage's levels over the draws), so the axes follow the dynamics, not other variation among the cells |
 | `{out}.cell_velocity.parquet` | every cell's velocity on that map, `d log level/dt` through the chain rule |
 | `{out}.gene_rates.parquet` | every gene's `log_gamma` and `log_ratio` (log γ/β) with sd, R̂, ESS, and `flagged` |
 | `{out}.lineages.tsv` | every lineage's direction evidence, per pseudobulk, its call and whether it was turned |

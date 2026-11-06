@@ -155,7 +155,7 @@ pub struct OdeArgs {
     #[arg(
         long,
         default_value_t = 30,
-        help = "Principal components of the map space"
+        help = "Principal components of the map space, fitted on the trajectories"
     )]
     pub map_pcs: usize,
 
@@ -453,11 +453,9 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let log_ratio = chain_stats(&per_chain(&draws, |d| &d.log_ratio));
     write_gene_rates(&args.out, &names, &log_gamma, &log_ratio)?;
 
+    // The map on the trajectories' own axes, every cell placed by its reads.
+    let map = MapBasis::of_trajectories(&snaps, args.map_pcs)?;
     // Every cell read once, a block at a time; QC's near-empty cells out.
-    let map = {
-        let x = &reads.u + &reads.s;
-        MapBasis::new(&x, args.map_pcs)?
-    };
     let table = read_out_cells(
         &data,
         &names,
