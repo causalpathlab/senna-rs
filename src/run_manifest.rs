@@ -987,6 +987,17 @@ pub struct RunOutputs {
     /// for row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_velocity: Option<String>,
+    /// `{out}.pb_time.parquet`: every finest pseudobulk's posterior over
+    /// lineage and time on the grid, a row per `(pb, lineage, position)`
+    /// with its `phase` on the grid, mean `time` and mass `q`, keyed by the
+    /// `cell_to_pb` finest level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_time: Option<String>,
+    /// `{out}.branch_time.tsv`: every other lineage's branch time off the
+    /// trunk over the chains (mean, sd, R̂, ESS), on `pb_time`'s phase scale;
+    /// only with a shared trunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_time: Option<String>,
     /// Fields this version does not know, written by another tool or a
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]

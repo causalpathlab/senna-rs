@@ -500,8 +500,10 @@ enum Commands {
                       from it; every cell is read out from the chains' draws. Writes\n\
                       {out}.cell_time.parquet (lineage, time, its sd and 90% interval,\n\
                       lineage posteriors), cell_embedding and cell_velocity (the map\n\
-                      space and every cell's velocity there) and gene_rates (every\n\
-                      gene's rates with R̂ and ESS, flagged above 1.05)."
+                      space and every cell's velocity there), gene_rates (every\n\
+                      gene's rates with R̂ and ESS, flagged above 1.05), pb_time (every\n\
+                      pseudobulk's posterior over lineage and time) and, on a trunk,\n\
+                      branch_time."
     )]
     Ode(ode_mixture::command::OdeArgs),
 

@@ -8,8 +8,9 @@ use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
 use super::direction::{direction_of, Call};
 use super::init::{climb, Climb};
 use super::likelihood::Reads;
+use super::model::lineage_label;
 use super::output::{chain_stats, ChainStat, MapBasis};
-use super::readout::{read_cells, Snapshot};
+use super::readout::{grid_posterior, read_cells, GridPosterior, Snapshot};
 use super::sampler::{self, Draws};
 use legume_numeric::matrix::parquet::{write_named_table, Column};
 use log::info;
@@ -234,6 +235,8 @@ struct Finest {
     reads: Reads,
     /// The genes' names.
     names: Vec<Box<str>>,
+    /// Every row's pseudobulk in the collapse's finest level.
+    pbs: Vec<usize>,
     /// `[D × batches]` the batch effects the cells are read with.
     delta: Option<DMatrix<f32>>,
 }
@@ -279,6 +282,7 @@ fn finest_reads(
     Ok(Finest {
         reads,
         names,
+        pbs,
         delta,
     })
 }
@@ -377,6 +381,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let Finest {
         reads,
         names,
+        pbs,
         delta,
     } = finest_reads(
         collapsed_levels,
@@ -436,7 +441,9 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
             ..sampler::Options::default()
         },
     )?;
-    report_chains(&draws);
+    // Every other lineage's branch time off the trunk; none with them apart.
+    let branch = chain_stats(&per_chain(&draws, |d| &d.branch));
+    report_chains(&draws, &branch);
 
     // Nothing to report or read out from chains stopped in burn-in.
     let snaps: Vec<Snapshot> = draws
@@ -473,9 +480,13 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     if let Some(tree) = &pb_tree {
         crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &row_names)?;
     }
-    write_manifest(args, &inputs, pb_tree.is_some())?;
+    write_pb_time(&args.out, &pbs, &grid_posterior(&reads, &snaps))?;
+    if !branch.is_empty() {
+        write_branch_times(&args.out, &branch)?;
+    }
+    write_manifest(args, &inputs, pb_tree.is_some(), !branch.is_empty())?;
     info!(
-        "Wrote {0}.{{cell_time,cell_embedding,cell_velocity,gene_rates}}.parquet and {0}.senna.json (and {0}.lineages.tsv unless --no-direction)",
+        "Wrote {0}.{{cell_time,cell_embedding,cell_velocity,gene_rates,pb_time}}.parquet and {0}.senna.json (and {0}.lineages.tsv unless --no-direction, {0}.branch_time.tsv on a trunk)",
         args.out
     );
     Ok(())
@@ -550,7 +561,7 @@ fn read_out_cells(
         for p in &out.lineage {
             let best = lineage_index(p);
             t.lineage
-                .push(best.map_or_else(|| "NA".into(), |l| format!("L{}", l + 1).into()));
+                .push(best.map_or_else(|| "NA".into(), lineage_label));
             t.direction
                 .push(best.map_or("NA", |l| run_label(runs[l])).into());
         }
@@ -674,7 +685,7 @@ fn lineage_directions(
 }
 
 /// The chains' lineage durations and branch times, and how well they mix.
-fn report_chains(draws: &[Draws]) {
+fn report_chains(draws: &[Draws], branch: &[ChainStat]) {
     let say = |what: &str, stats: &[ChainStat]| {
         for (i, s) in stats.iter().enumerate() {
             info!(
@@ -692,10 +703,7 @@ fn report_chains(draws: &[Draws]) {
         "log duration of lineage",
         &chain_stats(&per_chain(draws, |d| &d.log_t)),
     );
-    say(
-        "branch time of lineage",
-        &chain_stats(&per_chain(draws, |d| &d.branch)),
-    );
+    say("branch time of lineage", branch);
 }
 
 /// `{out}.gene_rates.parquet`: every gene's `log γ` and `log γ/β` over the
@@ -734,8 +742,76 @@ fn write_gene_rates(
     )
 }
 
+/// Below this a pseudobulk's mass at a grid row is left out of `pb_time`.
+const PB_TIME_FLOOR: f64 = 1e-6;
+
+/// `{out}.pb_time.parquet`: every pseudobulk's posterior on the grid, a
+/// row per `(pb, lineage, position)` it has mass at, `pb` its index in the
+/// collapse's finest level (as `cell_to_pb` writes it). `phase` is the
+/// position's share of its lineage's grid, the same in every draw (the
+/// branch time's scale); `time` the draws' mean time there (a lineage's
+/// duration is drawn, so `cell_time` holds the exact posterior time). A
+/// pseudobulk no draw can place has no row.
+fn write_pb_time(out: &str, pbs: &[usize], grid: &GridPosterior) -> anyhow::Result<()> {
+    let n = grid.positions;
+    let labels: Vec<Box<str>> = (0..grid.time.len() / n).map(lineage_label).collect();
+    let (mut key, mut lineage) = (Vec::<Box<str>>::new(), Vec::<Box<str>>::new());
+    let (mut position, mut phase) = (Vec::<i32>::new(), Vec::<f32>::new());
+    let (mut time, mut q) = (Vec::<f32>::new(), Vec::new());
+    for (row, &pb) in grid.post.row_iter().zip(pbs) {
+        let pb: Box<str> = pb.to_string().into();
+        for (r, &mass) in row.iter().enumerate().filter(|(_, m)| **m >= PB_TIME_FLOOR) {
+            key.push(pb.clone());
+            lineage.push(labels[r / n].clone());
+            position.push((r % n) as i32);
+            phase.push(grid.phase[r] as f32);
+            time.push(grid.time[r] as f32);
+            q.push(mass as f32);
+        }
+    }
+    write_named_table(
+        &format!("{out}.pb_time.parquet"),
+        "pb",
+        &key,
+        &[
+            ("lineage".into(), Column::Str(&lineage)),
+            ("position".into(), Column::I32(&position)),
+            ("phase".into(), Column::F32(&phase)),
+            ("time".into(), Column::F32(&time)),
+            ("q".into(), Column::F32(&q)),
+        ],
+    )
+}
+
+/// `{out}.branch_time.tsv`: every other lineage's branch time off the
+/// trunk over the chains, on the phase scale (a share of the grid, as
+/// `pb_time`'s `phase`), with R̂ and ESS and whether it is not mixed.
+fn write_branch_times(out: &str, branch: &[ChainStat]) -> anyhow::Result<()> {
+    use std::fmt::Write;
+    let mut tsv = String::from("lineage\tbranch_time\tbranch_time_sd\trhat\tess\tflagged\n");
+    for (i, b) in branch.iter().enumerate() {
+        writeln!(
+            tsv,
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            lineage_label(i + 1),
+            b.mean,
+            b.sd,
+            b.rhat,
+            b.ess,
+            u8::from(b.flagged())
+        )?;
+    }
+    std::fs::write(format!("{out}.branch_time.tsv"), tsv)?;
+    Ok(())
+}
+
 /// `{out}.senna.json`: the run as `senna view` and the layouts open it.
-fn write_manifest(args: &OdeArgs, inputs: &Inputs, has_pb_tree: bool) -> anyhow::Result<()> {
+fn write_manifest(
+    args: &OdeArgs,
+    inputs: &Inputs,
+    has_pb_tree: bool,
+    has_branch: bool,
+) -> anyhow::Result<()> {
     use senna::run_manifest::{
         record_train_args, write_run_manifest_with, RunDescription, RunKind,
     };
@@ -748,6 +824,8 @@ fn write_manifest(args: &OdeArgs, inputs: &Inputs, has_pb_tree: bool) -> anyhow:
     let record_time = |m: &mut senna::run_manifest::RunManifest, base: &str| {
         m.outputs.cell_time = Some(format!("{base}.cell_time.parquet"));
         m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
+        m.outputs.pb_time = Some(format!("{base}.pb_time.parquet"));
+        m.outputs.branch_time = has_branch.then(|| format!("{base}.branch_time.tsv"));
     };
     write_run_manifest_with(
         &RunDescription {

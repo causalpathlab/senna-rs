@@ -96,6 +96,8 @@ and flagged above R̂ 1.05.
 | `{out}.cell_embedding.parquet` | every cell on the map: its log1p reads per 10⁴ on the leading `--map-pcs` components of the fitted trajectories (every lineage's levels over the draws), so the axes follow the dynamics, not other variation among the cells |
 | `{out}.cell_velocity.parquet` | every cell's velocity on that map, `d log level/dt` through the chain rule |
 | `{out}.gene_rates.parquet` | every gene's `log_gamma` and `log_ratio` (log γ/β) with sd, R̂, ESS, and `flagged` |
+| `{out}.pb_time.parquet` | every finest pseudobulk's posterior over lineage and time, a row per `(pb, lineage, position)` with its `phase` (the position's share of the lineage's grid, the same in every draw), the draws' mean `time` there and mass `q`; `pb` as `{out}.cell_to_pb.parquet`'s finest level |
+| `{out}.branch_time.tsv` | with a shared trunk, every other lineage's branch time off it over the chains (mean and sd, R̂, ESS, `flagged`), on `pb_time`'s phase scale |
 | `{out}.lineages.tsv` | every lineage's direction evidence, per pseudobulk, its call and whether it was turned |
 | `{out}.senna.json` | the run manifest `senna view` and the MCP tools read |
 
