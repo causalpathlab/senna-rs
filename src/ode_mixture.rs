@@ -2,6 +2,7 @@
 //! time, the trajectory the splicing ODE driven by the lineage's
 //! transcription. Built bottom up; see each module.
 
+pub mod band;
 pub mod blocks;
 pub mod command;
 pub mod counts;

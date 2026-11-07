@@ -1,6 +1,6 @@
 use super::model::truth_params;
 use crate::ode_mixture::blocks::{
-    draw_latents, draw_share_sd, draw_weights, from_theta, gene_laplace, gene_step, share_step,
+    draw_latents, draw_share_sd, draw_weights, from_theta, gene_mode, gene_step, share_step,
     to_theta, GenePrior,
 };
 use crate::ode_mixture::likelihood::{GeneRows, Reads, RowLayout};
@@ -72,14 +72,14 @@ fn a_genes_rates_are_found_from_a_wrong_start() {
         .map(|p| (sim.truth.time[p] / step).round() as usize)
         .collect();
     let lambda = reads.depths(&rows, &lv);
-    let prior = GenePrior::default();
+    let prior = GenePrior::bounded(&truth);
     let layout = RowLayout::new(&rows, &lambda);
     let z_bar = truth.path_mean();
     for g in [0, 3, 11, 25, 40, 77] {
-        // From the prior mean, Newton finds the conditional's mode; four
-        // chains start there, the proposal built on it once.
+        // From the prior mean, bounded Newton finds the conditional's mode;
+        // four chains start there, the proposal built on it once.
         let by_row = GeneRows::new(&layout, &reads, g);
-        let prop = gene_laplace(
+        let prop = gene_mode(
             &truth,
             &by_row,
             &z_bar,
@@ -159,8 +159,8 @@ fn the_samplers_coordinates_round_trip() {
 
 /// From the posterior mode (Adam from the truth), the path block alone,
 /// genes, latents and depths held: it mixes. The move is the generalized
-/// elliptical slice on the Gauss–Newton Laplace approximation
-/// (`path_laplace`, `path_gess_step`); `PLAIN=1` runs plain ESS on the
+/// elliptical slice on the banded Laplace approximation
+/// (`path_mode`, `path_gess_step`); `PLAIN=1` runs plain ESS on the
 /// prior instead, for comparison. Followed are the invariants a
 /// path sets, log transcription `ρ_gᵀz(t_k) + b_g` of a few genes at a few
 /// times, and the reads' log-likelihood; their effective draws are reported
@@ -168,7 +168,7 @@ fn the_samplers_coordinates_round_trip() {
 /// tried, is the climb's job, not the sampler's.)
 #[test]
 fn a_lineages_path_mixes_from_the_mode() {
-    use crate::ode_mixture::blocks::{path_gess_step, path_laplace, path_ll, path_step};
+    use crate::ode_mixture::blocks::{path_gess_step, path_ll, path_mode, path_step};
     use crate::ode_mixture::fit::Fit;
     use crate::ode_mixture::kernel::GridPrior;
     use crate::ode_mixture::likelihood::table;
@@ -218,7 +218,7 @@ fn a_lineages_path_mixes_from_the_mode() {
     let mut traces = vec![Vec::with_capacity(moves); followed.len() + 1];
     let t0 = std::time::Instant::now();
     let plain = std::env::var("PLAIN").is_ok();
-    let prop = path_laplace(&params, 0, &eta, &grid, &reads, &rows, &lambda, &prior);
+    let prop = path_mode(&params, 0, &eta, &grid, &reads, &rows, &lambda, &prior);
     for _ in 0..moves {
         (eta, ll) = if plain {
             path_step(
@@ -275,7 +275,7 @@ fn a_lineages_path_mixes_from_the_mode() {
 /// `d = b − log γ − m`, `(m, s)` the prior on `b̃`.
 #[test]
 fn the_path_block_carries_the_genes_prior_through_the_path_mean() {
-    use crate::ode_mixture::blocks::{path_gess_step, path_laplace, path_step};
+    use crate::ode_mixture::blocks::{path_gess_step, path_mode, path_step};
     use crate::ode_mixture::kernel::GridPrior;
     use crate::ode_mixture::model::Params;
     let n = 5;
@@ -305,7 +305,7 @@ fn the_path_block_carries_the_genes_prior_through_the_path_mean() {
     // The plain move, then the preconditioned one, its proposal built on an
     // anchor away from the mode (the move is exact whatever it is built on).
     let anchor = vec![nalgebra::DVector::from_element(n, 0.7)];
-    let prop = path_laplace(&params, 0, &anchor, &grid, &reads, &[], &[], &gene_prior);
+    let prop = path_mode(&params, 0, &anchor, &grid, &reads, &[], &[], &gene_prior);
     for preconditioned in [false, true] {
         let mut eta = vec![nalgebra::DVector::<f64>::zeros(n)];
         let mut ll = f64::NEG_INFINITY;
@@ -558,7 +558,7 @@ fn on_a_trunk_a_trunk_move_moves_every_lineage_and_a_departure_its_own() {
 /// direction it rises no more either way than its curvature allows.
 #[test]
 fn on_a_trunk_a_paths_laplace_mode_is_the_densitys() {
-    use crate::ode_mixture::blocks::{path_eta, path_laplace, path_log_density, place_path};
+    use crate::ode_mixture::blocks::{path_eta, path_log_density, path_mode, place_path};
     use crate::ode_mixture::kernel::GridPrior;
     use nalgebra::DVector;
     let (params, reads, rows, lambda) = trunk_mode();
@@ -566,7 +566,7 @@ fn on_a_trunk_a_paths_laplace_mode_is_the_densitys() {
     let prior = GenePrior::default();
     for block in [0, 1] {
         let anchor = path_eta(&params, &grid, block);
-        let prop = path_laplace(
+        let prop = path_mode(
             &params, block, &anchor, &grid, &reads, &rows, &lambda, &prior,
         );
         let mode = prop.mode(3);
@@ -613,7 +613,7 @@ fn on_a_trunk_a_paths_laplace_mode_is_the_densitys() {
 /// its whitened path `N(0, I)` and its branch time uniform.
 #[test]
 fn with_no_reads_a_departure_and_its_branch_time_follow_their_prior() {
-    use crate::ode_mixture::blocks::{path_eta, path_gess_step, path_laplace};
+    use crate::ode_mixture::blocks::{path_eta, path_gess_step, path_mode};
     use crate::ode_mixture::kernel::GridPrior;
     let (params, reads, _, _) = trunk_mode();
     let grid = GridPrior::new(45, 1.0, 0.25).unwrap();
@@ -624,7 +624,7 @@ fn with_no_reads_a_departure_and_its_branch_time_follow_their_prior() {
     p.rho.clear();
     p.base.clear();
     let mut eta = path_eta(&params, &grid, 1);
-    let prop = path_laplace(&p, 1, &eta, &grid, &reads, &[], &[], &prior);
+    let prop = path_mode(&p, 1, &eta, &grid, &reads, &[], &[], &prior);
     let mut rng = StdRng::seed_from_u64(5);
     let n = 20_000;
     let (mut m, mut v, mut e2) = (0.0, 0.0, 0.0);
@@ -687,7 +687,8 @@ fn the_response_to_every_node_is_one_trajectory_a_node() {
     }
 }
 
-/// A lineage's reads' gradient and Fisher information in its path, as one
+/// A lineage's reads' gradient and banded Fisher information (its
+/// responses cut to the band) in its path, as one
 /// gene's contribution after another summed (the definition, written out
 /// here), however they are accumulated.
 #[test]
@@ -735,8 +736,22 @@ fn a_lineages_information_is_every_genes_summed() {
             ws[k] += lambda[p][1] / s[k];
         }
         let d_alpha = a_u.transpose() * eu + a_s.transpose() * es;
-        let fa = a_u.transpose() * DMatrix::from_diagonal(&wu) * &a_u
-            + a_s.transpose() * DMatrix::from_diagonal(&ws) * &a_s;
+        // The information's responses cut to the nodes from `BAND − 1`
+        // before a position's to the one after.
+        let band = crate::ode_mixture::kernel::BAND;
+        let cut = |a: &DMatrix<f64>| {
+            DMatrix::from_fn(a.nrows(), n, |k, j| {
+                let node = k / params.sub;
+                if j + band > node && j <= node + 1 {
+                    a[(k, j)]
+                } else {
+                    0.0
+                }
+            })
+        };
+        let (c_u, c_s) = (cut(&a_u), cut(&a_s));
+        let fa = c_u.transpose() * DMatrix::from_diagonal(&wu) * &c_u
+            + c_s.transpose() * DMatrix::from_diagonal(&ws) * &c_s;
         for j in 0..n {
             for d in 0..h {
                 want_g[(j, d)] += alpha[j] * rho[d] * d_alpha[j];
@@ -756,9 +771,296 @@ fn a_lineages_information_is_every_genes_summed() {
         "gradient {}",
         rel(&got_g, &want_g)
     );
+    // Node-major `k H + d`.
+    let got_f = DMatrix::from_fn(h * n, h * n, |a, b| got_f.get(a, b));
+    let want_f = DMatrix::from_fn(h * n, h * n, |a, b| {
+        let (i, d, j, e) = (a / h, a % h, b / h, b % h);
+        want_f[(d * n + i, e * n + j)]
+    });
     assert!(
         rel(&got_f, &want_f) < 1e-10,
         "Fisher {}",
         rel(&got_f, &want_f)
     );
+}
+
+/// A gene whose rate is not a number leaves the reads' gradient non-finite: the
+/// path's mode search stops at its last finite point instead of failing,
+/// its mode finite.
+#[test]
+fn a_paths_mode_survives_a_gradient_that_is_not_finite() {
+    use crate::ode_mixture::blocks::path_mode;
+    use crate::ode_mixture::kernel::GridPrior;
+    use crate::ode_mixture::likelihood::table;
+    let cfg = SimConfig::default();
+    let sim = simulate(&cfg).unwrap();
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let grid = GridPrior::new(45, 1.0, cfg.kappa).unwrap();
+    let mut params = truth_params(&sim, 133, 45);
+    let lv = params.levels();
+    let tab = table(&reads, &lv);
+    let rows: Vec<usize> = (0..sim.n_pb)
+        .map(|p| {
+            (0..tab.ncols())
+                .max_by(|&a, &b| tab[(p, a)].total_cmp(&tab[(p, b)]))
+                .unwrap()
+        })
+        .collect();
+    let lambda = reads.depths(&rows, &lv);
+    // A NaN rate (an infinite one saturates at the clamp, finite).
+    params.base[0] = f64::NAN;
+    let h = params.rho[0].len();
+    let eta: Vec<nalgebra::DVector<f64>> = (0..h)
+        .map(|d| grid.whiten(&nalgebra::DVector::from_fn(45, |k, _| params.path[0][k][d])))
+        .collect();
+    let prop = path_mode(
+        &params,
+        0,
+        &eta,
+        &grid,
+        &reads,
+        &rows,
+        &lambda,
+        &GenePrior::default(),
+    );
+    assert!(prop.mode(h).iter().flatten().all(|v| v.is_finite()));
+}
+
+/// An extreme baseline or embedding saturates the transcription at the
+/// clamp ([`crate::ode_mixture::model::LOG_CLAMP`]) instead of
+/// overflowing: the likelihood, the levels and the reads' gradient and
+/// information stay finite.
+#[test]
+fn an_extreme_rate_gives_a_finite_likelihood_and_gradient() {
+    use crate::ode_mixture::blocks::{lineage_information, path_ll};
+    let sim = simulate(&SimConfig::default()).unwrap();
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let mut params = truth_params(&sim, 133, 45);
+    params.base[0] = 800.0;
+    params.base[1] = -800.0;
+    params.rho[2] = vec![1e4; params.rho[2].len()];
+    let lv = params.levels();
+    assert!(lv.u.iter().chain(lv.s.iter()).all(|v| v.is_finite()));
+    let rows: Vec<usize> = (0..sim.n_pb).map(|p| p % params.positions()).collect();
+    let lambda = reads.depths(&rows, &lv);
+    assert!(path_ll(&params, 0, &reads, &rows, &lambda).is_finite());
+    let (grad, fisher) = lineage_information(&params, 0, &reads, &rows, &lambda);
+    assert!(grad.iter().all(|v| v.is_finite()));
+    let hn = 45 * params.rho[0].len();
+    assert!((0..hn).all(|i| (0..hn).all(|j| fisher.get(i, j).is_finite())));
+}
+
+/// The rates' link carries the prior exactly: `link` and `unlink` are
+/// inverse inside the bounds, every rate it gives is inside them, and the
+/// log-Jacobian is the map's (by finite differences of `log r` in `u`).
+#[test]
+fn the_rate_link_round_trips_and_carries_its_jacobian() {
+    use crate::ode_mixture::model::Params;
+    let params = Params {
+        beta: vec![1.0],
+        gamma: vec![1.0],
+        rho: vec![vec![0.0]],
+        base: vec![0.0],
+        t_len: vec![1.0],
+        path: vec![vec![vec![0.0]; 45]],
+        sub: 4,
+        branch: None,
+    };
+    let prior = GenePrior::bounded(&params);
+    let (lo, hi) = prior.log_rate.unwrap();
+    eprintln!("bounds on log γ and log β at 45 points, 4 a step: [{lo:.3}, {hi:.3}]");
+    for theta in [
+        [0.3, -0.5, 0.2, 1.0],
+        [hi - 0.1, 0.05, -1.0, 0.0],
+        [lo + 0.2, 0.1, 0.0, 2.0],
+    ] {
+        let back = prior.unlink(&prior.link(&theta));
+        assert!(
+            theta.iter().zip(&back).all(|(a, b)| (a - b).abs() < 1e-9),
+            "{theta:?} {back:?}"
+        );
+    }
+    for u in [-30.0, -5.0, 0.0, 3.0, 30.0] {
+        let t = prior.unlink(&[u, -u, 0.0, 0.0]);
+        let (lg, lb) = (t[0], t[0] - t[1]);
+        assert!(
+            (lo..=hi).contains(&lg) && (lo..=hi).contains(&lb),
+            "u {u}: {lg} {lb}"
+        );
+    }
+    let eps = 1e-6;
+    for u in [-3.0, -0.4, 0.0, 1.1, 4.0] {
+        let lg = |u: f64| prior.unlink(&[u, 0.0, 0.0, 0.0])[0];
+        let slope = (lg(u + eps) - lg(u - eps)) / (2.0 * eps);
+        let at = |a: f64| prior.linked_log_density(&[a, 0.5, 0.0, 0.0]);
+        let jac = at(u) - prior.log_density(&prior.unlink(&[u, 0.5, 0.0, 0.0]));
+        let want = slope.ln() + {
+            let lb = |v: f64| prior.unlink(&[0.0, v, 0.0, 0.0]);
+            let lb = |v: f64| lb(v)[0] - lb(v)[1];
+            ((lb(0.5 + eps) - lb(0.5 - eps)) / (2.0 * eps)).ln()
+        };
+        assert!((jac - want).abs() < 1e-6, "u {u}: {jac} vs {want}");
+    }
+}
+
+/// Gene `g`'s `(log γ, log β)` draws from four chains of [`gene_step`] on
+/// `prior`, from its mode (rows at the truth's times).
+fn rate_draws(
+    params: &crate::ode_mixture::model::Params,
+    reads: &Reads,
+    times: &[f64],
+    g: usize,
+    prior: &GenePrior,
+) -> (Vec<f64>, Vec<f64>) {
+    let lv = params.levels();
+    let step = params.t_len[0] / (params.positions() - 1) as f64;
+    let rows: Vec<usize> = times.iter().map(|t| (t / step).round() as usize).collect();
+    let lambda = reads.depths(&rows, &lv);
+    let layout = RowLayout::new(&rows, &lambda);
+    let z_bar = params.path_mean();
+    let by_row = GeneRows::new(&layout, reads, g);
+    let h = params.rho[g].len();
+    let anchor = to_theta(
+        params.beta[g],
+        params.gamma[g],
+        &params.rho[g],
+        params.base[g],
+        &z_bar,
+    );
+    let prop = gene_mode(params, &by_row, &z_bar, prior, &anchor);
+    let (mut lg, mut lb) = (Vec::new(), Vec::new());
+    for chain in 0..4 {
+        let mut rng = StdRng::seed_from_u64(31 + chain);
+        let (mut theta, mut ll) = (prop.mode.clone(), f64::NEG_INFINITY);
+        for it in 0..2000 {
+            (theta, ll) = gene_step(params, &theta, ll, &by_row, &z_bar, prior, &prop, &mut rng);
+            if it >= 300 {
+                lg.push(theta[0]);
+                lb.push(theta[0] - theta[1]);
+            }
+        }
+    }
+    let _ = h;
+    (lg, lb)
+}
+
+/// The simulation's reads with gene `g`'s replaced by their expectation
+/// under `params` at the truth's times: no noise, so where a rate is
+/// unidentified only the prior (and the walls) hold it.
+fn expected_reads(
+    sim: &crate::ode_mixture::sim::Sim,
+    params: &crate::ode_mixture::model::Params,
+    g: usize,
+) -> Reads {
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let lv = params.levels();
+    let step = params.t_len[0] / (params.positions() - 1) as f64;
+    let rows: Vec<usize> = sim
+        .truth
+        .time
+        .iter()
+        .map(|t| (t / step).round() as usize)
+        .collect();
+    let lambda = reads.depths(&rows, &lv);
+    let (mut u, mut s) = (reads.u.clone(), reads.s.clone());
+    for p in 0..sim.n_pb {
+        u[(p, g)] = lambda[p][0] * lv.u[(rows[p], g)];
+        s[(p, g)] = lambda[p][1] * lv.s[(rows[p], g)];
+    }
+    Reads::from_matrices(u, s)
+}
+
+fn mean(v: &[f64]) -> f64 {
+    v.iter().sum::<f64>() / v.len() as f64
+}
+
+/// A gene whose rates are far faster (or slower) than the grid resolves has
+/// them on a flat ridge: with the bounds ([`GenePrior::bounded`]) its draws
+/// stay inside them, exactly.
+#[test]
+fn an_unresolved_rate_stays_inside_its_bounds() {
+    let sim = simulate(&SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let mut params = truth_params(&sim, 133, 45);
+    let bounded = GenePrior::bounded(&params);
+    let (lo, hi) = bounded.log_rate.unwrap();
+    eprintln!("bounds on log γ and log β: [{lo:.3}, {hi:.3}]");
+    let g = 0;
+    for (name, log_gamma, past) in [("fast", hi + 3.0, 1.0), ("slow", lo - 3.0, -1.0)] {
+        let ratio = params.gamma[g] / params.beta[g];
+        params.gamma[g] = log_gamma.exp();
+        params.beta[g] = params.gamma[g] / ratio;
+        let reads = expected_reads(&sim, &params, g);
+        let (free_g, _) = rate_draws(&params, &reads, &sim.truth.time, g, &GenePrior::default());
+        let (lg, lb) = rate_draws(&params, &reads, &sim.truth.time, g, &bounded);
+        let inside = |v: &[f64]| v.iter().all(|x| (lo..=hi).contains(x));
+        let free_past = free_g
+            .iter()
+            .filter(|&&x| if past > 0.0 { x > hi } else { x < lo })
+            .count() as f64
+            / free_g.len() as f64;
+        eprintln!(
+            "{name} gene: mean log γ {:.3} unbounded ({:.3} of draws past the bound), {:.3} bounded (log β {:.3})",
+            mean(&free_g),
+            free_past,
+            mean(&lg),
+            mean(&lb)
+        );
+        assert!(
+            inside(&lg) && inside(&lb),
+            "{name}: a draw outside the bounds"
+        );
+    }
+}
+
+/// For a gene whose rates the reads pin, well inside the bounds, the bounds
+/// change next to nothing.
+#[test]
+fn the_rate_bounds_leave_an_ordinary_gene_alone() {
+    let sim = simulate(&SimConfig {
+        fine: 133,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let params = truth_params(&sim, 133, 45);
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let bounded = GenePrior::bounded(&params);
+    for g in [3, 11] {
+        let (fg, fb) = rate_draws(&params, &reads, &sim.truth.time, g, &GenePrior::default());
+        let (wg, wb) = rate_draws(&params, &reads, &sim.truth.time, g, &bounded);
+        let (dg, db) = (mean(&wg) - mean(&fg), mean(&wb) - mean(&fb));
+        eprintln!(
+            "gene {g}: log γ {:.3} ({dg:+.4} bounded), log β {:.3} ({db:+.4})",
+            mean(&fg),
+            mean(&fb)
+        );
+        assert!(dg.abs() < 0.05 && db.abs() < 0.05, "gene {g}: {dg} {db}");
+    }
+}
+
+/// The bounds are fixed for a run: the climb starts every lineage at the
+/// unit duration, the chains move the durations, and every stage keeps
+/// the same bounds, so a gene the climb left at one is at the same one in
+/// the chains.
+#[test]
+fn the_rate_bounds_do_not_move_with_the_durations() {
+    let sim = simulate(&SimConfig::default()).unwrap();
+    let mut params = truth_params(&sim, 133, 45);
+    params.t_len = vec![1.0; params.t_len.len().max(2)];
+    params
+        .path
+        .resize(params.t_len.len(), params.path[0].clone());
+    let at_start = GenePrior::bounded(&params).log_rate.unwrap();
+    for t in [0.3, 3.0] {
+        let mut moved = params.clone();
+        moved.t_len[1] = t;
+        assert_eq!(
+            GenePrior::bounded(&moved).log_rate.unwrap(),
+            at_start,
+            "a duration of {t}"
+        );
+    }
 }

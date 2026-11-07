@@ -6,13 +6,15 @@
 //! 2. every pseudobulk's `(ℓ, k)` drawn exactly ([`draw_latents`]), its
 //!    depth `λ_p = N_p / Z` at the drawn row;
 //! 3. every gene: [`gene_step`] a few times on a Student-t shaped like the
-//!    Laplace approximation of its conditional ([`gene_laplace`]); in
+//!    Laplace approximation of its conditional by bounded Newton
+//!    ([`gene_mode`]); in
 //!    parallel over genes, a stream per gene and sweep;
 //! 4. every lineage's whitened path, one lineage after another (they meet
 //!    in the genes' prior through the paths' mean): generalized elliptical
-//!    slice moves ([`path_gess_step`]) on its Laplace approximation by
-//!    Gauss–Newton ([`path_laplace`]; plain ESS on the prior gives a handful
-//!    of effective draws in a thousand moves even from the mode);
+//!    slice moves ([`path_gess_step`]) on its Laplace approximation, banded
+//!    in the path and factored once a refit ([`path_mode`]; plain ESS on
+//!    the prior gives a handful of effective draws in a thousand moves even
+//!    from the mode);
 //! 5. every other lineage's log duration `log T_ℓ` (lineage 0's is the
 //!    unit) by a scalar elliptical slice move on its `N(0, 1)` prior, the
 //!    path's whitened coordinates held. The length scale stays a fixed share
@@ -45,13 +47,13 @@
 //! `z` against `ρ` and the baseline's shared shift, do not show in them).
 
 use super::blocks::{
-    draw_latents, draw_share_sd, draw_weights, from_theta, gene_laplace, gene_step, path_eta,
-    path_gess_step, path_laplace, path_ll, share_step, stream, to_theta, GenePrior, GeneProposal,
+    draw_latents, draw_share_sd, draw_weights, from_theta, gene_mode, gene_step, path_eta,
+    path_gess_step, path_ll, path_mode, share_step, stream, to_theta, GenePrior, GeneProposal,
     PathProposal,
 };
 use super::kernel::GridPrior;
 use super::likelihood::{jittered_table, table, Depth, GeneRows, Reads, RowLayout};
-use super::model::Params;
+use super::model::{clamped_exp, Params};
 use super::readout::Snapshot;
 use legume_numeric::mcmc::engine::elliptical_slice_step;
 use nalgebra::DVector;
@@ -247,7 +249,7 @@ pub fn duration_step(
     let probe = params.clone();
     let ll = |log_t: f64| {
         let mut p = probe.clone();
-        p.t_len[l] = log_t.exp();
+        p.t_len[l] = clamped_exp(log_t);
         path_ll(&p, l, reads, rows, lambda)
     };
     let x0 = probe.t_len[l].ln();
@@ -260,7 +262,7 @@ pub fn duration_step(
         0.0,
         rng,
     );
-    params.t_len[l] = f64::from(next[0]).exp();
+    params.t_len[l] = clamped_exp(f64::from(next[0]));
 }
 
 /// Whether sweep `it` refits the proposals: the first, every
@@ -340,7 +342,7 @@ fn sweep(
             let by_row = GeneRows::new(&layout, reads, g);
             if refit {
                 let anchor = slot.as_ref().map_or(&starts[g], |p| &p.mode);
-                *slot = Some(gene_laplace(params, &by_row, &z_bar, prior, anchor));
+                *slot = Some(gene_mode(params, &by_row, &z_bar, prior, anchor));
             }
             let prop = slot.as_ref().expect("fitted at the first sweep");
             let mut theta = to_theta(
@@ -367,7 +369,7 @@ fn sweep(
     lap(GENES_BLOCK);
 
     // 4. Paths, one lineage after another: generalized ESS on the Laplace
-    // approximation by Gauss–Newton, refitted as the genes' are.
+    // approximation (banded in the path), refitted as the genes' are.
     for l in 0..lineages {
         let mut rng = stream(block_seed(seed, PATHS), l as u64, it);
         if refit {
@@ -375,7 +377,7 @@ fn sweep(
             let anchor = state.path_props[l]
                 .as_ref()
                 .map_or_else(|| state.path_modes[l].clone(), |p| p.mode(h));
-            state.path_props[l] = Some(path_laplace(
+            state.path_props[l] = Some(path_mode(
                 &state.params,
                 l,
                 &anchor,
@@ -439,7 +441,7 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
         );
     }
     let grid = GridPrior::new(start_at.path[0].len(), 1.0, opts.kappa)?;
-    let prior = GenePrior::default();
+    let prior = GenePrior::bounded(start_at);
     let bar = crate::logging::new_progress_bar((opts.chains * opts.sweeps) as u64)
         .with_message("ode-mixture sampler");
     let stopped = || {

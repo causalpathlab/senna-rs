@@ -18,7 +18,7 @@
 //! kinetics because the levels are smooth in time and the jitter is not;
 //! a drift smooth in time is not.
 
-use super::model::Levels;
+use super::model::{clamped_exp, Levels, LOG_CLAMP};
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
@@ -80,7 +80,7 @@ impl Reads {
             .zip(omega)
             .enumerate()
             .map(|(p, (&r, &w))| {
-                let e = w.exp();
+                let e = clamped_exp(w);
                 let lambda = self.total[p] / (e * lv.u.row(r).sum() + lv.s.row(r).sum());
                 [e * lambda, lambda]
             })
@@ -103,6 +103,7 @@ pub fn jittered_table(reads: &Reads, lv: &Levels, omega: &[f64]) -> DMatrix<f64>
     let mut tab = table(reads, lv);
     let z = lv.totals();
     for (p, &w) in omega.iter().enumerate() {
+        let w = w.clamp(-LOG_CLAMP, LOG_CLAMP);
         let (n_u, n, e) = (reads.unspliced[p], reads.total[p], w.exp());
         for (r, &(z_u, z_s)) in z.iter().enumerate() {
             tab[(p, r)] += n_u * w - n * ((e * z_u + z_s) / (z_u + z_s)).ln();

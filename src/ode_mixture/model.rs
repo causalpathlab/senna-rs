@@ -74,10 +74,20 @@ pub fn lineage_label(l: usize) -> Box<str> {
     format!("L{}", l + 1).into()
 }
 
-/// The transcription at every node of a path, `α_k = exp(ρᵀ z_k + b)`.
+/// Log rates, durations and jitters are clamped to `±LOG_CLAMP` before
+/// `exp`: a large deviation saturates instead of overflowing.
+pub const LOG_CLAMP: f64 = 30.0;
+
+/// `exp(x)`, `x` clamped to `±`[`LOG_CLAMP`] (its slope zero outside).
+pub fn clamped_exp(x: f64) -> f64 {
+    x.clamp(-LOG_CLAMP, LOG_CLAMP).exp()
+}
+
+/// The transcription at every node of a path, `α_k = exp(ρᵀ z_k + b)`
+/// ([`clamped_exp`]).
 pub fn alpha_on(path: &[Vec<f64>], rho: &[f64], base: f64) -> Vec<f64> {
     path.iter()
-        .map(|z| (z.iter().zip(rho).map(|(a, b)| a * b).sum::<f64>() + base).exp())
+        .map(|z| clamped_exp(z.iter().zip(rho).map(|(a, b)| a * b).sum::<f64>() + base))
         .collect()
 }
 
