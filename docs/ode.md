@@ -75,8 +75,12 @@ left free. Only the invariants are reported: times, rates and levels.
    on.
 3. **Chains** (`--chains`, `--sweeps`, `--burn`): blocked Gibbs from the
    climb's mode — the pseudobulks' lineage and time exactly, every gene's
-   rates by generalized elliptical slice moves on its Laplace approximation,
-   the paths by preconditioned slice moves, the branch time and the jitter.
+   rates by generalized elliptical slice moves on its Laplace approximation
+   (bounded Newton), the paths by slice moves on theirs (banded in the path,
+   factored once a refit), the branch time and the jitter. Both rates are
+   kept between a half-life of one fine time step and four time units (the
+   first lineage's duration; a bounded logit link, the rates' prior carried
+   by its Jacobian): past either end the reads cannot tell a rate apart and it would drift.
    Proposals are refitted every `--laplace-every` sweeps during burn-in and
    frozen after, so the kept chain is a homogeneous Markov chain.
 4. **Cells**: every cell is scored against `--snapshot-every`'s draws of the

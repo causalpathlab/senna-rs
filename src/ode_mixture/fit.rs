@@ -29,7 +29,7 @@
 use super::blocks::GenePrior;
 use super::kernel::GridPrior;
 use super::likelihood::Reads;
-use super::model::{branch_ramp, Params};
+use super::model::{branch_ramp, clamped_exp, Params, LOG_CLAMP};
 use crate::rbm_core::adam;
 use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var, D};
 use legume_numeric::candle::candle_nn::ops::log_softmax;
@@ -64,6 +64,8 @@ pub struct DeviceReads {
 }
 
 pub struct Fit {
+    /// `[1 × G]` each rate's log, read through its bounds
+    /// ([`GenePrior::log_rate`], [`Fit::log_rates`]).
     log_beta: Var,
     log_gamma: Var,
     rho: Var,
@@ -109,6 +111,7 @@ impl Fit {
             }
         }
         let c = prior.chol();
+        let gene_prior = GenePrior::bounded(params);
         let log_t = if l > 1 {
             let t0 = params.t_len[0];
             Some(var(
@@ -121,7 +124,7 @@ impl Fit {
         };
         Ok(Self {
             log_beta: var(params.beta.iter().map(|b| b.ln()).collect(), &[1, g], dev)?,
-            log_gamma: var(params.gamma.iter().map(|y| y.ln()).collect(), &[1, g], dev)?,
+            log_gamma: var(params.gamma.iter().map(|r| r.ln()).collect(), &[1, g], dev)?,
             rho: var(params.rho.iter().flatten().copied().collect(), &[g, h], dev)?,
             base: var(params.base.clone(), &[1, g], dev)?,
             eta: var(eta, &[l, n, h], dev)?,
@@ -131,7 +134,7 @@ impl Fit {
             branch: None,
             kappa: prior.kappa(),
             chol: Tensor::from_vec(c.iter().map(|&x| x as f32).collect::<Vec<_>>(), (n, n), dev)?,
-            prior: GenePrior::default(),
+            prior: gene_prior,
             dims: (l, n, g, h),
             sub: params.sub.max(1),
         })
@@ -205,7 +208,7 @@ impl Fit {
     pub fn share_sd(&self) -> Result<Option<f64>> {
         self.log_share_sd
             .as_ref()
-            .map(|v| Ok(f64::from(v.as_tensor().to_vec1::<f32>()?[0]).exp()))
+            .map(|v| Ok(clamped_exp(f64::from(v.as_tensor().to_vec1::<f32>()?[0]))))
             .transpose()
     }
 
@@ -217,7 +220,9 @@ impl Fit {
         let Some(log_sd) = &self.log_share_sd else {
             return Ok(None);
         };
-        let v = (log_sd.as_tensor() * 2.0)?.exp()?.reshape((1, 1))?;
+        let v = clamped(&(log_sd.as_tensor() * 2.0)?)?
+            .exp()?
+            .reshape((1, 1))?;
         let (n_u, n) = (&reads.n_u, &reads.n);
         let sigmoid = |x: &Tensor| -> Result<Tensor> { (x.neg()?.exp()? + 1.0)?.recip() };
         let softplus =
@@ -308,6 +313,20 @@ impl Fit {
         v
     }
 
+    /// `([1 × G], [1 × G])` `log β` and `log γ` as the model reads them:
+    /// clamped to their bounds (unbounded, to `±LOG_CLAMP`). The climb seeks the mode in the rates' own
+    /// coordinates, so inside the bounds nothing changes (the sampler's
+    /// link, [`GenePrior::link`], carries a Jacobian; a mode sought through
+    /// it would move toward the bounds' middle); the priors, on the
+    /// unclamped logs, pull a rate that strays past back in.
+    fn log_rates(&self) -> Result<(Tensor, Tensor)> {
+        let (lb, lg) = (self.log_beta.as_tensor(), self.log_gamma.as_tensor());
+        match self.prior.log_rate {
+            None => Ok((clamped(lb)?, clamped(lg)?)),
+            Some((lo, hi)) => Ok((lb.clamp(lo, hi)?, lg.clamp(lo, hi)?)),
+        }
+    }
+
     /// `[L × 1]` every lineage's duration.
     fn t_len(&self) -> Result<Tensor> {
         let log_t = match &self.log_t {
@@ -317,7 +336,7 @@ impl Fit {
             }
             None => Tensor::zeros((self.dims.0,), DType::F32, self.eta.device())?,
         };
-        log_t.exp()?.unsqueeze(1)
+        clamped(&log_t)?.exp()?.unsqueeze(1)
     }
 
     /// `[L × n × H]` the paths.
@@ -356,15 +375,14 @@ impl Fit {
     pub fn levels(&self) -> Result<(Tensor, Tensor)> {
         let (l, n, g, h) = self.dims;
         let z = self.paths()?.reshape((l * n, h))?;
-        let alpha = z
-            .matmul(&self.rho.as_tensor().t()?)?
-            .broadcast_add(self.base.as_tensor())?
-            .exp()?
-            .reshape((l, n, g))?;
-        let (beta, gamma) = (
-            self.log_beta.as_tensor().exp()?,
-            self.log_gamma.as_tensor().exp()?,
-        );
+        let alpha = clamped(
+            &z.matmul(&self.rho.as_tensor().t()?)?
+                .broadcast_add(self.base.as_tensor())?,
+        )?
+        .exp()?
+        .reshape((l, n, g))?;
+        let (log_beta, log_gamma) = self.log_rates()?;
+        let (beta, gamma) = (log_beta.exp()?, log_gamma.exp()?);
         let step = (self.t_len()? / (n - 1) as f64)?; // [L × 1]
         let m = self.sub;
         // `e^{−βδ}`, `e^{−γδ}` and `E(δ) = (e^{−βδ} − e^{−γδ})/(γ − β)`
@@ -584,19 +602,20 @@ impl Fit {
     /// The parameters on the host.
     pub fn params(&self) -> Result<Params> {
         let (l, n, _, _) = self.dims;
-        let row = |v: &Var| -> Result<Vec<f64>> {
-            Ok(v.as_tensor()
-                .flatten_all()?
+        let row = |x: &Tensor| -> Result<Vec<f64>> {
+            Ok(x.flatten_all()?
                 .to_vec1::<f32>()?
                 .iter()
-                .map(|&x| f64::from(x))
+                .map(|&v| f64::from(v))
                 .collect())
         };
         let paths = self.paths()?.to_vec3::<f32>()?;
-        let t = self.t_len()?.flatten_all()?.to_vec1::<f32>()?;
+        let (lb, lg) = self.log_rates()?;
+        let rates =
+            |x: &Tensor| -> Result<Vec<f64>> { Ok(row(x)?.into_iter().map(clamped_exp).collect()) };
         Ok(Params {
-            beta: row(&self.log_beta)?.iter().map(|x| x.exp()).collect(),
-            gamma: row(&self.log_gamma)?.iter().map(|x| x.exp()).collect(),
+            beta: rates(&lb)?,
+            gamma: rates(&lg)?,
             rho: self
                 .rho
                 .as_tensor()
@@ -604,8 +623,8 @@ impl Fit {
                 .iter()
                 .map(|r| r.iter().map(|&x| f64::from(x)).collect())
                 .collect(),
-            base: row(&self.base)?,
-            t_len: t.iter().map(|&x| f64::from(x)).collect(),
+            base: row(self.base.as_tensor())?,
+            t_len: row(&self.t_len()?)?,
             path: (0..l)
                 .map(|i| {
                     (0..n)
@@ -617,4 +636,9 @@ impl Fit {
             branch: self.branch_at()?,
         })
     }
+}
+
+/// `x` clamped to `±`[`LOG_CLAMP`] before an `exp`.
+fn clamped(x: &Tensor) -> Result<Tensor> {
+    x.clamp(-LOG_CLAMP, LOG_CLAMP)
 }

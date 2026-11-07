@@ -36,7 +36,9 @@ fn the_levels_are_the_hosts() {
 }
 
 /// A gene whose `γ` is far faster than its `β` (`(γ − β) δ` past f32's
-/// exp range a step) still has the host's finite levels.
+/// exp range a step) still has the host's finite levels: the climb reads
+/// its rates at their bounds ([`crate::ode_mixture::blocks::GenePrior::bounded`]),
+/// and so does the host from the climb's parameters.
 #[test]
 fn a_fast_genes_levels_stay_finite() {
     let sim = simulate(&SimConfig {
@@ -51,7 +53,7 @@ fn a_fast_genes_levels_stay_finite() {
     let fit = Fit::from_params(&params, &prior, &Device::Cpu).unwrap();
     let (u, s) = fit.levels().unwrap();
     let (u, s) = (u.to_vec2::<f32>().unwrap(), s.to_vec2::<f32>().unwrap());
-    let lv = params.levels();
+    let lv = fit.params().unwrap().levels();
     for r in 0..lv.u.nrows() {
         assert!(
             u[r][0].is_finite() && s[r][0].is_finite(),

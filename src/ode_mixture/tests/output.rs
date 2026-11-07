@@ -261,12 +261,13 @@ fn a_lineage_of_no_weight_does_not_shape_the_map() {
     assert_same_map(&sim, &[lopsided], &[alone]);
 }
 
-/// A draw with a level not finite is left out of the rows it spoils, not
-/// the run: the map is the other draws'.
+/// A draw with a level not finite (a NaN rate; an infinite one saturates
+/// at the clamp) is left out of the rows it spoils, not the run: the map is
+/// the other draws'.
 #[test]
 fn a_draw_not_finite_is_left_out_of_the_map() {
     let (sim, snap) = two_lineages();
     let mut spoiled = snap.clone();
-    spoiled.params.base[3] = f64::INFINITY;
+    spoiled.params.base[3] = f64::NAN;
     assert_same_map(&sim, &[snap.clone(), spoiled], &[snap]);
 }

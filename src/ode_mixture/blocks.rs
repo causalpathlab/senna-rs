@@ -3,10 +3,11 @@
 //! Every random stream is keyed by `(seed, item, sweep)`, so a draw does
 //! not depend on how the items were split across threads.
 
-use super::kernel::GridPrior;
+use super::band::{dot, Band, Bordered, Factor};
+use super::kernel::{GridPrior, BAND};
 use super::kinetics::fine_trajectory;
 use super::likelihood::{share_mode, softplus, Depth, GeneRows, Reads};
-use super::model::{branch_ramp, Params};
+use super::model::{alpha_on, branch_ramp, clamped_exp, Params, LOG_CLAMP};
 use legume_numeric::mcmc::engine::elliptical_slice_step;
 use nalgebra::{DMatrix, DVector};
 use rand::rngs::StdRng;
@@ -121,14 +122,10 @@ pub fn to_theta(beta: f64, gamma: f64, rho: &[f64], base: f64, z_bar: &[f64]) ->
 /// `(β, γ, ρ, b)` from [`to_theta`]'s coordinates.
 pub fn from_theta<'a>(theta: &'a [f64], z_bar: &[f64]) -> (f64, f64, &'a [f64], f64) {
     let h = theta.len() - 3;
-    let gamma = theta[0].exp();
+    let gamma = clamped_exp(theta[0]);
     let rho = &theta[2..2 + h];
     let base = theta[2 + h] + theta[0] - dot(rho, z_bar);
-    (gamma / theta[1].exp(), gamma, rho, base)
-}
-
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    (gamma / clamped_exp(theta[1]), gamma, rho, base)
 }
 
 /// The normal prior on a gene's [`to_theta`] coordinates, `(mean, sd)` each.
@@ -138,6 +135,10 @@ pub struct GenePrior {
     pub log_ratio: (f64, f64),
     pub rho_sd: f64,
     pub log_spliced: (f64, f64),
+    /// Bounds `(lo, hi)` on `log γ` and `log β` ([`GenePrior::bounded`]),
+    /// carried by the sampler's coordinates ([`GenePrior::link`]); `None`:
+    /// unbounded.
+    pub log_rate: Option<(f64, f64)>,
 }
 
 impl Default for GenePrior {
@@ -147,7 +148,104 @@ impl Default for GenePrior {
             log_ratio: (0.5f64.ln(), 1.0),
             rho_sd: 1.0,
             log_spliced: (0.0, 1.5),
+            log_rate: None,
         }
+    }
+}
+
+/// A rate's half-life is held above one fine step and below this many path
+/// durations ([`GenePrior::bounded`]): faster, the reads follow `α` in
+/// quasi-steady state; slower, they accumulate `α` with no decay seen
+/// (over four durations a level decays by under a sixth). Either way the
+/// rate runs along a flat ridge only the weak prior holds.
+const SLOW_HALF_LIVES: f64 = 4.0;
+
+/// How near a bound a rate outside it is taken in ([`GenePrior::link`]).
+const LINK_EDGE: f64 = 1e-9;
+
+/// Where `x` sits between `lo` and `hi`, as a share kept `edge` off either.
+fn share_of(x: f64, lo: f64, hi: f64, edge: f64) -> f64 {
+    ((x - lo) / (hi - lo)).clamp(edge, 1.0 - edge)
+}
+
+/// `log(p / (1 − p))`, [`sigmoid`]'s inverse.
+fn logit(p: f64) -> f64 {
+    (p / (1.0 - p)).ln()
+}
+
+impl GenePrior {
+    /// The default prior with `log γ` and `log β` bounded, fixed for a
+    /// run: a half-life of at least one fine step and at most
+    /// [`SLOW_HALF_LIVES`] durations, both on the time unit, the first
+    /// lineage's duration (every fit holds it at its start's; the others
+    /// are carried relative to it). The other lineages' durations move in
+    /// the climb and the chains, so they are left out: the bounds stay
+    /// the same at every stage.
+    pub fn bounded(params: &Params) -> Self {
+        let steps = params.positions().saturating_sub(1).max(1) as f64;
+        let unit = params.t_len[0];
+        let ln2 = std::f64::consts::LN_2;
+        Self {
+            log_rate: Some((
+                (ln2 / (SLOW_HALF_LIVES * unit)).ln(),
+                (ln2 * steps / unit).ln(),
+            )),
+            ..Self::default()
+        }
+    }
+
+    /// The sampler's coordinates of `θ` ([`to_theta`]): with bounds, `log γ`
+    /// and `log β = θ₀ − θ₁` each as `u`, `log r = lo + (hi − lo) σ(u)`, so
+    /// both rates stay inside (a rate outside is taken in to the edge);
+    /// the rest as they are.
+    pub fn link(&self, theta: &[f64]) -> Vec<f64> {
+        let mut v = theta.to_vec();
+        if let Some((lo, hi)) = self.log_rate {
+            let unit = |x: f64| logit(share_of(x, lo, hi, LINK_EDGE));
+            (v[0], v[1]) = (unit(theta[0]), unit(theta[0] - theta[1]));
+        }
+        v
+    }
+
+    /// `θ` from the sampler's coordinates ([`Self::link`]).
+    pub fn unlink(&self, v: &[f64]) -> Vec<f64> {
+        let mut theta = v.to_vec();
+        if let Some((lo, hi)) = self.log_rate {
+            let rate = |u: f64| lo + (hi - lo) * sigmoid(u);
+            let (log_gamma, log_beta) = (rate(v[0]), rate(v[1]));
+            (theta[0], theta[1]) = (log_gamma, log_gamma - log_beta);
+        }
+        theta
+    }
+
+    /// The prior's log density in the sampler's coordinates: at `θ` with
+    /// the link's log-Jacobian, `Σ log((hi − lo) σ(u)(1 − σ(u)))` over the
+    /// two rates (the map from `(log γ, log β)` to `θ`'s has unit Jacobian).
+    pub(super) fn linked_log_density(&self, v: &[f64]) -> f64 {
+        let jacobian = self.log_rate.map_or(0.0, |(lo, hi)| {
+            [v[0], v[1]]
+                .iter()
+                .map(|&u| (hi - lo).ln() - softplus(u) - softplus(-u))
+                .sum()
+        });
+        self.log_density(&self.unlink(v)) + jacobian
+    }
+
+    /// A normal in the sampler's coordinates near the prior, `(mean, sd)`
+    /// each (the scalar slice moves' scale): the prior's own unbounded;
+    /// with bounds, the rates' prior carried through the link at its mean.
+    fn reference(&self, h: usize) -> (Vec<f64>, Vec<f64>) {
+        let (mut mean, mut sd) = (self.mean(h), self.sd(h));
+        if let Some((lo, hi)) = self.log_rate {
+            let (mg, sg) = self.log_gamma;
+            let (mr, sr) = self.log_ratio;
+            for (i, (m, s)) in [(mg, sg), (mg - mr, sg.hypot(sr))].into_iter().enumerate() {
+                let p = share_of(m, lo, hi, 0.05);
+                mean[i] = logit(p);
+                sd[i] = s / ((hi - lo) * p * (1.0 - p));
+            }
+        }
+        (mean, sd)
     }
 }
 
@@ -178,7 +276,7 @@ fn gene_ll(params: &Params, z_bar: &[f64], theta: &[f64], by_row: &GeneRows) -> 
 
 impl GenePrior {
     /// `log p₀(θ)` up to a constant.
-    fn log_density(&self, theta: &[f64]) -> f64 {
+    pub(super) fn log_density(&self, theta: &[f64]) -> f64 {
         let h = theta.len() - 3;
         let (m, s) = (self.mean(h), self.sd(h));
         theta
@@ -189,36 +287,135 @@ impl GenePrior {
     }
 }
 
-/// Where a gene's conditional is, as a normal: its mode and the Cholesky
-/// factor `L` of the precision `P = L Lᵀ` (the negative Hessian there,
-/// over [`WIDEN`]²).
+/// Where a gene's conditional is, as a normal in the sampler's
+/// coordinates ([`GenePrior::link`]): its mode (`θ`, and linked as
+/// `centre`) and the Cholesky factor `L` of the precision `P = L Lᵀ` (the
+/// negative Hessian there, over [`WIDEN`]²).
 #[derive(Clone)]
 pub struct GeneProposal {
     pub mode: Vec<f64>,
-    precision_chol: DMatrix<f64>,
+    centre: Vec<f64>,
+    /// The proposal's precision, factored.
+    precision: Bordered,
 }
 
 /// The proposal's sd over the Laplace approximation's: heavier than the
 /// conditional, so its tails are covered.
 const WIDEN: f64 = 1.5;
 
+/// Gradient steps at most on a path's one frozen precision per refit
+/// ([`frozen_steps`]): a banded precision is a rougher Newton matrix than
+/// the full one, so the mode takes a few more; they stop once a step rises
+/// less than [`STEP_GAIN`].
+const PATH_STEPS: usize = 8;
+
+/// A rise (nats) under which the frozen steps stop: the mode is then close
+/// enough for the proposal (the slice move is exact on any).
+const STEP_GAIN: f64 = 1e-2;
+
+/// A failed step is halved this many times (down to about a thousandth of
+/// its length) before the search stops: a well-read gene or path's
+/// posterior can be far narrower than the capped step.
+const HALVINGS: usize = 10;
+
+/// A step's largest move in any coordinate (about the prior's sd): the
+/// steps cannot run away where the frozen precision is far off.
+const STEP_CAP: f64 = 1.0;
+
+/// An objective's value and gradient at a point.
+type Objective<'a> = dyn FnMut(&[f64]) -> (f64, Vec<f64>) + 'a;
+
+/// At most `steps` of `x += P⁻¹ g` from `start` (its value and gradient
+/// `at_start`), `solve` applying the frozen `P⁻¹`, `eval` the objective's
+/// value and gradient; a step is cut to [`STEP_CAP`] and one that does
+/// not rise is halved ([`HALVINGS`]), the point kept if none does. Stops
+/// on a rise under [`STEP_GAIN`], or where the value or gradient is not
+/// finite (a rate overflowing); the best point met.
+fn frozen_steps(
+    start: &[f64],
+    at_start: (f64, Vec<f64>),
+    steps: usize,
+    solve: &dyn Fn(&[f64]) -> Vec<f64>,
+    eval: &mut Objective,
+) -> Vec<f64> {
+    let mut x = start.to_vec();
+    let (mut f, mut g) = at_start;
+    let finite = |f: f64, g: &[f64]| f.is_finite() && g.iter().all(|v| v.is_finite());
+    if !finite(f, &g) {
+        return x;
+    }
+    for _ in 0..steps {
+        let step = solve(&g);
+        let top = step.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let Some((y, fy, gy, _)) = capped_search(&x, f, &step, top, |y| {
+            let (fy, gy) = eval(y);
+            finite(fy, &gy).then_some((fy, gy))
+        }) else {
+            break;
+        };
+        let gain = fy - f;
+        (x, f, g) = (y, fy, gy);
+        if gain < STEP_GAIN {
+            break;
+        }
+    }
+    x
+}
+
+/// A step's line search: from `x` (its value `fx`) along `step`, cut so
+/// its largest move `top` is at most [`STEP_CAP`], then halved
+/// ([`HALVINGS`]) until `eval` (`None` where not finite) rises; the point,
+/// its value and `eval`'s rest, and the scale taken; `None` if none does.
+fn capped_search<T>(
+    x: &[f64],
+    fx: f64,
+    step: &[f64],
+    top: f64,
+    mut eval: impl FnMut(&[f64]) -> Option<(f64, T)>,
+) -> Option<(Vec<f64>, f64, T, f64)> {
+    let mut scale = if top > STEP_CAP { STEP_CAP / top } else { 1.0 };
+    for _ in 0..=HALVINGS {
+        let y: Vec<f64> = x.iter().zip(step).map(|(a, b)| a + scale * b).collect();
+        if let Some((fy, rest)) = eval(&y) {
+            if fy > fx {
+                return Some((y, fy, rest, scale));
+            }
+        }
+        scale *= 0.5;
+    }
+    None
+}
+
+/// Newton iterations at most for a gene's mode ([`gene_mode`]).
+const GENE_ITERS: usize = 50;
+
 /// The Laplace approximation of a gene's conditional (likelihood from its
-/// reads by row, times prior; `z_bar` the paths' mean), by Newton's method
-/// from `anchor`, numerical derivatives (a gene has `H + 3` coordinates).
-/// The sampler fits it only during burn-in ([`super::sampler::Options::laplace_every`])
-/// and keeps the last one after, so the kept moves are one fixed kernel.
-pub fn gene_laplace(
+/// reads by row, times prior; `z_bar` the paths' mean), by bounded Newton
+/// from `anchor`, numerical derivatives (a gene has `H + 3` coordinates):
+/// every step's Hessian factored guarded ([`Factor::new`], the prior's
+/// precision the fallback), the step cut to [`STEP_CAP`] prior sds in any
+/// coordinate and halved ([`HALVINGS`]) until the objective rises, else
+/// the search stops (and where a value is not finite). The sampler fits it
+/// only during burn-in ([`super::sampler::Options::laplace_every`]) and
+/// keeps the last one after, so the kept moves are one fixed kernel.
+pub fn gene_mode(
     params: &Params,
     by_row: &GeneRows,
     z_bar: &[f64],
     prior: &GenePrior,
     anchor: &[f64],
 ) -> GeneProposal {
-    let f = |t: &[f64]| gene_ll(params, z_bar, t, by_row) + prior.log_density(t);
+    // In the sampler's coordinates.
+    let f =
+        |v: &[f64]| gene_ll(params, z_bar, &prior.unlink(v), by_row) + prior.linked_log_density(v);
     let n = anchor.len();
+    let (_, sd) = prior.reference(n - 3);
+    let prior_precision = || Band::diagonal_of(&sd.iter().map(|s| s.powi(-2)).collect::<Vec<_>>());
+    let factor =
+        |p: &DMatrix<f64>| Bordered::new(Factor::new(&Band::from_dense(p), prior_precision), None);
     let eps = 1e-4;
-    let hessian = |t: &[f64]| -> (DVector<f64>, DMatrix<f64>) {
-        let f0 = f(t);
+    // At `t`, `f0 = f(t)` known.
+    let hessian = |t: &[f64], f0: f64| -> (DVector<f64>, DMatrix<f64>) {
         let at = |d: &[(usize, f64)]| {
             let mut x = t.to_vec();
             for &(i, v) in d {
@@ -245,76 +442,54 @@ pub fn gene_laplace(
         }
         (grad, hess)
     };
-    // Damped Newton: the negative Hessian plus a ridge until positive
-    // definite, the step halved until the objective rises.
-    let mut t = anchor.to_vec();
+    let mut t = prior.link(anchor);
     let mut ft = f(&t);
-    for _ in 0..50 {
-        let (grad, hess) = hessian(&t);
-        let mut ridge = 0.0;
-        let step = loop {
-            let p = -&hess + DMatrix::identity(n, n) * ridge;
-            if let Some(c) = p.cholesky() {
-                break c.solve(&grad);
-            }
-            ridge = if ridge == 0.0 { 1e-3 } else { ridge * 10.0 };
+    let (mut grad, mut hess) = hessian(&t, ft);
+    for _ in 0..GENE_ITERS {
+        let finite = ft.is_finite() && grad.iter().chain(hess.iter()).all(|v| v.is_finite());
+        if !finite {
+            break;
+        }
+        let step = factor(&(-&hess)).solve(grad.as_slice());
+        let top = step
+            .iter()
+            .zip(&sd)
+            .fold(0.0f64, |m, (v, s)| m.max(v.abs() / s));
+        let found = capped_search(&t, ft, &step, top, |x| {
+            let fx = f(x);
+            fx.is_finite().then_some((fx, ()))
+        });
+        let Some((x, fx, (), scale)) = found else {
+            break;
         };
-        let mut scale = 1.0;
-        let moved = loop {
-            let x: Vec<f64> = t
-                .iter()
-                .zip(step.iter())
-                .map(|(a, b)| a + scale * b)
-                .collect();
-            let fx = f(&x);
-            if fx >= ft {
-                break Some((x, fx));
-            }
-            scale *= 0.5;
-            if scale < 1e-8 {
-                break None;
-            }
-        };
-        let Some((x, fx)) = moved else { break };
-        let size = scale * step.norm();
+        let size = scale * step.iter().map(|v| v * v).sum::<f64>().sqrt();
         (t, ft) = (x, fx);
+        (grad, hess) = hessian(&t, ft);
         if size < 1e-7 {
             break;
         }
     }
-    let (_, hess) = hessian(&t);
-    let mut p = -hess / (WIDEN * WIDEN);
-    let mut ridge = 1e-9;
-    let precision_chol = loop {
-        if let Some(c) = p.clone().cholesky() {
-            break c.l();
-        }
-        p += DMatrix::identity(n, n) * ridge;
-        ridge *= 10.0;
-    };
+    let precision = factor(&(-hess / (WIDEN * WIDEN)));
     GeneProposal {
-        mode: t,
-        precision_chol,
+        mode: prior.unlink(&t),
+        centre: t,
+        precision,
     }
 }
 
 impl GeneProposal {
-    /// `log N(θ; mode, P⁻¹)` up to a constant.
-    fn log_density(&self, theta: &[f64]) -> f64 {
-        let d = DVector::from_iterator(
-            theta.len(),
-            theta.iter().zip(&self.mode).map(|(a, b)| a - b),
-        );
-        -0.5 * (self.precision_chol.transpose() * d).norm_squared()
+    /// `log N(v; centre, P⁻¹)` up to a constant, `v` linked.
+    fn log_density(&self, v: &[f64]) -> f64 {
+        let d: Vec<f64> = v.iter().zip(&self.centre).map(|(a, b)| a - b).collect();
+        -0.5 * self.precision.quad(&d)
     }
 
     /// A draw of `θ − mode`: `L⁻ᵀ z`, `z ~ N(0, I)`.
     fn draw(&self, rng: &mut impl Rng) -> DVector<f64> {
-        let z = DVector::from_fn(self.mode.len(), |_, _| StandardNormal.sample(rng));
-        self.precision_chol
-            .transpose()
-            .solve_upper_triangular(&z)
-            .expect("a Cholesky factor has a nonzero diagonal")
+        let z: Vec<f64> = (0..self.centre.len())
+            .map(|_| StandardNormal.sample(rng))
+            .collect();
+        DVector::from_vec(self.precision.draw(&z))
     }
 }
 
@@ -351,7 +526,26 @@ pub fn gene_step(
 ) -> (Vec<f64>, f64) {
     let n = theta.len();
     let d = n as f64;
-    let ll = |t: &[f64]| gene_ll(params, z_bar, t, by_row);
+    // In the sampler's coordinates ([`GenePrior::link`]); the scalar moves'
+    // normal is the reference ([`GenePrior::reference`]), the prior's
+    // difference from it (none unbounded) taken with the reads.
+    let (mean, sd) = prior.reference(n - 3);
+    let log_ref = |v: &[f64]| -> f64 {
+        v.iter()
+            .zip(mean.iter().zip(&sd))
+            .map(|(t, (m, s))| -0.5 * ((t - m) / s).powi(2))
+            .sum()
+    };
+    let bounded = prior.log_rate.is_some();
+    let ll = |v: &[f64]| {
+        let extra = if bounded {
+            prior.linked_log_density(v) - log_ref(v)
+        } else {
+            0.0
+        };
+        gene_ll(params, z_bar, &prior.unlink(v), by_row) + extra
+    };
+    let theta = &prior.link(theta)[..];
     let mut cur = theta.to_vec();
     let mut cur_ll = if cur_ll.is_finite() {
         cur_ll
@@ -361,7 +555,6 @@ pub fn gene_step(
 
     // A scalar slice move per coordinate on the prior's scale first: where
     // the prior, not the reads, shapes a direction, this is what mixes.
-    let (mean, sd) = (prior.mean(n - 3), prior.sd(n - 3));
     for j in 0..n {
         let x = DVector::from_element(1, (cur[j] - mean[j]) as f32);
         let e: f64 = StandardNormal.sample(rng);
@@ -379,7 +572,7 @@ pub fn gene_step(
     let theta = &cur[..];
     // log t_ν(θ) up to a constant, from the normal's `−Δ²/2`.
     let log_t = |t: &[f64]| -0.5 * (T_DF + d) * (1.0 - 2.0 * prop.log_density(t) / T_DF).ln();
-    let tilt = |t: &[f64]| prior.log_density(t) - log_t(t);
+    let tilt = |t: &[f64]| log_ref(t) - log_t(t);
 
     let delta2 = -2.0 * prop.log_density(theta);
     let shape = 0.5 * (T_DF + d);
@@ -392,11 +585,14 @@ pub fn gene_step(
     let base = cur_ll + tilt(theta);
     let at = |y: &DVector<f32>| -> Vec<f64> {
         y.iter()
-            .zip(&prop.mode)
+            .zip(&prop.centre)
             .map(|(&v, m)| f64::from(v) + m)
             .collect()
     };
-    let x = DVector::from_iterator(n, theta.iter().zip(&prop.mode).map(|(t, m)| (t - m) as f32));
+    let x = DVector::from_iterator(
+        n,
+        theta.iter().zip(&prop.centre).map(|(t, m)| (t - m) as f32),
+    );
     let nu = (prop.draw(rng) * scale.sqrt()).map(|v| v as f32);
     // Relative to the current value, so f32 keeps the slice's resolution.
     let lnpdf = |y: &DVector<f32>| {
@@ -406,7 +602,7 @@ pub fn gene_step(
     let (next, _) = elliptical_slice_step(&x, &nu, &lnpdf, 0.0, rng);
     let t = at(&next);
     let new_ll = ll(&t);
-    (t, new_ll)
+    (prior.unlink(&t), new_ll)
 }
 
 /// The pseudobulks whose rows are on lineage `l` (`positions` rows a
@@ -429,10 +625,7 @@ pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda:
     (0..params.beta.len())
         .into_par_iter()
         .map(|g| {
-            let alpha: Vec<f64> = params.path[l]
-                .iter()
-                .map(|z| (dot(z, &params.rho[g]) + params.base[g]).exp())
-                .collect();
+            let alpha = alpha_on(&params.path[l], &params.rho[g], params.base[g]);
             let (u, s) = fine_trajectory(&alpha, params.beta[g], params.gamma[g], h, params.sub);
             on.iter()
                 .map(|&(p, k)| {
@@ -666,47 +859,52 @@ pub(super) fn response(
     (a_u, a_s)
 }
 
-/// Lineage `l`'s path's log conditional in its whitened coordinates
-/// (flattened `d n + k`): its gradient and the Gauss–Newton precision
-/// (`I` from `η`'s prior, the reads' Fisher information, the genes'
-/// prior's exact curvature through `z̄`). Rows and depths held.
-///
-/// The reads on lineage `l` pooled per position, `U_gk = Σ_{p at k} u_pg`,
-/// `Λ^u_k = Σ_{p at k} λ^u_p` (and the spliced track's likewise):
-/// `ℓ = Σ_{g,k} U_gk log ū_gk − Λ^u_k ū_gk (+ s̄)`,
-/// `∂ℓ/∂ū_gk = U_gk/ū_gk − Λ^u_k`, Fisher `Λ^u_k/ū_gk`; then through `ū = A_u α`,
-/// `α_gj = exp(ρ_gᵀ z_j + b_g)` and `z_d = C η_d`.
-#[allow(clippy::too_many_arguments)]
-fn path_newton(
-    space: &Space,
-    params: &Params,
-    x: &DVector<f64>,
-    reads: &Reads,
-    rows: &[usize],
-    lambda: &[Depth],
-    gene_prior: &GenePrior,
-) -> Newton {
-    let parts: Vec<(DMatrix<f64>, DMatrix<f64>)> = moved_by(params, space.block)
-        .into_iter()
-        .map(|l| lineage_information(params, l, reads, rows, lambda))
-        .collect();
-    space.information(params, x, gene_prior, &parts)
+/// `(A_u, A_s)` ([`response`]) of every gene on lineage `l`: they move with
+/// the rates and the duration only, so a path's mode search reuses them.
+fn responses(params: &Params, l: usize) -> Vec<(DMatrix<f64>, DMatrix<f64>)> {
+    let n = params.path[l].len();
+    let step = params.t_len[l] / (n - 1) as f64;
+    (0..params.beta.len())
+        .into_par_iter()
+        .map(|g| response(params.beta[g], params.gamma[g], step, n, params.sub))
+        .collect()
 }
 
-/// The reads' gradient `[n × H]` and Fisher information `[Hn × Hn]`
-/// (flattened `d n + k`) in lineage `l`'s path `z`, as [`path_newton`].
-pub(super) fn lineage_information(
+/// One pass of lineage `l`'s reads ([`lineage_reads`]).
+pub(super) struct LineageReads {
+    /// [`path_ll`] on `l` but for a constant, `Σ u log λ`.
+    pub ll: f64,
+    /// `[n × H]` its gradient in `z`.
+    pub grad: DMatrix<f64>,
+    /// Its Fisher information in `z`, node-major (`k H + d`), banded to
+    /// [`BAND`] nodes, when asked for.
+    pub fisher: Option<Band>,
+}
+
+/// Lineage `l`'s reads in its path `z`, rows and depths held, `resp` its
+/// genes' [`responses`]: the log-likelihood, its gradient and (with
+/// `fisher`) a banded Fisher information: every position's response cut
+/// to the [`BAND`] nodes around it, which keeps it positive semidefinite
+/// (cutting the information itself would not).
+///
+/// The reads on `l` pooled per position, `U_gk = Σ_{p at k} u_pg`,
+/// `Λ^u_k = Σ_{p at k} λ^u_p` (the spliced track's likewise):
+/// `ℓ = Σ_{g,k} U_gk log ū_gk − Λ^u_k ū_gk (+ s̄)`,
+/// `∂ℓ/∂ū_gk = U_gk/ū_gk − Λ^u_k`, Fisher `Λ^u_k/ū_gk`; then through
+/// `ū = A_u α` and `α_gj = exp(ρ_gᵀ z_j + b_g)` ([`clamped_exp`]).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lineage_reads(
     params: &Params,
     l: usize,
+    resp: &[(DMatrix<f64>, DMatrix<f64>)],
     reads: &Reads,
     rows: &[usize],
     lambda: &[Depth],
-) -> (DMatrix<f64>, DMatrix<f64>) {
+    fisher: bool,
+) -> LineageReads {
     let path = &params.path[l];
     let n = path.len();
     let h = path.first().map_or(0, Vec::len);
-    let genes = params.beta.len();
-    let step = params.t_len[l] / (n - 1) as f64;
     let positions = params.positions();
     let on = on_lineage(rows, positions, l);
     // The depths pooled per position and track.
@@ -715,72 +913,101 @@ pub(super) fn lineage_information(
         pooled_u[k] += lambda[p][0];
         pooled_s[k] += lambda[p][1];
     }
-
-    // Summed over genes, per thread: the gradient wrt z `[n × H]` and the
-    // Fisher's `H × H` blocks of `[n × n]` (the upper ones, `d ≤ e`).
-    // Block `(d, e)`, `d ≤ e`, at `upper(d, e)`.
-    let upper = |d: usize, e: usize| d * h - d * (d + 1) / 2 + e;
+    let width = h * (BAND + 1) - 1;
     let zero = || {
         (
+            0.0,
             DMatrix::zeros(n, h),
-            vec![DMatrix::zeros(n, n); h * (h + 1) / 2],
+            Band::zeros(if fisher { h * n } else { 0 }, width),
         )
     };
-    let (gz, blocks) = (0..genes)
+    let (ll, grad, band) = (0..params.beta.len())
         .into_par_iter()
-        .fold(zero, |(mut gz, mut blocks), g| {
+        .fold(zero, |(mut ll, mut gz, mut fz), g| {
             let rho = &params.rho[g];
-            let alpha: Vec<f64> = path
+            let log_alpha: Vec<f64> = path.iter().map(|z| dot(z, rho) + params.base[g]).collect();
+            let alpha: Vec<f64> = log_alpha.iter().map(|&x| clamped_exp(x)).collect();
+            // `dα/d log α`: none outside the clamp.
+            let slope: Vec<f64> = log_alpha
                 .iter()
-                .map(|z| (dot(z, rho) + params.base[g]).exp())
+                .zip(&alpha)
+                .map(|(x, a)| if x.abs() < LOG_CLAMP { *a } else { 0.0 })
                 .collect();
-            let (a_u, a_s) = response(params.beta[g], params.gamma[g], step, n, params.sub);
+            let (a_u, a_s) = &resp[g];
             let av = DVector::from_column_slice(&alpha);
-            let (u, s) = (&a_u * &av, &a_s * &av);
+            let (u, s) = (a_u * &av, a_s * &av);
             let (mut ru, mut rs) = (vec![0.0; positions], vec![0.0; positions]);
             for &(p, k) in &on {
                 ru[k] += reads.u[(p, g)];
                 rs[k] += reads.s[(p, g)];
             }
+            for k in 0..positions {
+                ll +=
+                    ru[k] * u[k].ln() - pooled_u[k] * u[k] + rs[k] * s[k].ln() - pooled_s[k] * s[k];
+            }
             let eu = DVector::from_fn(positions, |k, _| ru[k] / u[k] - pooled_u[k]);
             let es = DVector::from_fn(positions, |k, _| rs[k] / s[k] - pooled_s[k]);
             // ∂ℓ/∂α_j, then ∂ℓ/∂z_jd = α_j ρ_d ∂ℓ/∂α_j.
             let d_alpha = a_u.tr_mul(&eu) + a_s.tr_mul(&es);
-            // Wrt α: A_uᵀ W_u A_u + A_sᵀ W_s A_s; wrt z, α_i α_j ρ_d ρ_e times it.
-            let wu = DMatrix::from_fn(positions, n, |i, j| a_u[(i, j)] * pooled_u[i] / u[i]);
-            let ws = DMatrix::from_fn(positions, n, |i, j| a_s[(i, j)] * pooled_s[i] / s[i]);
-            let fa = a_u.tr_mul(&wu) + a_s.tr_mul(&ws);
-            // `diag(α) F_α diag(α)`, to be scaled by `ρ_d ρ_e` per block.
-            let m = DMatrix::from_fn(n, n, |i, j| alpha[i] * alpha[j] * fa[(i, j)]);
-            gz += DMatrix::from_fn(n, h, |j, d| alpha[j] * rho[d] * d_alpha[j]);
-            for d in 0..h {
-                for e in d..h {
-                    let c = rho[d] * rho[e];
-                    for (x, y) in blocks[upper(d, e)]
-                        .as_mut_slice()
-                        .iter_mut()
-                        .zip(m.as_slice())
-                    {
-                        *x += c * y;
+            gz += DMatrix::from_fn(n, h, |j, d| slope[j] * rho[d] * d_alpha[j]);
+            if fisher {
+                let (wu, ws): (Vec<f64>, Vec<f64>) = (0..positions)
+                    .map(|i| (pooled_u[i] / u[i], pooled_s[i] / s[i]))
+                    .unzip();
+                // Wrt α: J̃ᵀ W J̃, `J̃` the response cut to the nodes from
+                // [`BAND`] − 1 before a position's to the one after (so
+                // positive semidefinite and banded); wrt z, α_i α_j ρ_d ρ_e
+                // times it.
+                let sub = params.sub.max(1);
+                let mut fa = vec![0.0; n * (BAND + 1)];
+                for k in 0..positions {
+                    let node = k / sub;
+                    let (lo, hi) = (node.saturating_sub(BAND - 1), (node + 1).min(n - 1));
+                    for i in lo..=hi {
+                        for j in lo..=i {
+                            fa[i * (BAND + 1) + i - j] += a_u[(k, i)] * a_u[(k, j)] * wu[k]
+                                + a_s[(k, i)] * a_s[(k, j)] * ws[k];
+                        }
+                    }
+                }
+                for i in 0..n {
+                    for j in i.saturating_sub(BAND)..=i {
+                        let m = slope[i] * slope[j] * fa[i * (BAND + 1) + i - j];
+                        for d in 0..h {
+                            for e in 0..h {
+                                if i > j || d >= e {
+                                    fz.add(i * h + d, j * h + e, rho[d] * rho[e] * m);
+                                }
+                            }
+                        }
                     }
                 }
             }
-            (gz, blocks)
+            (ll, gz, fz)
         })
-        .reduce(zero, |(ga, ba), (gb, bb)| {
-            (
-                ga + gb,
-                ba.into_iter().zip(bb).map(|(x, y)| x + y).collect(),
-            )
+        .reduce(zero, |(la, ga, mut fa), (lb, gb, fb)| {
+            fa += &fb;
+            (la + lb, ga + gb, fa)
         });
-    // Wrt z: block `(d, e)` is `Σ_g ρ_gd ρ_ge diag(α_g) F_α,g diag(α_g)`.
-    let fz = DMatrix::from_fn(h * n, h * n, |a, b| {
-        let (d, i, e, j) = (a / n, a % n, b / n, b % n);
-        let (lo, hi) = (d.min(e), d.max(e));
-        let (i, j) = if d <= e { (i, j) } else { (j, i) };
-        blocks[upper(lo, hi)][(i, j)]
-    });
-    (gz, fz)
+    LineageReads {
+        ll,
+        grad,
+        fisher: fisher.then_some(band),
+    }
+}
+
+/// The reads' gradient `[n × H]` and banded Fisher information
+/// (node-major) in lineage `l`'s path `z` ([`lineage_reads`]).
+#[cfg(test)]
+pub(super) fn lineage_information(
+    params: &Params,
+    l: usize,
+    reads: &Reads,
+    rows: &[usize],
+    lambda: &[Depth],
+) -> (DMatrix<f64>, Band) {
+    let r = lineage_reads(params, l, &responses(params, l), reads, rows, lambda, true);
+    (r.grad, r.fisher.expect("asked for"))
 }
 
 /// A path block's coordinates, flattened: its whitened path `η` (`d n + k`)
@@ -855,122 +1082,278 @@ impl<'a> Space<'a> {
         }
     }
 
-    /// `∂z/∂(η, x)` of a lineage the block moves, `[Hn × dim]` (rows
-    /// `d n + k`), at `params` (placed at `x`): the map `M` per dimension
-    /// ([`path_map`]), and for the branch time `∂r/∂t_b ⊙ C η_d` times
-    /// `dt_b/dx`.
-    fn jacobian(&self, params: &Params, x: &[f64]) -> DMatrix<f64> {
-        let (h, n) = (self.h, self.n);
-        let m = path_map(params, self.prior, self.block);
-        let mut j = DMatrix::zeros(h * n, self.dim());
-        for d in 0..h {
-            j.view_mut((d * n, d * n), (n, n)).copy_from(&m);
-        }
-        if self.branch {
-            let tb = params.branch.as_ref().expect("a trunk")[self.block - 1];
-            let kappa = self.prior.kappa();
-            let eta = self.eta(x);
-            for (d, e) in eta.iter().enumerate() {
-                let w = self.prior.colour(e);
-                for k in 0..n {
-                    let u = (k as f64 / (n - 1) as f64 - tb).max(0.0) / kappa;
-                    let dr = -std::f64::consts::SQRT_2 * 2.0 * u * (-u * u).exp() / kappa;
-                    j[(d * n + k, h * n)] = dr * w[k] * tb * (1.0 - tb);
-                }
+    /// The ramp `r` of the block's map `M = diag(r) C` ([`path_map`]):
+    /// ones but for a departure.
+    fn ramp(&self, params: &Params) -> Vec<f64> {
+        match &params.branch {
+            Some(branch) if self.branch => {
+                branch_ramp(self.n, branch[self.block - 1], self.prior.kappa())
             }
+            _ => vec![1.0; self.n],
         }
-        j
     }
 
-    /// From the reads' gradient `[n × H]` and information `[Hn × Hn]` in
-    /// `z` (flattened `d n + k`) of every lineage the block moves (`parts`):
-    /// the gradient and Gauss–Newton precision in the coordinates `x`,
-    /// through the Jacobian ([`Self::jacobian`]), with their own prior and
-    /// the genes' prior's exact curvature through `z̄`,
-    /// `−½ Σ_g ((b_g + ρ_gᵀz̄ − log γ_g − m)/s)²`, `z̄_d` the mean of every
-    /// lineage's path at every node.
-    fn information(
-        &self,
-        params: &Params,
-        x: &DVector<f64>,
-        gene_prior: &GenePrior,
-        parts: &[(DMatrix<f64>, DMatrix<f64>)],
-    ) -> Newton {
-        let (h, n, dim) = (self.h, self.n, self.dim());
-        let j = self.jacobian(params, x.as_slice());
+    /// `∂z_d/∂x` of a departure's branch-time coordinate `x`, one `[n]` per
+    /// dimension, at `params` (placed at `x`): `∂r/∂t_b ⊙ C η_d` times
+    /// `dt_b/dx`.
+    fn branch_column(&self, params: &Params, x: &[f64]) -> Vec<DVector<f64>> {
+        let tb = params.branch.as_ref().expect("a trunk")[self.block - 1];
+        let kappa = self.prior.kappa();
+        let n = self.n;
+        self.eta(x)
+            .iter()
+            .map(|e| {
+                let w = self.prior.colour(e);
+                DVector::from_fn(n, |k, _| {
+                    let u = (k as f64 / (n - 1) as f64 - tb).max(0.0) / kappa;
+                    let dr = -std::f64::consts::SQRT_2 * 2.0 * u * (-u * u).exp() / kappa;
+                    dr * w[k] * tb * (1.0 - tb)
+                })
+            })
+            .collect()
+    }
+
+    /// The genes' prior `−½ Σ_g ((b_g + ρ_gᵀz̄ − log γ_g − m)/s)²`'s
+    /// gradient `[H]` in `z̄`, `z̄_d` the mean of every lineage's path at
+    /// every node.
+    fn genes_prior_in_mean(&self, params: &Params, gene_prior: &GenePrior) -> Vec<f64> {
+        let h = self.h;
         let (mean, sd) = gene_prior.log_spliced;
         let z_bar = params.path_mean();
-        let mut prior_grad = vec![0.0; h];
-        let mut prior_curv = DMatrix::<f64>::zeros(h, h);
+        let mut grad = vec![0.0; h];
         for g in 0..params.beta.len() {
             let rho = &params.rho[g];
             let r = params.base[g] + dot(rho, &z_bar) - params.gamma[g].ln() - mean;
             for d in 0..h {
-                prior_grad[d] -= r * rho[d] / (sd * sd);
-                for e in 0..h {
-                    prior_curv[(d, e)] += rho[d] * rho[e] / (sd * sd);
+                grad[d] -= r * rho[d] / (sd * sd);
+            }
+        }
+        grad
+    }
+
+    /// The genes' prior's curvature `[H × H]` in `z̄`
+    /// ([`Self::genes_prior_in_mean`]): `Σ_g ρ_g ρ_gᵀ / s²`.
+    fn genes_prior_curvature(&self, params: &Params, gene_prior: &GenePrior) -> DMatrix<f64> {
+        let (_, sd) = gene_prior.log_spliced;
+        let mut curv = DMatrix::<f64>::zeros(self.h, self.h);
+        for rho in &params.rho {
+            for d in 0..self.h {
+                for e in 0..self.h {
+                    curv[(d, e)] += rho[d] * rho[e] / (sd * sd);
                 }
             }
         }
-        // ∂z̄_d/∂(η, x): every moved lineage's rows of dimension d, over L n.
-        let points = (params.path.len() * n) as f64;
-        let cols: Vec<DVector<f64>> = (0..h)
-            .map(|d| {
-                DVector::from_fn(dim, |c, _| {
-                    (0..n).map(|k| j[(d * n + k, c)]).sum::<f64>() * parts.len() as f64 / points
-                })
-            })
-            .collect();
-        let hn = h * n;
-        let mut grad = DVector::zeros(dim);
-        let mut prec = DMatrix::zeros(dim, dim);
-        for (grad_z, fisher_z) in parts {
-            let g = DVector::from_fn(hn, |i, _| grad_z[(i % n, i / n)]);
-            grad += j.transpose() * g;
-            prec += j.transpose() * fisher_z * &j;
-        }
-        for d in 0..h {
-            grad += &cols[d] * prior_grad[d];
-            for e in 0..h {
-                prec += &cols[d] * cols[e].transpose() * prior_curv[(d, e)];
+        curv
+    }
+
+    /// The share of `z̄` a node of a moved lineage holds (`moved` of them).
+    fn share(&self, params: &Params, moved: usize) -> f64 {
+        moved as f64 / (params.path.len() * self.n) as f64
+    }
+
+    /// The log conditional's gradient in the block's path space, `u_d = C
+    /// η_d` node-major (`k H + d`), the branch-time coordinate last: from
+    /// the reads' gradient `[n × H]` in `z` of every lineage the block
+    /// moves (`parts`; `z = … + r ⊙ u`), with the prior `−½ uᵀK⁻¹u`
+    /// (`−C⁻ᵀη`, exact), the genes' prior through `z̄` and the branch
+    /// time's own.
+    fn gradient(
+        &self,
+        params: &Params,
+        x: &[f64],
+        gene_prior: &GenePrior,
+        parts: &[&DMatrix<f64>],
+    ) -> Vec<f64> {
+        let (h, n, hn) = (self.h, self.n, self.h * self.n);
+        let r = self.ramp(params);
+        let mut grad = vec![0.0; self.dim()];
+        for grad_z in parts {
+            for k in 0..n {
+                for d in 0..h {
+                    grad[k * h + d] += r[k] * grad_z[(k, d)];
+                }
             }
         }
-        // The coordinates' own prior.
-        for i in 0..hn {
-            grad[i] -= x[i];
-            prec[(i, i)] += 1.0;
+        let prior_grad = self.genes_prior_in_mean(params, gene_prior);
+        let share = self.share(params, parts.len());
+        for k in 0..n {
+            for d in 0..h {
+                grad[k * h + d] += share * r[k] * prior_grad[d];
+            }
+        }
+        let c = self.prior.chol();
+        for (d, eta) in self.eta(x).iter().enumerate() {
+            let back = c
+                .transpose()
+                .solve_upper_triangular(eta)
+                .expect("a Cholesky factor has a nonzero diagonal");
+            for k in 0..n {
+                grad[k * h + d] -= back[k];
+            }
         }
         if self.branch {
-            let q = sigmoid(x[hn]);
-            grad[hn] += 1.0 - 2.0 * q;
-            prec[(hn, hn)] += 2.0 * q * (1.0 - q);
+            let col = self.branch_column(params, x);
+            for grad_z in parts {
+                for (d, c) in col.iter().enumerate() {
+                    grad[hn] += (0..n).map(|k| c[k] * grad_z[(k, d)]).sum::<f64>();
+                }
+            }
+            for (d, c) in col.iter().enumerate() {
+                grad[hn] += share * c.sum() * prior_grad[d];
+            }
+            grad[hn] += 1.0 - 2.0 * sigmoid(x[hn]);
         }
-        (grad, prec)
+        grad
+    }
+
+    /// The Gauss–Newton precision in the block's path space ([`Self::gradient`]'s
+    /// coordinates), banded: the reads' banded Fisher information of every
+    /// lineage the block moves (`parts`) through `diag(r)`, plus the
+    /// prior's banded precision ([`GridPrior::markov`]); for a departure a
+    /// dense border for its branch time (with the genes' prior's curvature
+    /// through `z̄` there). The genes' prior's curvature across the nodes
+    /// (dense, rank `H`) is left out. Factored guarded ([`Factor::new`]),
+    /// the prior's precision the fallback.
+    fn precision(
+        &self,
+        params: &Params,
+        x: &[f64],
+        gene_prior: &GenePrior,
+        parts: &[&Band],
+    ) -> Bordered {
+        let (h, n) = (self.h, self.n);
+        let r = self.ramp(params);
+        let prior = || {
+            let mut q = Band::zeros(h * n, h * (BAND + 1) - 1);
+            let m = self.prior.markov();
+            for i in 0..n {
+                for j in i.saturating_sub(BAND)..=i {
+                    for d in 0..h {
+                        q.add(i * h + d, j * h + d, m.get(i, j));
+                    }
+                }
+            }
+            q
+        };
+        let mut a = prior();
+        let width = a.width();
+        for f in parts {
+            for i in 0..h * n {
+                for j in i.saturating_sub(width)..=i {
+                    a.add(i, j, r[i / h] * r[j / h] * f.get(i, j));
+                }
+            }
+        }
+        let border = self.branch.then(|| {
+            let col = self.branch_column(params, x);
+            let cz: Vec<f64> = (0..h * n).map(|i| col[i % h][i / h]).collect();
+            let mut c = vec![0.0; h * n];
+            let mut q = 0.0;
+            for f in parts {
+                let fc = f.mul(&cz);
+                for i in 0..h * n {
+                    c[i] += r[i / h] * fc[i];
+                }
+                q += cz.iter().zip(&fc).map(|(a, b)| a * b).sum::<f64>();
+            }
+            // The genes' prior on the paths' mean: its border terms (the
+            // `u`–`u` block couples every node, dense, and is left out of
+            // the band; should the Schur complement then not be positive,
+            // [`Bordered::new`] drops the coupling).
+            let curv = self.genes_prior_curvature(params, gene_prior);
+            let share = self.share(params, parts.len());
+            let means: Vec<f64> = col.iter().map(|c| share * c.sum()).collect();
+            for k in 0..n {
+                for d in 0..h {
+                    for e in 0..h {
+                        c[k * h + d] += share * r[k] * means[e] * curv[(d, e)];
+                    }
+                }
+            }
+            for d in 0..h {
+                for e in 0..h {
+                    q += means[d] * means[e] * curv[(d, e)];
+                }
+            }
+            let s = sigmoid(x[h * n]);
+            (c, q + 2.0 * s * (1.0 - s))
+        });
+        Bordered::new(Factor::new(&a, prior), border)
+    }
+
+    /// Path space (node-major `u`, the branch time last) from the block's
+    /// coordinates (`d n + k`): `u_d = C η_d`.
+    fn to_path(&self, x: &[f64]) -> Vec<f64> {
+        let (h, n, hn) = (self.h, self.n, self.h * self.n);
+        let mut out = vec![0.0; self.dim()];
+        for (d, eta) in self.eta(x).iter().enumerate() {
+            let u = self.prior.colour(eta);
+            for k in 0..n {
+                out[k * h + d] = u[k];
+            }
+        }
+        if self.branch {
+            out[hn] = x[hn];
+        }
+        out
+    }
+
+    /// The block's coordinates from path space: `η_d = C⁻¹ u_d`.
+    fn coords_of_path(&self, u: &[f64]) -> Vec<f64> {
+        let (h, n, hn) = (self.h, self.n, self.h * self.n);
+        let mut out = vec![0.0; self.dim()];
+        for d in 0..h {
+            let ud = DVector::from_fn(n, |k, _| u[k * h + d]);
+            let eta = self
+                .prior
+                .chol()
+                .solve_lower_triangular(&ud)
+                .expect("a Cholesky factor has a nonzero diagonal");
+            for k in 0..n {
+                out[d * n + k] = eta[k];
+            }
+        }
+        if self.branch {
+            out[hn] = u[hn];
+        }
+        out
     }
 }
 
-/// The normal approximation of a path's conditional, as [`GeneProposal`]
-/// (its mode and the Cholesky factor of its precision over [`WIDEN`]²), in
-/// its block's coordinates ([`Space`]).
+/// The normal approximation of a path's conditional: its mode in its
+/// block's coordinates ([`Space`]) and its banded precision in path space
+/// ([`Space::precision`]), over [`WIDEN`]².
 #[derive(Clone)]
 pub struct PathProposal {
-    normal: GeneProposal,
+    centre: Vec<f64>,
+    precision: Bordered,
 }
 
 impl PathProposal {
     /// The mode's whitened paths, one `[n]` per dimension.
     pub fn mode(&self, h: usize) -> Vec<DVector<f64>> {
-        let n = self.normal.mode.len() / h.max(1);
-        (0..h)
-            .map(|d| DVector::from_fn(n, |k, _| self.normal.mode[d * n + k]))
-            .collect()
+        let n = self.centre.len() / h.max(1);
+        unflatten(&self.centre, h, n)
     }
-}
 
-impl PathProposal {
     /// A departure's branch time at the mode (`None` for a block without).
     pub fn branch_time(&self, h: usize, n: usize) -> Option<f64> {
-        (self.normal.mode.len() > h * n).then(|| sigmoid(self.normal.mode[h * n]))
+        (self.centre.len() > h * n).then(|| sigmoid(self.centre[h * n]))
+    }
+
+    /// `log N(θ; mode, P⁻¹)` up to a constant, `θ` in `space`'s coordinates.
+    fn log_density(&self, space: &Space, theta: &[f64]) -> f64 {
+        let d: Vec<f64> = theta.iter().zip(&self.centre).map(|(a, b)| a - b).collect();
+        -0.5 * self.precision.quad(&space.to_path(&d)) / (WIDEN * WIDEN)
+    }
+
+    /// A draw of `θ − mode`.
+    fn draw(&self, space: &Space, rng: &mut impl Rng) -> DVector<f64> {
+        let z: Vec<f64> = (0..self.precision.size())
+            .map(|_| StandardNormal.sample(rng))
+            .collect();
+        let u: Vec<f64> = self.precision.draw(&z).iter().map(|v| v * WIDEN).collect();
+        DVector::from_vec(space.coords_of_path(&u))
     }
 }
 
@@ -982,12 +1365,13 @@ fn unflatten(x: &[f64], h: usize, n: usize) -> Vec<DVector<f64>> {
 }
 
 /// The Laplace approximation of path block `l`'s conditional (rows,
-/// depths, genes held) by damped Gauss–Newton from `anchor` (whitened; in
+/// depths, genes held), banded in path space: at `anchor` (whitened; in
 /// the sampler the last fit's mode; a departure's branch time from
-/// `params`), the Fisher information analytic ([`path_newton`]). Fitted
-/// during burn-in only, as [`gene_laplace`].
+/// `params`) the precision once ([`Space::precision`]), then a few
+/// gradient steps on it ([`frozen_steps`]), the gradient analytic
+/// ([`lineage_reads`]). Fitted during burn-in only, as [`gene_mode`].
 #[allow(clippy::too_many_arguments)]
-pub fn path_laplace(
+pub fn path_mode(
     params: &Params,
     l: usize,
     anchor: &[DVector<f64>],
@@ -998,79 +1382,44 @@ pub fn path_laplace(
     gene_prior: &GenePrior,
 ) -> PathProposal {
     let space = Space::new(params, prior, l);
-    scoring(
-        &space,
-        params,
-        &space.coords(params, anchor),
-        &|p: &Params| path_log_density(p, l, reads, rows, lambda, gene_prior),
-        &|p: &Params, x: &DVector<f64>| path_newton(&space, p, x, reads, rows, lambda, gene_prior),
-    )
-}
-
-/// A gradient and a precision.
-type Newton = (DVector<f64>, DMatrix<f64>);
-
-/// Damped Fisher scoring of `density` plus the coordinates' own prior in
-/// `space` from `start`, `newton` its gradient and precision; stopped when
-/// the predicted rise `gᵀP⁻¹g` is under a hundredth of a nat. The normal at
-/// the end, as a [`PathProposal`].
-fn scoring(
-    space: &Space,
-    params: &Params,
-    start: &DVector<f64>,
-    density: &dyn Fn(&Params) -> f64,
-    newton: &dyn Fn(&Params, &DVector<f64>) -> Newton,
-) -> PathProposal {
+    let lineages = moved_by(params, l);
+    let resp: Vec<_> = lineages.iter().map(|&m| responses(params, m)).collect();
     let base = params.clone();
     let mut probe = params.clone();
-    let objective = |p: &mut Params, x: &DVector<f64>| {
-        space.place(p, &base, x.as_slice());
-        density(p) + space.own(x.as_slice())
+    // The objective and its gradient in path space at `x` (and the
+    // precision, when asked).
+    let mut at = |x: &[f64], fisher: bool| {
+        space.place(&mut probe, &base, x);
+        let parts: Vec<LineageReads> = lineages
+            .iter()
+            .zip(&resp)
+            .map(|(&m, r)| lineage_reads(&probe, m, r, reads, rows, lambda, fisher))
+            .collect();
+        let grads: Vec<&DMatrix<f64>> = parts.iter().map(|r| &r.grad).collect();
+        let f = parts.iter().map(|r| r.ll).sum::<f64>()
+            + genes_log_prior(&probe, gene_prior)
+            + space.own(x);
+        let g = space.gradient(&probe, x, gene_prior, &grads);
+        let prec = fisher.then(|| {
+            let bands: Vec<&Band> = parts.iter().filter_map(|r| r.fisher.as_ref()).collect();
+            space.precision(&probe, x, gene_prior, &bands)
+        });
+        (f, g, prec)
     };
-    let mut x = start.clone();
-    let mut fx = objective(&mut probe, &x);
-    let mut prec;
-    let mut iter = 0;
-    loop {
-        let grad;
-        (grad, prec) = newton(&probe, &x);
-        let step = prec
-            .clone()
-            .cholesky()
-            .expect("a prior's precision plus a Fisher information is positive definite")
-            .solve(&grad);
-        iter += 1;
-        if grad.dot(&step) < 1e-2 || iter > 20 {
-            break;
-        }
-        let mut scale = 1.0;
-        let moved = loop {
-            let y = &x + &step * scale;
-            let fy = objective(&mut probe, &y);
-            if fy >= fx {
-                break Some((y, fy));
-            }
-            scale *= 0.5;
-            if scale < 1e-4 {
-                break None;
-            }
-        };
-        let Some((y, fy)) = moved else {
-            space.place(&mut probe, &base, x.as_slice());
-            break;
-        };
-        (x, fx) = (y, fy);
-    }
-    let precision_chol = (prec / (WIDEN * WIDEN))
-        .cholesky()
-        .expect("a prior's precision plus a Fisher information is positive definite")
-        .l();
-    PathProposal {
-        normal: GeneProposal {
-            mode: x.iter().copied().collect(),
-            precision_chol,
+    let start: Vec<f64> = space.coords(params, anchor).iter().copied().collect();
+    let (f0, g0, precision) = at(&start, true);
+    let precision = precision.expect("asked for");
+    let centre = frozen_steps(
+        &start,
+        (f0, g0),
+        PATH_STEPS,
+        &|g: &[f64]| space.coords_of_path(&precision.solve(g)),
+        &mut |x: &[f64]| {
+            let (f, g, _) = at(x, false);
+            (f, g)
         },
-    }
+    );
+    PathProposal { centre, precision }
 }
 
 /// One generalized elliptical slice move of path block `l` (its whitened
@@ -1120,7 +1469,6 @@ fn t_ess(
     rng: &mut impl Rng,
 ) -> (Vec<DVector<f64>>, f64) {
     let dim = space.dim();
-    let normal = &prop.normal;
     let theta: Vec<f64> = space.coords(params, eta).iter().copied().collect();
     let base = params.clone();
     space.place(params, &base, &theta);
@@ -1130,9 +1478,10 @@ fn t_ess(
         density(params)
     };
     // log t_ν up to a constant.
-    let log_t =
-        |t: &[f64]| -0.5 * (T_DF + dim as f64) * (1.0 - 2.0 * normal.log_density(t) / T_DF).ln();
-    let delta2 = -2.0 * normal.log_density(&theta);
+    let log_t = |t: &[f64]| {
+        -0.5 * (T_DF + dim as f64) * (1.0 - 2.0 * prop.log_density(space, t) / T_DF).ln()
+    };
+    let delta2 = -2.0 * prop.log_density(space, &theta);
     let scale = 0.5 * (T_DF + delta2)
         / Gamma::new(0.5 * (T_DF + dim as f64), 1.0)
             .expect("a positive shape")
@@ -1140,15 +1489,15 @@ fn t_ess(
     let offset = cur_ll + space.own(&theta) - log_t(&theta);
     let at = |y: &DVector<f32>| -> Vec<f64> {
         y.iter()
-            .zip(&normal.mode)
+            .zip(&prop.centre)
             .map(|(&v, m)| f64::from(v) + m)
             .collect()
     };
     let x = DVector::from_iterator(
         dim,
-        theta.iter().zip(&normal.mode).map(|(t, m)| (t - m) as f32),
+        theta.iter().zip(&prop.centre).map(|(t, m)| (t - m) as f32),
     );
-    let nu = (normal.draw(rng) * scale.sqrt()).map(|v| v as f32);
+    let nu = (prop.draw(space, rng) * scale.sqrt()).map(|v| v as f32);
     let probe = params.clone();
     // Relative to the current value, so f32 keeps the slice's resolution.
     let lnpdf = |y: &DVector<f32>| {

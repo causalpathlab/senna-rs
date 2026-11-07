@@ -368,7 +368,7 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
     let (su, ss): (Vec<f64>, Vec<f64>) = (0..g)
         .map(|j| (reads.u.column(j).sum() + 0.5, reads.s.column(j).sum() + 0.5))
         .unzip();
-    Params {
+    let mut start = Params {
         beta: (0..g).map(|j| gamma0 * ss[j] / su[j]).collect(),
         gamma: vec![gamma0; g],
         rho: (0..g)
@@ -379,7 +379,15 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
         path,
         sub: opts.sub,
         branch: None,
+    };
+    // Inside the rates' bounds ([`GenePrior::bounded`]).
+    if let Some((lo, hi)) = GenePrior::bounded(&start).log_rate {
+        let inside = |r: f64| r.ln().clamp(lo, hi).exp();
+        for r in start.beta.iter_mut().chain(start.gamma.iter_mut()) {
+            *r = inside(*r);
+        }
     }
+    start
 }
 
 /// Whether a start's objective `new` beats the best so far: a NaN (a climb
