@@ -90,7 +90,7 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
 
     let (strs, nums) = read_table_columns(
         &format!("{out}.cell_time.parquet"),
-        &["cell", "lineage", "direction"],
+        &["cell", "lineage"],
         &["tau", "tau_sd", "tau_lo", "tau_hi", "p_L1"],
     )
     .unwrap();
@@ -98,12 +98,11 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
     // QC may leave a few near-empty cells out.
     assert!(cells.len() <= sim.n_pb && cells.len() * 100 >= sim.n_pb * 99);
     assert!(strs[1].iter().all(|l| l.as_ref() == "L1"));
-    // A lone lineage with kinetics runs forward in the output, as called
-    // or turned round.
+    // No direction is claimed: which end a lineage starts at is not
+    // identifiable from the reads.
     assert!(
-        strs[2].iter().all(|d| d.as_ref() == "forward"),
-        "{:?}",
-        &strs[2][..3]
+        read_table_columns(&format!("{out}.cell_time.parquet"), &["direction"], &[]).is_err(),
+        "a direction column"
     );
     for (name, col) in ["tau", "tau_sd", "tau_lo", "tau_hi", "p_L1"]
         .iter()
@@ -160,21 +159,8 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
         .all(|g| g.starts_with("GENE") && g.as_ref() != "GENE0"));
     assert!(stats[8].iter().all(|&f| f == 0.0 || f == 1.0));
 
-    // Every lineage's direction evidence; a lineage with kinetics is called.
-    let lineages = std::fs::read_to_string(format!("{out}.lineages.tsv")).unwrap();
-    let mut lines = lineages.lines();
-    assert_eq!(
-        lines.next(),
-        Some("lineage\tevidence\tper_pseudobulk\tdirection\tturned")
-    );
-    let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
-    // Called either way; a lone lineage (no trunk) the evidence reverses
-    // is turned round, one it does not is left as climbed.
-    assert_eq!(row[0], "L1");
-    assert!(["forward", "reversed"].contains(&row[3]), "{row:?}");
-    assert_eq!(row[4], if row[3] == "reversed" { "yes" } else { "no" });
-    assert!(row[1].parse::<f64>().unwrap().is_finite());
-    assert!(lines.next().is_none());
+    // Nor a table of direction calls.
+    assert!(!std::path::Path::new(&format!("{out}.lineages.tsv")).exists());
 
     let (m, _) = RunManifest::load(std::path::Path::new(&format!("{out}.senna.json"))).unwrap();
     assert_eq!(m.kind, RunKind::Ode);

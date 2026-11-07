@@ -1,11 +1,9 @@
 //! The plan's gates on one lineage, from scratch: rates in the right unit,
-//! the direction called with dynamics and left open without them, and a
-//! shared drift of the unspliced share not taken for a direction.
+//! time in order, and both survive a jitter of the unspliced share.
 
 use super::init::{first, spearman};
-use crate::ode_mixture::direction::{direction, Direction};
 use crate::ode_mixture::fit::Fit;
-use crate::ode_mixture::init::Climb;
+use crate::ode_mixture::init::{climb, Climb};
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 use legume_numeric::candle::candle_core::Device;
 use std::sync::OnceLock;
@@ -27,71 +25,40 @@ fn opts(cfg: &SimConfig) -> Climb {
     }
 }
 
-fn config(steady: bool, drift: f64, seed: u64) -> SimConfig {
+/// The kinetics lineage's simulation.
+fn config() -> SimConfig {
     SimConfig {
         fine: FINE,
-        steady,
-        unspliced_drift: drift,
-        seed,
+        seed: 1,
         ..SimConfig::default()
     }
 }
 
-/// What a direction call came to on simulated reads.
-struct Call {
+/// A climb from scratch on simulated reads.
+struct Climbed {
     sim: Sim,
-    dir: Direction,
-    /// The climbed fit's signed Spearman of time with the truth.
-    climbed: f64,
+    fit: Fit,
+    /// The fit's signed Spearman of time with the truth.
+    spearman: f64,
 }
 
-impl Call {
-    /// Evidence in the truth's favour: positive when the held refit the
-    /// true way round fits better.
-    fn for_truth(&self) -> f64 {
-        self.dir.evidence() * self.climbed.signum()
-    }
-
-    /// The held refit the evidence prefers.
-    fn chosen(&self) -> &Fit {
-        if self.dir.evidence() >= 0.0 {
-            &self.dir.forward
-        } else {
-            &self.dir.reversed
-        }
-    }
-}
-
-fn call(cfg: &SimConfig) -> Call {
-    call_with(cfg, &opts(cfg))
-}
-
-fn call_with(cfg: &SimConfig, opts: &Climb) -> Call {
+fn climbed(cfg: &SimConfig) -> Climbed {
     let sim = simulate(cfg).unwrap();
     let reads = first(&sim, sim.n_pb);
-    let dir = direction(&reads, opts, 0, &Device::Cpu).unwrap();
-    let (_, time) = dir.fit.posterior(&dir.fit.reads(&reads).unwrap()).unwrap();
-    let climbed = spearman(&time, &sim.truth.time);
-    let c = Call { sim, dir, climbed };
+    let (fit, objective) = climb(&reads, &opts(cfg), &Device::Cpu).unwrap();
+    let (_, time) = fit.posterior(&fit.reads(&reads).unwrap()).unwrap();
+    let spearman = spearman(&time, &sim.truth.time);
     eprintln!(
-        "steady {} drift {} seed {}: climbed {:.1} (signed Spearman {climbed:.3}); held forward {:.1}, reversed {:.1}; evidence for the truth {:.1} ({:.1} per pseudobulk), determined {}",
-        cfg.steady,
-        cfg.unspliced_drift,
-        cfg.seed,
-        c.dir.objective,
-        c.dir.forward_objective,
-        c.dir.reversed_objective,
-        c.for_truth(),
-        c.for_truth() / c.sim.n_pb as f64,
-        c.dir.determined()
+        "jitter {}: climbed {objective:.1} (signed Spearman {spearman:.3})",
+        cfg.share_jitter
     );
-    c
+    Climbed { sim, fit, spearman }
 }
 
-/// The kinetics lineage, shared by the rate and direction gates.
-fn kinetics() -> &'static Call {
-    static CALL: OnceLock<Call> = OnceLock::new();
-    CALL.get_or_init(|| call(&config(false, 0.0, 1)))
+/// The kinetics lineage, shared by the gates.
+fn kinetics() -> &'static Climbed {
+    static CLIMBED: OnceLock<Climbed> = OnceLock::new();
+    CLIMBED.get_or_init(|| climbed(&config()))
 }
 
 /// Per gene: how far off steady state the truth runs, the mean over
@@ -132,8 +99,8 @@ fn pinned(sim: &Sim) -> Vec<usize> {
 }
 
 /// `(median |log γ̂/γ|, median |log β̂/β|)` over `genes`.
-fn rate_errors(c: &Call, genes: &[usize]) -> (f64, f64) {
-    let got = c.chosen().params().unwrap();
+fn rate_errors(c: &Climbed, genes: &[usize]) -> (f64, f64) {
+    let got = c.fit.params().unwrap();
     let t = &c.sim.truth;
     let err = |fit: &[f64], truth: &[f64]| {
         median(
@@ -144,41 +111,6 @@ fn rate_errors(c: &Call, genes: &[usize]) -> (f64, f64) {
         )
     };
     (err(&got.gamma, &t.gamma), err(&got.beta, &t.beta))
-}
-
-/// The held objective is the host's table at the held rows, plus log π and
-/// the priors (the objective minus the marginal).
-#[test]
-fn the_held_objective_is_the_hosts() {
-    use super::model::truth_params;
-    use crate::ode_mixture::kernel::GridPrior;
-    use crate::ode_mixture::likelihood::table;
-    use legume_numeric::candle::candle_core::Tensor;
-    let cfg = SimConfig {
-        lineages: 2,
-        ..config(false, 0.0, 1)
-    };
-    let sim = simulate(&cfg).unwrap();
-    let params = truth_params(&sim, FINE, POINTS);
-    let prior = GridPrior::new(POINTS, 1.0, cfg.kappa).unwrap();
-    let reads = first(&sim, sim.n_pb);
-    let fit = Fit::from_params(&params, &prior, &Device::Cpu).unwrap();
-    let dev = fit.reads(&reads).unwrap();
-    let rows: Vec<u32> = (0..sim.n_pb).map(|p| (p % (2 * POINTS)) as u32).collect();
-    let scalar = |t: Tensor| f64::from(t.to_scalar::<f32>().unwrap());
-    let got = scalar(
-        fit.held_objective(&dev, &Tensor::new(rows.as_slice(), &Device::Cpu).unwrap())
-            .unwrap(),
-    );
-    let log_prior = scalar(fit.objective(&dev).unwrap()) - scalar(fit.log_marginal(&dev).unwrap());
-    let tab = table(&reads, &params.levels());
-    let want: f64 = rows
-        .iter()
-        .enumerate()
-        .map(|(p, &r)| tab[(p, r as usize)] + 0.5f64.ln())
-        .sum::<f64>()
-        + log_prior;
-    assert!((got - want).abs() / want.abs() < 1e-5, "{got} vs {want}");
 }
 
 /// Lineage 0's duration is the unit and the simulator's is 1, so the
@@ -198,89 +130,28 @@ fn from_scratch_the_rates_are_the_truths_where_the_reads_pin_them() {
     assert!(gamma < 1.25f64.ln(), "median |log γ̂/γ| {gamma}");
 }
 
-#[test]
-fn with_kinetics_the_right_direction_is_called() {
-    let c = kinetics();
-    assert!(c.climbed.abs() > 0.95, "climbed Spearman {}", c.climbed);
-    assert!(c.dir.determined(), "evidence {}", c.dir.evidence());
-    assert!(c.for_truth() > 0.0, "the wrong way: {}", c.for_truth());
-}
-
-#[test]
-fn with_no_dynamics_the_direction_is_undetermined() {
-    let c = call(&config(true, 0.0, 1));
-    assert!(!c.dir.determined(), "evidence {}", c.dir.evidence());
-}
-
-/// The gate as the plan sets it: a drift of every gene's unspliced share
-/// alone, with no kinetics in the reads, calls no direction. It needs the
-/// jitter in the model ([`Climb::jitter`]): the shared model calls one as
-/// confidently as kinetics do (a shared shift of the unspliced share looks
-/// like a shared rate change).
-#[test]
-fn a_shared_unspliced_drift_alone_is_not_a_direction() {
-    for drift in [1.0, 3.0] {
-        let cfg = config(true, drift, 1);
-        let c = call_with(
-            &cfg,
-            &Climb {
-                jitter: true,
-                trunk: false,
-                ..opts(&cfg)
-            },
-        );
-        assert!(
-            !c.dir.determined(),
-            "drift {drift}: evidence {}",
-            c.dir.evidence()
-        );
-    }
-}
-
-/// With kinetics in the reads too, the direction survives the drift.
-#[test]
-fn with_kinetics_the_direction_survives_a_shared_unspliced_drift() {
-    let c = call(&config(false, 3.0, 1));
-    let (gamma, beta) = rate_errors(&c, &pinned(&c.sim));
-    eprintln!("drift 3 with kinetics: median |log γ̂/γ| {gamma:.3}, |log β̂/β| {beta:.3}");
-    assert!(c.dir.determined(), "evidence {}", c.dir.evidence());
-    assert!(c.for_truth() > 0.0, "the wrong way: {}", c.for_truth());
-}
-
 /// With the jitter in the model ([`Climb::jitter`]), a jitter of the
 /// unspliced share from pseudobulk to pseudobulk leaves the gates as they
-/// are without it: rates, time and direction. (The shared model loses the
-/// rates already at the smaller jitter.)
+/// are without it: rates and time. (The shared model loses the rates
+/// already at the smaller jitter.)
 #[test]
 fn with_the_jitter_in_the_model_the_gates_survive_a_jitter_of_the_unspliced_share() {
     for j in [0.3, 1.0] {
         let cfg = SimConfig {
             share_jitter: j,
-            ..config(false, 0.0, 1)
+            ..config()
         };
-        let c = call_with(
-            &cfg,
-            &Climb {
-                jitter: true,
-                trunk: false,
-                ..opts(&cfg)
-            },
-        );
+        let c = climbed(&cfg);
         let (gamma, beta) = rate_errors(&c, &pinned(&c.sim));
-        let sd = c.chosen().share_sd().unwrap().unwrap();
+        let sd = c.fit.share_sd().unwrap().unwrap();
         eprintln!(
             "jitter {j}: fitted sd {sd:.3}; median |log γ̂/γ| {gamma:.3}, |log β̂/β| {beta:.3}"
         );
         assert!(gamma < 1.25f64.ln(), "jitter {j}: median |log γ̂/γ| {gamma}");
         assert!(
-            c.climbed.abs() > 0.95,
+            c.spearman.abs() > 0.95,
             "jitter {j}: climbed Spearman {}",
-            c.climbed
-        );
-        assert!(
-            c.dir.determined() && c.for_truth() > 0.0,
-            "jitter {j}: evidence {}",
-            c.for_truth()
+            c.spearman
         );
         assert!((sd / j).ln().abs() < 0.25f64, "jitter {j}: fitted sd {sd}");
     }
@@ -290,24 +161,11 @@ fn with_the_jitter_in_the_model_the_gates_survive_a_jitter_of_the_unspliced_shar
 /// gates pass and the fitted jitter is small.
 #[test]
 fn with_no_jitter_in_the_reads_the_jitter_in_the_model_stays_small() {
-    let cfg = config(false, 0.0, 1);
-    let c = call_with(
-        &cfg,
-        &Climb {
-            jitter: true,
-            trunk: false,
-            ..opts(&cfg)
-        },
-    );
-    let (gamma, _) = rate_errors(&c, &pinned(&c.sim));
-    let sd = c.chosen().share_sd().unwrap().unwrap();
+    let c = kinetics();
+    let (gamma, _) = rate_errors(c, &pinned(&c.sim));
+    let sd = c.fit.share_sd().unwrap().unwrap();
     eprintln!("no jitter: fitted sd {sd:.4}; median |log γ̂/γ| {gamma:.3}");
     assert!(gamma < 1.25f64.ln(), "median |log γ̂/γ| {gamma}");
-    assert!(c.climbed.abs() > 0.95, "climbed Spearman {}", c.climbed);
-    assert!(
-        c.dir.determined() && c.for_truth() > 0.0,
-        "evidence {}",
-        c.for_truth()
-    );
+    assert!(c.spearman.abs() > 0.95, "climbed Spearman {}", c.spearman);
     assert!(sd < 0.05, "fitted sd {sd}");
 }

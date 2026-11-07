@@ -19,8 +19,10 @@
 //!
 //! [`climb`] then runs Adam from the k-means start, and again with each
 //! lineage turned round, keeping a turn that raises the objective (the
-//! start fixes the order, the splicing the direction); with two lineages
-//! also from every tree start, and keeps the best of all.
+//! start fixes the order; the splicing says which way round fits); with
+//! two lineages also from every tree start, and keeps the best of all.
+//! This is a search for the climb's basin, not for a root: a lineage's
+//! `t = 0` is a convention.
 
 use super::blocks::GenePrior;
 use super::fit::{Fit, SHARE_START};

@@ -67,24 +67,6 @@ fn with_kinetics_the_ratios_move_off_steady_state() {
     assert!(moved * 2 > sim.n_genes, "only {moved} genes move");
 }
 
-#[test]
-fn a_drift_shifts_every_genes_unspliced_share_alike() {
-    let sim = simulate(&SimConfig {
-        steady: true,
-        unspliced_drift: 1.0,
-        ..SimConfig::default()
-    })
-    .unwrap();
-    let t = &sim.truth;
-    for p in 0..sim.n_pb {
-        let shift = t.time[p] / t.t_len[t.lineage[p]] - 0.5;
-        for g in [0, 7, 42] {
-            let r = t.u_mean[p * sim.n_genes + g] / t.s_mean[p * sim.n_genes + g];
-            assert!(((r * t.beta[g] / t.gamma[g]).ln() - shift).abs() < 1e-9);
-        }
-    }
-}
-
 /// A jitter moves every pseudobulk's unspliced share by its own `ω_p`,
 /// every gene's alike: at steady state `log(ū β/(s̄ γ)) = ω_p` in every
 /// gene, those amounts spread as the jitter.

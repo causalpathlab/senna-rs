@@ -1,12 +1,27 @@
 use super::model::truth_params;
 use crate::ode_mixture::fit::Fit;
 use crate::ode_mixture::kernel::GridPrior;
-use crate::ode_mixture::likelihood::{table, Reads};
+use crate::ode_mixture::likelihood::{integrated_table, table, Reads};
 use crate::ode_mixture::sim::{simulate, SimConfig};
 use legume_numeric::candle::candle_core::Device;
 
 fn rel(a: f64, b: f64) -> f64 {
     (a - b).abs() / b.abs().max(1e-9)
+}
+
+/// `Σ_p log Σ_r exp(tab[p, r] + log_w)`: the marginal over a host table,
+/// every point weighted `exp(log_w)`.
+fn host_marginal(tab: &nalgebra::DMatrix<f64>, log_w: f64) -> f64 {
+    tab.row_iter()
+        .map(|row| {
+            let top = row.max() + log_w;
+            top + row
+                .iter()
+                .map(|x| (x + log_w - top).exp())
+                .sum::<f64>()
+                .ln()
+        })
+        .sum()
 }
 
 #[test]
@@ -115,15 +130,7 @@ fn the_marginal_is_the_hosts() {
         .to_scalar::<f32>()
         .unwrap();
     let tab = table(&reads, &params.levels());
-    let want: f64 = (0..sim.n_pb)
-        .map(|p| {
-            let v: Vec<f64> = (0..tab.ncols())
-                .map(|r| tab[(p, r)] + 0.5f64.ln() - 45f64.ln())
-                .collect();
-            let top = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            top + v.iter().map(|x| (x - top).exp()).sum::<f64>().ln()
-        })
-        .sum();
+    let want = host_marginal(&tab, 0.5f64.ln() - 45f64.ln());
     assert!(rel(f64::from(got), want) < 1e-5, "{got} vs {want}");
 }
 
@@ -196,12 +203,11 @@ fn a_stop_ends_adam_at_once() {
     assert_eq!(before, after);
 }
 
-/// The fit's share term is the host's: the held objective with a jitter
-/// minus without is `Σ_p` [`share_term`] at every pseudobulk's held row.
+/// The fit's share term is the host's: with a jitter, the marginal is
+/// the host's over [`integrated_table`] (every pseudobulk's jitter
+/// integrated out at every point).
 #[test]
 fn the_share_term_is_the_hosts() {
-    use crate::ode_mixture::likelihood::share_term;
-    use legume_numeric::candle::candle_core::Tensor;
     let sim = simulate(&SimConfig {
         fine: 133,
         share_jitter: 0.4,
@@ -211,42 +217,18 @@ fn the_share_term_is_the_hosts() {
     let params = truth_params(&sim, 133, 45);
     let prior = GridPrior::new(45, 1.0, 0.25).unwrap();
     let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
-    let rows: Vec<u32> = (0..sim.n_pb).map(|p| (p % 45) as u32).collect();
-    let held = |sd: Option<f64>| {
-        let fit = Fit::from_params(&params, &prior, &Device::Cpu)
-            .unwrap()
-            .with_share(sd)
-            .unwrap();
-        let dev = fit.reads(&reads).unwrap();
-        let r = Tensor::new(rows.as_slice(), &Device::Cpu).unwrap();
-        f64::from(
-            fit.held_objective(&dev, &r)
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap(),
-        )
-    };
-    let got = held(Some(0.4)) - held(None);
-    let lv = params.levels();
-    let want: f64 = rows
-        .iter()
-        .enumerate()
-        .map(|(p, &r)| {
-            let r = r as usize;
-            let n_u = reads.u.row(p).sum();
-            share_term(
-                n_u,
-                reads.total(p),
-                lv.u.row(r).sum(),
-                lv.s.row(r).sum(),
-                0.4,
-            )
-        })
-        .sum();
-    assert!(
-        (got - want).abs() < 1e-4 * want.abs().max(1.0) + 2.0,
-        "{got} vs {want}"
-    );
+    let fit = Fit::from_params(&params, &prior, &Device::Cpu)
+        .unwrap()
+        .with_share(Some(0.4))
+        .unwrap();
+    let got = fit
+        .log_marginal(&fit.reads(&reads).unwrap())
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    let tab = integrated_table(&reads, &params.levels(), 0.4);
+    let want = host_marginal(&tab, -45f64.ln());
+    assert!(rel(f64::from(got), want) < 1e-5, "{got} vs {want}");
 }
 
 /// With a shared trunk every lineage's levels are lineage 0's up to the

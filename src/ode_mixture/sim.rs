@@ -40,9 +40,6 @@ pub struct SimConfig {
     pub rho_sd: f64,
     /// Every gene at steady state at every time (no dynamics to read).
     pub steady: bool,
-    /// Every gene's unspliced reads scaled by `e^{d (t/T − ½)}`: a drift of
-    /// the unspliced share shared by every gene, no kinetics in it.
-    pub unspliced_drift: f64,
     /// Every pseudobulk's unspliced reads scaled by its own `e^{ω_p}`,
     /// `ω_p ~ N(0, j²)`: a jitter of the unspliced share from pseudobulk to
     /// pseudobulk, no kinetics in it, drawn apart from every other draw.
@@ -66,7 +63,6 @@ impl Default for SimConfig {
             kappa: 0.25,
             rho_sd: 0.7,
             steady: false,
-            unspliced_drift: 0.0,
             share_jitter: 0.0,
             branch_at: None,
             seed: 1,
@@ -190,15 +186,15 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
         let k = rng.random_range(0..n);
         let t = k as f64 * step;
         omega[p] = jitter.sample(&mut jitter_rng);
-        let drift = (cfg.unspliced_drift * (t / t_len[lin] - 0.5) + omega[p]).exp();
+        let scale = omega[p].exp();
         let total: f64 = (0..g)
-            .map(|j| traj[lin][j].0[k] * drift + traj[lin][j].1[k])
+            .map(|j| traj[lin][j].0[k] * scale + traj[lin][j].1[k])
             .sum();
         let n_p = depth_draw.sample(&mut rng);
         let lambda = n_p / total;
         for j in 0..g {
             let (mu, ms) = (
-                lambda * traj[lin][j].0[k] * drift,
+                lambda * traj[lin][j].0[k] * scale,
                 lambda * traj[lin][j].1[k],
             );
             u_mean[p * g + j] = mu;

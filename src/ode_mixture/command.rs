@@ -5,7 +5,6 @@
 //! a time.
 
 use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
-use super::direction::{direction_of, Call};
 use super::init::{climb, Climb};
 use super::likelihood::Reads;
 use super::model::lineage_label;
@@ -145,13 +144,6 @@ pub struct OdeArgs {
         help = "Keep every this many kept sweeps' parameters for the cells' readout (0: 25 a chain)"
     )]
     pub snapshot_every: usize,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Skip every lineage's direction evidence (two held refits a lineage)"
-    )]
-    pub no_direction: bool,
 
     #[arg(
         long,
@@ -410,12 +402,6 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     };
     let (fit, objective) = climb(&reads, &opts, &dev)?;
     info!("ode: the climb's objective {objective:.4}");
-    // Every lineage's state in the output, as each of its cells reports it.
-    let (fit, runs) = if args.no_direction {
-        (fit, vec![None; args.lineages])
-    } else {
-        lineage_directions(&args.out, fit, objective, &reads, &opts, &dev)?
-    };
     let start_at = fit.params()?;
     let share = fit.share_sd()?;
     drop(fit);
@@ -470,7 +456,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         keep.as_deref(),
         &snaps,
         &map,
-        &runs,
+        args.lineages,
         args.block_size,
     )?;
     table.write(&args.out, map.dim())?;
@@ -486,26 +472,16 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     }
     write_manifest(args, &inputs, pb_tree.is_some(), !branch.is_empty())?;
     info!(
-        "Wrote {0}.{{cell_time,cell_embedding,cell_velocity,gene_rates,pb_time}}.parquet and {0}.senna.json (and {0}.lineages.tsv unless --no-direction, {0}.branch_time.tsv on a trunk)",
+        "Wrote {0}.{{cell_time,cell_embedding,cell_velocity,gene_rates,pb_time}}.parquet and {0}.senna.json (and {0}.branch_time.tsv on a trunk)",
         args.out
     );
     Ok(())
-}
-
-/// How every lineage runs in the output, `None` where its direction was
-/// not called (`--no-direction`).
-type Runs = Vec<Option<Call>>;
-
-/// A lineage's state as its cells report it.
-fn run_label(run: Option<Call>) -> &'static str {
-    run.map_or("not called", Call::as_str)
 }
 
 /// Every cell's readout, as the tables have it.
 struct CellTable {
     cells: Vec<Box<str>>,
     lineage: Vec<Box<str>>,
-    direction: Vec<Box<str>>,
     /// `[L][C]` the lineages' posteriors.
     p_lineage: Vec<Vec<f32>>,
     tau: Vec<f32>,
@@ -519,7 +495,7 @@ struct CellTable {
 
 /// Every cell of `data` read out from `snaps` a block at a time (QC's
 /// near-empty cells, those not in `keep`, left out), placed on `map` with
-/// its velocity there, and its lineage's state from `runs`.
+/// its velocity there (`lineages` of them).
 #[allow(clippy::too_many_arguments)]
 fn read_out_cells(
     data: &data_beans::sparse_io_vector::SparseIoVec,
@@ -528,7 +504,7 @@ fn read_out_cells(
     keep: Option<&[usize]>,
     snaps: &[Snapshot],
     map: &MapBasis,
-    runs: &Runs,
+    lineages: usize,
     block_size: usize,
 ) -> anyhow::Result<CellTable> {
     let all_cells = data.column_names()?;
@@ -540,8 +516,7 @@ fn read_out_cells(
     let mut t = CellTable {
         cells: Vec::new(),
         lineage: Vec::new(),
-        direction: Vec::new(),
-        p_lineage: vec![Vec::new(); runs.len()],
+        p_lineage: vec![Vec::new(); lineages],
         tau: Vec::new(),
         tau_sd: Vec::new(),
         tau_lo: Vec::new(),
@@ -562,8 +537,6 @@ fn read_out_cells(
             let best = lineage_index(p);
             t.lineage
                 .push(best.map_or_else(|| "NA".into(), lineage_label));
-            t.direction
-                .push(best.map_or("NA", |l| run_label(runs[l])).into());
         }
         for (l, col) in t.p_lineage.iter_mut().enumerate() {
             col.extend(
@@ -600,7 +573,6 @@ impl CellTable {
             .collect();
         let mut cols: Vec<(Box<str>, Column)> = vec![
             ("lineage".into(), Column::Str(&self.lineage)),
-            ("direction".into(), Column::Str(&self.direction)),
             ("tau".into(), Column::F32(&self.tau)),
             ("tau_sd".into(), Column::F32(&self.tau_sd)),
             ("tau_lo".into(), Column::F32(&self.tau_lo)),
@@ -628,60 +600,6 @@ impl CellTable {
             k,
         )
     }
-}
-
-/// `{out}.lineages.tsv`: every lineage's direction evidence from `fit`
-/// ([`direction_of`]: the climbed order held, refitted both ways round)
-/// and its [`Call`]. A lineage the evidence reverses is turned round (the
-/// fit carried on is the held refit turned round) only with the lineages
-/// apart: on a shared trunk every lineage starts at the trunk's root, so
-/// one cannot run the other way alone, and it is reported, not turned.
-/// The fit carried on, and how every lineage runs in it.
-fn lineage_directions(
-    out: &str,
-    mut fit: super::fit::Fit,
-    mut objective: f32,
-    reads: &Reads,
-    opts: &Climb,
-    dev: &legume_numeric::candle::candle_core::Device,
-) -> anyhow::Result<(super::fit::Fit, Runs)> {
-    let mut runs: Runs = Vec::with_capacity(opts.lineages);
-    let mut tsv = String::from("lineage\tevidence\tper_pseudobulk\tdirection\tturned\n");
-    for l in 0..opts.lineages {
-        let on_trunk = fit.branch_at()?.is_some();
-        let dir = direction_of(fit, objective, reads, opts, l, dev)?;
-        let (evidence, call) = (dir.evidence(), dir.call());
-        let per = evidence / dir.rows.len().max(1) as f64;
-        let turned = call == Call::Reversed && !on_trunk;
-        info!(
-            "ode: lineage {}'s direction {}: evidence {evidence:.1} ({per:.2} a pseudobulk){}",
-            l + 1,
-            call.as_str(),
-            if turned {
-                "; turned round"
-            } else if call == Call::Reversed {
-                "; on the trunk, not turned"
-            } else {
-                ""
-            }
-        );
-        tsv.push_str(&format!(
-            "L{}\t{evidence:.3}\t{per:.4}\t{}\t{}\n",
-            l + 1,
-            call.as_str(),
-            if turned { "yes" } else { "no" }
-        ));
-        // How the lineage runs in the output: a reversal turned round now
-        // runs forward; one left (on the trunk) still runs backwards.
-        runs.push(Some(if turned { Call::Forward } else { call }));
-        (fit, objective) = if turned {
-            (dir.reversed, dir.reversed_objective)
-        } else {
-            (dir.fit, dir.objective)
-        };
-    }
-    std::fs::write(format!("{out}.lineages.tsv"), tsv)?;
-    Ok((fit, runs))
 }
 
 /// The chains' lineage durations and branch times, and how well they mix.

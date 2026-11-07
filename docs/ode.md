@@ -64,28 +64,30 @@ left free. Only the invariants are reported: times, rates and levels.
 ## Inference
 
 1. **Climb** (`--steps`, `--lr`): Adam on the marginal of every pseudobulk
-   over its lineage and time, from several starts; a start whose objective is
-   not finite never wins.
-2. **Direction** (unless `--no-direction`): for each lineage, the pseudobulks'
-   order held as climbed, refitted both ways round. The difference in
-   evidence calls the lineage `forward`, `reversed`, `undetermined` (within
-   5 nats a pseudobulk: steady state looks the same either way) or
-   `diverged`. A reversed lineage is turned round only off a trunk; on a
-   trunk both arms start at the branch, so the call is reported, not acted
-   on.
-3. **Chains** (`--chains`, `--sweeps`, `--burn`): blocked Gibbs from the
+   over its lineage and time, from several starts: the k-means start, the
+   same with each lineage turned round, and with two lineages every tree
+   start. The best objective wins; a start whose objective is not finite
+   never does.
+2. **Chains** (`--chains`, `--sweeps`, `--burn`): blocked Gibbs from the
    climb's mode — the pseudobulks' lineage and time exactly, every gene's
    rates by generalized elliptical slice moves on its Laplace approximation
    (bounded Newton), the paths by slice moves on theirs (banded in the path,
    factored once a refit), the branch time and the jitter. Both rates are
    kept between a half-life of one fine time step and four time units (the
    first lineage's duration; a bounded logit link, the rates' prior carried
-   by its Jacobian): past either end the reads cannot tell a rate apart and it would drift.
+   by its Jacobian): past either end the reads cannot tell a rate apart and
+   it would drift.
    Proposals are refitted every `--laplace-every` sweeps during burn-in and
    frozen after, so the kept chain is a homogeneous Markov chain.
-4. **Cells**: every cell is scored against `--snapshot-every`'s draws of the
+3. **Cells**: every cell is scored against `--snapshot-every`'s draws of the
    chains, at its own depth, for its lineage and time posteriors and its
    velocity.
+
+No root is inferred. Splicing tells which way genes move along a path, so
+the climb keeps each lineage the way round its kinetics fit best; but where
+a trajectory starts, how many starts there are, and whether one sits inside
+a path are not identifiable from the reads, only from the cells' identity. A
+lineage's `t = 0` is the fit's convention, not a root.
 
 Along one direction the data say little: a warp of the clock traded against
 every gene's speed. This is weak identifiability, not a sampler defect, so
@@ -96,13 +98,12 @@ and flagged above R̂ 1.05.
 
 | file | holds |
 |---|---|
-| `{out}.cell_time.parquet` | every cell's `lineage`, its `direction`, `tau` with `tau_sd` and the 90% interval `tau_lo`/`tau_hi`, and `p_L1…` lineage posteriors |
+| `{out}.cell_time.parquet` | every cell's `lineage`, `tau` with `tau_sd` and the 90% interval `tau_lo`/`tau_hi`, and `p_L1…` lineage posteriors |
 | `{out}.cell_embedding.parquet` | every cell on the map: its log1p reads per 10⁴ on the leading `--map-pcs` components of the fitted trajectories (every lineage's levels over the draws), so the axes follow the dynamics, not other variation among the cells |
 | `{out}.cell_velocity.parquet` | every cell's velocity on that map, `d log level/dt` through the chain rule |
 | `{out}.gene_rates.parquet` | every gene's `log_gamma` and `log_ratio` (log γ/β) with sd, R̂, ESS, and `flagged` |
 | `{out}.pb_time.parquet` | every finest pseudobulk's posterior over lineage and time, a row per `(pb, lineage, position)` with its `phase` (the position's share of the lineage's grid, the same in every draw), the draws' mean `time` there and mass `q`; `pb` as `{out}.cell_to_pb.parquet`'s finest level |
 | `{out}.branch_time.tsv` | with a shared trunk, every other lineage's branch time off it over the chains (mean and sd, R̂, ESS, `flagged`), on `pb_time`'s phase scale |
-| `{out}.lineages.tsv` | every lineage's direction evidence, per pseudobulk, its call and whether it was turned |
 | `{out}.senna.json` | the run manifest `senna view` and the MCP tools read |
 
 In `senna view`, `y` colours the cells by time, `v` draws the velocity field
