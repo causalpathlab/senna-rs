@@ -4,6 +4,7 @@
 
 pub mod band;
 pub mod blocks;
+pub mod coarsen;
 pub mod command;
 pub mod counts;
 pub mod fit;
