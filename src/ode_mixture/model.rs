@@ -28,6 +28,9 @@ pub struct Params {
     /// clock (every duration the unit): `z_ℓ = z_0 + √2 r(t) w_ℓ`
     /// ([`branch_ramp`]); `None`: the lineages apart.
     pub branch: Option<Vec<f64>>,
+    /// The global log capture `c` of the unspliced reads against the
+    /// spliced: every unspliced level is the kinetics' `ū` times `e^c`.
+    pub log_capture: f64,
 }
 
 /// `r(t_k) = √2 (1 − e^{−((t_k − t_b)₊/κ)²})` on `n` grid points over
@@ -78,6 +81,10 @@ pub fn lineage_label(l: usize) -> Box<str> {
 /// `exp`: a large deviation saturates instead of overflowing.
 pub const LOG_CLAMP: f64 = 30.0;
 
+/// The log capture's prior, `c ~ N(0, 2²)`: weak, unspliced reads captured
+/// within a factor of `e^{±4}` of the spliced.
+pub const CAPTURE_PRIOR: (f64, f64) = (0.0, 2.0);
+
 /// `exp(x)`, `x` clamped to `±`[`LOG_CLAMP`] (its slope zero outside).
 pub fn clamped_exp(x: f64) -> f64 {
     x.clamp(-LOG_CLAMP, LOG_CLAMP).exp()
@@ -126,14 +133,21 @@ impl Params {
     /// baseline, on the current paths.
     pub fn levels_of(&self, beta: f64, gamma: f64, rho: &[f64], base: f64) -> (Vec<f64>, Vec<f64>) {
         let (mut u, mut s) = (Vec::new(), Vec::new());
+        let capture = self.capture();
         for (path, &t_len) in self.path.iter().zip(&self.t_len) {
             let alpha = alpha_on(path, rho, base);
             let h = t_len / (path.len() - 1) as f64;
             let (ul, sl) = fine_trajectory(&alpha, beta, gamma, h, self.sub);
-            u.extend(ul);
+            u.extend(ul.into_iter().map(|x| x * capture));
             s.extend(sl);
         }
         (u, s)
+    }
+
+    /// `e^c`, the unspliced reads' capture against the spliced
+    /// ([`Self::log_capture`], [`clamped_exp`]).
+    pub fn capture(&self) -> f64 {
+        clamped_exp(self.log_capture)
     }
 
     /// Every gene's levels, in parallel over genes.
@@ -166,9 +180,11 @@ impl Params {
         self.velocities_of(&self.levels())
     }
 
-    /// [`Params::velocities`] from these parameters' levels `lv`.
+    /// [`Params::velocities`] from these parameters' levels `lv` (the
+    /// kinetics' `ū`, the capture taken off).
     pub fn velocities_of(&self, lv: &Levels) -> (DMatrix<f64>, DMatrix<f64>) {
         let sub = self.sub.max(1);
+        let capture = self.capture();
         let cols: Vec<(Vec<f64>, Vec<f64>)> = (0..lv.genes)
             .into_par_iter()
             .map(|g| {
@@ -179,7 +195,7 @@ impl Params {
                     for k in 0..lv.points {
                         let a = alpha[(k / sub).min(path.len() - 2)];
                         let r = lv.row(l, k);
-                        let (u, s) = (lv.u[(r, g)], lv.s[(r, g)]);
+                        let (u, s) = (lv.u[(r, g)] / capture, lv.s[(r, g)]);
                         du.push(a - b * u);
                         ds.push(b * u - y * s);
                     }

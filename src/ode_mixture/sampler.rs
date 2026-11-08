@@ -38,7 +38,10 @@
 //! pseudobulk's `ω_p` is a latent too: the rows are drawn given it
 //! ([`jittered_table`]), then `ω_p` given its row ([`share_step`]), then
 //! the jitter's sd given every `ω` ([`draw_share_sd`]); the depths are the
-//! jittered ones ([`Reads::jittered_depths`]).
+//! jittered ones ([`Reads::jittered_depths`]). The unspliced reads' global
+//! capture ([`Params::log_capture`]) is drawn given the rows and jitters
+//! ([`capture_step`]) before the depths; the jitters are every
+//! pseudobulk's departure from it.
 //!
 //! The parameters are kept natural, `(β, γ, ρ, b)`; a gene's sampler
 //! coordinates ([`to_theta`]) are taken at the current paths' mean each
@@ -47,9 +50,9 @@
 //! `z` against `ρ` and the baseline's shared shift, do not show in them).
 
 use super::blocks::{
-    draw_latents, draw_share_sd, draw_weights, from_theta, gene_mode, gene_step, path_eta,
-    path_gess_step, path_ll, path_mode, share_step, stream, to_theta, GenePrior, GeneProposal,
-    PathProposal,
+    capture_step, draw_latents, draw_share_sd, draw_weights, from_theta, gene_mode, gene_step,
+    path_eta, path_gess_step, path_ll, path_mode, share_step, stream, to_theta, GenePrior,
+    GeneProposal, PathProposal,
 };
 use super::kernel::GridPrior;
 use super::likelihood::{jittered_table, table, Depth, GeneRows, Reads, RowLayout};
@@ -130,6 +133,8 @@ pub struct Draws {
     /// with no jitter).
     pub share_sd: Vec<f64>,
     pub omega: Vec<Vec<f64>>,
+    /// `[S]` the unspliced reads' log capture.
+    pub log_capture: Vec<f64>,
     /// `[S][L − 1]` every other lineage's branch time off the trunk (empty
     /// with the lineages apart).
     pub branch: Vec<Vec<f64>>,
@@ -154,7 +159,7 @@ const LL_BLOCK: usize = 6;
 /// The sweep's blocks as [`Draws::block_secs`] times them.
 pub const BLOCKS: [&str; 7] = [
     "levels and latents",
-    "jitter and depths",
+    "jitter, capture and depths",
     "genes",
     "paths' Laplace",
     "paths' moves",
@@ -207,6 +212,7 @@ const DURATIONS: u64 = 4;
 const WEIGHTS: u64 = 5;
 const JITTERS: u64 = 6;
 const JITTER_SD: u64 = 7;
+const CAPTURE: u64 = 8;
 
 fn start(params: &Params, grid: &GridPrior, pseudobulks: usize, share: Option<f64>) -> State {
     let lineages = params.path.len();
@@ -297,8 +303,8 @@ fn sweep(
     let lineages = state.params.path.len();
     // Rows are positions (a pseudobulk's time may sit between the nodes).
     let n = state.params.positions();
-    // 1–2. Levels, latents (and jitters) and depths.
-    let lv = state.params.levels();
+    // 1–2. Levels, latents (and jitters), the capture and depths.
+    let mut lv = state.params.levels();
     let tab = match state.share_sd {
         Some(_) => jittered_table(reads, &lv, &state.omega),
         None => table(reads, &lv),
@@ -328,6 +334,19 @@ fn sweep(
             .collect();
         state.share_sd = Some(draw_share_sd(&state.omega, block_seed(seed, JITTER_SD), it));
     }
+    let c = state.params.log_capture;
+    let z = lv.totals();
+    let a: Vec<f64> = rows
+        .iter()
+        .zip(&state.omega)
+        .map(|(&r, &w)| (z[r].0 / z[r].1).ln() - c + w)
+        .collect();
+    let n_u: Vec<f64> = (0..rows.len()).map(|p| reads.unspliced(p)).collect();
+    let n_all: Vec<f64> = (0..rows.len()).map(|p| reads.total(p)).collect();
+    let mut rng = stream(block_seed(seed, CAPTURE), 0, it);
+    let next = capture_step(&n_u, &n_all, &a, c, &mut rng);
+    lv.u *= clamped_exp(next - c);
+    state.params.log_capture = next;
     let lambda = reads.jittered_depths(&rows, &lv, &state.omega);
     lap(JITTER_BLOCK);
 
@@ -467,6 +486,7 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 path_ll: Vec::with_capacity(kept),
                 share_sd: Vec::new(),
                 omega: Vec::new(),
+                log_capture: Vec::with_capacity(kept),
                 branch: Vec::new(),
                 snapshots: Vec::new(),
                 block_secs: vec![0.0; BLOCKS.len()],
@@ -517,6 +537,7 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 {
                     d.snapshots.push(state.snapshot(&rows, &lambda));
                 }
+                d.log_capture.push(state.params.log_capture);
                 if let Some(sd) = state.share_sd {
                     d.share_sd.push(sd);
                     d.omega.push(state.omega.clone());

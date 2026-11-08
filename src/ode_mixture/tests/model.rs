@@ -15,6 +15,7 @@ pub(super) fn truth_params(sim: &Sim, fine: usize, n: usize) -> Params {
         t_len: t.t_len.clone(),
         sub: 1,
         branch: None,
+        log_capture: t.log_capture,
         path: t
             .path
             .iter()

@@ -1,7 +1,7 @@
 use super::model::truth_params;
 use crate::ode_mixture::blocks::{
-    draw_latents, draw_share_sd, draw_weights, from_theta, gene_mode, gene_step, share_step,
-    to_theta, GenePrior,
+    capture_step, draw_latents, draw_share_sd, draw_weights, from_theta, gene_mode, gene_step,
+    share_step, to_theta, GenePrior,
 };
 use crate::ode_mixture::likelihood::{GeneRows, Reads, RowLayout};
 use crate::ode_mixture::sim::{simulate, SimConfig};
@@ -291,6 +291,7 @@ fn the_path_block_carries_the_genes_prior_through_the_path_mean() {
         path: vec![vec![vec![0.0]; n]],
         sub: 1,
         branch: None,
+        log_capture: 0.0,
     };
     let reads = Reads::new(&[], &[], 0, 1);
     let c: Vec<f64> = (0..n)
@@ -447,6 +448,62 @@ fn the_jitter_sd_is_drawn_from_its_conditional() {
         (mean / spread).ln().abs() < 0.02,
         "mean {mean} vs spread {spread}"
     );
+}
+
+/// The capture's conditional,
+/// `∝ Π_p e^{N_u c} (1 + e^{a_p + c})^{−N} N(c; CAPTURE_PRIOR)`, its mean
+/// and sd by quadrature.
+fn capture_posterior(n_u: &[f64], n: &[f64], a: &[f64]) -> (f64, f64) {
+    use crate::ode_mixture::likelihood::softplus;
+    let (pm, psd) = crate::ode_mixture::model::CAPTURE_PRIOR;
+    let f = |c: f64| {
+        (0..a.len())
+            .map(|p| n_u[p] * c - n[p] * softplus(a[p] + c))
+            .sum::<f64>()
+            - 0.5 * ((c - pm) / psd).powi(2)
+    };
+    let (lo, hi, m) = (-10.0, 10.0, 400_001);
+    let h = (hi - lo) / (m - 1) as f64;
+    let top = (0..m)
+        .map(|i| f(lo + i as f64 * h))
+        .fold(f64::MIN, f64::max);
+    let (mut z, mut m1, mut m2) = (0.0, 0.0, 0.0);
+    for i in 0..m {
+        let c = lo + i as f64 * h;
+        let d = (f(c) - top).exp();
+        (z, m1, m2) = (z + d, m1 + d * c, m2 + d * c * c);
+    }
+    let mean = m1 / z;
+    (mean, (m2 / z - mean * mean).sqrt())
+}
+
+/// [`capture_step`] leaves the capture's conditional invariant: the
+/// chain's mean and sd are the conditional's, with many reads and with few.
+#[test]
+fn the_capture_step_draws_its_conditional() {
+    let a: Vec<f64> = (0..30)
+        .map(|p| -0.5 + 0.8 * (p as f64 * 0.9).sin())
+        .collect();
+    for scale in [1.0, 0.002] {
+        let n: Vec<f64> = (0..30)
+            .map(|p| (2000.0 + 50.0 * p as f64) * scale)
+            .collect();
+        let n_u: Vec<f64> = n.iter().map(|x| (0.2 * x).round()).collect();
+        let (want_m, want_s) = capture_posterior(&n_u, &n, &a);
+        let mut rng = StdRng::seed_from_u64(4);
+        let (mut c, steps) = (0.0, 100_000);
+        let (mut m1, mut m2) = (0.0, 0.0);
+        for _ in 0..steps {
+            c = capture_step(&n_u, &n, &a, c, &mut rng);
+            m1 += c / steps as f64;
+            m2 += c * c / steps as f64;
+        }
+        let got_s = (m2 - m1 * m1).sqrt();
+        assert!(
+            (m1 - want_m).abs() < 0.03 * want_s && (got_s / want_s).ln().abs() < 0.03,
+            "scale {scale}: mean {m1} vs {want_m}, sd {got_s} vs {want_s}"
+        );
+    }
 }
 
 /// The branching simulation's truth put on a shared trunk at the truth's
@@ -865,6 +922,7 @@ fn the_rate_link_round_trips_and_carries_its_jacobian() {
         path: vec![vec![vec![0.0]; 45]],
         sub: 4,
         branch: None,
+        log_capture: 0.0,
     };
     let prior = GenePrior::bounded(&params);
     let (lo, hi) = prior.log_rate.unwrap();

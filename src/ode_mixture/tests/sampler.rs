@@ -280,6 +280,7 @@ fn a_duration_with_no_reads_follows_its_prior() {
         path: vec![vec![vec![0.0]; 4]; 2],
         sub: 1,
         branch: None,
+        log_capture: 0.0,
     };
     let g = 1;
     // One pseudobulk, on lineage 0.

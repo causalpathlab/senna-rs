@@ -367,12 +367,21 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
                 .collect()
         })
         .collect();
-    let gamma0 = GenePrior::default().log_gamma.0.exp();
+    let prior = GenePrior::default();
+    let gamma0 = prior.log_gamma.0.exp();
     let (su, ss): (Vec<f64>, Vec<f64>) = (0..g)
         .map(|j| (reads.u.column(j).sum() + 0.5, reads.s.column(j).sum() + 0.5))
         .unzip();
+    // Every gene's reads' `U/S = e^c γ/β` at steady state: the median gene
+    // on the prior's `γ/β`, the rest of its offset the capture's, each
+    // gene's own in its `β` (the levels the same however it is split).
+    let mut log_us: Vec<f64> = su.iter().zip(&ss).map(|(u, s)| (u / s).ln()).collect();
+    log_us.sort_by(f64::total_cmp);
+    let log_capture = log_us.get(g / 2).map_or(0.0, |m| m - prior.log_ratio.0);
     let mut start = Params {
-        beta: (0..g).map(|j| gamma0 * ss[j] / su[j]).collect(),
+        beta: (0..g)
+            .map(|j| gamma0 * log_capture.exp() * ss[j] / su[j])
+            .collect(),
         gamma: vec![gamma0; g],
         rho: (0..g)
             .map(|j| (0..h).map(|d| loadings[(j, d)] * sd[d]).collect())
@@ -382,6 +391,7 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
         path,
         sub: opts.sub,
         branch: None,
+        log_capture,
     };
     // Inside the rates' bounds ([`GenePrior::bounded`]).
     if let Some((lo, hi)) = GenePrior::bounded(&start).log_rate {

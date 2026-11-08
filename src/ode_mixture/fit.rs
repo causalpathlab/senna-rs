@@ -19,6 +19,10 @@
 //! determinant's share of it is dropped). The term is a marginal likelihood
 //! for `σ` with `σ → 0` the shared model, so `σ` has no prior.
 //!
+//! The unspliced levels carry one global capture `e^c` against the
+//! spliced ([`Params::log_capture`]), `c` fitted with the rest under
+//! [`CAPTURE_PRIOR`]; the jitter is every pseudobulk's departure from it.
+//!
 //! With [`Fit::with_trunk`], every other lineage branches off lineage 0 at
 //! its own time `t_b` on one clock (every duration the unit):
 //! `z_ℓ = z_0 + √2 r(t) w_ℓ`, `w_ℓ = C η_ℓ`, `r = 1 − e^{−((t − t_b)₊/κ)²}`,
@@ -29,7 +33,7 @@
 use super::blocks::GenePrior;
 use super::kernel::GridPrior;
 use super::likelihood::Reads;
-use super::model::{branch_ramp, clamped_exp, Params, LOG_CLAMP};
+use super::model::{branch_ramp, clamped_exp, Params, CAPTURE_PRIOR, LOG_CLAMP};
 use crate::rbm_core::adam;
 use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var, D};
 use legume_numeric::candle::candle_nn::ops::log_softmax;
@@ -86,6 +90,8 @@ pub struct Fit {
     kappa: f64,
     /// `[1]` the log sd of the unspliced share's jitter, `None` for none.
     log_share_sd: Option<Var>,
+    /// `[1]` the unspliced reads' log capture ([`Params::log_capture`]).
+    log_capture: Var,
     /// `[n × n]` the prior's Cholesky factor.
     chol: Tensor,
     prior: GenePrior,
@@ -135,6 +141,7 @@ impl Fit {
             log_t,
             logit_pi: var(vec![0.0; l], &[1, l], dev)?,
             log_share_sd: None,
+            log_capture: var(vec![params.log_capture], &[1], dev)?,
             branch: None,
             kappa: prior.kappa(),
             chol: Tensor::from_vec(c.iter().map(|&x| x as f32).collect::<Vec<_>>(), (n, n), dev)?,
@@ -206,6 +213,11 @@ impl Fit {
                     .collect())
             })
             .transpose()
+    }
+
+    /// The unspliced reads' log capture.
+    pub fn log_capture(&self) -> Result<f64> {
+        Ok(f64::from(self.log_capture.as_tensor().to_vec1::<f32>()?[0]))
     }
 
     /// The unspliced share's jitter sd, `None` with no jitter.
@@ -313,6 +325,7 @@ impl Fit {
         ];
         v.extend(self.log_t.clone());
         v.extend(self.log_share_sd.clone());
+        v.push(self.log_capture.clone());
         v.extend(self.branch.clone());
         v
     }
@@ -375,10 +388,14 @@ impl Fit {
         Tensor::cat(&[&trunk, &parted], 0)
     }
 
-    /// `([L·n × G], [L·n × G])` the levels ([`closed_form_levels`]).
+    /// `([L·n × G], [L·n × G])` the levels ([`closed_form_levels`]), the
+    /// unspliced captured at `e^c`.
     pub fn levels(&self) -> Result<(Tensor, Tensor)> {
         let (log_beta, log_gamma) = self.log_rates()?;
-        closed_form_levels(
+        let capture = clamped(self.log_capture.as_tensor())?
+            .exp()?
+            .reshape((1, 1))?;
+        let (u, s) = closed_form_levels(
             &self.paths()?,
             &self.t_len()?,
             self.sub,
@@ -386,7 +403,8 @@ impl Fit {
             &log_gamma,
             self.rho.as_tensor(),
             self.base.as_tensor(),
-        )
+        )?;
+        Ok((u.broadcast_mul(&capture)?, s))
     }
 
     /// `Σ_p log Σ_{ℓ,k} π_ℓ (1/n) p(x_p | ℓ, k)`, the multinomial (no
@@ -422,6 +440,7 @@ impl Fit {
         total = (total + gauss(self.rho.as_tensor(), (0.0, pr.rho_sd))?)?;
         total = (total + gauss(&spliced, pr.log_spliced)?)?;
         total = (total + gauss(self.eta.as_tensor(), (0.0, 1.0))?)?;
+        total = (total + gauss(self.log_capture.as_tensor(), CAPTURE_PRIOR)?)?;
         if let Some(t) = &self.log_t {
             total = (total + gauss(t.as_tensor(), (0.0, 1.0))?)?;
         }
@@ -543,6 +562,7 @@ impl Fit {
                 .collect(),
             sub: self.sub,
             branch: self.branch_at()?,
+            log_capture: self.log_capture()?.clamp(-LOG_CLAMP, LOG_CLAMP),
         })
     }
 }

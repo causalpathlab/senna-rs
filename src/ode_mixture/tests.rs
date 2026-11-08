@@ -1,5 +1,6 @@
 mod blocks;
 mod branch;
+mod capture;
 mod coarsen;
 mod command;
 mod counts;

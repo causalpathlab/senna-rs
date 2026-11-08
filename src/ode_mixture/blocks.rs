@@ -7,7 +7,7 @@ use super::band::{dot, Band, Bordered, Factor};
 use super::kernel::{GridPrior, BAND};
 use super::kinetics::fine_trajectory;
 use super::likelihood::{share_mode, softplus, Depth, GeneRows, Reads};
-use super::model::{alpha_on, branch_ramp, clamped_exp, Params, LOG_CLAMP};
+use super::model::{alpha_on, branch_ramp, clamped_exp, Params, CAPTURE_PRIOR, LOG_CLAMP};
 use legume_numeric::mcmc::engine::elliptical_slice_step;
 use nalgebra::{DMatrix, DVector};
 use rand::rngs::StdRng;
@@ -622,6 +622,7 @@ pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda:
     let (n, positions) = (params.path[l].len(), params.positions());
     let on = on_lineage(rows, positions, l);
     let h = params.t_len[l] / (n - 1) as f64;
+    let capture = params.capture();
     (0..params.beta.len())
         .into_par_iter()
         .map(|g| {
@@ -629,7 +630,7 @@ pub fn path_ll(params: &Params, l: usize, reads: &Reads, rows: &[usize], lambda:
             let (u, s) = fine_trajectory(&alpha, params.beta[g], params.gamma[g], h, params.sub);
             on.iter()
                 .map(|&(p, k)| {
-                    let (mu, ms) = (lambda[p][0] * u[k], lambda[p][1] * s[k]);
+                    let (mu, ms) = (lambda[p][0] * capture * u[k], lambda[p][1] * s[k]);
                     reads.u[(p, g)] * mu.ln() - mu + reads.s[(p, g)] * ms.ln() - ms
                 })
                 .sum::<f64>()
@@ -859,14 +860,19 @@ pub(super) fn response(
     (a_u, a_s)
 }
 
-/// `(A_u, A_s)` ([`response`]) of every gene on lineage `l`: they move with
-/// the rates and the duration only, so a path's mode search reuses them.
+/// `(A_u, A_s)` ([`response`]) of every gene on lineage `l`, `A_u` with the
+/// capture on ([`Params::capture`]): they move with the rates, the
+/// duration and the capture only, so a path's mode search reuses them.
 fn responses(params: &Params, l: usize) -> Vec<(DMatrix<f64>, DMatrix<f64>)> {
     let n = params.path[l].len();
     let step = params.t_len[l] / (n - 1) as f64;
+    let capture = params.capture();
     (0..params.beta.len())
         .into_par_iter()
-        .map(|g| response(params.beta[g], params.gamma[g], step, n, params.sub))
+        .map(|g| {
+            let (a_u, a_s) = response(params.beta[g], params.gamma[g], step, n, params.sub);
+            (a_u * capture, a_s)
+        })
         .collect()
 }
 
@@ -1562,4 +1568,49 @@ pub fn draw_share_sd(omega: &[f64], seed: u64, sweep: u64) -> f64 {
         .expect("a positive shape and rate")
         .sample(&mut rng);
     precision.recip().sqrt()
+}
+
+/// Newton steps to the capture's conditional mode.
+const CAPTURE_NEWTON: usize = 12;
+
+/// Spread of the capture's independence proposal over its Laplace sd.
+const CAPTURE_PROPOSAL_WIDTH: f64 = 1.2;
+
+/// One independence Metropolis–Hastings move of the unspliced reads' log
+/// capture `c` on its conditional given every pseudobulk's row and jitter
+/// (its depth profiled out): `N_u` of `N` reads unspliced in pseudobulk
+/// `p`, `a_p` the uncaptured levels' `log(Z_u/Z_s)` at its row plus its
+/// jitter, `f(c) = Σ_p (N_u c − N softplus(a_p + c)) + log N(c; CAPTURE_PRIOR)`
+/// (concave). The proposal is its Laplace approximation widened by
+/// [`CAPTURE_PROPOSAL_WIDTH`]; the move is taken nearly always.
+pub fn capture_step(n_u: &[f64], n: &[f64], a: &[f64], c: f64, rng: &mut impl Rng) -> f64 {
+    let (m, sd) = CAPTURE_PRIOR;
+    let v = sd * sd;
+    let log_f = |c: f64| {
+        let ll: f64 = (0..a.len())
+            .map(|p| n_u[p] * c - n[p] * softplus(a[p] + c))
+            .sum();
+        ll - (c - m).powi(2) / (2.0 * v)
+    };
+    let slopes = |c: f64| {
+        (0..a.len()).fold((-(c - m) / v, 1.0 / v), |(g, h), p| {
+            let q = 1.0 / (1.0 + (-(a[p] + c)).exp());
+            (g + n_u[p] - n[p] * q, h + n[p] * q * (1.0 - q))
+        })
+    };
+    let mut mode = c.clamp(-LOG_CLAMP, LOG_CLAMP);
+    for _ in 0..CAPTURE_NEWTON {
+        let (g, h) = slopes(mode);
+        mode = (mode + g / h).clamp(-LOG_CLAMP, LOG_CLAMP);
+    }
+    let width = CAPTURE_PROPOSAL_WIDTH / slopes(mode).1.sqrt();
+    let log_q = |w: f64| -0.5 * ((w - mode) / width).powi(2);
+    let e: f64 = StandardNormal.sample(rng);
+    let next = mode + width * e;
+    let log_ratio = log_f(next) - log_f(c) - log_q(next) + log_q(c);
+    if rng.random::<f64>().ln() < log_ratio {
+        next
+    } else {
+        c
+    }
 }

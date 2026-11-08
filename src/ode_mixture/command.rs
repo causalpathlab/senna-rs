@@ -460,6 +460,19 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
             ..sampler::Options::default()
         },
     )?;
+    let capture: Vec<f64> = draws
+        .iter()
+        .flat_map(|d| d.log_capture.iter().copied())
+        .collect();
+    if !capture.is_empty() {
+        let mean = capture.iter().sum::<f64>() / capture.len() as f64;
+        let sd =
+            (capture.iter().map(|c| (c - mean).powi(2)).sum::<f64>() / capture.len() as f64).sqrt();
+        info!(
+            "ode: the unspliced reads' log capture {mean:.3} ± {sd:.3} (the climb's {:.3}); jitter sd {:?}",
+            start_at.log_capture, share
+        );
+    }
     // Every other lineage's branch time off the trunk; none with them apart.
     let branch = chain_stats(&per_chain(&draws, |d| &d.branch));
     report_chains(&draws, &branch);
