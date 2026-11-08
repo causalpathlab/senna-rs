@@ -6,7 +6,6 @@ pub mod band;
 pub mod blocks;
 pub mod command;
 pub mod counts;
-pub mod direction;
 pub mod fit;
 pub mod init;
 pub mod kernel;

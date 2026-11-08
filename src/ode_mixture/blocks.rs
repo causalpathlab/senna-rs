@@ -153,10 +153,10 @@ impl Default for GenePrior {
     }
 }
 
-/// A rate's half-life is held above one fine step and below this many path
-/// durations ([`GenePrior::bounded`]): faster, the reads follow `α` in
+/// A rate's half-life is held above one fine step and below this many time
+/// units ([`GenePrior::bounded`]): faster, the reads follow `α` in
 /// quasi-steady state; slower, they accumulate `α` with no decay seen
-/// (over four durations a level decays by under a sixth). Either way the
+/// (over four units a level decays by under a sixth). Either way the
 /// rate runs along a flat ridge only the weak prior holds.
 const SLOW_HALF_LIVES: f64 = 4.0;
 

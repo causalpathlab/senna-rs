@@ -2,7 +2,6 @@ mod blocks;
 mod branch;
 mod command;
 mod counts;
-mod direction;
 mod fit;
 mod gates;
 mod init;
