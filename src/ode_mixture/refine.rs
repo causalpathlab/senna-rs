@@ -8,7 +8,7 @@
 //! ([`gene_step`]). The paths and latents stay the groups' draws.
 
 use super::blocks::{from_theta, gene_mode, gene_step, stream, to_theta, GenePrior};
-use super::coarsen::uncoarsen_params;
+use super::coarsen::gene_params;
 use super::likelihood::{GeneRows, Reads, RowLayout};
 use super::readout::Snapshot;
 use data_beans::alg::feature_coarsening::FeatureCoarsening;
@@ -31,14 +31,9 @@ pub fn refine_genes(
     seed: u64,
 ) -> GeneDraws {
     let g = fc.fine_to_coarse.len();
-    let each = FeatureCoarsening {
-        fine_to_coarse: (0..g).collect(),
-        coarse_to_fine: (0..g).map(|i| vec![i]).collect(),
-        num_coarse: g,
-    };
     let (mut log_gamma, mut log_ratio) = (Vec::new(), Vec::new());
     for (s, snap) in snaps.iter().enumerate() {
-        let params = uncoarsen_params(fc, &each, &snap.params, reads);
+        let params = gene_params(fc, &snap.params, reads);
         let prior = GenePrior::bounded(&params);
         let z_bar = params.path_mean();
         let layout = RowLayout::new(&snap.rows, &snap.lambda);

@@ -3,7 +3,7 @@
 
 use super::model::truth_params;
 use crate::ode_mixture::blocks::draw_latents;
-use crate::ode_mixture::coarsen::{coarse_params, coarse_reads, uncoarsen_params};
+use crate::ode_mixture::coarsen::{coarse_params, coarse_reads, gene_params};
 use crate::ode_mixture::likelihood::{table, GeneRows, Reads, RowLayout};
 use crate::ode_mixture::model::Params;
 use crate::ode_mixture::sim::{simulate, SimConfig};
@@ -130,59 +130,41 @@ fn a_groups_log_likelihood_is_its_genes_up_to_a_constant() {
     }
 }
 
-/// Two nested coarsenings: every fine group of `GROUPS` inside one of
-/// `PARENTS` coarse ones.
-const PARENTS: usize = 2;
-
-fn nested() -> (FeatureCoarsening, FeatureCoarsening) {
-    let fine: Vec<usize> = (0..GENES).map(|g| (g * 5) % GROUPS).collect();
-    let coarse = fine.iter().map(|&j| j % PARENTS).collect();
-    (
-        FeatureCoarsening::from_fine_to_coarse(coarse, PARENTS).unwrap(),
-        FeatureCoarsening::from_fine_to_coarse(fine, GROUPS).unwrap(),
-    )
-}
-
-/// A coarse state uncoarsened: every fine group on its parent's rates and
-/// embedding, the parent's levels split among its children.
+/// A group's state back on the genes: every gene on its group's rates
+/// and embedding, the group's levels split among its genes.
 #[test]
-fn uncoarsened_groups_sum_to_their_parents_levels() {
-    let (params, reads, _) = setup();
-    let (coarse, fine) = nested();
-    let parent = coarse_params(&coarse, &params);
-    let child = uncoarsen_params(&coarse, &fine, &parent, &reads);
-    assert_eq!(child.beta.len(), GROUPS);
-    let (lv_p, lv_c) = (parent.levels(), child.levels());
+fn a_groups_genes_sum_to_its_levels() {
+    let (params, reads, groups) = setup();
+    let group = coarse_params(&groups, &params);
+    let genes = gene_params(&groups, &group, &reads);
+    assert_eq!(genes.beta.len(), GENES);
+    let (lv_k, lv_g) = (group.levels(), genes.levels());
     let mut worst = 0f64;
-    for k in 0..PARENTS {
-        let kids: Vec<usize> = (0..GROUPS).filter(|&j| j % PARENTS == k).collect();
-        for r in 0..lv_p.u.nrows() {
-            for (p, c) in [(&lv_p.u, &lv_c.u), (&lv_p.s, &lv_c.s)] {
-                let sum: f64 = kids.iter().map(|&j| c[(r, j)]).sum();
+    for (k, members) in groups.coarse_to_fine.iter().enumerate() {
+        for r in 0..lv_k.u.nrows() {
+            for (p, c) in [(&lv_k.u, &lv_g.u), (&lv_k.s, &lv_g.s)] {
+                let sum: f64 = members.iter().map(|&g| c[(r, g)]).sum();
                 worst = worst.max((sum - p[(r, k)]).abs() / p[(r, k)].abs());
             }
         }
-        for &j in &kids {
-            assert_eq!(child.beta[j], parent.beta[k]);
-            assert_eq!(child.rho[j], parent.rho[k]);
+        for &g in members {
+            assert_eq!(genes.beta[g], group.beta[k]);
+            assert_eq!(genes.rho[g], group.rho[k]);
         }
     }
     assert!(worst < 1e-12, "worst relative gap {worst}");
 }
 
-/// The children's baselines split their parent's by their reads.
+/// A group's genes split its baseline by their reads.
 #[test]
-fn uncoarsened_baselines_follow_the_reads() {
-    let (params, reads, _) = setup();
-    let (coarse, fine) = nested();
-    let parent = coarse_params(&coarse, &params);
-    let child = uncoarsen_params(&coarse, &fine, &parent, &reads);
-    let fine_reads = coarse_reads(&fine, &reads);
-    let total = |j: usize| fine_reads.u.column(j).sum() + fine_reads.s.column(j).sum();
-    for a in 0..GROUPS {
-        for b in 0..GROUPS {
-            if a % PARENTS == b % PARENTS {
-                let (want, got) = ((total(a) / total(b)).ln(), child.base[a] - child.base[b]);
+fn a_groups_genes_baselines_follow_their_reads() {
+    let (params, reads, groups) = setup();
+    let genes = gene_params(&groups, &coarse_params(&groups, &params), &reads);
+    let total = |g: usize| reads.u.column(g).sum() + reads.s.column(g).sum();
+    for members in &groups.coarse_to_fine {
+        for &a in members {
+            for &b in members {
+                let (want, got) = ((total(a) / total(b)).ln(), genes.base[a] - genes.base[b]);
                 assert!((want - got).abs() < 1e-2, "{a}, {b}: {got} vs {want}");
             }
         }

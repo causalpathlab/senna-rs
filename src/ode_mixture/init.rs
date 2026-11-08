@@ -30,6 +30,7 @@ use super::kernel::GridPrior;
 use super::likelihood::Reads;
 use super::model::Params;
 use legume_numeric::candle::candle_core::{Device, Result};
+use legume_numeric::matrix::traits::RandomizedAlgs;
 use nalgebra::DMatrix;
 
 /// What [`climb`] fits.
@@ -68,10 +69,12 @@ pub type Places = Vec<Vec<(usize, f64)>>;
 /// `([P × G] centred log spliced shares, [G] their means)`.
 fn log_shares(reads: &Reads) -> (DMatrix<f64>, Vec<f64>) {
     let (p, g) = (reads.s.nrows(), reads.s.ncols());
-    let mut y = DMatrix::from_fn(p, g, |i, j| {
-        let total = reads.s.row(i).sum() + 0.5 * g as f64;
-        ((reads.s[(i, j)] + 0.5) / total).ln()
-    });
+    let total: Vec<f64> = reads
+        .s
+        .row_iter()
+        .map(|r| r.sum() + 0.5 * g as f64)
+        .collect();
+    let mut y = DMatrix::from_fn(p, g, |i, j| ((reads.s[(i, j)] + 0.5) / total[i]).ln());
     let mean: Vec<f64> = (0..g).map(|j| y.column(j).mean()).collect();
     for (j, m) in mean.iter().enumerate() {
         y.column_mut(j).add_scalar_mut(-m);
@@ -79,16 +82,14 @@ fn log_shares(reads: &Reads) -> (DMatrix<f64>, Vec<f64>) {
     (y, mean)
 }
 
-/// `([P × H] scores, [G × H] loadings)` of `y` on its leading axes.
-fn axes(y: &DMatrix<f64>, h: usize) -> (DMatrix<f64>, DMatrix<f64>) {
-    let svd = y.clone().svd(true, true);
-    let (u, v) = (
-        svd.u.expect("asked for"),
-        svd.v_t.expect("asked for").transpose(),
-    );
-    let h = h.min(svd.singular_values.len());
-    let scores = DMatrix::from_fn(y.nrows(), h, |i, d| u[(i, d)] * svd.singular_values[d]);
-    (scores, v.columns(0, h).into_owned())
+/// `([P × H] scores, [G × H] loadings)` of `y` on its leading axes, by
+/// randomized SVD (a fixed start, so reproducible): only `H` axes are read,
+/// and a full SVD of thousands of pseudobulks by every gene takes minutes.
+pub(crate) fn axes(y: &DMatrix<f64>, h: usize) -> (DMatrix<f64>, DMatrix<f64>) {
+    let h = h.min(y.nrows()).min(y.ncols());
+    let (u, d, v) = y.rsvd(h).expect("a non-empty matrix");
+    let scores = DMatrix::from_fn(y.nrows(), h, |i, k| u[(i, k)] * d[k]);
+    (scores, v)
 }
 
 /// `k` clusters of the rows by Lloyd's algorithm, started at far-apart rows

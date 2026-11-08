@@ -52,48 +52,32 @@ pub fn coarse_params(fc: &FeatureCoarsening, params: &Params) -> Params {
     }
 }
 
-/// Reads added to every fine group's total before its share is taken, so a
-/// group with none keeps a finite baseline.
+/// Reads added to every gene's total before its share is taken, so a gene
+/// with none keeps a finite baseline.
 const SHARE_PSEUDO: f64 = 0.5;
 
-/// A coarse state on the finer coarsening `fine` nested in `coarse` (every
-/// fine group's genes in one coarse group): every fine group on its
-/// parent's rates and embedding, the parent's baseline split by the fine
-/// groups' reads, `b_j = b_k + log(R_j/R_k)` (`R` the reads on both
-/// tracks, [`SHARE_PSEUDO`] added to each `R_j`). The children's levels sum
-/// to the parent's.
-pub fn uncoarsen_params(
-    coarse: &FeatureCoarsening,
-    fine: &FeatureCoarsening,
-    params: &Params,
-    reads: &Reads,
-) -> Params {
-    let parent: Vec<usize> = fine
-        .coarse_to_fine
-        .iter()
-        .map(|genes| coarse.fine_to_coarse[genes[0]])
+/// A state on `fc`'s groups back on the genes: every gene on its group's
+/// rates and embedding, the group's baseline split by the genes' reads,
+/// `b_g = b_K + log(R_g/R_K)` (`R` the reads on both tracks,
+/// [`SHARE_PSEUDO`] added to each `R_g`). A group's genes' levels sum to
+/// its own.
+pub fn gene_params(fc: &FeatureCoarsening, params: &Params, reads: &Reads) -> Params {
+    let r: Vec<f64> = (0..fc.fine_to_coarse.len())
+        .map(|g| SHARE_PSEUDO + reads.u.column(g).sum() + reads.s.column(g).sum())
         .collect();
-    let reads_of = |j: usize| -> f64 {
-        let total = |g: usize| reads.u.column(g).sum() + reads.s.column(g).sum();
-        SHARE_PSEUDO
-            + fine.coarse_to_fine[j]
-                .iter()
-                .map(|&g| total(g))
-                .sum::<f64>()
-    };
-    let r: Vec<f64> = (0..fine.num_coarse).map(reads_of).collect();
-    let mut r_parent = vec![0.0; coarse.num_coarse];
-    for (j, &k) in parent.iter().enumerate() {
-        r_parent[k] += r[j];
+    let mut r_group = vec![0.0; fc.num_coarse];
+    for (g, &k) in fc.fine_to_coarse.iter().enumerate() {
+        r_group[k] += r[g];
     }
+    let k = &fc.fine_to_coarse;
     Params {
-        beta: parent.iter().map(|&k| params.beta[k]).collect(),
-        gamma: parent.iter().map(|&k| params.gamma[k]).collect(),
-        rho: parent.iter().map(|&k| params.rho[k].clone()).collect(),
-        base: parent
+        beta: k.iter().map(|&k| params.beta[k]).collect(),
+        gamma: k.iter().map(|&k| params.gamma[k]).collect(),
+        rho: k.iter().map(|&k| params.rho[k].clone()).collect(),
+        base: k
             .iter()
             .enumerate()
-            .map(|(j, &k)| params.base[k] + (r[j] / r_parent[k]).ln())
+            .map(|(g, &k)| params.base[k] + (r[g] / r_group[k]).ln())
             .collect(),
         ..params.clone()
     }
