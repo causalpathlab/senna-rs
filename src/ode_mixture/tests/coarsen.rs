@@ -3,7 +3,7 @@
 
 use super::model::truth_params;
 use crate::ode_mixture::blocks::draw_latents;
-use crate::ode_mixture::coarsen::{coarse_params, coarse_reads, gene_params};
+use crate::ode_mixture::coarsen::{coarse_params, coarse_reads, coarsen_genes, gene_params};
 use crate::ode_mixture::likelihood::{table, GeneRows, Reads, RowLayout};
 use crate::ode_mixture::model::Params;
 use crate::ode_mixture::sim::{simulate, SimConfig};
@@ -169,4 +169,87 @@ fn a_groups_genes_baselines_follow_their_reads() {
             }
         }
     }
+}
+
+/// Genes from `programs` distinct programs (embeddings) × two kinetic classes
+/// (slow, fast), `each` genes per pair on their own baselines, read with
+/// Poisson noise at pseudobulks spread over one lineage: the reads, and
+/// every gene's (program, class).
+fn programs_and_classes(programs: usize, each: usize) -> (Reads, Vec<f32>, Vec<(usize, usize)>) {
+    use rand::SeedableRng;
+    use rand_distr::{Distribution, Poisson};
+    let sim = simulate(&SimConfig {
+        lineages: 1,
+        n_genes: programs,
+        fine: 133,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let mut params = truth_params(&sim, 133, 45);
+    let rates = [(0.7, 0.4), (6.0, 10.0)];
+    let h = sim.truth.rho[0].len();
+    let mut labels = Vec::new();
+    let (mut beta, mut gamma, mut rho, mut base) = (vec![], vec![], vec![], vec![]);
+    for m in 0..programs {
+        for (c, &(b, y)) in rates.iter().enumerate() {
+            for i in 0..each {
+                labels.push((m, c));
+                beta.push(b);
+                gamma.push(y);
+                // Program m on its own path axis, signed: programs apart.
+                let mut r = vec![0.0; h];
+                r[m % h] = if m < h { 1.5 } else { -1.5 };
+                rho.push(r);
+                base.push(sim.truth.base[m] + (i as f64 / each as f64 - 0.5) * 2.0);
+            }
+        }
+    }
+    (params.beta, params.gamma, params.rho, params.base) = (beta, gamma, rho, base);
+    let lv = params.levels();
+    let (pbs, g) = (400, labels.len());
+    let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+    let mut draw = |m: &nalgebra::DMatrix<f64>, p: usize, j: usize| {
+        let r = p * (lv.points - 1) / (pbs - 1);
+        let mean: f64 = 5000.0 * m[(r, j)] / lv.u.row(r).sum();
+        Poisson::new(mean.max(1e-6)).unwrap().sample(&mut rng)
+    };
+    let u = nalgebra::DMatrix::from_fn(pbs, g, |p, j| draw(&lv.u, p, j));
+    let s = nalgebra::DMatrix::from_fn(pbs, g, |p, j| draw(&lv.s, p, j));
+    (Reads::from_matrices(u, s), vec![1.0; pbs], labels)
+}
+
+/// The share of genes whose group's most common label is their own.
+fn purity(fc: &FeatureCoarsening, label: &[usize]) -> f64 {
+    let mut agree = 0;
+    for members in &fc.coarse_to_fine {
+        let mut count = std::collections::HashMap::new();
+        for &g in members {
+            *count.entry(label[g]).or_insert(0) += 1;
+        }
+        agree += count.values().max().copied().unwrap_or(0);
+    }
+    agree as f64 / label.len() as f64
+}
+
+/// Genes are grouped by program and by kinetics: a group shares its rates
+/// in the coarse fit, so no group mixes programs or a fast class with a
+/// slow one.
+#[test]
+fn genes_are_grouped_by_program_and_kinetics() {
+    let (programs, each) = (4, 10);
+    let (reads, sizes, labels) = programs_and_classes(programs, each);
+    // Twice the pairs: a run has more groups than programs, and splitting a
+    // program costs speed, mixing one accuracy.
+    let cap = 4 * programs;
+    let fc = coarsen_genes(&reads, &sizes, cap, 1).unwrap();
+    assert!(fc.num_coarse <= cap, "{} groups", fc.num_coarse);
+    let program: Vec<usize> = labels.iter().map(|l| l.0).collect();
+    let class: Vec<usize> = labels.iter().map(|l| l.1).collect();
+    let (p, c) = (purity(&fc, &program), purity(&fc, &class));
+    eprintln!(
+        "{} groups; program purity {p:.3}, kinetic class purity {c:.3}",
+        fc.num_coarse
+    );
+    assert!(p >= 0.95, "program purity {p}");
+    assert!(c >= 0.95, "kinetic class purity {c}");
 }

@@ -11,8 +11,84 @@
 
 use super::likelihood::Reads;
 use super::model::Params;
-use data_beans::alg::feature_coarsening::FeatureCoarsening;
+use data_beans::alg::feature_coarsening::{
+    partition_features, FeatureCoarsening, PartitionOptions,
+};
 use nalgebra::DMatrix;
+
+/// Width (nats) of the bins of a gene's spliced-to-unspliced balance
+/// `log(S/U)` no group crosses: at steady state it is `log(β/γ)`, so a
+/// group's genes share their kinetics to about this.
+const KINETIC_BIN: f64 = 0.5;
+
+/// The genes in at most `cap` groups (at least one a kinetic bin;
+/// [`partition_features`]), `sizes`
+/// every pseudobulk's cells. A group's genes share what the coarse fit
+/// takes them to share:
+/// - their transcription's timing: k-means on their pseudobulk profiles,
+///   both tracks side by side, each track scaled to the gene's mean total
+///   (else a slow gene's spliced reads drown its unspliced);
+/// - their kinetics: no group crosses a [`KINETIC_BIN`] of `log(S/U)`,
+///   the flat genes' background split by bin as well.
+pub fn coarsen_genes(
+    reads: &Reads,
+    sizes: &[f32],
+    cap: usize,
+    seed: u64,
+) -> anyhow::Result<FeatureCoarsening> {
+    let (p, g) = reads.u.shape();
+    let totals: Vec<(f64, f64)> = (0..g)
+        .map(|j| {
+            (
+                reads.u.column(j).sum().max(1.0),
+                reads.s.column(j).sum().max(1.0),
+            )
+        })
+        .collect();
+    let counts = DMatrix::<f32>::from_fn(g, 2 * p, |j, c| {
+        let (tu, ts) = totals[j];
+        let mean = 0.5 * (tu + ts);
+        let x = if c < p {
+            reads.u[(c, j)] * mean / tu
+        } else {
+            reads.s[(c - p, j)] * mean / ts
+        };
+        x as f32
+    });
+    let block: Vec<u32> = totals
+        .iter()
+        .map(|&(tu, ts)| ((ts / tu).ln() / KINETIC_BIN).floor() as i64 as u32)
+        .collect();
+    let opts = PartitionOptions {
+        block: Some(block.clone()),
+        ..PartitionOptions::default()
+    };
+    // A slot kept for every bin the background may split into.
+    let bins = block
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let slots = cap.saturating_sub(bins - 1).max(1);
+    let part = partition_features(&counts, &[sizes, sizes].concat(), slots, seed, &opts)?;
+    // The background is one group across the blocks: split it by block too.
+    let mut labels = part.labels;
+    if let Some(bg) = part.background {
+        let mut by_block = std::collections::BTreeMap::new();
+        for (j, label) in labels.iter_mut().enumerate() {
+            if *label == bg {
+                let next = part.num_groups + by_block.len();
+                *label = *by_block.entry(block[j]).or_insert(next);
+            }
+        }
+        // The background's own id is now empty: the last group takes it.
+        let last = part.num_groups + by_block.len() - 1;
+        for label in labels.iter_mut().filter(|l| **l == last) {
+            *label = bg;
+        }
+        return FeatureCoarsening::from_fine_to_coarse(labels, last);
+    }
+    FeatureCoarsening::from_fine_to_coarse(labels, part.num_groups)
+}
 
 /// Every group's reads, its genes' summed, `[P × K]` per track.
 pub fn coarse_reads(fc: &FeatureCoarsening, reads: &Reads) -> Reads {

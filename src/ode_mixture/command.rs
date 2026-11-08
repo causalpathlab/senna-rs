@@ -4,7 +4,7 @@
 //! the chains), and read every cell out from the chains' draws, a block at
 //! a time.
 
-use super::coarsen::coarse_reads;
+use super::coarsen::{coarse_reads, coarsen_genes};
 use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
 use super::init::{climb, Climb};
 use super::likelihood::Reads;
@@ -13,7 +13,7 @@ use super::output::{chain_stats, ChainStat, MapBasis};
 use super::readout::{grid_posterior, read_cells, GridPosterior, Snapshot};
 use super::refine::refine_genes;
 use super::sampler::{self, Draws};
-use data_beans::alg::feature_coarsening::{coarsen_features, FeatureCoarsening};
+use data_beans::alg::feature_coarsening::FeatureCoarsening;
 use legume_numeric::matrix::parquet::{write_named_table, Column};
 use log::info;
 use nalgebra::DMatrix;
@@ -192,30 +192,6 @@ const GENE_PASS_MOVES: usize = 3;
 
 /// The gene pass's seed offset, apart from the chains'.
 const GENE_PASS_SEED: u64 = 0x6e5e;
-
-/// The genes in at most `--max-coarse-features` groups by their pseudobulk
-/// profiles (both tracks summed), `None` when they are no more than that.
-fn coarsen_genes(
-    reads: &Reads,
-    sizes: &[f32],
-    args: &OdeArgs,
-) -> anyhow::Result<Option<FeatureCoarsening>> {
-    let g = reads.u.ncols();
-    let Some(cap) = args
-        .coarsening
-        .cap()
-        .map(std::num::NonZeroUsize::get)
-        .filter(|&c| g > c)
-    else {
-        return Ok(None);
-    };
-    let counts: DMatrix<f32> = (&reads.u + &reads.s).transpose().cast();
-    let fc = coarsen_features(&counts, sizes, &[cap], args.seed)?
-        .pop()
-        .expect("one level asked for");
-    info!("ode: {g} genes in {} groups", fc.num_coarse);
-    Ok(Some(fc))
-}
 
 /// Snapshots a chain keeps for the readout when `--snapshot-every` is 0.
 const SNAPSHOTS_A_CHAIN: usize = 25;
@@ -433,7 +409,15 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     // The genes in groups, when they outnumber --max-coarse-features: the
     // climb and the chains on the groups' reads, every gene drawn on its
     // own after.
-    let fc = coarsen_genes(&reads, &sizes, args)?;
+    let cap = args.coarsening.cap().map(std::num::NonZeroUsize::get);
+    let fc = match cap.filter(|&c| g > c) {
+        Some(cap) => {
+            let fc = coarsen_genes(&reads, &sizes, cap, args.seed)?;
+            info!("ode: {g} genes in {} groups", fc.num_coarse);
+            Some(fc)
+        }
+        None => None,
+    };
     let grouped = fc.as_ref().map(|fc| coarse_reads(fc, &reads));
     let fit_reads = grouped.as_ref().unwrap_or(&reads);
 
