@@ -210,3 +210,78 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
         assert!(mass.contains_key(pb.as_str()), "cell {c}'s pseudobulk {pb}");
     }
 }
+
+/// A run on groups of genes (`--max-coarse-features`) still writes every
+/// gene's own rates, records its groups, and its cells' times rank with
+/// the truth's.
+#[test]
+fn a_coarsened_run_writes_every_genes_rates() {
+    let sim = simulate(&SimConfig {
+        n_genes: 80,
+        n_pb: 1000,
+        depth: 3000.0,
+        seed: 4,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let data = backend(&sim, dir.path());
+    let out = dir.path().join("run").to_string_lossy().into_owned();
+    run_ode(&parse(&[
+        data.as_str(),
+        "-o",
+        &out,
+        "--lineages",
+        "1",
+        "--points",
+        "25",
+        "--steps",
+        "1500",
+        "--sweeps",
+        "80",
+        "--burn",
+        "40",
+        "--chains",
+        "2",
+        "--snapshot-every",
+        "10",
+        "--map-pcs",
+        "5",
+        "--max-coarse-features",
+        "20",
+    ]))
+    .unwrap();
+
+    let levels = crate::topic::model_metadata::load_coarsening_levels(&out)
+        .unwrap()
+        .expect("the groups recorded");
+    let fc = levels.last().unwrap().as_ref().expect("a coarsening");
+    assert_eq!(fc.fine_to_coarse.len(), sim.n_genes - 1);
+    assert!(fc.num_coarse <= 20, "{} groups", fc.num_coarse);
+
+    let (genes, stats) = read_table_columns(
+        &format!("{out}.gene_rates.parquet"),
+        &["gene"],
+        &["log_gamma", "log_ratio"],
+    )
+    .unwrap();
+    assert_eq!(genes[0].len(), sim.n_genes - 1);
+    assert!(stats.iter().flatten().all(|x| x.is_finite()));
+    // Genes in one group are drawn on their own.
+    let distinct: std::collections::HashSet<u64> = stats[0].iter().map(|x| x.to_bits()).collect();
+    assert!(
+        distinct.len() > fc.num_coarse,
+        "{} distinct rates",
+        distinct.len()
+    );
+
+    let (strs, nums) =
+        read_table_columns(&format!("{out}.cell_time.parquet"), &["cell"], &["tau"]).unwrap();
+    let truth: Vec<f64> = strs[0]
+        .iter()
+        .map(|c| sim.truth.time[c[1..].parse::<usize>().unwrap()])
+        .collect();
+    let rho = spearman(&nums[0], &truth).abs();
+    eprintln!("senna ode on groups: time Spearman with the truth {rho:.3}");
+    assert!(rho > 0.9, "Spearman {rho}");
+}

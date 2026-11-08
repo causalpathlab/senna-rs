@@ -4,13 +4,16 @@
 //! the chains), and read every cell out from the chains' draws, a block at
 //! a time.
 
+use super::coarsen::coarse_reads;
 use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
 use super::init::{climb, Climb};
 use super::likelihood::Reads;
 use super::model::lineage_label;
 use super::output::{chain_stats, ChainStat, MapBasis};
 use super::readout::{grid_posterior, read_cells, GridPosterior, Snapshot};
+use super::refine::refine_genes;
 use super::sampler::{self, Draws};
+use data_beans::alg::feature_coarsening::{coarsen_features, FeatureCoarsening};
 use legume_numeric::matrix::parquet::{write_named_table, Column};
 use log::info;
 use nalgebra::DMatrix;
@@ -176,7 +179,42 @@ pub struct OdeArgs {
     pub(crate) hvg: crate::hvg::HvgCliArgs,
 
     #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) coarsening: data_beans::alg::feature_coarsening::FeatureCoarseningArgs,
+
+    #[command(flatten)]
     pub(crate) qc: QcArgs,
+}
+
+/// Moves every gene takes from its own mode at every snapshot of a run on
+/// groups ([`refine_genes`]).
+const GENE_PASS_MOVES: usize = 3;
+
+/// The gene pass's seed offset, apart from the chains'.
+const GENE_PASS_SEED: u64 = 0x6e5e;
+
+/// The genes in at most `--max-coarse-features` groups by their pseudobulk
+/// profiles (both tracks summed), `None` when they are no more than that.
+fn coarsen_genes(
+    reads: &Reads,
+    sizes: &[f32],
+    args: &OdeArgs,
+) -> anyhow::Result<Option<FeatureCoarsening>> {
+    let g = reads.u.ncols();
+    let Some(cap) = args
+        .coarsening
+        .cap()
+        .map(std::num::NonZeroUsize::get)
+        .filter(|&c| g > c)
+    else {
+        return Ok(None);
+    };
+    let counts: DMatrix<f32> = (&reads.u + &reads.s).transpose().cast();
+    let fc = coarsen_features(&counts, sizes, &[cap], args.seed)?
+        .pop()
+        .expect("one level asked for");
+    info!("ode: {g} genes in {} groups", fc.num_coarse);
+    Ok(Some(fc))
 }
 
 /// Snapshots a chain keeps for the readout when `--snapshot-every` is 0.
@@ -227,8 +265,9 @@ struct Finest {
     reads: Reads,
     /// The genes' names.
     names: Vec<Box<str>>,
-    /// Every row's pseudobulk in the collapse's finest level.
+    /// Every row's pseudobulk in the collapse's finest level, and its cells.
     pbs: Vec<usize>,
+    sizes: Vec<f32>,
     /// `[D × batches]` the batch effects the cells are read with.
     delta: Option<DMatrix<f32>>,
 }
@@ -271,10 +310,12 @@ fn finest_reads(
         tracks.unspliced.select_columns(&genes).cast(),
         tracks.spliced.select_columns(&genes).cast(),
     );
+    let sizes = pbs.iter().map(|&p| n_cells[p]).collect();
     Ok(Finest {
         reads,
         names,
         pbs,
+        sizes,
         delta,
     })
 }
@@ -374,6 +415,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         reads,
         names,
         pbs,
+        sizes,
         delta,
     } = finest_reads(
         collapsed_levels,
@@ -388,6 +430,13 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         inputs.data_files.len()
     );
 
+    // The genes in groups, when they outnumber --max-coarse-features: the
+    // climb and the chains on the groups' reads, every gene drawn on its
+    // own after.
+    let fc = coarsen_genes(&reads, &sizes, args)?;
+    let grouped = fc.as_ref().map(|fc| coarse_reads(fc, &reads));
+    let fit_reads = grouped.as_ref().unwrap_or(&reads);
+
     // The climb, then the chains from its mode.
     let opts = Climb {
         lineages: args.lineages,
@@ -400,7 +449,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         jitter: !args.no_jitter,
         trunk: !args.no_trunk,
     };
-    let (fit, objective) = climb(&reads, &opts, &dev)?;
+    let (fit, objective) = climb(fit_reads, &opts, &dev)?;
     info!("ode: the climb's objective {objective:.4}");
     let start_at = fit.params()?;
     let share = fit.share_sd()?;
@@ -412,7 +461,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         kept.div_ceil(SNAPSHOTS_A_CHAIN).max(1)
     };
     let mut draws = sampler::run(
-        &reads,
+        fit_reads,
         &start_at,
         &sampler::Options {
             kappa: args.kappa,
@@ -431,6 +480,33 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let branch = chain_stats(&per_chain(&draws, |d| &d.branch));
     report_chains(&draws, &branch);
 
+    // Every gene's rates over the chains: on groups, every gene drawn at
+    // every snapshot of its chain.
+    let (log_gamma, log_ratio) = match &fc {
+        None => (
+            chain_stats(&per_chain(&draws, |d| &d.log_gamma)),
+            chain_stats(&per_chain(&draws, |d| &d.log_ratio)),
+        ),
+        Some(fc) => {
+            let genes: Vec<_> = draws
+                .iter()
+                .enumerate()
+                .map(|(c, d)| {
+                    let seed = args.seed.wrapping_add(GENE_PASS_SEED + c as u64);
+                    refine_genes(&reads, fc, &d.snapshots, GENE_PASS_MOVES, seed)
+                })
+                .collect();
+            (
+                chain_stats(&genes.iter().map(|d| &d.log_gamma).collect::<Vec<_>>()),
+                chain_stats(&genes.iter().map(|d| &d.log_ratio).collect::<Vec<_>>()),
+            )
+        }
+    };
+    write_gene_rates(&args.out, &names, &log_gamma, &log_ratio)?;
+    if let Some(fc) = &fc {
+        crate::topic::model_metadata::save_coarsening_levels(&[Some(fc.clone())], &args.out)?;
+    }
+
     // Nothing to report or read out from chains stopped in burn-in.
     let snaps: Vec<Snapshot> = draws
         .iter_mut()
@@ -441,17 +517,13 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         "no snapshot kept: the chains stopped too early"
     );
 
-    // Every gene's rates over the chains.
-    let log_gamma = chain_stats(&per_chain(&draws, |d| &d.log_gamma));
-    let log_ratio = chain_stats(&per_chain(&draws, |d| &d.log_ratio));
-    write_gene_rates(&args.out, &names, &log_gamma, &log_ratio)?;
-
     // The map on the trajectories' own axes, every cell placed by its reads.
     let map = MapBasis::of_trajectories(&snaps, args.map_pcs)?;
     // Every cell read once, a block at a time; QC's near-empty cells out.
     let table = read_out_cells(
         &data,
         &names,
+        fc.as_ref(),
         delta.as_ref(),
         keep.as_deref(),
         &snaps,
@@ -466,7 +538,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     if let Some(tree) = &pb_tree {
         crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &row_names)?;
     }
-    write_pb_time(&args.out, &pbs, &grid_posterior(&reads, &snaps))?;
+    write_pb_time(&args.out, &pbs, &grid_posterior(fit_reads, &snaps))?;
     if !branch.is_empty() {
         write_branch_times(&args.out, &branch)?;
     }
@@ -500,6 +572,7 @@ struct CellTable {
 fn read_out_cells(
     data: &data_beans::sparse_io_vector::SparseIoVec,
     names: &[Box<str>],
+    fc: Option<&FeatureCoarsening>,
     delta: Option<&DMatrix<f32>>,
     keep: Option<&[usize]>,
     snaps: &[Snapshot],
@@ -530,6 +603,10 @@ fn read_out_cells(
             .filter(|i| kept_cell.as_ref().is_none_or(|k| k[start + i]))
             .collect();
         let block = Reads::from_matrices(u.select_rows(&rows).cast(), s.select_rows(&rows).cast());
+        let block = match fc {
+            Some(fc) => coarse_reads(fc, &block),
+            None => block,
+        };
         let out = read_cells(&block, snaps);
         t.cells
             .extend(rows.iter().map(|&i| all_cells[start + i].clone()));

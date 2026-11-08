@@ -142,6 +142,8 @@ fn truth_snap(sim: &Sim, fine: usize, grid: usize) -> Snapshot {
         params: truth_params(sim, fine, grid),
         log_w: vec![-(l as f64).ln(); l],
         share_sd: None,
+        rows: Vec::new(),
+        lambda: Vec::new(),
     }
 }
 

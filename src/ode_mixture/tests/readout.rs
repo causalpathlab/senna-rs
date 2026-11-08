@@ -31,6 +31,8 @@ fn truth_snap(sim: &Sim, share_sd: Option<f64>) -> Snapshot {
         params,
         log_w: vec![-(lineages as f64).ln(); lineages],
         share_sd,
+        rows: Vec::new(),
+        lambda: Vec::new(),
     }
 }
 

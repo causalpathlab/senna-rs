@@ -12,5 +12,7 @@ mod likelihood;
 mod model;
 mod output;
 mod readout;
+mod refine;
 mod sampler;
+mod scale;
 mod sim;

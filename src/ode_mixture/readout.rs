@@ -10,7 +10,7 @@
 //! each track and of its log level ([`log_rate`]).
 
 use super::blocks::log_posterior_row;
-use super::likelihood::{integrated_table, table, Reads};
+use super::likelihood::{integrated_table, table, Depth, Reads};
 use super::model::Params;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
@@ -23,6 +23,10 @@ pub struct Snapshot {
     pub log_w: Vec<f64>,
     /// The jitter's sd, `None` with no jitter.
     pub share_sd: Option<f64>,
+    /// `[P]` every pseudobulk's row and depths at this draw (empty where
+    /// the draw has none, as a truth made up for a test).
+    pub rows: Vec<usize>,
+    pub lambda: Vec<Depth>,
 }
 
 /// Every cell's readout, `[C]` each (`lineage` `[C][L]`).

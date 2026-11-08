@@ -3,7 +3,7 @@
 
 use super::model::truth_params;
 use crate::ode_mixture::blocks::draw_latents;
-use crate::ode_mixture::coarsen::{coarse_params, coarse_reads};
+use crate::ode_mixture::coarsen::{coarse_params, coarse_reads, uncoarsen_params};
 use crate::ode_mixture::likelihood::{table, GeneRows, Reads, RowLayout};
 use crate::ode_mixture::model::Params;
 use crate::ode_mixture::sim::{simulate, SimConfig};
@@ -127,5 +127,64 @@ fn a_groups_log_likelihood_is_its_genes_up_to_a_constant() {
             (a - b).abs() <= 1e-9 * a.abs().max(1.0),
             "group {k}: {a} vs {b}"
         );
+    }
+}
+
+/// Two nested coarsenings: every fine group of `GROUPS` inside one of
+/// `PARENTS` coarse ones.
+const PARENTS: usize = 2;
+
+fn nested() -> (FeatureCoarsening, FeatureCoarsening) {
+    let fine: Vec<usize> = (0..GENES).map(|g| (g * 5) % GROUPS).collect();
+    let coarse = fine.iter().map(|&j| j % PARENTS).collect();
+    (
+        FeatureCoarsening::from_fine_to_coarse(coarse, PARENTS).unwrap(),
+        FeatureCoarsening::from_fine_to_coarse(fine, GROUPS).unwrap(),
+    )
+}
+
+/// A coarse state uncoarsened: every fine group on its parent's rates and
+/// embedding, the parent's levels split among its children.
+#[test]
+fn uncoarsened_groups_sum_to_their_parents_levels() {
+    let (params, reads, _) = setup();
+    let (coarse, fine) = nested();
+    let parent = coarse_params(&coarse, &params);
+    let child = uncoarsen_params(&coarse, &fine, &parent, &reads);
+    assert_eq!(child.beta.len(), GROUPS);
+    let (lv_p, lv_c) = (parent.levels(), child.levels());
+    let mut worst = 0f64;
+    for k in 0..PARENTS {
+        let kids: Vec<usize> = (0..GROUPS).filter(|&j| j % PARENTS == k).collect();
+        for r in 0..lv_p.u.nrows() {
+            for (p, c) in [(&lv_p.u, &lv_c.u), (&lv_p.s, &lv_c.s)] {
+                let sum: f64 = kids.iter().map(|&j| c[(r, j)]).sum();
+                worst = worst.max((sum - p[(r, k)]).abs() / p[(r, k)].abs());
+            }
+        }
+        for &j in &kids {
+            assert_eq!(child.beta[j], parent.beta[k]);
+            assert_eq!(child.rho[j], parent.rho[k]);
+        }
+    }
+    assert!(worst < 1e-12, "worst relative gap {worst}");
+}
+
+/// The children's baselines split their parent's by their reads.
+#[test]
+fn uncoarsened_baselines_follow_the_reads() {
+    let (params, reads, _) = setup();
+    let (coarse, fine) = nested();
+    let parent = coarse_params(&coarse, &params);
+    let child = uncoarsen_params(&coarse, &fine, &parent, &reads);
+    let fine_reads = coarse_reads(&fine, &reads);
+    let total = |j: usize| fine_reads.u.column(j).sum() + fine_reads.s.column(j).sum();
+    for a in 0..GROUPS {
+        for b in 0..GROUPS {
+            if a % PARENTS == b % PARENTS {
+                let (want, got) = ((total(a) / total(b)).ln(), child.base[a] - child.base[b]);
+                assert!((want - got).abs() < 1e-2, "{a}, {b}: {got} vs {want}");
+            }
+        }
     }
 }

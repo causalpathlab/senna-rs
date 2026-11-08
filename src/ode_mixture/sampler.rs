@@ -183,11 +183,13 @@ struct State {
 
 impl State {
     /// What the cells' readout needs of this state.
-    fn snapshot(&self) -> Snapshot {
+    fn snapshot(&self, rows: &[usize], lambda: &[Depth]) -> Snapshot {
         Snapshot {
             params: self.params.clone(),
             log_w: self.log_w.clone(),
             share_sd: self.share_sd,
+            rows: rows.to_vec(),
+            lambda: lambda.to_vec(),
         }
     }
 }
@@ -273,7 +275,8 @@ pub fn refit_at(opts: &Options, it: usize) -> bool {
         || (it < opts.burn && it.is_multiple_of(opts.laplace_every.max(1)))
 }
 
-/// One sweep of a chain; the drawn rows and the reads' log-likelihood there.
+/// One sweep of a chain; the drawn rows, the depths and the reads'
+/// log-likelihood there.
 #[allow(clippy::too_many_arguments)]
 fn sweep(
     state: &mut State,
@@ -285,7 +288,7 @@ fn sweep(
     it: u64,
     refit: bool,
     secs: &mut [f64],
-) -> (Vec<usize>, f64) {
+) -> (Vec<usize>, Vec<Depth>, f64) {
     let mut clock = std::time::Instant::now();
     let mut lap = |block: usize| {
         secs[block] += clock.elapsed().as_secs_f64();
@@ -428,7 +431,7 @@ fn sweep(
         .map(|l| path_ll(&state.params, l, reads, &rows, &lambda))
         .sum();
     lap(LL_BLOCK);
-    (rows, total)
+    (rows, lambda, total)
 }
 
 /// `opts.chains` chains from `start` (the Adam mode, [`super::fit::Fit::params`]),
@@ -477,7 +480,7 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 if refit {
                     d.refits.push(it);
                 }
-                let (rows, ll) = sweep(
+                let (rows, lambda, ll) = sweep(
                     &mut state,
                     reads,
                     &grid,
@@ -512,7 +515,7 @@ pub fn run(reads: &Reads, start_at: &Params, opts: &Options) -> anyhow::Result<V
                 if opts.snapshot_every > 0
                     && (it - opts.burn + 1).is_multiple_of(opts.snapshot_every)
                 {
-                    d.snapshots.push(state.snapshot());
+                    d.snapshots.push(state.snapshot(&rows, &lambda));
                 }
                 if let Some(sd) = state.share_sd {
                     d.share_sd.push(sd);
