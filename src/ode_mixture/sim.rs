@@ -96,9 +96,6 @@ pub struct Truth {
     pub time: Vec<f64>,
     /// Every pseudobulk on the shared trunk (at or before the branch).
     pub trunk: Vec<bool>,
-    /// `[P]` every pseudobulk's jitter of its unspliced share
-    /// ([`SimConfig::share_jitter`]).
-    pub omega: Vec<f64>,
     /// The global log capture of the unspliced reads
     /// ([`SimConfig::log_capture`]).
     pub log_capture: f64,
@@ -250,7 +247,6 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
             lineage,
             time,
             trunk,
-            omega,
             log_capture: cfg.log_capture,
             u_mean,
             s_mean,

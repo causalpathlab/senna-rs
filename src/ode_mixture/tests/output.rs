@@ -1,57 +1,11 @@
 use super::model::truth_params;
-use crate::ode_mixture::output::{chain_stats, MapBasis, RHAT_FLAG};
+use crate::ode_mixture::output::MapBasis;
 use crate::ode_mixture::readout::Snapshot;
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
-
-/// `chains` chains of `draws` draws of two coordinates, coordinate `j`'s
-/// chain `c` centred at `shift[j] * c`.
-fn normal_chains(chains: usize, draws: usize, shift: [f64; 2]) -> Vec<Vec<Vec<f64>>> {
-    let mut rng = StdRng::seed_from_u64(5);
-    let z = Normal::new(0.0, 1.0).unwrap();
-    (0..chains)
-        .map(|c| {
-            (0..draws)
-                .map(|_| {
-                    (0..2)
-                        .map(|j| 1.0 + shift[j] * c as f64 + z.sample(&mut rng))
-                        .collect()
-                })
-                .collect()
-        })
-        .collect()
-}
-
-/// Over well-mixed chains a coordinate's mean, sd and ESS are the
-/// draws', its R̂ about 1 and not flagged; chains apart are flagged.
-#[test]
-fn chain_stats_summarise_and_flag_chains_apart() {
-    let stats = chain_stats(&normal_chains(4, 500, [0.0, 3.0]));
-    assert_eq!(stats.len(), 2);
-    let (mixed, apart) = (&stats[0], &stats[1]);
-    assert!((mixed.mean - 1.0).abs() < 0.1, "mean {}", mixed.mean);
-    assert!((mixed.sd - 1.0).abs() < 0.1, "sd {}", mixed.sd);
-    assert!(mixed.ess > 1500.0, "ess {}", mixed.ess);
-    assert!(mixed.rhat < 1.01 && !mixed.flagged(), "R̂ {}", mixed.rhat);
-    assert!(
-        apart.rhat > RHAT_FLAG && apart.flagged(),
-        "R̂ {}",
-        apart.rhat
-    );
-}
-
-/// No draws: every coordinate unknown, and flagged.
-#[test]
-fn chain_stats_of_no_draws_are_unknown() {
-    let stats = chain_stats(&[vec![], vec![]]);
-    assert!(stats.is_empty());
-    let stats = chain_stats(&[vec![vec![1.0]], vec![]]);
-    assert_eq!(stats.len(), 1);
-    assert!(stats[0].rhat.is_nan() && stats[0].flagged());
-}
 
 /// Rows of reads `[P × G]` with two directions of variation.
 fn rows() -> DMatrix<f64> {

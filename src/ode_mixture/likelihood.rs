@@ -57,11 +57,6 @@ impl Reads {
         }
     }
 
-    /// Pseudobulk `p`'s unspliced reads, `N^u_p`.
-    pub fn unspliced(&self, p: usize) -> f64 {
-        self.unspliced[p]
-    }
-
     /// Pseudobulk `p`'s reads, `N_p`.
     pub fn total(&self, p: usize) -> f64 {
         self.total[p]

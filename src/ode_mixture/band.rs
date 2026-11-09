@@ -55,18 +55,9 @@ impl Band {
         }
     }
 
-    pub fn width(&self) -> usize {
-        self.p
-    }
-
     fn at(&self, i: usize, j: usize) -> Option<usize> {
         let (i, j) = if i >= j { (i, j) } else { (j, i) };
         (i - j <= self.p).then(|| i * (self.p + 1) + i - j)
-    }
-
-    /// Entry `(i, j)` (zero off the band).
-    pub fn get(&self, i: usize, j: usize) -> f64 {
-        self.at(i, j).map_or(0.0, |k| self.a[k])
     }
 
     /// Adds `v` at `(i, j)` (and so at `(j, i)`); off the band, nothing.
@@ -74,21 +65,6 @@ impl Band {
         if let Some(k) = self.at(i, j) {
             self.a[k] += v;
         }
-    }
-
-    /// `P x`.
-    pub fn mul(&self, x: &[f64]) -> Vec<f64> {
-        let mut y = vec![0.0; self.n];
-        for i in 0..self.n {
-            for j in i.saturating_sub(self.p)..=i {
-                let v = self.a[i * (self.p + 1) + i - j];
-                y[i] += v * x[j];
-                if j != i {
-                    y[j] += v * x[i];
-                }
-            }
-        }
-        y
     }
 
     fn diagonal(&self) -> Vec<f64> {
@@ -146,18 +122,6 @@ impl Band {
             x[i] /= self.a[i * (p + 1)];
         }
         x
-    }
-
-    /// `Lᵀ d`, `self` a lower factor.
-    fn upper_mul(&self, d: &[f64]) -> Vec<f64> {
-        let (n, p) = (self.n, self.p);
-        (0..n)
-            .map(|i| {
-                (i..(i + p + 1).min(n))
-                    .map(|k| self.a[k * (p + 1) + k - i] * d[k])
-                    .sum()
-            })
-            .collect()
     }
 }
 
@@ -254,12 +218,6 @@ impl Factor {
             .map(|(x, r)| x / r)
             .collect()
     }
-
-    /// `Fᵀ d`.
-    fn upper_mul(&self, d: &[f64]) -> Vec<f64> {
-        let y: Vec<f64> = d.iter().zip(&self.root).map(|(d, r)| d * r).collect();
-        self.l.upper_mul(&y)
-    }
 }
 
 /// A banded precision with an optional dense last row and column (a
@@ -295,10 +253,6 @@ impl Bordered {
         Self { band, border }
     }
 
-    pub fn size(&self) -> usize {
-        self.band.size() + usize::from(self.border.is_some())
-    }
-
     /// `P⁻¹ b`.
     pub fn solve(&self, b: &[f64]) -> Vec<f64> {
         let m = self.band.size();
@@ -314,35 +268,6 @@ impl Bordered {
                 x
             }
         }
-    }
-
-    /// `L⁻ᵀ z`: with `z ~ N(0, I)` a draw of `N(0, P⁻¹)`.
-    pub fn draw(&self, z: &[f64]) -> Vec<f64> {
-        let m = self.band.size();
-        match &self.border {
-            None => self.band.upper_solve(&z[..m]),
-            Some((l, s)) => {
-                let xb = z[m] / s;
-                let r: Vec<f64> = z[..m].iter().zip(l).map(|(z, l)| z - l * xb).collect();
-                let mut x = self.band.upper_solve(&r);
-                x.push(xb);
-                x
-            }
-        }
-    }
-
-    /// `dᵀ P d`.
-    pub fn quad(&self, d: &[f64]) -> f64 {
-        let m = self.band.size();
-        let mut y = self.band.upper_mul(&d[..m]);
-        let mut extra = 0.0;
-        if let Some((l, s)) = &self.border {
-            for (y, l) in y.iter_mut().zip(l) {
-                *y += l * d[m];
-            }
-            extra = (s * d[m]).powi(2);
-        }
-        y.iter().map(|v| v * v).sum::<f64>() + extra
     }
 }
 

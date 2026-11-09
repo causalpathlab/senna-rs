@@ -10,7 +10,7 @@
 //! operations, so the gradient runs through it. Paths are whitened,
 //! `z_ℓ = C η_ℓ` (`C` fixed: `κ/T` held during the climb); lineage 1's
 //! duration is the unit. The priors are [`super::blocks::GenePrior`]'s on the
-//! sampler's coordinates, `N(0, I)` on `η`, `N(0, 1)` on `log T`.
+//! gene's coordinates, `N(0, I)` on `η`, `N(0, 1)` on `log T`.
 //!
 //! With [`Fit::with_share`], every pseudobulk's unspliced share jitters on
 //! its own, `σ` fitted: [`super::likelihood::share_term`] added at every
@@ -344,7 +344,7 @@ impl Fit {
 
     /// `([1 × G], [1 × G])` `log β` and `log γ` as the model reads them:
     /// clamped to their bounds (unbounded, to `±LOG_CLAMP`). The climb seeks the mode in the rates' own
-    /// coordinates, so inside the bounds nothing changes (the sampler's
+    /// coordinates, so inside the bounds nothing changes (the gene's
     /// link, [`GenePrior::link`], carries a Jacobian; a mode sought through
     /// it would move toward the bounds' middle); the priors, on the
     /// unclamped logs, pull a rate that strays past back in.

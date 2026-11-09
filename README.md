@@ -239,10 +239,10 @@ splicing ODE solved exactly, driven by the lineage's transcription; splicing
 and decay rates shared by every lineage, so all of them run on one clock.
 Every lineage has its own path and its own time (`--trunk` puts them on
 lineage 0's trunk until a fitted branch time, one clock for all).
-Fitted on the finest pseudobulks by a climb to a mode, then blocked Gibbs
-chains; every cell is read out from the chains' draws for its lineage, time
-(with its interval) and velocity. No root is inferred: a lineage's `t = 0`
-is a convention. Every gene's rates come with R̂ and ESS.
+Fitted on the finest pseudobulks by a climb to a mode; every cell is read
+out at the mode for its lineage, time (with its interval) and velocity. No
+root is inferred: a lineage's `t = 0` is a convention. Every gene's rates
+come with the sds of their Laplace approximation.
 `senna docs ode` has the model, the inference and the outputs.
 
 ```bash

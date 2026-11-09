@@ -2,7 +2,7 @@
 //! reads ([`coarse_reads`], [`coarse_params`]).
 
 use super::model::truth_params;
-use crate::ode_mixture::blocks::draw_latents;
+use crate::ode_mixture::blocks::log_posterior_row;
 use crate::ode_mixture::coarsen::{coarse_params, coarse_reads, coarsen_genes, gene_params};
 use crate::ode_mixture::likelihood::{table, GeneRows, Reads, RowLayout};
 use crate::ode_mixture::model::Params;
@@ -61,9 +61,19 @@ fn the_groups_tables_are_the_genes_up_to_a_pseudobulks_constant() {
     }
     eprintln!("worst relative gap {worst:.2e}");
     assert!(worst < 1e-10, "worst relative gap {worst}");
+    // The most probable row of every pseudobulk is the same under both.
     let log_w = [0.5f64.ln(); 2];
-    let draw = |t| draw_latents(t, &log_w, params.positions(), 5, 0);
-    assert_eq!(draw(&tab), draw(&tab_m));
+    let rows = |t: &nalgebra::DMatrix<f64>| -> Vec<usize> {
+        (0..t.nrows())
+            .map(|p| {
+                let (lp, _) = log_posterior_row(t, &log_w, params.positions(), p);
+                (0..lp.len())
+                    .max_by(|&a, &b| lp[a].total_cmp(&lp[b]))
+                    .unwrap()
+            })
+            .collect()
+    };
+    assert_eq!(rows(&tab), rows(&tab_m));
 }
 
 /// Every pseudobulk's depth is the same from the groups' levels.

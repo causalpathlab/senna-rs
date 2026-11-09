@@ -50,7 +50,7 @@ fn backend(sim: &Sim, dir: &std::path::Path) -> String {
 }
 
 /// A run writes every cell's time, map place and velocity, every gene's
-/// rates with their chains' diagnostics, and a manifest the viewer reads;
+/// rates with their sds, and a manifest the viewer reads;
 /// the cells' times rank with the truth's.
 #[test]
 fn a_run_writes_the_cells_tables_and_a_manifest() {
@@ -75,14 +75,6 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
         "25",
         "--steps",
         "1500",
-        "--sweeps",
-        "80",
-        "--burn",
-        "40",
-        "--chains",
-        "2",
-        "--snapshot-every",
-        "10",
         "--map-pcs",
         "5",
     ]))
@@ -138,17 +130,7 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
     let (genes, stats) = read_table_columns(
         &format!("{out}.gene_rates.parquet"),
         &["gene"],
-        &[
-            "log_gamma",
-            "log_gamma_sd",
-            "log_gamma_rhat",
-            "log_gamma_ess",
-            "log_ratio",
-            "log_ratio_sd",
-            "log_ratio_rhat",
-            "log_ratio_ess",
-            "flagged",
-        ],
+        &["log_gamma", "log_gamma_sd", "log_ratio", "log_ratio_sd"],
     )
     .unwrap();
     // Every gene but the one with no unspliced reads: the pseudobulks'
@@ -157,7 +139,8 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
     assert!(genes[0]
         .iter()
         .all(|g| g.starts_with("GENE") && g.as_ref() != "GENE0"));
-    assert!(stats[8].iter().all(|&f| f == 0.0 || f == 1.0));
+    assert!(stats.iter().flatten().all(|x| x.is_finite()));
+    assert!(stats[1].iter().chain(&stats[3]).all(|&sd| sd > 0.0));
 
     // Nor a table of direction calls.
     assert!(!std::path::Path::new(&format!("{out}.lineages.tsv")).exists());
@@ -211,11 +194,10 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
     }
 }
 
-/// With no chains (the default) the cells are read out at the climb's
-/// mode and every gene's rates come with their Laplace sds: the same
-/// tables, R̂ and ESS not known, nothing flagged.
+/// The cells are read out at the climb's mode and every gene's rates come
+/// with their Laplace sds; the lineages are apart by default.
 #[test]
-fn a_run_without_chains_reads_out_at_the_mode() {
+fn a_run_reads_out_at_the_mode() {
     let sim = simulate(&SimConfig {
         n_genes: 80,
         n_pb: 1000,
@@ -240,7 +222,6 @@ fn a_run_without_chains_reads_out_at_the_mode() {
         "--map-pcs",
         "5",
     ]);
-    assert_eq!(args.chains, 0, "chains are opt-in");
     assert!(
         !args.trunk,
         "lineages apart, each on its own time, by default"
@@ -265,23 +246,11 @@ fn a_run_without_chains_reads_out_at_the_mode() {
     let (_, stats) = read_table_columns(
         &format!("{out}.gene_rates.parquet"),
         &["gene"],
-        &[
-            "log_gamma",
-            "log_gamma_sd",
-            "log_gamma_rhat",
-            "log_ratio",
-            "log_ratio_sd",
-            "log_ratio_rhat",
-            "flagged",
-        ],
+        &["log_gamma", "log_gamma_sd", "log_ratio", "log_ratio_sd"],
     )
     .unwrap();
-    for i in [0, 1, 3, 4] {
-        assert!(stats[i].iter().all(|x| x.is_finite()), "column {i}");
-    }
-    assert!(stats[1].iter().chain(&stats[4]).all(|&s| s > 0.0));
-    assert!(stats[2].iter().chain(&stats[5]).all(|r| r.is_nan()));
-    assert!(stats[6].iter().all(|&f| f == 0.0));
+    assert!(stats.iter().flatten().all(|x| x.is_finite()));
+    assert!(stats[1].iter().chain(&stats[3]).all(|&s| s > 0.0));
     let (m, _) = RunManifest::load(std::path::Path::new(&format!("{out}.senna.json"))).unwrap();
     assert_eq!(m.kind, RunKind::Ode);
     assert_eq!(m.outputs.pb_time.as_deref(), Some("run.pb_time.parquet"));
@@ -313,14 +282,6 @@ fn a_coarsened_run_writes_every_genes_rates() {
         "25",
         "--steps",
         "1500",
-        "--sweeps",
-        "80",
-        "--burn",
-        "40",
-        "--chains",
-        "2",
-        "--snapshot-every",
-        "10",
         "--map-pcs",
         "5",
         "--max-coarse-features",

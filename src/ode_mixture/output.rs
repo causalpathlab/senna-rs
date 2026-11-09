@@ -1,81 +1,9 @@
-//! What a run reports beyond the cells' readout: every coordinate's
-//! summary over the chains, and the map the cells and their velocities
-//! are drawn on.
+//! The map the cells and their velocities are drawn on.
 
 use super::readout::Snapshot;
 use anyhow::Context;
 use legume_numeric::matrix::traits::RandomizedAlgs;
-use legume_numeric::mcmc::engine::diagnostics::{ess, split_rhat_chains};
 use nalgebra::{DMatrix, DVector};
-
-/// A coordinate is flagged as not mixed above this split R̂.
-pub const RHAT_FLAG: f64 = 1.05;
-
-/// One coordinate over the chains' kept draws.
-#[derive(Clone, Debug)]
-pub struct ChainStat {
-    pub mean: f64,
-    pub sd: f64,
-    /// Split R̂ over the chains (NaN with fewer than two draws a chain).
-    pub rhat: f64,
-    /// The chains' ESS summed.
-    pub ess: f64,
-}
-
-impl ChainStat {
-    /// Not mixed, or not known to be.
-    pub fn flagged(&self) -> bool {
-        self.rhat.is_nan() || self.rhat > RHAT_FLAG
-    }
-
-    /// A coordinate at a mode with its sd, no chains run: R̂ and ESS are
-    /// not known.
-    pub fn at_mode(mean: f64, sd: f64) -> Self {
-        Self {
-            mean,
-            sd,
-            rhat: f64::NAN,
-            ess: f64::NAN,
-        }
-    }
-}
-
-/// Every coordinate's summary from `chains[c][s][j]` (chain, kept draw,
-/// coordinate); the coordinates the first non-empty chain has.
-pub fn chain_stats<C: AsRef<[Vec<f64>]>>(chains: &[C]) -> Vec<ChainStat> {
-    let Some(width) = chains.iter().find_map(|c| c.as_ref().first().map(Vec::len)) else {
-        return Vec::new();
-    };
-    let kept: Vec<&[Vec<f64>]> = chains
-        .iter()
-        .map(AsRef::as_ref)
-        .filter(|c| !c.is_empty())
-        .collect();
-    (0..width)
-        .map(|j| {
-            let per: Vec<Vec<f32>> = kept
-                .iter()
-                .map(|c| c.iter().map(|d| d[j] as f32).collect())
-                .collect();
-            let all: Vec<f64> = kept.iter().flat_map(|c| c.iter().map(|d| d[j])).collect();
-            let n = all.len() as f64;
-            let mean = all.iter().sum::<f64>() / n;
-            let sd = (all.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
-            let enough = per.len() >= 2 && per.iter().all(|c| c.len() >= 4);
-            let rhat = if enough {
-                f64::from(split_rhat_chains(&per))
-            } else {
-                f64::NAN
-            };
-            ChainStat {
-                mean,
-                sd,
-                rhat,
-                ess: per.iter().map(|c| f64::from(ess(c))).sum(),
-            }
-        })
-        .collect()
-}
 
 /// The map space: `log1p` reads per 10⁴ (both tracks summed), centred, on
 /// the leading principal components of the rows it is built from, the

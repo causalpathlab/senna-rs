@@ -1,11 +1,11 @@
-//! The readout with no chains, at the climb's mode: every pseudobulk at
+//! The readout at the climb's mode: every pseudobulk at
 //! its most probable row, every gene's rates with their Laplace sds.
 
 use super::init::{first, spearman};
 use super::model::truth_params;
+use crate::ode_mixture::readout::mode_snapshot;
 use crate::ode_mixture::readout::{read_cells, Snapshot};
 use crate::ode_mixture::refine::genes_at_mode;
-use crate::ode_mixture::sampler::mode_snapshot;
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 
 const FINE: usize = 133;

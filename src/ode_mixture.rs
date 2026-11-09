@@ -16,7 +16,6 @@ pub mod model;
 pub mod output;
 pub mod readout;
 pub mod refine;
-pub mod sampler;
 #[cfg(test)]
 pub mod sim;
 
