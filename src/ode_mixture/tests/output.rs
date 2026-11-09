@@ -1,57 +1,11 @@
 use super::model::truth_params;
-use crate::ode_mixture::output::{chain_stats, MapBasis, RHAT_FLAG};
-use crate::ode_mixture::readout::Snapshot;
+use crate::ode_mixture::output::MapBasis;
+use crate::ode_mixture::readout::Mode;
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
-
-/// `chains` chains of `draws` draws of two coordinates, coordinate `j`'s
-/// chain `c` centred at `shift[j] * c`.
-fn normal_chains(chains: usize, draws: usize, shift: [f64; 2]) -> Vec<Vec<Vec<f64>>> {
-    let mut rng = StdRng::seed_from_u64(5);
-    let z = Normal::new(0.0, 1.0).unwrap();
-    (0..chains)
-        .map(|c| {
-            (0..draws)
-                .map(|_| {
-                    (0..2)
-                        .map(|j| 1.0 + shift[j] * c as f64 + z.sample(&mut rng))
-                        .collect()
-                })
-                .collect()
-        })
-        .collect()
-}
-
-/// Over well-mixed chains a coordinate's mean, sd and ESS are the
-/// draws', its R̂ about 1 and not flagged; chains apart are flagged.
-#[test]
-fn chain_stats_summarise_and_flag_chains_apart() {
-    let stats = chain_stats(&normal_chains(4, 500, [0.0, 3.0]));
-    assert_eq!(stats.len(), 2);
-    let (mixed, apart) = (&stats[0], &stats[1]);
-    assert!((mixed.mean - 1.0).abs() < 0.1, "mean {}", mixed.mean);
-    assert!((mixed.sd - 1.0).abs() < 0.1, "sd {}", mixed.sd);
-    assert!(mixed.ess > 1500.0, "ess {}", mixed.ess);
-    assert!(mixed.rhat < 1.01 && !mixed.flagged(), "R̂ {}", mixed.rhat);
-    assert!(
-        apart.rhat > RHAT_FLAG && apart.flagged(),
-        "R̂ {}",
-        apart.rhat
-    );
-}
-
-/// No draws: every coordinate unknown, and flagged.
-#[test]
-fn chain_stats_of_no_draws_are_unknown() {
-    let stats = chain_stats(&[vec![], vec![]]);
-    assert!(stats.is_empty());
-    let stats = chain_stats(&[vec![vec![1.0]], vec![]]);
-    assert_eq!(stats.len(), 1);
-    assert!(stats[0].rhat.is_nan() && stats[0].flagged());
-}
 
 /// Rows of reads `[P × G]` with two directions of variation.
 fn rows() -> DMatrix<f64> {
@@ -134,13 +88,12 @@ fn sim_reads(sim: &Sim) -> DMatrix<f64> {
     DMatrix::from_fn(sim.n_pb, g, |i, j| sim.u[i * g + j] + sim.s[i * g + j])
 }
 
-/// The truth as one draw, on `grid` of the simulator's `fine` points, the
+/// The truth as the mode, on `grid` of the simulator's `fine` points, the
 /// lineages equally weighted.
-fn truth_snap(sim: &Sim, fine: usize, grid: usize) -> Snapshot {
-    let l = sim.truth.t_len.len();
-    Snapshot {
+fn truth_snap(sim: &Sim, fine: usize, grid: usize) -> Mode {
+    Mode {
         params: truth_params(sim, fine, grid),
-        log_w: vec![-(l as f64).ln(); l],
+        log_w: super::model::uniform_log_w(sim.truth.t_len.len()),
         share_sd: None,
     }
 }
@@ -177,7 +130,7 @@ fn the_trajectories_axes_part_the_lineages_a_nuisance_hides() {
         b @ 0..=2 => (clean[(i, j)] * nuisance[i][b]).round(),
         _ => clean[(i, j)],
     });
-    let traj = MapBasis::of_trajectories(&[truth_snap(&sim, cfg.fine, 21)], 2).unwrap();
+    let traj = MapBasis::of_trajectories(&truth_snap(&sim, cfg.fine, 21), 2).unwrap();
     assert_eq!(traj.dim(), 2);
     // Off the trunk only: on it the lineages are one.
     let off: Vec<usize> = (0..p).filter(|&i| !sim.truth.trunk[i]).collect();
@@ -198,8 +151,8 @@ fn the_trajectories_axes_part_the_lineages_a_nuisance_hides() {
     assert!(model > reads - 0.02, "{model} vs {reads}");
 }
 
-/// Two lineages apart, as the truth and as one draw of the map.
-fn two_lineages() -> (Sim, Snapshot) {
+/// Two lineages apart, as the truth and as the mode of the map.
+fn two_lineages() -> (Sim, Mode) {
     let sim = simulate(&SimConfig {
         lineages: 2,
         fine: 81,
@@ -211,12 +164,12 @@ fn two_lineages() -> (Sim, Snapshot) {
     (sim, snap)
 }
 
-/// The maps of draws `a` and of draws `b` place the same pseudobulks at the
-/// same places, each component up to its sign.
-fn assert_same_map(sim: &Sim, a: &[Snapshot], b: &[Snapshot]) {
+/// The maps of modes `a` and `b` place the same pseudobulks at the same
+/// places, each component up to its sign.
+fn assert_same_map(sim: &Sim, a: &Mode, b: &Mode) {
     let x = sim_reads(sim);
     let some: Vec<usize> = (0..sim.n_pb).step_by(37).collect();
-    let on = |snaps| places(&MapBasis::of_trajectories(snaps, 3).unwrap(), &x, &some);
+    let on = |mode| places(&MapBasis::of_trajectories(mode, 3).unwrap(), &x, &some);
     let (a, b) = (on(a), on(b));
     for d in 0..a[0].len() {
         let sign = a
@@ -245,7 +198,7 @@ fn the_trajectories_map_is_the_same_at_any_scale_of_the_levels() {
     for b in &mut small.params.base {
         *b += 1e-3f64.ln();
     }
-    assert_same_map(&sim, &[snap], &[small]);
+    assert_same_map(&sim, &snap, &small);
 }
 
 /// A lineage of no weight does not shape the map: it is the map of the
@@ -258,16 +211,19 @@ fn a_lineage_of_no_weight_does_not_shape_the_map() {
     alone.params.path.truncate(1);
     alone.params.t_len.truncate(1);
     alone.log_w = vec![0.0];
-    assert_same_map(&sim, &[lopsided], &[alone]);
+    assert_same_map(&sim, &lopsided, &alone);
 }
 
-/// A draw with a level not finite (a NaN rate; an infinite one saturates
-/// at the clamp) is left out of the rows it spoils, not the run: the map is
-/// the other draws'.
+/// A position whose levels are not finite (a NaN on the path there) has
+/// no weight in the map: the map is built from the other positions and is
+/// finite.
 #[test]
-fn a_draw_not_finite_is_left_out_of_the_map() {
+fn a_position_not_finite_is_left_out_of_the_map() {
     let (sim, snap) = two_lineages();
     let mut spoiled = snap.clone();
-    spoiled.params.base[3] = f64::NAN;
-    assert_same_map(&sim, &[snap.clone(), spoiled], &[snap]);
+    spoiled.params.path[1][7] = vec![f64::NAN; spoiled.params.path[1][7].len()];
+    let map = MapBasis::of_trajectories(&spoiled, 3).unwrap();
+    let x = sim_reads(&sim);
+    let placed = places(&map, &x, &[0, 5, 11]);
+    assert!(placed.iter().flatten().all(|v| v.is_finite()), "{placed:?}");
 }

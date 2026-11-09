@@ -10,7 +10,7 @@
 //! operations, so the gradient runs through it. Paths are whitened,
 //! `z_ℓ = C η_ℓ` (`C` fixed: `κ/T` held during the climb); lineage 1's
 //! duration is the unit. The priors are [`super::blocks::GenePrior`]'s on the
-//! sampler's coordinates, `N(0, I)` on `η`, `N(0, 1)` on `log T`.
+//! gene's coordinates, `N(0, I)` on `η`, `N(0, 1)` on `log T`.
 //!
 //! With [`Fit::with_share`], every pseudobulk's unspliced share jitters on
 //! its own, `σ` fitted: [`super::likelihood::share_term`] added at every
@@ -18,6 +18,10 @@
 //! gradient through `ω̂` vanishes from the first part; the Laplace
 //! determinant's share of it is dropped). The term is a marginal likelihood
 //! for `σ` with `σ → 0` the shared model, so `σ` has no prior.
+//!
+//! The unspliced levels carry one global capture `e^c` against the
+//! spliced ([`Params::log_capture`]), `c` fitted with the rest under
+//! [`CAPTURE_PRIOR`]; the jitter is every pseudobulk's departure from it.
 //!
 //! With [`Fit::with_trunk`], every other lineage branches off lineage 0 at
 //! its own time `t_b` on one clock (every duration the unit):
@@ -29,7 +33,7 @@
 use super::blocks::GenePrior;
 use super::kernel::GridPrior;
 use super::likelihood::Reads;
-use super::model::{branch_ramp, clamped_exp, Params, LOG_CLAMP};
+use super::model::{branch_ramp, clamped_exp, Params, CAPTURE_PRIOR, LOG_CLAMP};
 use crate::rbm_core::adam;
 use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var, D};
 use legume_numeric::candle::candle_nn::ops::log_softmax;
@@ -52,6 +56,10 @@ const SHARE_NEWTON: usize = 8;
 /// difference of exponentials loses `ε/|x|` of `E` (`6·10⁻⁶` here), the
 /// second-order series `x³/24` (`4·10⁻⁸`).
 const SMALL: f64 = 1e-2;
+
+/// [`SMALL`] in f64: the difference loses `2·10⁻¹²` of `E`, the series
+/// `4·10⁻¹⁴`.
+const SMALL_F64: f64 = 1e-4;
 
 /// Pseudobulks' reads on the device, `[P × G]` per track.
 pub struct DeviceReads {
@@ -82,6 +90,8 @@ pub struct Fit {
     kappa: f64,
     /// `[1]` the log sd of the unspliced share's jitter, `None` for none.
     log_share_sd: Option<Var>,
+    /// `[1]` the unspliced reads' log capture ([`Params::log_capture`]).
+    log_capture: Var,
     /// `[n × n]` the prior's Cholesky factor.
     chol: Tensor,
     prior: GenePrior,
@@ -131,6 +141,7 @@ impl Fit {
             log_t,
             logit_pi: var(vec![0.0; l], &[1, l], dev)?,
             log_share_sd: None,
+            log_capture: var(vec![params.log_capture], &[1], dev)?,
             branch: None,
             kappa: prior.kappa(),
             chol: Tensor::from_vec(c.iter().map(|&x| x as f32).collect::<Vec<_>>(), (n, n), dev)?,
@@ -149,31 +160,37 @@ impl Fit {
         Ok(self)
     }
 
-    /// With every other lineage on lineage 0's trunk until `branch_at`, one
-    /// clock for all: the paths of `params` taken as the trunk (lineage 0's)
-    /// and every other lineage's departure `d = z_ℓ − z_0` from it, its
-    /// whitened `η_ℓ` the most probable under the prior given `d`
-    /// ([`GridPrior::whiten_scaled`] to within [`TRUNK_FIT`]).
+    /// With every other lineage on lineage 0's trunk until its branch time
+    /// (`branch_at`, one per other lineage), one clock for all: the paths
+    /// of `params` taken as the trunk (lineage 0's) and every other
+    /// lineage's departure `d = z_ℓ − z_0` from it, its whitened `η_ℓ` the
+    /// most probable under the prior given `d` ([`GridPrior::whiten_scaled`]
+    /// to within [`TRUNK_FIT`]).
     pub fn with_trunk(
         mut self,
         params: &Params,
         prior: &GridPrior,
-        branch_at: f64,
+        branch_at: &[f64],
     ) -> Result<Self> {
         use nalgebra::DVector;
         let (l, n, _, h) = self.dims;
+        if branch_at.len() + 1 != l {
+            legume_numeric::candle::candle_core::bail!(
+                "ode-mixture: {} branch times for {l} lineages",
+                branch_at.len()
+            );
+        }
         let dev = self.eta.device().clone();
-        let tb = branch_at.clamp(0.02, 0.98);
-        let r = branch_ramp(n, tb, self.kappa);
+        let tb: Vec<f64> = branch_at.iter().map(|t| t.clamp(0.02, 0.98)).collect();
         let mut eta = Vec::with_capacity(l * n * h);
         for (li, path) in params.path.iter().enumerate() {
+            let ramp = (li > 0).then(|| branch_ramp(n, tb[li - 1], self.kappa));
             let dims: Vec<DVector<f64>> = (0..h)
-                .map(|d| {
-                    if li == 0 {
-                        prior.whiten(&DVector::from_fn(n, |k, _| path[k][d]))
-                    } else {
+                .map(|d| match &ramp {
+                    None => prior.whiten(&DVector::from_fn(n, |k, _| path[k][d])),
+                    Some(r) => {
                         let dep = DVector::from_fn(n, |k, _| path[k][d] - params.path[0][k][d]);
-                        prior.whiten_scaled(&r, &dep, TRUNK_FIT)
+                        prior.whiten_scaled(r, &dep, TRUNK_FIT)
                     }
                 })
                 .collect();
@@ -184,7 +201,13 @@ impl Fit {
         self.eta = var(eta, &[l, n, h], &dev)?;
         self.log_t = None;
         self.branch = (l > 1)
-            .then(|| var(vec![(tb / (1.0 - tb)).ln(); l - 1], &[l - 1], &dev))
+            .then(|| {
+                var(
+                    tb.iter().map(|t| (t / (1.0 - t)).ln()).collect(),
+                    &[l - 1],
+                    &dev,
+                )
+            })
             .transpose()?;
         Ok(self)
     }
@@ -202,6 +225,11 @@ impl Fit {
                     .collect())
             })
             .transpose()
+    }
+
+    /// The unspliced reads' log capture.
+    pub fn log_capture(&self) -> Result<f64> {
+        Ok(f64::from(self.log_capture.as_tensor().to_vec1::<f32>()?[0]))
     }
 
     /// The unspliced share's jitter sd, `None` with no jitter.
@@ -309,13 +337,14 @@ impl Fit {
         ];
         v.extend(self.log_t.clone());
         v.extend(self.log_share_sd.clone());
+        v.push(self.log_capture.clone());
         v.extend(self.branch.clone());
         v
     }
 
     /// `([1 × G], [1 × G])` `log β` and `log γ` as the model reads them:
     /// clamped to their bounds (unbounded, to `±LOG_CLAMP`). The climb seeks the mode in the rates' own
-    /// coordinates, so inside the bounds nothing changes (the sampler's
+    /// coordinates, so inside the bounds nothing changes (the gene's
     /// link, [`GenePrior::link`], carries a Jacobian; a mode sought through
     /// it would move toward the bounds' middle); the priors, on the
     /// unclamped logs, pull a rate that strays past back in.
@@ -371,75 +400,23 @@ impl Fit {
         Tensor::cat(&[&trunk, &parted], 0)
     }
 
-    /// `([L·n × G], [L·n × G])` the levels.
+    /// `([L·n × G], [L·n × G])` the levels ([`closed_form_levels`]), the
+    /// unspliced captured at `e^c`.
     pub fn levels(&self) -> Result<(Tensor, Tensor)> {
-        let (l, n, g, h) = self.dims;
-        let z = self.paths()?.reshape((l * n, h))?;
-        let alpha = clamped(
-            &z.matmul(&self.rho.as_tensor().t()?)?
-                .broadcast_add(self.base.as_tensor())?,
-        )?
-        .exp()?
-        .reshape((l, n, g))?;
         let (log_beta, log_gamma) = self.log_rates()?;
-        let (beta, gamma) = (log_beta.exp()?, log_gamma.exp()?);
-        let step = (self.t_len()? / (n - 1) as f64)?; // [L × 1]
-        let m = self.sub;
-        // `e^{−βδ}`, `e^{−γδ}` and `E(δ) = (e^{−βδ} − e^{−γδ})/(γ − β)`
-        // (`δ e^{−γδ} (1 + x/2 + x²/6)` near `x = (γ − β)δ = 0`, where the
-        // difference cancels) for a step `δ` `[L × 1]`, each `[L × G]`. Both
-        // exponentials are at most 1, so `E` cannot overflow however far
-        // apart the rates are.
-        let factors = |delta: &Tensor| -> Result<(Tensor, Tensor, Tensor)> {
-            let bh = delta.broadcast_mul(&beta)?;
-            let gh = delta.broadcast_mul(&gamma)?;
-            let (eb, eg) = (bh.neg()?.exp()?, gh.neg()?.exp()?);
-            let x = (&gh - &bh)?;
-            let small = x.abs()?.lt(SMALL)?;
-            let gap =
-                small.where_cond(&x.ones_like()?, &(&gamma - &beta)?.broadcast_as(x.shape())?)?;
-            let series = ((x.affine(1.0 / 6.0, 0.5)? * &x)? + 1.0)?;
-            let near = (delta.broadcast_mul(&eg)? * series)?;
-            let e = small.where_cond(&near, &((&eb - &eg)? / gap)?)?;
-            Ok((eb, eg, e))
-        };
-        let full = factors(&step)?;
-        let part: Vec<(Tensor, Tensor, Tensor)> = (1..m)
-            .map(|j| factors(&(&step * (j as f64 / m as f64))?))
-            .collect::<Result<_>>()?;
-        let (inv_b, inv_g) = (beta.recip()?, gamma.recip()?);
-        // One exact step of the ODE from `(u, s)` by `(eb, eg, e)`, `α = a`.
-        let advance = |u: &Tensor,
-                       s: &Tensor,
-                       a: &Tensor,
-                       (eb, eg, e): &(Tensor, Tensor, Tensor)|
-         -> Result<(Tensor, Tensor)> {
-            let a_b = a.broadcast_mul(&inv_b)?;
-            let next_s = ((s * eg)?
-                + (a.broadcast_mul(&inv_g)? * (1.0 - eg)?)?
-                + ((u.broadcast_mul(&beta)? - a)? * e)?)?;
-            let next_u = (&a_b + ((u - &a_b)? * eb)?)?;
-            Ok((next_u, next_s))
-        };
-        let a0 = alpha.narrow(1, 0, 1)?.squeeze(1)?;
-        let (mut u, mut s) = (a0.broadcast_mul(&inv_b)?, a0.broadcast_mul(&inv_g)?);
-        let (mut us, mut ss) = (Vec::new(), Vec::new());
-        for k in 0..n - 1 {
-            let a = alpha.narrow(1, k, 1)?.squeeze(1)?;
-            us.push(u.clone());
-            ss.push(s.clone());
-            for f in &part {
-                let (uj, sj) = advance(&u, &s, &a, f)?;
-                us.push(uj);
-                ss.push(sj);
-            }
-            (u, s) = advance(&u, &s, &a, &full)?;
-        }
-        us.push(u);
-        ss.push(s);
-        let positions = (n - 1) * m + 1;
-        let stack = |v: &[Tensor]| Tensor::stack(v, 1)?.reshape((l * positions, g));
-        Ok((stack(&us)?, stack(&ss)?))
+        let capture = clamped(self.log_capture.as_tensor())?
+            .exp()?
+            .reshape((1, 1))?;
+        let (u, s) = closed_form_levels(
+            &self.paths()?,
+            &self.t_len()?,
+            self.sub,
+            &log_beta,
+            &log_gamma,
+            self.rho.as_tensor(),
+            self.base.as_tensor(),
+        )?;
+        Ok((u.broadcast_mul(&capture)?, s))
     }
 
     /// `Σ_p log Σ_{ℓ,k} π_ℓ (1/n) p(x_p | ℓ, k)`, the multinomial (no
@@ -475,6 +452,7 @@ impl Fit {
         total = (total + gauss(self.rho.as_tensor(), (0.0, pr.rho_sd))?)?;
         total = (total + gauss(&spliced, pr.log_spliced)?)?;
         total = (total + gauss(self.eta.as_tensor(), (0.0, 1.0))?)?;
+        total = (total + gauss(self.log_capture.as_tensor(), CAPTURE_PRIOR)?)?;
         if let Some(t) = &self.log_t {
             total = (total + gauss(t.as_tensor(), (0.0, 1.0))?)?;
         }
@@ -556,6 +534,16 @@ impl Fit {
         Ok((lineage, time))
     }
 
+    /// `[L]` the lineages' log weights.
+    pub fn log_weights(&self) -> Result<Vec<f64>> {
+        Ok(log_softmax(self.logit_pi.as_tensor(), D::Minus1)?
+            .flatten_all()?
+            .to_vec1::<f32>()?
+            .iter()
+            .map(|&x| f64::from(x))
+            .collect())
+    }
+
     /// Positions per lineage, `(n − 1) sub + 1`.
     pub fn positions(&self) -> usize {
         (self.dims.1 - 1) * self.sub + 1
@@ -596,8 +584,121 @@ impl Fit {
                 .collect(),
             sub: self.sub,
             branch: self.branch_at()?,
+            log_capture: self.log_capture()?.clamp(-LOG_CLAMP, LOG_CLAMP),
         })
     }
+}
+
+/// `([L·n × G], [L·n × G])` the levels on paths `[L × n × H]` of
+/// durations `[L × 1]`, `sub` positions a step, every gene's `log β`, `log γ`
+/// and `b` `[1 × G]` and `ρ` `[G × H]`, in the paths' dtype.
+///
+/// `α` is constant over a step and every step is as long, so one step
+/// is `x_{k+1} = A x_k + c α_k`, `x = (ū, s̄)`, the same `A` throughout:
+/// `A^m` is `[[e^{−βmδ}, 0], [β E(mδ), e^{−γmδ}]]` and
+/// `x_k = A^k x_0 + Σ_{j<k} A^{k−1−j} c α_j`, a scan solved for every gene
+/// at once by doubling (`⌈log₂ n⌉` rounds, no loop over the path); the
+/// positions inside a step are one exact part-step from its node, all at
+/// once.
+pub(super) fn closed_form_levels(
+    paths: &Tensor,
+    t_len: &Tensor,
+    sub: usize,
+    log_beta: &Tensor,
+    log_gamma: &Tensor,
+    rho: &Tensor,
+    base: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    let (l, n, h) = paths.dims3()?;
+    let g = rho.dim(0)?;
+    let (dev, dtype) = (paths.device(), paths.dtype());
+    let small = if dtype == DType::F64 {
+        SMALL_F64
+    } else {
+        SMALL
+    };
+    let z = paths.reshape((l * n, h))?;
+    let alpha = clamped(&z.matmul(&rho.t()?)?.broadcast_add(base)?)?
+        .exp()?
+        .reshape((l, n, g))?;
+    let (beta, gamma) = (clamped(log_beta)?.exp()?, clamped(log_gamma)?.exp()?); // [1 × G]
+    let step = (t_len / (n - 1) as f64)?.unsqueeze(2)?; // [L × 1 × 1]
+    let m = sub.max(1);
+    // `e^{−βδ}`, `e^{−γδ}` and `E(δ) = (e^{−βδ} − e^{−γδ})/(γ − β)`
+    // (`δ e^{−γδ} (1 + x/2 + x²/6)` near `x = (γ − β)δ = 0`, where the
+    // difference cancels) for steps `δ` `[L × K × 1]`, each `[L × K × G]`.
+    // Both exponentials are at most 1, so `E` cannot overflow however far
+    // apart the rates are.
+    let factors = |delta: &Tensor| -> Result<(Tensor, Tensor, Tensor)> {
+        let bh = delta.broadcast_mul(&beta)?;
+        let gh = delta.broadcast_mul(&gamma)?;
+        let (eb, eg) = (bh.neg()?.exp()?, gh.neg()?.exp()?);
+        let x = (&gh - &bh)?;
+        let small = x.abs()?.lt(small)?;
+        let gap = small.where_cond(&x.ones_like()?, &(&gamma - &beta)?.broadcast_as(x.shape())?)?;
+        let series = ((x.affine(1.0 / 6.0, 0.5)? * &x)? + 1.0)?;
+        let near = (delta.broadcast_mul(&eg)? * series)?;
+        let e = small.where_cond(&near, &((&eb - &eg)? / gap)?)?;
+        Ok((eb, eg, e))
+    };
+    // Every step length needed, in one call: the doublings' `dδ`
+    // (`d = 1, 2, 4, …`; `d = 1` gives `c` too) and the part-steps' `jδ/m`.
+    let doublings: Vec<usize> = std::iter::successors(Some(1), |d| Some(d * 2))
+        .take_while(|&d| d < n.max(2))
+        .collect();
+    let multiples: Vec<f64> = doublings
+        .iter()
+        .map(|&d| d as f64)
+        .chain((1..m).map(|j| j as f64 / m as f64))
+        .collect();
+    let k = multiples.len();
+    let multiples = Tensor::from_vec(multiples, (1, k, 1), dev)?.to_dtype(dtype)?;
+    let (eb_all, eg_all, e_all) = factors(&multiples.broadcast_mul(&step)?)?; // [L × K × G]
+    let at = |t: &Tensor, i: usize, len: usize| t.narrow(1, i, len);
+    // One step from rest, `c`, and the inputs `b_0 = x_0` (at rest),
+    // `b_k = c α_{k−1}`, `[L × n × G]` per track.
+    let (eb1, eg1, e1) = (at(&eb_all, 0, 1)?, at(&eg_all, 0, 1)?, at(&e_all, 0, 1)?);
+    let c_u = (1.0 - &eb1)?.broadcast_div(&beta)?;
+    let c_s = ((1.0 - &eg1)?.broadcast_div(&gamma)? - &e1)?;
+    let (a0, a_in) = (alpha.narrow(1, 0, 1)?, alpha.narrow(1, 0, n - 1)?);
+    let mut u = Tensor::cat(&[&a0.broadcast_div(&beta)?, &a_in.broadcast_mul(&c_u)?], 1)?;
+    let mut s = Tensor::cat(&[&a0.broadcast_div(&gamma)?, &a_in.broadcast_mul(&c_s)?], 1)?;
+    // `x_k = Σ_{j≤k} A^{k−j} b_j` by doubling: `x_k += A^d x_{k−d}` for
+    // `d = 1, 2, 4, …`, `A^d x = (e^{−βdδ} ū, β E(dδ) ū + e^{−γdδ} s̄)`.
+    for (i, &d) in doublings.iter().enumerate().filter(|_| n > 1) {
+        let (eb, eg) = (at(&eb_all, i, 1)?, at(&eg_all, i, 1)?);
+        let be = at(&e_all, i, 1)?.broadcast_mul(&beta)?;
+        let (up, sp) = (u.narrow(1, 0, n - d)?, s.narrow(1, 0, n - d)?);
+        let du = up.broadcast_mul(&eb)?;
+        let ds = (up.broadcast_mul(&be)? + sp.broadcast_mul(&eg)?)?;
+        let pad = Tensor::zeros((l, d, g), dtype, dev)?;
+        u = (u + Tensor::cat(&[&pad, &du], 1)?)?;
+        s = (s + Tensor::cat(&[&pad, &ds], 1)?)?;
+    }
+    // Inside every step at once: from its node `x_k`, `α_k` held, every
+    // part-step `jδ/m` along a new axis, `[L × (n − 1) × (m − 1) × G]`.
+    let (uk, sk, ak) = (
+        u.narrow(1, 0, n - 1)?.unsqueeze(2)?,
+        s.narrow(1, 0, n - 1)?.unsqueeze(2)?,
+        alpha.narrow(1, 0, n - 1)?.unsqueeze(2)?,
+    );
+    let (us, ss) = if m > 1 {
+        let part = |t: &Tensor| at(t, doublings.len(), m - 1)?.unsqueeze(1); // [L × 1 × (m−1) × G]
+        let (eb, eg, e) = (part(&eb_all)?, part(&eg_all)?, part(&e_all)?);
+        let (a_b, a_g) = (ak.broadcast_div(&beta)?, ak.broadcast_div(&gamma)?);
+        let up = a_b.broadcast_add(&uk.broadcast_sub(&a_b)?.broadcast_mul(&eb)?)?;
+        let sp = ((sk.broadcast_mul(&eg)? + a_g.broadcast_mul(&(1.0 - &eg)?)?)?
+            + (uk.broadcast_mul(&beta)? - &ak)?.broadcast_mul(&e)?)?;
+        (Tensor::cat(&[&uk, &up], 2)?, Tensor::cat(&[&sk, &sp], 2)?)
+    } else {
+        (uk, sk)
+    };
+    let positions = (n - 1) * m + 1;
+    let stack = |v: &Tensor, last: &Tensor| -> Result<Tensor> {
+        let inner = v.reshape((l, (n - 1) * m, g))?;
+        Tensor::cat(&[&inner, &last.narrow(1, n - 1, 1)?], 1)?.reshape((l * positions, g))
+    };
+    Ok((stack(&us, &u)?, stack(&ss, &s)?))
 }
 
 /// `x` clamped to `±`[`LOG_CLAMP`] before an `exp`.

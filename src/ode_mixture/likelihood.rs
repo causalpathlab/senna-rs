@@ -18,7 +18,9 @@
 //! kinetics because the levels are smooth in time and the jitter is not;
 //! a drift smooth in time is not.
 
-use super::model::{clamped_exp, Levels, LOG_CLAMP};
+#[cfg(test)]
+use super::model::LOG_CLAMP;
+use super::model::{clamped_exp, Levels};
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
@@ -99,6 +101,7 @@ pub fn table(reads: &Reads, lv: &Levels) -> DMatrix<f64> {
 /// [`table`] with every pseudobulk's unspliced levels scaled by its jitter
 /// `e^{omega[p]}`: the shared table plus
 /// `N^u_p ω_p − N_p log((e^{ω_p} Z_u + Z_s)/(Z_u + Z_s))` at every point.
+#[cfg(test)]
 pub fn jittered_table(reads: &Reads, lv: &Levels, omega: &[f64]) -> DMatrix<f64> {
     let mut tab = table(reads, lv);
     let z = lv.totals();

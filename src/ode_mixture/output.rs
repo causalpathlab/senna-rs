@@ -1,70 +1,8 @@
-//! What a run reports beyond the cells' readout: every coordinate's
-//! summary over the chains, and the map the cells and their velocities
-//! are drawn on.
+//! The map the cells and their velocities are drawn on.
 
-use super::readout::Snapshot;
-use anyhow::Context;
+use super::readout::Mode;
 use legume_numeric::matrix::traits::RandomizedAlgs;
-use legume_numeric::mcmc::engine::diagnostics::{ess, split_rhat_chains};
 use nalgebra::{DMatrix, DVector};
-
-/// A coordinate is flagged as not mixed above this split R̂.
-pub const RHAT_FLAG: f64 = 1.05;
-
-/// One coordinate over the chains' kept draws.
-#[derive(Clone, Debug)]
-pub struct ChainStat {
-    pub mean: f64,
-    pub sd: f64,
-    /// Split R̂ over the chains (NaN with fewer than two draws a chain).
-    pub rhat: f64,
-    /// The chains' ESS summed.
-    pub ess: f64,
-}
-
-impl ChainStat {
-    /// Not mixed, or not known to be.
-    pub fn flagged(&self) -> bool {
-        self.rhat.is_nan() || self.rhat > RHAT_FLAG
-    }
-}
-
-/// Every coordinate's summary from `chains[c][s][j]` (chain, kept draw,
-/// coordinate); the coordinates the first non-empty chain has.
-pub fn chain_stats<C: AsRef<[Vec<f64>]>>(chains: &[C]) -> Vec<ChainStat> {
-    let Some(width) = chains.iter().find_map(|c| c.as_ref().first().map(Vec::len)) else {
-        return Vec::new();
-    };
-    let kept: Vec<&[Vec<f64>]> = chains
-        .iter()
-        .map(AsRef::as_ref)
-        .filter(|c| !c.is_empty())
-        .collect();
-    (0..width)
-        .map(|j| {
-            let per: Vec<Vec<f32>> = kept
-                .iter()
-                .map(|c| c.iter().map(|d| d[j] as f32).collect())
-                .collect();
-            let all: Vec<f64> = kept.iter().flat_map(|c| c.iter().map(|d| d[j])).collect();
-            let n = all.len() as f64;
-            let mean = all.iter().sum::<f64>() / n;
-            let sd = (all.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
-            let enough = per.len() >= 2 && per.iter().all(|c| c.len() >= 4);
-            let rhat = if enough {
-                f64::from(split_rhat_chains(&per))
-            } else {
-                f64::NAN
-            };
-            ChainStat {
-                mean,
-                sd,
-                rhat,
-                ess: per.iter().map(|c| f64::from(ess(c))).sum(),
-            }
-        })
-        .collect()
-}
 
 /// The map space: `log1p` reads per 10⁴ (both tracks summed), centred, on
 /// the leading principal components of the rows it is built from, the
@@ -122,42 +60,35 @@ impl MapBasis {
     }
 
     /// On the leading `k` components of the trajectories themselves: every
-    /// lineage's levels (both tracks summed) at every position as shares,
-    /// averaged over the draws `snaps`, a lineage weighted by its mean
-    /// weight. The axes are the directions the dynamics move along, not
-    /// whatever else varies most among the reads. A draw whose levels at a
-    /// position are not finite is left out of that position's mean.
-    pub fn of_trajectories(snaps: &[Snapshot], k: usize) -> anyhow::Result<Self> {
-        let first = snaps.first().context("no draw to build the map on")?;
-        let positions = first.params.positions();
-        let rows = first.params.path.len() * positions;
-        let g = first.params.beta.len();
-        let mut sum = DMatrix::<f64>::zeros(rows, g);
-        let mut n = vec![0usize; rows];
-        let mut weight = vec![0.0; rows];
-        for snap in snaps {
-            let lv = snap.params.levels();
-            anyhow::ensure!(
-                lv.u.shape() == (rows, g),
-                "every draw on the same lineages, grid and genes"
-            );
-            let totals: Vec<f64> = lv.totals().iter().map(|(u, s)| u + s).collect();
-            let fine: Vec<bool> = totals.iter().map(|t| t.is_finite() && *t > 0.0).collect();
-            for j in 0..g {
-                for r in (0..rows).filter(|&r| fine[r]) {
-                    sum[(r, j)] += (lv.u[(r, j)] + lv.s[(r, j)]) / totals[r];
+    /// lineage's levels (both tracks summed) at every position as shares at
+    /// `mode`, a lineage weighted by its weight. The axes are the directions
+    /// the dynamics move along, not whatever else varies most among the
+    /// reads. A position whose levels are not finite has no weight.
+    pub fn of_trajectories(mode: &Mode, k: usize) -> anyhow::Result<Self> {
+        let p = &mode.params;
+        let positions = p.positions();
+        let rows = p.path.len() * positions;
+        let g = p.beta.len();
+        let lv = p.levels();
+        let totals: Vec<f64> = lv.totals().iter().map(|(u, s)| u + s).collect();
+        let fine: Vec<bool> = totals.iter().map(|t| t.is_finite() && *t > 0.0).collect();
+        let shares = DMatrix::from_fn(rows, g, |r, j| {
+            if fine[r] {
+                (lv.u[(r, j)] + lv.s[(r, j)]) / totals[r]
+            } else {
+                0.0
+            }
+        });
+        let weight: Vec<f64> = (0..rows)
+            .map(|r| {
+                if fine[r] {
+                    mode.log_w[r / positions].exp()
+                } else {
+                    0.0
                 }
-            }
-            for r in (0..rows).filter(|&r| fine[r]) {
-                n[r] += 1;
-                weight[r] += snap.log_w[r / positions].exp();
-            }
-        }
-        for (r, &nr) in n.iter().enumerate().filter(|&(_, &nr)| nr > 0) {
-            sum.row_mut(r).scale_mut(1.0 / nr as f64);
-            weight[r] /= nr as f64;
-        }
-        Self::weighted(&sum, &weight, k)
+            })
+            .collect();
+        Self::weighted(&shares, &weight, k)
     }
 
     pub fn dim(&self) -> usize {

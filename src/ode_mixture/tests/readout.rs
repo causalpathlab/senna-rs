@@ -1,7 +1,7 @@
 use super::init::{first, pearson, spearman};
 use super::model::truth_params;
 use crate::ode_mixture::likelihood::Reads;
-use crate::ode_mixture::readout::{read_cells, CellReadout, Snapshot};
+use crate::ode_mixture::readout::{read_cells, CellReadout, Mode};
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 
 /// The simulator's grid, the model's and the positions a step.
@@ -22,14 +22,14 @@ fn cells() -> Sim {
     .unwrap()
 }
 
-/// The truth as one draw: lineages equally weighted, `share_sd` the jitter.
-fn truth_snap(sim: &Sim, share_sd: Option<f64>) -> Snapshot {
+/// The truth as the mode: lineages equally weighted, `share_sd` the jitter.
+fn truth_snap(sim: &Sim, share_sd: Option<f64>) -> Mode {
     let mut params = truth_params(sim, FINE, GRID);
     params.sub = SUB;
     let lineages = params.path.len();
-    Snapshot {
+    Mode {
         params,
-        log_w: vec![-(lineages as f64).ln(); lineages],
+        log_w: super::model::uniform_log_w(lineages),
         share_sd,
     }
 }
@@ -49,7 +49,7 @@ fn coverage(out: &CellReadout, t: &[f64]) -> f64 {
 #[test]
 fn at_the_truth_cells_are_read_out() {
     let sim = cells();
-    let out = read_cells(&first(&sim, sim.n_pb), &[truth_snap(&sim, None)]);
+    let out = read_cells(&first(&sim, sim.n_pb), &truth_snap(&sim, None));
     let t = &sim.truth;
     let called = (0..sim.n_pb)
         .filter(|&c| {
@@ -79,7 +79,7 @@ fn with_a_jitter_the_cells_intervals_still_cover() {
         ..SimConfig::default()
     })
     .unwrap();
-    let out = read_cells(&first(&sim, sim.n_pb), &[truth_snap(&sim, Some(1.0))]);
+    let out = read_cells(&first(&sim, sim.n_pb), &truth_snap(&sim, Some(1.0)));
     let covered = coverage(&out, &sim.truth.time);
     eprintln!("with the jitter: 90% coverage {covered:.3}");
     assert!((0.85..=0.97).contains(&covered), "coverage {covered}");
@@ -90,7 +90,7 @@ fn with_a_jitter_the_cells_intervals_still_cover() {
 #[test]
 fn at_the_truth_cells_velocities_track_the_truths() {
     let sim = cells();
-    let out = read_cells(&first(&sim, sim.n_pb), &[truth_snap(&sim, None)]);
+    let out = read_cells(&first(&sim, sim.n_pb), &truth_snap(&sim, None));
     let fine = truth_params(&sim, FINE, FINE);
     let (du, ds) = fine.velocities();
     let t = &sim.truth;
@@ -117,7 +117,7 @@ fn at_the_truth_cells_velocities_track_the_truths() {
 #[test]
 fn at_the_truth_cells_log_velocities_track_the_truths() {
     let sim = cells();
-    let out = read_cells(&first(&sim, sim.n_pb), &[truth_snap(&sim, None)]);
+    let out = read_cells(&first(&sim, sim.n_pb), &truth_snap(&sim, None));
     let fine = truth_params(&sim, FINE, FINE);
     let lv = fine.levels();
     let (du, ds) = fine.velocities_of(&lv);
@@ -155,19 +155,16 @@ fn intervals_are_quantiles(t_len: f64) {
     let (params, log_w) = (snap.params.clone(), snap.log_w.clone());
     let lv = params.levels();
     let tab = table(&reads, &lv);
-    let out = read_cells(&reads, &[snap]);
-    let position = t_len / (lv.points - 1) as f64;
-    assert!(
-        (out.time_bin - position).abs() < 1e-12,
-        "bin {}",
-        out.time_bin
-    );
+    let out = read_cells(&reads, &snap);
+    // Time is each lineage's own phase, so a position is a share of the
+    // grid whatever the duration.
+    let position = 1.0 / (lv.points - 1) as f64;
     for c in 0..50 {
         let (lp, _) = log_posterior_row(&tab, &log_w, lv.points, c);
         let mut m: Vec<(f64, f64)> = lp
             .iter()
             .enumerate()
-            .map(|(r, x)| (params.time_at(r / lv.points, r % lv.points), x.exp()))
+            .map(|(r, x)| (params.phase_at(r % lv.points), x.exp()))
             .collect();
         m.sort_by(|a, b| a.0.total_cmp(&b.0));
         let point = |q: f64| {
@@ -193,6 +190,35 @@ fn intervals_are_quantiles(t_len: f64) {
     }
 }
 
+/// Time is local to each lineage: on `[0, 1]` for every cell whatever the
+/// lineages' durations, a lineage three times as long reading out on the
+/// same scale as the other.
+#[test]
+fn the_time_is_each_lineages_own_phase() {
+    let sim = cells();
+    let mut snap = truth_snap(&sim, None);
+    snap.params.t_len = vec![1.0, 3.0];
+    let reads = first(&sim, 200);
+    let out = read_cells(&reads, &snap);
+    let unit = |v: &[f64]| v.iter().all(|t| (0.0..=1.0).contains(t));
+    assert!(
+        unit(&out.time_mean),
+        "a mean past 1: {:?}",
+        out.time_mean.iter().cloned().fold(0.0, f64::max)
+    );
+    assert!(unit(&out.time_lo) && unit(&out.time_hi));
+    let on_long: Vec<usize> = (0..200).filter(|&c| out.lineage[c][1] > 0.5).collect();
+    assert!(!on_long.is_empty(), "no cell on the long lineage");
+    let late = on_long
+        .iter()
+        .map(|&c| out.time_mean[c])
+        .fold(0.0, f64::max);
+    assert!(
+        late > 0.5,
+        "the long lineage's cells never reach half its phase: {late}"
+    );
+}
+
 /// A cell no row can explain (its reads not finite) reads out as unknown,
 /// NaN throughout, not as a confident call; the other cells as before.
 #[test]
@@ -202,14 +228,14 @@ fn a_cell_no_row_explains_is_unknown() {
     let mut u = sim.u[..3 * g].to_vec();
     u[g] = f64::NAN;
     let reads = Reads::new(&u, &sim.s[..3 * g], 3, g);
-    let out = read_cells(&reads, &[truth_snap(&sim, None)]);
+    let out = read_cells(&reads, &truth_snap(&sim, None));
     assert!(out.time_mean[1].is_nan() && out.time_lo[1].is_nan() && out.time_sd[1].is_nan());
     assert!(out.lineage[1].iter().all(|x| x.is_nan()));
     assert!(out.velocity_s.row(1).iter().all(|x| x.is_nan()));
     assert!(out.time_mean[0].is_finite() && out.time_mean[2].is_finite());
 }
 
-/// The readout's time at a larger size: 20k cells, 1000 genes, 4 draws.
+/// The readout's time at a larger size: 20k cells, 1000 genes.
 #[test]
 #[ignore = "benchmark"]
 fn benchmark_the_readout() {
@@ -224,14 +250,13 @@ fn benchmark_the_readout() {
     })
     .unwrap();
     let reads = first(&sim, sim.n_pb);
-    let snaps = vec![truth_snap(&sim, Some(0.1)); 4];
+    let snap = truth_snap(&sim, Some(0.1));
     let t0 = std::time::Instant::now();
-    let out = read_cells(&reads, &snaps);
+    let out = read_cells(&reads, &snap);
     eprintln!(
-        "readout of {} cells × {} genes over {} draws: {:.2} s",
+        "readout of {} cells × {} genes: {:.2} s",
         sim.n_pb,
         sim.n_genes,
-        snaps.len(),
         t0.elapsed().as_secs_f64()
     );
     assert!(out.time_mean.iter().all(|t| t.is_finite()));
@@ -248,22 +273,20 @@ fn an_underflowed_level_has_no_log_velocity() {
     assert_eq!(log_rate(-1.0, 0.0, f64::NAN, 1.0), 0.0);
 }
 
-/// Every cell's posterior on the grid, over two draws, is a distribution
-/// whose lineage masses and mean time are the readout's.
+/// Every cell's posterior on the grid is a distribution whose lineage
+/// masses and mean time are the readout's.
 #[test]
 fn the_grid_posterior_is_the_readouts() {
     use crate::ode_mixture::readout::grid_posterior;
     let sim = cells();
-    let a = truth_snap(&sim, None);
-    let mut b = a.clone();
-    b.log_w = vec![0.8f64.ln(), 0.2f64.ln()];
-    let snaps = [a, b];
+    let mut mode = truth_snap(&sim, None);
+    mode.log_w = vec![0.8f64.ln(), 0.2f64.ln()];
     let reads = first(&sim, 200);
-    let out = read_cells(&reads, &snaps);
-    let grid = grid_posterior(&reads, &snaps);
+    let out = read_cells(&reads, &mode);
+    let grid = grid_posterior(&reads, &mode);
     let positions = grid.positions;
     assert_eq!(grid.post.shape(), (200, 2 * positions));
-    assert_eq!(grid.time.len(), 2 * positions);
+    assert_eq!(grid.phase.len(), 2 * positions);
     // The phase runs 0 to 1 along each lineage's grid.
     assert_eq!((grid.phase[0], grid.phase[positions - 1]), (0.0, 1.0));
     assert_eq!(grid.phase[positions], 0.0);
@@ -281,7 +304,7 @@ fn the_grid_posterior_is_the_readouts() {
                 "cell {c} lineage {l}"
             );
         }
-        let t: f64 = row.iter().zip(&grid.time).map(|(q, t)| q * t).sum();
+        let t: f64 = row.iter().zip(&grid.phase).map(|(q, t)| q * t).sum();
         assert!(
             (t - out.time_mean[c]).abs() < 1e-9,
             "cell {c}: {t} vs {}",

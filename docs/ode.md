@@ -3,15 +3,14 @@
 Every pseudobulk sits on one lineage's trajectory at one time; the trajectory
 is the splicing ODE solved exactly, driven by the lineage's transcription.
 Fitted on the finest pseudobulks and the most variable genes by a climb to a
-mode, then blocked Gibbs chains from it; every cell is read out from the
-chains' draws. It builds on cell2fate (Aivazidis et al., *Nature Methods*
+mode; every cell is read out at the mode. It builds on cell2fate (Aivazidis et al., *Nature Methods*
 2025) and Chronocell (Fang, Gorin and Pachter, *PLOS Computational Biology*
 2025).
 
 ```bash
-senna ode tracks.zarr -o out                     # two lineages on a shared trunk
+senna ode tracks.zarr -o out                     # two lineages, each on its own time
 senna ode tracks.zarr -o out --lineages 1        # one trajectory
-senna ode tracks.zarr -o out --no-trunk          # lineages apart from the start
+senna ode tracks.zarr -o out --trunk             # lineages on a shared trunk, one clock
 senna view -f out.senna.json                     # y: time, v: velocity field
 ```
 
@@ -49,10 +48,11 @@ The depth is the pseudobulk's total over the model's, so the likelihood is a
 multinomial over both tracks: a change in total mRNA shared by every gene is
 not seen.
 
-- **Shared trunk** (the default with two or more lineages): every lineage
-  follows one path until a branch time `t_b` and departs from it smoothly
-  after, `z_ℓ = z_0 + √2 r(t; t_b) C η_ℓ`, with `r = 1 − exp(−((t − t_b)₊/κ)²)`.
-  `--no-trunk` gives each lineage its own path from the start.
+- **Local time** (the default): every lineage has its own path and its own
+  time on `[0, 1]`; nothing aligns one lineage's clock with another's.
+  With `--trunk` every lineage follows lineage 0's path until a branch time
+  `t_b` and departs from it smoothly after, `z_ℓ = z_0 + √2 r(t; t_b) C η_ℓ`,
+  with `r = 1 − exp(−((t − t_b)₊/κ)²)`, all on one clock.
 - **Unspliced jitter** (on unless `--no-jitter`): every pseudobulk's unspliced
   levels are scaled by `e^{ω_p}`, `ω_p ~ N(0, σ²)` with `σ` fitted, so a
   pseudobulk's nuclear fraction does not pass for kinetics.
@@ -65,23 +65,21 @@ left free. Only the invariants are reported: times, rates and levels.
 
 1. **Climb** (`--steps`, `--lr`): Adam on the marginal of every pseudobulk
    over its lineage and time, from several starts: the k-means start, the
-   same with each lineage turned round, and with two lineages every tree
-   start. The best objective wins; a start whose objective is not finite
-   never does.
-2. **Chains** (`--chains`, `--sweeps`, `--burn`): blocked Gibbs from the
-   climb's mode — the pseudobulks' lineage and time exactly, every gene's
-   rates by generalized elliptical slice moves on its Laplace approximation
-   (bounded Newton), the paths by slice moves on theirs (banded in the path,
-   factored once a refit), the branch time and the jitter. Both rates are
-   kept between a half-life of one fine time step and four time units (the
-   first lineage's duration; a bounded logit link, the rates' prior carried
-   by its Jacobian): past either end the reads cannot tell a rate apart and
-   it would drift.
-   Proposals are refitted every `--laplace-every` sweeps during burn-in and
-   frozen after, so the kept chain is a homogeneous Markov chain.
-3. **Cells**: every cell is scored against `--snapshot-every`'s draws of the
-   chains, at its own depth, for its lineage and time posteriors and its
-   velocity.
+   same with each lineage turned round, and the tree starts, trees on the
+   pseudobulks' nearest-neighbour graph, one per end of the tree taken as
+   the root, or the one grown from the root the user names (`--root-cells`,
+   cells at the root of the trajectory, one a line: a stem inside the tree
+   is no end of it). On a trunk the tree starts alone run. The best
+   objective wins; a start whose objective is not finite never does.
+2. **Genes at the mode**: every pseudobulk sits at its most probable row
+   under the mode, and every gene's rates are the mode of its conditional
+   there (bounded Newton), reported with the sds of the Laplace
+   approximation. Both rates are kept between a half-life of one fine time
+   step and four time units (the first lineage's duration; a bounded logit
+   link): past either end the reads cannot tell a rate apart and it would
+   drift.
+3. **Cells**: every cell is scored against the mode, at its own depth, for
+   its lineage and time posteriors and its velocity.
 
 No root is inferred. Splicing tells which way genes move along a path, so
 the climb keeps each lineage the way round its kinetics fit best; but where
@@ -90,20 +88,19 @@ a path are not identifiable from the reads, only from the cells' identity. A
 lineage's `t = 0` is the fit's convention, not a root.
 
 Along one direction the data say little: a warp of the clock traded against
-every gene's speed. This is weak identifiability, not a sampler defect, so
-every gene's rates are reported with their split R̂ and effective sample size
-and flagged above R̂ 1.05.
+every gene's speed. This is weak identifiability: the rates' bounds hold it,
+and a gene's sd reports what the reads pin.
 
 ## Outputs
 
 | file | holds |
 |---|---|
-| `{out}.cell_time.parquet` | every cell's `lineage`, `tau` with `tau_sd` and the 90% interval `tau_lo`/`tau_hi`, and `p_L1…` lineage posteriors |
-| `{out}.cell_embedding.parquet` | every cell on the map: its log1p reads per 10⁴ on the leading `--map-pcs` components of the fitted trajectories (every lineage's levels over the draws), so the axes follow the dynamics, not other variation among the cells |
+| `{out}.cell_time.parquet` | every cell's `lineage`, `tau` (its lineage's own time on `[0, 1]`; lineages are not put on one clock) with `tau_sd` and the 90% interval `tau_lo`/`tau_hi`, and `p_L1…` lineage posteriors |
+| `{out}.cell_embedding.parquet` | every cell on the map: its log1p reads per 10⁴ on the leading `--map-pcs` components of the fitted trajectories (every lineage's levels at the mode), so the axes follow the dynamics, not other variation among the cells |
 | `{out}.cell_velocity.parquet` | every cell's velocity on that map, `d log level/dt` through the chain rule |
-| `{out}.gene_rates.parquet` | every gene's `log_gamma` and `log_ratio` (log γ/β) with sd, R̂, ESS, and `flagged` |
-| `{out}.pb_time.parquet` | every finest pseudobulk's posterior over lineage and time, a row per `(pb, lineage, position)` with its `phase` (the position's share of the lineage's grid, the same in every draw), the draws' mean `time` there and mass `q`; `pb` as `{out}.cell_to_pb.parquet`'s finest level |
-| `{out}.branch_time.tsv` | with a shared trunk, every other lineage's branch time off it over the chains (mean and sd, R̂, ESS, `flagged`), on `pb_time`'s phase scale |
+| `{out}.gene_rates.parquet` | every gene's `log_gamma` and `log_ratio` (log γ/β) at the mode with the sd of its Laplace approximation |
+| `{out}.pb_time.parquet` | every finest pseudobulk's posterior over lineage and time, a row per `(pb, lineage, position)` with its `phase` (the position's share of the lineage's grid, its lineage's own time) and mass `q`; `pb` as `{out}.cell_to_pb.parquet`'s finest level |
+| `{out}.branch_time.tsv` | with `--trunk`, every other lineage's branch time off it at the mode, on `pb_time`'s phase scale |
 | `{out}.senna.json` | the run manifest `senna view` and the MCP tools read |
 
 In `senna view`, `y` colours the cells by time, `v` draws the velocity field

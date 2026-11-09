@@ -12,7 +12,8 @@
 //! 0's path plus `√2 r(t) w_ℓ(t)`, `w_ℓ` a draw from the prior and
 //! `r(t) = 1 − e^{−((t − t_b)/κ)²}` past the branch `t_b` (0 before), so
 //! value and slope are continuous there; far past it the lineages are as
-//! far apart as two independent draws. Every lineage starts at steady state
+//! far apart as two independent draws, plus [`SimConfig::part`] along a
+//! direction of the lineage's own. Every lineage starts at steady state
 //! on the same path, so the trunk's levels are shared too.
 
 use super::kernel::GridPrior;
@@ -44,9 +45,17 @@ pub struct SimConfig {
     /// `ω_p ~ N(0, j²)`: a jitter of the unspliced share from pseudobulk to
     /// pseudobulk, no kinetics in it, drawn apart from every other draw.
     pub share_jitter: f64,
+    /// Every unspliced read captured at `e^c` against the spliced: one
+    /// global log capture `c`, on top of any jitter.
+    pub log_capture: f64,
     /// With `Some(f)` and two lineages or more, every lineage on lineage
     /// 0's path until `f T`, apart after.
     pub branch_at: Option<f64>,
+    /// How far every branching lineage drifts from the trunk past the
+    /// branch, on its own fixed direction, on top of its draw (both scaled
+    /// by the branch's ramp, so far past the branch the drift is `√2`
+    /// this): `0` lets two fates wander back together, as a draw may.
+    pub part: f64,
     pub seed: u64,
 }
 
@@ -64,7 +73,9 @@ impl Default for SimConfig {
             rho_sd: 0.7,
             steady: false,
             share_jitter: 0.0,
+            log_capture: 0.0,
             branch_at: None,
+            part: 0.0,
             seed: 1,
         }
     }
@@ -85,9 +96,9 @@ pub struct Truth {
     pub time: Vec<f64>,
     /// Every pseudobulk on the shared trunk (at or before the branch).
     pub trunk: Vec<bool>,
-    /// `[P]` every pseudobulk's jitter of its unspliced share
-    /// ([`SimConfig::share_jitter`]).
-    pub omega: Vec<f64>,
+    /// The global log capture of the unspliced reads
+    /// ([`SimConfig::log_capture`]).
+    pub log_capture: f64,
     /// `[P × G]` the reads' means.
     pub u_mean: Vec<f64>,
     pub s_mean: Vec<f64>,
@@ -138,11 +149,23 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
         let width = cfg.kappa * cfg.t_len;
         let (trunk, others) = path.split_at_mut(1);
         for other in others {
+            // The lineage's own direction away from the trunk (no draw
+            // without one: a simulation without it replays as before).
+            let mut drift = vec![0.0; h];
+            if cfg.part > 0.0 {
+                for x in &mut drift {
+                    *x = unit.sample(&mut rng);
+                }
+                let norm = drift.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-12);
+                for x in &mut drift {
+                    *x *= cfg.part / norm;
+                }
+            }
             for (k, (z, z0)) in other.iter_mut().zip(&trunk[0]).enumerate() {
                 let after = (k as f64 * step - tb).max(0.0) / width;
                 let ramp = std::f64::consts::SQRT_2 * (1.0 - (-after * after).exp());
-                for (zd, z0d) in z.iter_mut().zip(z0) {
-                    *zd = z0d + ramp * *zd;
+                for ((zd, z0d), dr) in z.iter_mut().zip(z0).zip(&drift) {
+                    *zd = z0d + ramp * (*zd + dr);
                 }
             }
         }
@@ -186,7 +209,7 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
         let k = rng.random_range(0..n);
         let t = k as f64 * step;
         omega[p] = jitter.sample(&mut jitter_rng);
-        let scale = omega[p].exp();
+        let scale = (omega[p] + cfg.log_capture).exp();
         let total: f64 = (0..g)
             .map(|j| traj[lin][j].0[k] * scale + traj[lin][j].1[k])
             .sum();
@@ -224,7 +247,7 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
             lineage,
             time,
             trunk,
-            omega,
+            log_capture: cfg.log_capture,
             u_mean,
             s_mean,
         },

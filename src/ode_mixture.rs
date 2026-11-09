@@ -4,6 +4,7 @@
 
 pub mod band;
 pub mod blocks;
+pub mod coarsen;
 pub mod command;
 pub mod counts;
 pub mod fit;
@@ -14,7 +15,7 @@ pub mod likelihood;
 pub mod model;
 pub mod output;
 pub mod readout;
-pub mod sampler;
+pub mod refine;
 #[cfg(test)]
 pub mod sim;
 

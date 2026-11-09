@@ -231,6 +231,31 @@ fn the_share_term_is_the_hosts() {
     assert!(rel(f64::from(got), want) < 1e-5, "{got} vs {want}");
 }
 
+/// The fit's capture is the host's: with the unspliced reads captured at
+/// `e^c`, the marginal is the host's over [`table`] at the captured levels.
+#[test]
+fn the_fits_capture_is_the_hosts() {
+    let sim = simulate(&SimConfig {
+        fine: 133,
+        log_capture: -0.7,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let params = truth_params(&sim, 133, 45);
+    assert_eq!(params.log_capture, -0.7);
+    let prior = GridPrior::new(45, 1.0, 0.25).unwrap();
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let fit = Fit::from_params(&params, &prior, &Device::Cpu).unwrap();
+    let got = fit
+        .log_marginal(&fit.reads(&reads).unwrap())
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    let want = host_marginal(&table(&reads, &params.levels()), -45f64.ln());
+    assert!(rel(f64::from(got), want) < 1e-5, "{got} vs {want}");
+    assert!((fit.params().unwrap().log_capture + 0.7).abs() < 1e-6);
+}
+
 /// With a shared trunk every lineage's levels are lineage 0's up to the
 /// branch, exactly (the same path and clock from the same steady start),
 /// and part after it; the branch time reads back.
@@ -247,7 +272,7 @@ fn with_a_trunk_the_lineages_levels_agree_before_the_branch() {
     let prior = GridPrior::new(45, 1.0, 0.25).unwrap();
     let fit = Fit::from_params(&params, &prior, &Device::Cpu)
         .unwrap()
-        .with_trunk(&params, &prior, 0.4)
+        .with_trunk(&params, &prior, &[0.4])
         .unwrap();
     assert!((fit.branch_at().unwrap().unwrap()[0] - 0.4).abs() < 1e-5);
     let (u, _) = fit.levels().unwrap();

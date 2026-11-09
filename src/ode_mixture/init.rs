@@ -9,20 +9,24 @@
 //!    grid; `γ` at the prior's mean, `γ/β` every gene's unspliced over
 //!    spliced reads.
 //!
-//! A tree (two lineages on a shared trunk) is started apart
+//! A tree (`L` lineages on a shared trunk) is started apart
 //! ([`tree_starts`]): k-means would cut the trunk off as a cluster of its
 //! own. Geodesic distances on the scores' nearest-neighbour graph find the
-//! three ends of the tree; with one end as the root the other two are the
-//! tips, and the Gromov products against them split the pseudobulks into
-//! the trunk (on both lineages) and two branches, every part ordered by its
-//! distance from the root onto one clock shared by both lineages.
+//! `L + 1` ends of the tree; with one end as the root the others are the
+//! tips, and the Gromov products against them put every pseudobulk on the
+//! lineage whose way it shares longest, the trunk on several, every part
+//! ordered by its distance from the root onto one clock shared by all. A
+//! stem inside the tree is no end of it, so a root the user names (its
+//! pseudobulks as one node) grows the one tree start from it instead
+//! ([`tree_start_from_roots`]).
 //!
-//! [`climb`] then runs Adam from the k-means start, and again with each
-//! lineage turned round, keeping a turn that raises the objective (the
-//! start fixes the order; the splicing says which way round fits); with
-//! two lineages also from every tree start, and keeps the best of all.
-//! This is a search for the climb's basin, not for a root: a lineage's
-//! `t = 0` is a convention.
+//! [`climb`] runs Adam from every start and keeps the best: under a trunk
+//! the tree starts alone (a k-means start has no trunk); with the lineages
+//! apart the k-means start, then with each lineage turned round in turn,
+//! keeping a turn that raises the objective (the start fixes the order; the
+//! splicing says which way round fits), then the tree starts too. This is
+//! a search for the climb's basin, not for a root: a lineage's `t = 0` is
+//! a convention.
 
 use super::blocks::GenePrior;
 use super::fit::{Fit, SHARE_START};
@@ -30,6 +34,7 @@ use super::kernel::GridPrior;
 use super::likelihood::Reads;
 use super::model::Params;
 use legume_numeric::candle::candle_core::{Device, Result};
+use legume_numeric::matrix::traits::RandomizedAlgs;
 use nalgebra::DMatrix;
 
 /// What [`climb`] fits.
@@ -53,6 +58,10 @@ pub struct Climb {
     /// Every other lineage on lineage 0's trunk until a branch time it
     /// fits, one clock for all ([`Fit::with_trunk`]).
     pub trunk: bool,
+    /// The pseudobulks at the root of the trajectory, when the user names
+    /// its cells: the one tree start grows from them as one root
+    /// ([`tree_start_from_roots`]); empty, every end of the tree is tried.
+    pub roots: Vec<usize>,
 }
 
 /// Bandwidth, on `[0, 1]`, of the smoothing of scores onto the grid.
@@ -68,10 +77,12 @@ pub type Places = Vec<Vec<(usize, f64)>>;
 /// `([P × G] centred log spliced shares, [G] their means)`.
 fn log_shares(reads: &Reads) -> (DMatrix<f64>, Vec<f64>) {
     let (p, g) = (reads.s.nrows(), reads.s.ncols());
-    let mut y = DMatrix::from_fn(p, g, |i, j| {
-        let total = reads.s.row(i).sum() + 0.5 * g as f64;
-        ((reads.s[(i, j)] + 0.5) / total).ln()
-    });
+    let total: Vec<f64> = reads
+        .s
+        .row_iter()
+        .map(|r| r.sum() + 0.5 * g as f64)
+        .collect();
+    let mut y = DMatrix::from_fn(p, g, |i, j| ((reads.s[(i, j)] + 0.5) / total[i]).ln());
     let mean: Vec<f64> = (0..g).map(|j| y.column(j).mean()).collect();
     for (j, m) in mean.iter().enumerate() {
         y.column_mut(j).add_scalar_mut(-m);
@@ -79,16 +90,14 @@ fn log_shares(reads: &Reads) -> (DMatrix<f64>, Vec<f64>) {
     (y, mean)
 }
 
-/// `([P × H] scores, [G × H] loadings)` of `y` on its leading axes.
-fn axes(y: &DMatrix<f64>, h: usize) -> (DMatrix<f64>, DMatrix<f64>) {
-    let svd = y.clone().svd(true, true);
-    let (u, v) = (
-        svd.u.expect("asked for"),
-        svd.v_t.expect("asked for").transpose(),
-    );
-    let h = h.min(svd.singular_values.len());
-    let scores = DMatrix::from_fn(y.nrows(), h, |i, d| u[(i, d)] * svd.singular_values[d]);
-    (scores, v.columns(0, h).into_owned())
+/// `([P × H] scores, [G × H] loadings)` of `y` on its leading axes, by
+/// randomized SVD (a fixed start, so reproducible): only `H` axes are read,
+/// and a full SVD of thousands of pseudobulks by every gene takes minutes.
+pub(crate) fn axes(y: &DMatrix<f64>, h: usize) -> (DMatrix<f64>, DMatrix<f64>) {
+    let h = h.min(y.nrows()).min(y.ncols());
+    let (u, d, v) = y.rsvd(h).expect("a non-empty matrix");
+    let scores = DMatrix::from_fn(y.nrows(), h, |i, k| u[(i, k)] * d[k]);
+    (scores, v)
 }
 
 /// `k` clusters of the rows by Lloyd's algorithm, started at far-apart rows
@@ -139,11 +148,16 @@ fn kmeans(x: &DMatrix<f64>, k: usize) -> Vec<usize> {
     label
 }
 
+/// `[P × H]` the pseudobulks' scores on the leading axes of their log
+/// spliced shares.
+fn scores_of(reads: &Reads, h: usize) -> DMatrix<f64> {
+    let (y, _) = log_shares(reads);
+    axes(&y, h).0
+}
+
 /// Every pseudobulk's start lineage and its order within it on `[0, 1]`.
 pub fn start_order(reads: &Reads, lineages: usize, h: usize) -> (Vec<usize>, Vec<f64>) {
-    let (y, _) = log_shares(reads);
-    let (scores, _) = axes(&y, h);
-    order_of(&scores, lineages)
+    order_of(&scores_of(reads, h), lineages)
 }
 
 fn order_of(scores: &DMatrix<f64>, lineages: usize) -> (Vec<usize>, Vec<f64>) {
@@ -193,13 +207,21 @@ fn knn_graph(x: &DMatrix<f64>) -> Vec<Vec<(usize, f64)>> {
 
 /// Every node's geodesic distance from `from` (∞ where unreachable).
 fn geodesic(adj: &[Vec<(usize, f64)>], from: usize) -> Vec<f64> {
+    geodesic_from(adj, &[from])
+}
+
+/// Every node's geodesic distance to the nearest of `sources` (∞ where
+/// none is reachable): the sources as one node.
+fn geodesic_from(adj: &[Vec<(usize, f64)>], sources: &[usize]) -> Vec<f64> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
     let mut dist = vec![f64::INFINITY; adj.len()];
     let mut heap = BinaryHeap::new();
-    dist[from] = 0.0;
-    // Non-negative floats order as their bits.
-    heap.push(Reverse((0f64.to_bits(), from)));
+    for &from in sources {
+        dist[from] = 0.0;
+        // Non-negative floats order as their bits.
+        heap.push(Reverse((0f64.to_bits(), from)));
+    }
     while let Some(Reverse((d, a))) = heap.pop() {
         let d = f64::from_bits(d);
         if d > dist[a] {
@@ -222,101 +244,205 @@ fn farthest(d: &[f64]) -> usize {
         .expect("rows")
 }
 
-/// Starts for two lineages on a shared trunk, one per end of the tree taken
-/// as the root; none when the graph falls apart.
-pub fn tree_starts(reads: &Reads, h: usize) -> Vec<Places> {
-    let (y, _) = log_shares(reads);
-    let (scores, _) = axes(&y, h);
-    tree_places(&scores)
+/// Starts for `lineages` on a shared trunk, one per end of the tree taken
+/// as the root (`lineages + 1` ends); none with one lineage, too few
+/// pseudobulks, or the graph falling apart.
+pub fn tree_starts(reads: &Reads, h: usize, lineages: usize) -> Vec<Places> {
+    tree_places(&scores_of(reads, h), lineages)
 }
 
-fn tree_places(scores: &DMatrix<f64>) -> Vec<Places> {
-    let p = scores.nrows();
-    if p < 3 {
-        return Vec::new();
-    }
-    let adj = knn_graph(scores);
-    let d0 = geodesic(&adj, 0);
-    if d0.iter().any(|d| !d.is_finite()) {
-        return Vec::new();
-    }
-    // The ends: the farthest from anywhere, the farthest from it, and the
-    // farthest from both.
-    let e1 = farthest(&d0);
-    let d1 = geodesic(&adj, e1);
-    let e2 = farthest(&d1);
-    let d2 = geodesic(&adj, e2);
-    let near: Vec<f64> = (0..p).map(|a| d1[a].min(d2[a])).collect();
-    let e3 = farthest(&near);
-    let d3 = geodesic(&adj, e3);
-    let ends = [(e1, &d1), (e2, &d2), (e3, &d3)];
-    (0..3)
-        .filter_map(|r| {
-            let (_, dr) = ends[r];
-            tree_from_root(dr, ends[(r + 1) % 3], ends[(r + 2) % 3])
+/// The one tree start from a root the user names: the pseudobulks `roots`
+/// as one node (every distance from the root the distance to the nearest
+/// of them, so no one of them decides the tree), its tips the `lineages`
+/// ends farthest from it (and from one another). A stem in the middle of a
+/// tree is no end of it, so no end taken as the root finds it; `None` as
+/// [`tree_starts`] is empty, with no root, or when fewer branch.
+pub fn tree_start_from_roots(
+    reads: &Reads,
+    h: usize,
+    lineages: usize,
+    roots: &[usize],
+) -> Option<Places> {
+    tree_place_from_roots(&scores_of(reads, h), lineages, roots)
+}
+
+/// A tree needs two lineages and more pseudobulks than its ends.
+fn tree_sized(p: usize, lineages: usize) -> bool {
+    lineages > 1 && p > lineages + 1
+}
+
+/// Every node's geodesic distances to the nearest of `sources`, `None`
+/// where the graph falls apart.
+fn reaching(adj: &[Vec<(usize, f64)>], sources: &[usize]) -> Option<Vec<f64>> {
+    let d = geodesic_from(adj, sources);
+    d.iter().all(|d| d.is_finite()).then_some(d)
+}
+
+/// `count` ends, each the farthest from `near` (the distance to the ends
+/// so far) and then folded into it, with its geodesic distances.
+fn farthest_ends(
+    adj: &[Vec<(usize, f64)>],
+    mut near: Vec<f64>,
+    count: usize,
+) -> Vec<(usize, Vec<f64>)> {
+    (0..count)
+        .map(|_| {
+            let e = farthest(&near);
+            let d = geodesic(adj, e);
+            for (n, &x) in near.iter_mut().zip(&d) {
+                *n = n.min(x);
+            }
+            (e, d)
         })
         .collect()
 }
 
-/// The trunk and the branches to the tips `a`, `b` seen from the root
-/// (`dr` its distances): a pseudobulk's Gromov product with a tip is how
-/// far it runs along the way to that tip, the tips' with each other where
-/// the branches part.
-fn tree_from_root(
-    dr: &[f64],
-    (a, da): (usize, &Vec<f64>),
-    (b, db): (usize, &Vec<f64>),
+fn tree_place_from_roots(
+    scores: &DMatrix<f64>,
+    lineages: usize,
+    roots: &[usize],
 ) -> Option<Places> {
-    let p = dr.len();
-    let fork = 0.5 * (dr[a] + dr[b] - da[b]);
-    // The trunk, the branch to `a`, the branch to `b`.
-    let mut part = vec![Vec::new(); 3];
-    for x in 0..p {
-        let ga = 0.5 * (dr[a] + dr[x] - da[x]);
-        let gb = 0.5 * (dr[b] + dr[x] - db[x]);
-        let which = if ga.max(gb) <= fork {
-            0
-        } else if ga > gb {
-            1
-        } else {
-            2
-        };
-        part[which].push(x);
-    }
-    if part[1].is_empty() || part[2].is_empty() {
+    if roots.is_empty() || !tree_sized(scores.nrows(), lineages) {
         return None;
     }
-    for rows in &mut part {
-        rows.sort_by(|&i, &j| dr[i].total_cmp(&dr[j]));
+    let adj = knn_graph(scores);
+    let dr = reaching(&adj, roots)?;
+    let tips = farthest_ends(&adj, dr.clone(), lineages);
+    tree_from_root(&dr, &tips)
+}
+
+fn tree_places(scores: &DMatrix<f64>, lineages: usize) -> Vec<Places> {
+    if !tree_sized(scores.nrows(), lineages) {
+        return Vec::new();
     }
-    // One clock: the trunk's share of the pseudobulks is its share of time.
-    let tb = part[0].len() as f64 / p as f64;
+    let adj = knn_graph(scores);
+    let Some(d0) = reaching(&adj, &[0]) else {
+        return Vec::new();
+    };
+    // The ends, farthest first: the farthest from anywhere, then each the
+    // farthest from the ends so far.
+    let e1 = farthest(&d0);
+    let d1 = geodesic(&adj, e1);
+    let mut ends = vec![(e1, d1.clone())];
+    ends.extend(farthest_ends(&adj, d1, lineages));
+    (0..ends.len())
+        .filter_map(|r| {
+            let mut tips = ends.clone();
+            let (_, dr) = tips.remove(r);
+            tree_from_root(&dr, &tips)
+        })
+        .collect()
+}
+
+/// The tree from the root (`dr` its distances) to the `tips`, tip 0's way
+/// the spine (lineage 0) every other lineage parts from: a pseudobulk's
+/// Gromov product with a tip is how far it runs along the way to that
+/// tip, so it is on the lineage whose way it shares longest, and lineage
+/// `a` parts from the spine where its tip's way does; a pseudobulk before
+/// two lineages' parting is on both.
+fn tree_from_root(dr: &[f64], tips: &[(usize, Vec<f64>)]) -> Option<Places> {
+    let (p, l) = (dr.len(), tips.len());
+    let along = |x: usize, a: usize| 0.5 * (dr[tips[a].0] + dr[x] - tips[a].1[x]);
+    let on: Vec<usize> = (0..p)
+        .map(|x| {
+            (0..l)
+                .max_by(|&a, &b| along(x, a).total_cmp(&along(x, b)))
+                .expect("a tip")
+        })
+        .collect();
+    if (0..l).any(|a| !on.contains(&a)) {
+        return None;
+    }
+    // A pseudobulk's progress is how far it runs along its own lineage's
+    // way; it is on another lineage's way too while short of their
+    // parting (lineage 0, the spine, parts from lineage a at a's fork).
+    let fork: Vec<f64> = (0..l)
+        .map(|a| {
+            if a == 0 {
+                f64::INFINITY
+            } else {
+                along(tips[0].0, a)
+            }
+        })
+        .collect();
+    let progress: Vec<f64> = (0..p).map(|x| along(x, on[x])).collect();
+    let shared = |x: usize, b: usize| b != on[x] && progress[x] <= fork[on[x]].min(fork[b]);
+    let mut by_progress: Vec<usize> = (0..p).collect();
+    by_progress.sort_by(|&i, &j| progress[i].total_cmp(&progress[j]));
+    // One clock: on every lineage, the pseudobulks it shares come first,
+    // their share of all pseudobulks their share of time, its own after.
     let mut places: Places = vec![Vec::new(); p];
-    for (i, &x) in part[0].iter().enumerate() {
-        let t = tb * i as f64 / part[0].len() as f64;
-        places[x] = vec![(0, t), (1, t)];
-    }
-    for (l, rows) in part[1..].iter().enumerate() {
-        for (i, &x) in rows.iter().enumerate() {
-            places[x] = vec![(l, tb + (1.0 - tb) * (i + 1) as f64 / rows.len() as f64)];
+    for a in 0..l {
+        let (with, own): (Vec<usize>, Vec<usize>) = by_progress
+            .iter()
+            .copied()
+            .filter(|&x| on[x] == a || shared(x, a))
+            .partition(|&x| (0..l).any(|b| shared(x, b)));
+        let tb = with.len() as f64 / p as f64;
+        for (i, &x) in with.iter().enumerate() {
+            places[x].push((a, tb * i as f64 / with.len() as f64));
+        }
+        for (i, &x) in own.iter().enumerate() {
+            places[x].push((a, tb + (1.0 - tb) * (i + 1) as f64 / own.len() as f64));
         }
     }
     Some(places)
 }
 
-/// Where a start's lineages part: the latest time of a pseudobulk on more
-/// than one, or (none shared) [`NO_TRUNK`].
-fn branch_of(places: &Places) -> f64 {
-    places
-        .iter()
-        .filter(|at| at.len() > 1)
-        .flat_map(|at| at.iter().map(|&(_, t)| t))
-        .fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))))
-        .unwrap_or(NO_TRUNK)
+/// Where every lineage `1..lineages` parts from lineage 0: the latest time
+/// of a pseudobulk on both, or (none shared) [`NO_TRUNK`].
+pub(crate) fn branch_times(places: &Places, lineages: usize) -> Vec<f64> {
+    (1..lineages)
+        .map(|l| {
+            places
+                .iter()
+                .filter(|at| at.iter().any(|&(m, _)| m == 0) && at.iter().any(|&(m, _)| m == l))
+                .flat_map(|at| at.iter().map(|&(_, t)| t))
+                .reduce(f64::max)
+                .unwrap_or(NO_TRUNK)
+        })
+        .collect()
 }
 
 /// The branch time of a start with no trunk: the lineages part at once.
 const NO_TRUNK: f64 = 0.05;
+
+/// A pseudobulk is at the root when at least this share of its cells are
+/// the named root cells.
+const ROOT_SHARE: f32 = 0.5;
+
+/// The root pseudobulks from the cells the user names: of the pseudobulks
+/// (`pbs` their indices in `member`, `sizes` their cells) those mostly of
+/// named cells ([`ROOT_SHARE`]; `true` with them), or, none being, the one
+/// richest in them (its named cells times its share of them, so a large
+/// pseudobulk mostly of them beats a tiny pure one); empty when none holds
+/// one.
+pub fn root_pseudobulks(
+    named: &std::collections::HashSet<Box<str>>,
+    cells: &[Box<str>],
+    member: &[usize],
+    pbs: &[usize],
+    sizes: &[f32],
+) -> (Vec<usize>, bool) {
+    let row_of: std::collections::HashMap<usize, usize> =
+        pbs.iter().enumerate().map(|(c, &p)| (p, c)).collect();
+    let mut hits = vec![0f32; pbs.len()];
+    for (_, &p) in cells.iter().zip(member).filter(|(c, _)| named.contains(*c)) {
+        if let Some(&c) = row_of.get(&p) {
+            hits[c] += 1.0;
+        }
+    }
+    let mostly: Vec<usize> = (0..pbs.len())
+        .filter(|&c| hits[c] >= ROOT_SHARE * sizes[c] && hits[c] > 0.0)
+        .collect();
+    if !mostly.is_empty() {
+        return (mostly, true);
+    }
+    let richest = (0..pbs.len())
+        .filter(|&c| hits[c] > 0.0)
+        .max_by(|&a, &b| (hits[a] * hits[a] / sizes[a]).total_cmp(&(hits[b] * hits[b] / sizes[b])));
+    (richest.into_iter().collect(), false)
+}
 
 /// The k-means start, every lineage `l` with `reversed[l]` turned round.
 fn kmeans_places(scores: &DMatrix<f64>, lineages: usize, reversed: &[bool]) -> Places {
@@ -366,12 +492,21 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
                 .collect()
         })
         .collect();
-    let gamma0 = GenePrior::default().log_gamma.0.exp();
+    let prior = GenePrior::default();
+    let gamma0 = prior.log_gamma.0.exp();
     let (su, ss): (Vec<f64>, Vec<f64>) = (0..g)
         .map(|j| (reads.u.column(j).sum() + 0.5, reads.s.column(j).sum() + 0.5))
         .unzip();
+    // Every gene's reads' `U/S = e^c γ/β` at steady state: the median gene
+    // on the prior's `γ/β`, the rest of its offset the capture's, each
+    // gene's own in its `β` (the levels the same however it is split).
+    let mut log_us: Vec<f64> = su.iter().zip(&ss).map(|(u, s)| (u / s).ln()).collect();
+    log_us.sort_by(f64::total_cmp);
+    let log_capture = log_us.get(g / 2).map_or(0.0, |m| m - prior.log_ratio.0);
     let mut start = Params {
-        beta: (0..g).map(|j| gamma0 * ss[j] / su[j]).collect(),
+        beta: (0..g)
+            .map(|j| gamma0 * log_capture.exp() * ss[j] / su[j])
+            .collect(),
         gamma: vec![gamma0; g],
         rho: (0..g)
             .map(|j| (0..h).map(|d| loadings[(j, d)] * sd[d]).collect())
@@ -381,6 +516,7 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
         path,
         sub: opts.sub,
         branch: None,
+        log_capture,
     };
     // Inside the rates' bounds ([`GenePrior::bounded`]).
     if let Some((lo, hi)) = GenePrior::bounded(&start).log_rate {
@@ -398,43 +534,65 @@ pub fn beats(new: f32, best: f32) -> bool {
     new > best || (best.is_nan() && !new.is_nan())
 }
 
-/// Adam from the start, then from the start with each lineage in turn
-/// turned round, a turn kept when it raises the objective; with two
-/// lineages also from every tree start. The best fit and its objective.
+/// Adam from every start, the best fit and its objective: under a trunk
+/// the tree starts, one per end taken as the root or the one from the
+/// named root (a k-means start has no trunk, and its lineages turned round
+/// one at a time cannot share one); apart, the k-means start and each
+/// lineage turned round in turn (a turn kept when it raises the
+/// objective), then the trees too. With no tree start to be had (one
+/// lineage, the graph falling apart) the k-means starts run either way.
 pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<(Fit, f32)> {
     let prior = GridPrior::new(opts.points, 1.0, opts.kappa)
         .map_err(|e| legume_numeric::candle::candle_core::Error::Msg(e.to_string()))?;
-    let (y, _) = log_shares(reads);
-    let (scores, _) = axes(&y, opts.dim);
+    let scores = scores_of(reads, opts.dim);
     let run = |places: &Places| -> Result<(Fit, f32)> {
         let start = params_from(reads, opts, places);
         let mut fit = Fit::from_params(&start, &prior, dev)?
             .with_share(opts.jitter.then_some(SHARE_START))?;
         if opts.trunk && opts.lineages > 1 {
-            fit = fit.with_trunk(&start, &prior, branch_of(places))?;
+            fit = fit.with_trunk(&start, &prior, &branch_times(places, opts.lineages))?;
         }
         let objective = fit.adam(reads, opts.steps, opts.lr)?;
         Ok((fit, objective))
     };
-    let mut reversed = vec![false; opts.lineages];
-    let mut best = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
-    for l in 0..opts.lineages {
-        reversed[l] = true;
-        let other = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
-        if beats(other.1, best.1) {
-            best = other;
-        } else {
-            reversed[l] = false;
-        }
+    let trees: Vec<Places> = if opts.roots.is_empty() {
+        tree_places(&scores, opts.lineages)
+    } else {
+        tree_place_from_roots(&scores, opts.lineages, &opts.roots)
+            .into_iter()
+            .collect()
+    };
+    if !opts.roots.is_empty() && trees.is_empty() {
+        log::warn!(
+            "ode climb: no tree start grows from the root named (one lineage, or the pseudobulks' graph falls apart); the k-means starts run instead"
+        );
     }
-    if opts.lineages == 2 {
-        for places in tree_places(&scores) {
-            let other = run(&places)?;
-            if beats(other.1, best.1) {
-                best = other;
+    let mut best: Option<(Fit, f32)> = None;
+    let mut keep = |other: (Fit, f32)| {
+        if best.as_ref().is_none_or(|b| beats(other.1, b.1)) {
+            best = Some(other);
+        }
+    };
+    if !opts.trunk || trees.is_empty() {
+        let mut reversed = vec![false; opts.lineages];
+        let mut best_kmeans = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
+        for l in 0..opts.lineages {
+            reversed[l] = true;
+            let other = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
+            if beats(other.1, best_kmeans.1) {
+                best_kmeans = other;
+            } else {
+                reversed[l] = false;
             }
         }
+        keep(best_kmeans);
     }
+    for places in &trees {
+        let climbed = run(places)?;
+        log::debug!("ode climb: a tree start's objective {}", climbed.1);
+        keep(climbed);
+    }
+    let best = best.expect("a start");
     if best.1.is_nan() {
         return Err(legume_numeric::candle::candle_core::Error::Msg(
             "ode-mixture climb: every start diverged (objective NaN)".into(),

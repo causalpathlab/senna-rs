@@ -1,7 +1,6 @@
-//! Banded symmetric precisions and their Cholesky factors, linear in the
-//! size: a path's proposal precision in path space (`H × H` blocks banded
-//! in nodes, node-major `k H + d`), with a dense border for a departure's
-//! branch time.
+//! Symmetric precisions, banded, and their guarded Cholesky factors: a
+//! gene's conditional's negative Hessian in its coordinates (dense, so the
+//! band is full) and the prior's diagonal.
 //!
 //! Factoring is guarded ([`Factor::new`]): the matrix Jacobi-scaled
 //! (`D^{−½} P D^{−½}`, `D = |diag P|`), a ridge `λ I` added on failure
@@ -55,18 +54,9 @@ impl Band {
         }
     }
 
-    pub fn width(&self) -> usize {
-        self.p
-    }
-
     fn at(&self, i: usize, j: usize) -> Option<usize> {
         let (i, j) = if i >= j { (i, j) } else { (j, i) };
         (i - j <= self.p).then(|| i * (self.p + 1) + i - j)
-    }
-
-    /// Entry `(i, j)` (zero off the band).
-    pub fn get(&self, i: usize, j: usize) -> f64 {
-        self.at(i, j).map_or(0.0, |k| self.a[k])
     }
 
     /// Adds `v` at `(i, j)` (and so at `(j, i)`); off the band, nothing.
@@ -74,21 +64,6 @@ impl Band {
         if let Some(k) = self.at(i, j) {
             self.a[k] += v;
         }
-    }
-
-    /// `P x`.
-    pub fn mul(&self, x: &[f64]) -> Vec<f64> {
-        let mut y = vec![0.0; self.n];
-        for i in 0..self.n {
-            for j in i.saturating_sub(self.p)..=i {
-                let v = self.a[i * (self.p + 1) + i - j];
-                y[i] += v * x[j];
-                if j != i {
-                    y[j] += v * x[i];
-                }
-            }
-        }
-        y
     }
 
     fn diagonal(&self) -> Vec<f64> {
@@ -147,18 +122,6 @@ impl Band {
         }
         x
     }
-
-    /// `Lᵀ d`, `self` a lower factor.
-    fn upper_mul(&self, d: &[f64]) -> Vec<f64> {
-        let (n, p) = (self.n, self.p);
-        (0..n)
-            .map(|i| {
-                (i..(i + p + 1).min(n))
-                    .map(|k| self.a[k * (p + 1) + k - i] * d[k])
-                    .sum()
-            })
-            .collect()
-    }
 }
 
 /// Logs once a process, at debug, each kind of guard that acted: a ridge,
@@ -171,7 +134,6 @@ fn note(seen: &AtomicBool, what: &str) {
 
 static RIDGED: AtomicBool = AtomicBool::new(false);
 static FELL_BACK: AtomicBool = AtomicBool::new(false);
-static DROPPED: AtomicBool = AtomicBool::new(false);
 
 /// The guards' ridge: `factor(ridge)` at none, then (when `ridged`) from
 /// `1e-8` up by tens to [`MAX_RIDGE`], the first that factors.
@@ -235,8 +197,9 @@ impl Factor {
         Some(Self { l, root })
     }
 
-    pub fn size(&self) -> usize {
-        self.root.len()
+    /// `P⁻¹ b`.
+    pub fn solve(&self, b: &[f64]) -> Vec<f64> {
+        self.upper_solve(&self.lower_solve(b))
     }
 
     /// `F⁻¹ b`, `F = D^{½} L`.
@@ -254,96 +217,6 @@ impl Factor {
             .map(|(x, r)| x / r)
             .collect()
     }
-
-    /// `Fᵀ d`.
-    fn upper_mul(&self, d: &[f64]) -> Vec<f64> {
-        let y: Vec<f64> = d.iter().zip(&self.root).map(|(d, r)| d * r).collect();
-        self.l.upper_mul(&y)
-    }
-}
-
-/// A banded precision with an optional dense last row and column (a
-/// departure's branch time), factored: `[[F, 0], [lᵀ, s]]`, `F lᵀ… = c`.
-#[derive(Clone, Debug)]
-pub struct Bordered {
-    band: Factor,
-    /// `l = F⁻¹ c` and `s = √(q − lᵀl)`.
-    border: Option<(Vec<f64>, f64)>,
-}
-
-impl Bordered {
-    /// `[[A, c], [cᵀ, q]]`, `A` factored; the border's coupling dropped
-    /// where its Schur complement is not positive.
-    pub fn new(band: Factor, border: Option<(Vec<f64>, f64)>) -> Self {
-        let border = border.map(|(c, q)| {
-            let l = band.lower_solve(&c);
-            let s2 = q - l.iter().map(|v| v * v).sum::<f64>();
-            if s2 > 0.0 && s2.is_finite() && l.iter().all(|v| v.is_finite()) {
-                (l, s2.sqrt())
-            } else {
-                note(&DROPPED, "a branch time's coupling was dropped");
-                (
-                    vec![0.0; c.len()],
-                    if q > 0.0 && q.is_finite() {
-                        q.sqrt()
-                    } else {
-                        1.0
-                    },
-                )
-            }
-        });
-        Self { band, border }
-    }
-
-    pub fn size(&self) -> usize {
-        self.band.size() + usize::from(self.border.is_some())
-    }
-
-    /// `P⁻¹ b`.
-    pub fn solve(&self, b: &[f64]) -> Vec<f64> {
-        let m = self.band.size();
-        let y = self.band.lower_solve(&b[..m]);
-        match &self.border {
-            None => self.band.upper_solve(&y),
-            Some((l, s)) => {
-                let yb = (b[m] - dot(l, &y)) / s;
-                let xb = yb / s;
-                let r: Vec<f64> = y.iter().zip(l).map(|(y, l)| y - l * xb).collect();
-                let mut x = self.band.upper_solve(&r);
-                x.push(xb);
-                x
-            }
-        }
-    }
-
-    /// `L⁻ᵀ z`: with `z ~ N(0, I)` a draw of `N(0, P⁻¹)`.
-    pub fn draw(&self, z: &[f64]) -> Vec<f64> {
-        let m = self.band.size();
-        match &self.border {
-            None => self.band.upper_solve(&z[..m]),
-            Some((l, s)) => {
-                let xb = z[m] / s;
-                let r: Vec<f64> = z[..m].iter().zip(l).map(|(z, l)| z - l * xb).collect();
-                let mut x = self.band.upper_solve(&r);
-                x.push(xb);
-                x
-            }
-        }
-    }
-
-    /// `dᵀ P d`.
-    pub fn quad(&self, d: &[f64]) -> f64 {
-        let m = self.band.size();
-        let mut y = self.band.upper_mul(&d[..m]);
-        let mut extra = 0.0;
-        if let Some((l, s)) = &self.border {
-            for (y, l) in y.iter_mut().zip(l) {
-                *y += l * d[m];
-            }
-            extra = (s * d[m]).powi(2);
-        }
-        y.iter().map(|v| v * v).sum::<f64>() + extra
-    }
 }
 
 /// A Jacobi scale from a diagonal entry: `√|d|`, one where that is zero
@@ -360,13 +233,4 @@ fn scale_of(d: f64) -> f64 {
 
 pub(super) fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
-impl std::ops::AddAssign<&Band> for Band {
-    fn add_assign(&mut self, other: &Band) {
-        debug_assert_eq!((self.n, self.p), (other.n, other.p));
-        for (a, b) in self.a.iter_mut().zip(&other.a) {
-            *a += b;
-        }
-    }
 }

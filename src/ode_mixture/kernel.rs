@@ -10,7 +10,6 @@
 //! on the grid `t_k = k T/(n − 1)`; it depends on `κ/T` alone. Paths are
 //! carried whitened, `z = C η`, `η ~ N(0, I)`, `C` the Cholesky factor.
 
-use super::band::Band;
 use nalgebra::{DMatrix, DVector};
 use rand::Rng;
 use rand_distr::{Distribution, StandardNormal};
@@ -32,48 +31,9 @@ pub fn grid_cov(n: usize, t_len: f64, kappa: f64) -> DMatrix<f64> {
     })
 }
 
-/// Nodes a path's banded precisions reach either way: the prior's
-/// ([`markov`]) and the reads' Fisher information in the path. Matérn-5/2
-/// is near Markov on the grid: conditioned on this many nodes before, a
-/// node's whitened precision is within some tens of percent of the exact.
-pub const BAND: usize = 16;
-
-/// The precision of `N(0, K)` banded to `b` nodes by conditioning every
-/// node on the `b` before it (Vecchia): `Σ_k (e_k − a_k)(e_k − a_k)ᵀ/σ_k²`,
-/// `a_k` its regression on them and `σ_k²` what is left. Positive definite
-/// whatever `b`; exact as `b` reaches `n`.
-pub fn markov(k: &DMatrix<f64>, b: usize) -> Band {
-    let n = k.nrows();
-    let mut q = Band::zeros(n, b);
-    for i in 0..n {
-        let lo = i.saturating_sub(b);
-        let m = i - lo;
-        let sub = k.view((lo, lo), (m, m)).into_owned();
-        let cross = DVector::from_fn(m, |r, _| k[(lo + r, i)]);
-        let a = sub
-            .cholesky()
-            .map_or(DVector::zeros(m), |c| c.solve(&cross));
-        let var = (k[(i, i)] - cross.dot(&a)).max(JITTER);
-        let e: Vec<(usize, f64)> = (0..m)
-            .map(|r| (lo + r, -a[r]))
-            .chain(std::iter::once((i, 1.0)))
-            .collect();
-        for &(x, u) in &e {
-            for &(y, v) in &e {
-                if x >= y {
-                    q.add(x, y, u * v / var);
-                }
-            }
-        }
-    }
-    q
-}
-
 /// The prior on one grid: its Cholesky factor, to colour and whiten.
 pub struct GridPrior {
     chol: DMatrix<f64>,
-    /// The prior's precision banded to [`BAND`] nodes ([`markov`]).
-    markov: Band,
     /// The length scale over the duration.
     kappa: f64,
 }
@@ -87,7 +47,6 @@ impl GridPrior {
             .ok_or_else(|| anyhow::anyhow!("grid covariance not positive definite"))?
             .l();
         Ok(Self {
-            markov: markov(&cov, BAND),
             chol,
             kappa: kappa / t_len,
         })
@@ -101,12 +60,6 @@ impl GridPrior {
     /// The Cholesky factor `C`, `[n × n]` lower triangular.
     pub fn chol(&self) -> &DMatrix<f64> {
         &self.chol
-    }
-
-    /// The prior's precision banded to [`BAND`] nodes, positive definite
-    /// ([`markov`]).
-    pub fn markov(&self) -> &Band {
-        &self.markov
     }
 
     /// `z = C η`.
