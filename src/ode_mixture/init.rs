@@ -16,8 +16,9 @@
 //! tips, and the Gromov products against them put every pseudobulk on the
 //! lineage whose way it shares longest, the trunk on several, every part
 //! ordered by its distance from the root onto one clock shared by all. A
-//! stem inside the tree is no end of it, so a root the user names grows
-//! the one tree start from it instead ([`tree_start_from_root`]).
+//! stem inside the tree is no end of it, so a root the user names (its
+//! pseudobulks as one node) grows the one tree start from it instead
+//! ([`tree_start_from_roots`]).
 //!
 //! [`climb`] runs Adam from every start and keeps the best: under a trunk
 //! the tree starts alone (a k-means start has no trunk); with the lineages
@@ -57,10 +58,10 @@ pub struct Climb {
     /// Every other lineage on lineage 0's trunk until a branch time it
     /// fits, one clock for all ([`Fit::with_trunk`]).
     pub trunk: bool,
-    /// The pseudobulk at the root of the trajectory, when the user names
-    /// one: under a trunk the one tree start grows from it
-    /// ([`tree_start_from_root`]); else every end of the tree is tried.
-    pub root: Option<usize>,
+    /// The pseudobulks at the root of the trajectory, when the user names
+    /// its cells: the one tree start grows from them as one root
+    /// ([`tree_start_from_roots`]); empty, every end of the tree is tried.
+    pub roots: Vec<usize>,
 }
 
 /// Bandwidth, on `[0, 1]`, of the smoothing of scores onto the grid.
@@ -206,13 +207,21 @@ fn knn_graph(x: &DMatrix<f64>) -> Vec<Vec<(usize, f64)>> {
 
 /// Every node's geodesic distance from `from` (∞ where unreachable).
 fn geodesic(adj: &[Vec<(usize, f64)>], from: usize) -> Vec<f64> {
+    geodesic_from(adj, &[from])
+}
+
+/// Every node's geodesic distance to the nearest of `sources` (∞ where
+/// none is reachable): the sources as one node.
+fn geodesic_from(adj: &[Vec<(usize, f64)>], sources: &[usize]) -> Vec<f64> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
     let mut dist = vec![f64::INFINITY; adj.len()];
     let mut heap = BinaryHeap::new();
-    dist[from] = 0.0;
-    // Non-negative floats order as their bits.
-    heap.push(Reverse((0f64.to_bits(), from)));
+    for &from in sources {
+        dist[from] = 0.0;
+        // Non-negative floats order as their bits.
+        heap.push(Reverse((0f64.to_bits(), from)));
+    }
     while let Some(Reverse((d, a))) = heap.pop() {
         let d = f64::from_bits(d);
         if d > dist[a] {
@@ -242,17 +251,19 @@ pub fn tree_starts(reads: &Reads, h: usize, lineages: usize) -> Vec<Places> {
     tree_places(&scores_of(reads, h), lineages)
 }
 
-/// The one tree start from a root the user names: the pseudobulk `root`,
-/// its tips the `lineages` ends farthest from it (and from one another).
-/// A stem in the middle of a tree is no end of it, so no end taken as the
-/// root finds it; `None` as [`tree_starts`] is empty, or when fewer branch.
-pub fn tree_start_from_root(
+/// The one tree start from a root the user names: the pseudobulks `roots`
+/// as one node (every distance from the root the distance to the nearest
+/// of them, so no one of them decides the tree), its tips the `lineages`
+/// ends farthest from it (and from one another). A stem in the middle of a
+/// tree is no end of it, so no end taken as the root finds it; `None` as
+/// [`tree_starts`] is empty, with no root, or when fewer branch.
+pub fn tree_start_from_roots(
     reads: &Reads,
     h: usize,
     lineages: usize,
-    root: usize,
+    roots: &[usize],
 ) -> Option<Places> {
-    tree_place_from_root(&scores_of(reads, h), lineages, root)
+    tree_place_from_roots(&scores_of(reads, h), lineages, roots)
 }
 
 /// A tree needs two lineages and more pseudobulks than its ends.
@@ -260,9 +271,10 @@ fn tree_sized(p: usize, lineages: usize) -> bool {
     lineages > 1 && p > lineages + 1
 }
 
-/// Every node's geodesic distances, `None` where the graph falls apart.
-fn reaching(adj: &[Vec<(usize, f64)>], from: usize) -> Option<Vec<f64>> {
-    let d = geodesic(adj, from);
+/// Every node's geodesic distances to the nearest of `sources`, `None`
+/// where the graph falls apart.
+fn reaching(adj: &[Vec<(usize, f64)>], sources: &[usize]) -> Option<Vec<f64>> {
+    let d = geodesic_from(adj, sources);
     d.iter().all(|d| d.is_finite()).then_some(d)
 }
 
@@ -285,12 +297,16 @@ fn farthest_ends(
         .collect()
 }
 
-fn tree_place_from_root(scores: &DMatrix<f64>, lineages: usize, root: usize) -> Option<Places> {
-    if !tree_sized(scores.nrows(), lineages) {
+fn tree_place_from_roots(
+    scores: &DMatrix<f64>,
+    lineages: usize,
+    roots: &[usize],
+) -> Option<Places> {
+    if roots.is_empty() || !tree_sized(scores.nrows(), lineages) {
         return None;
     }
     let adj = knn_graph(scores);
-    let dr = reaching(&adj, root)?;
+    let dr = reaching(&adj, roots)?;
     let tips = farthest_ends(&adj, dr.clone(), lineages);
     tree_from_root(&dr, &tips)
 }
@@ -300,7 +316,7 @@ fn tree_places(scores: &DMatrix<f64>, lineages: usize) -> Vec<Places> {
         return Vec::new();
     }
     let adj = knn_graph(scores);
-    let Some(d0) = reaching(&adj, 0) else {
+    let Some(d0) = reaching(&adj, &[0]) else {
         return Vec::new();
     };
     // The ends, farthest first: the farthest from anywhere, then each the
@@ -391,17 +407,21 @@ pub(crate) fn branch_times(places: &Places, lineages: usize) -> Vec<f64> {
 /// The branch time of a start with no trunk: the lineages part at once.
 const NO_TRUNK: f64 = 0.05;
 
-/// The root pseudobulk from the cells the user names: of the pseudobulks
-/// (`pbs` their indices in `member`, `sizes` their cells) the one holding
-/// the most named cells times its share of them, so a large pseudobulk
-/// mostly of them beats a tiny pure one; `None` when none holds one.
-pub fn root_pseudobulk(
+/// A pseudobulk is at the root when at least this share of its cells are
+/// the named root cells.
+const ROOT_SHARE: f32 = 0.5;
+
+/// The root pseudobulks from the cells the user names: of the pseudobulks
+/// (`pbs` their indices in `member`, `sizes` their cells) those mostly of
+/// named cells ([`ROOT_SHARE`]), or, none being, the one holding the most;
+/// empty when none holds one.
+pub fn root_pseudobulks(
     named: &std::collections::HashSet<Box<str>>,
     cells: &[Box<str>],
     member: &[usize],
     pbs: &[usize],
     sizes: &[f32],
-) -> Option<(usize, f32)> {
+) -> Vec<usize> {
     let row_of: std::collections::HashMap<usize, usize> =
         pbs.iter().enumerate().map(|(c, &p)| (p, c)).collect();
     let mut hits = vec![0f32; pbs.len()];
@@ -410,10 +430,17 @@ pub fn root_pseudobulk(
             hits[c] += 1.0;
         }
     }
+    let mostly: Vec<usize> = (0..pbs.len())
+        .filter(|&c| hits[c] >= ROOT_SHARE * sizes[c] && hits[c] > 0.0)
+        .collect();
+    if !mostly.is_empty() {
+        return mostly;
+    }
     (0..pbs.len())
         .filter(|&c| hits[c] > 0.0)
-        .max_by(|&a, &b| (hits[a] * hits[a] / sizes[a]).total_cmp(&(hits[b] * hits[b] / sizes[b])))
-        .map(|c| (c, hits[c]))
+        .max_by(|&a, &b| hits[a].total_cmp(&hits[b]))
+        .into_iter()
+        .collect()
 }
 
 /// The k-means start, every lineage `l` with `reversed[l]` turned round.
@@ -527,13 +554,14 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<(Fit, f32)> {
         let objective = fit.adam(reads, opts.steps, opts.lr)?;
         Ok((fit, objective))
     };
-    let trees: Vec<Places> = match opts.root {
-        Some(root) => tree_place_from_root(&scores, opts.lineages, root)
+    let trees: Vec<Places> = if opts.roots.is_empty() {
+        tree_places(&scores, opts.lineages)
+    } else {
+        tree_place_from_roots(&scores, opts.lineages, &opts.roots)
             .into_iter()
-            .collect(),
-        None => tree_places(&scores, opts.lineages),
+            .collect()
     };
-    if opts.root.is_some() && trees.is_empty() {
+    if !opts.roots.is_empty() && trees.is_empty() {
         log::warn!(
             "ode climb: no tree start grows from the root named (one lineage, or the pseudobulks' graph falls apart); the k-means starts run instead"
         );

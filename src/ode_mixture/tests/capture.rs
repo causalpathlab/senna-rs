@@ -47,7 +47,7 @@ fn mode() -> &'static (Params, Option<f64>) {
             steps: 2500,
             lr: 0.03,
             sub: 1,
-            root: None,
+            roots: Vec::new(),
         };
         let (fit, _) = climb(&first(sim(), TRAIN), &opts, &Device::Cpu).unwrap();
         (fit.params().unwrap(), fit.share_sd().unwrap())

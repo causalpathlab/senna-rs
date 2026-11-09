@@ -478,6 +478,38 @@ pub fn gene_mode(
 }
 
 impl GeneProposal {
+    /// The Laplace approximation's sds of `log γ` and `log γ/β` at the
+    /// mode: the conditional's covariance is `P⁻¹/`[`WIDEN`]`²` in the
+    /// sampler's coordinates, carried through the link's derivative at the
+    /// centre (`log γ/β = log γ − log β`, each rate its own `u`).
+    pub fn rate_sds(&self, prior: &GenePrior) -> (f64, f64) {
+        let n = self.centre.len();
+        let column = |i: usize| {
+            let mut e = vec![0.0; n];
+            e[i] = 1.0;
+            self.precision.solve(&e)
+        };
+        let (c0, c1) = (column(0), column(1));
+        let (v00, v01, v11) = (
+            c0[0] / (WIDEN * WIDEN),
+            c0[1] / (WIDEN * WIDEN),
+            c1[1] / (WIDEN * WIDEN),
+        );
+        let (j0, j1) = match prior.log_rate {
+            Some((lo, hi)) => {
+                let slope = |u: f64| {
+                    let s = sigmoid(u);
+                    (hi - lo) * s * (1.0 - s)
+                };
+                (slope(self.centre[0]), slope(self.centre[1]))
+            }
+            None => (1.0, 1.0),
+        };
+        let var_gamma = j0 * j0 * v00;
+        let var_ratio = j0 * j0 * v00 - 2.0 * j0 * j1 * v01 + j1 * j1 * v11;
+        (var_gamma.max(0.0).sqrt(), var_ratio.max(0.0).sqrt())
+    }
+
     /// `log N(v; centre, P⁻¹)` up to a constant, `v` linked.
     fn log_density(&self, v: &[f64]) -> f64 {
         let d: Vec<f64> = v.iter().zip(&self.centre).map(|(a, b)| a - b).collect();

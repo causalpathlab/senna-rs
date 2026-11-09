@@ -496,8 +496,9 @@ enum Commands {
                       pseudobulk on one lineage's trajectory at one time, the trajectory\n\
                       the splicing ODE solved exactly, driven by the lineage's\n\
                       transcription. Fitted on the finest pseudobulks and the most\n\
-                      variable genes by a climb to a mode, then blocked Gibbs chains\n\
-                      from it; every cell is read out from the chains' draws. Writes\n\
+                      variable genes by a climb to a mode (and, with --chains, blocked\n\
+                      Gibbs chains from it); every cell is read out at the mode or from\n\
+                      the chains' draws. Writes\n\
                       {out}.cell_time.parquet (lineage, time, its sd and 90% interval,\n\
                       lineage posteriors), cell_embedding and cell_velocity (the map\n\
                       space and every cell's velocity there), gene_rates (every\n\

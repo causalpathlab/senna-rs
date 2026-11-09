@@ -211,6 +211,82 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
     }
 }
 
+/// With no chains (the default) the cells are read out at the climb's
+/// mode and every gene's rates come with their Laplace sds: the same
+/// tables, R̂ and ESS not known, nothing flagged.
+#[test]
+fn a_run_without_chains_reads_out_at_the_mode() {
+    let sim = simulate(&SimConfig {
+        n_genes: 80,
+        n_pb: 1000,
+        depth: 3000.0,
+        seed: 4,
+        ..SimConfig::default()
+    })
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let data = backend(&sim, dir.path());
+    let out = dir.path().join("run").to_string_lossy().into_owned();
+    let args = parse(&[
+        data.as_str(),
+        "-o",
+        &out,
+        "--lineages",
+        "1",
+        "--points",
+        "25",
+        "--steps",
+        "1500",
+        "--map-pcs",
+        "5",
+    ]);
+    assert_eq!(args.chains, 0, "chains are opt-in");
+    assert!(
+        !args.trunk,
+        "lineages apart, each on its own time, by default"
+    );
+    run_ode(&args).unwrap();
+
+    let (strs, nums) = read_table_columns(
+        &format!("{out}.cell_time.parquet"),
+        &["cell"],
+        &["tau", "tau_sd", "tau_lo", "tau_hi", "p_L1"],
+    )
+    .unwrap();
+    assert!(nums.iter().flatten().all(|x| x.is_finite()));
+    let truth: Vec<f64> = strs[0]
+        .iter()
+        .map(|c| sim.truth.time[c[1..].parse::<usize>().unwrap()])
+        .collect();
+    let rho = spearman(&nums[0], &truth).abs();
+    eprintln!("senna ode at the mode: time Spearman with the truth {rho:.3}");
+    assert!(rho > 0.9, "Spearman {rho}");
+
+    let (_, stats) = read_table_columns(
+        &format!("{out}.gene_rates.parquet"),
+        &["gene"],
+        &[
+            "log_gamma",
+            "log_gamma_sd",
+            "log_gamma_rhat",
+            "log_ratio",
+            "log_ratio_sd",
+            "log_ratio_rhat",
+            "flagged",
+        ],
+    )
+    .unwrap();
+    for i in [0, 1, 3, 4] {
+        assert!(stats[i].iter().all(|x| x.is_finite()), "column {i}");
+    }
+    assert!(stats[1].iter().chain(&stats[4]).all(|&s| s > 0.0));
+    assert!(stats[2].iter().chain(&stats[5]).all(|r| r.is_nan()));
+    assert!(stats[6].iter().all(|&f| f == 0.0));
+    let (m, _) = RunManifest::load(std::path::Path::new(&format!("{out}.senna.json"))).unwrap();
+    assert_eq!(m.kind, RunKind::Ode);
+    assert_eq!(m.outputs.pb_time.as_deref(), Some("run.pb_time.parquet"));
+}
+
 /// A run on groups of genes (`--max-coarse-features`) still writes every
 /// gene's own rates, records its groups, and its cells' times rank with
 /// the truth's.

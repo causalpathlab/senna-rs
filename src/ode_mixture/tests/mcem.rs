@@ -3,7 +3,7 @@
 
 use super::init::{first, spearman};
 use crate::ode_mixture::fit::Fit;
-use crate::ode_mixture::init::{climb, tree_start_from_root, tree_starts, Climb, Places};
+use crate::ode_mixture::init::{climb, tree_start_from_roots, tree_starts, Climb, Places};
 use crate::ode_mixture::likelihood::Reads;
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 use legume_numeric::candle::candle_core::Device;
@@ -36,7 +36,7 @@ fn opts(l: usize) -> Climb {
         steps: 2500,
         lr: 0.03,
         sub: 1,
-        root: None,
+        roots: Vec::new(),
     }
 }
 
@@ -167,15 +167,30 @@ fn given_the_root_the_tree_start_puts_the_fates_on_lineages_on_seed_3() {
 }
 
 fn from_the_root_the_start_finds_the_fates(seeds: std::ops::RangeInclusive<u64>) {
+    from_roots_the_start_finds_the_fates(seeds, 1);
+}
+
+/// The root named as a set of pseudobulks (the earliest tenth): the tree
+/// grows from the set, every pseudobulk's distance from the root its
+/// distance to the nearest member, so no one member decides the tree.
+#[test]
+fn given_root_pseudobulks_the_tree_start_puts_the_fates_on_lineages() {
+    from_roots_the_start_finds_the_fates(1..=2, 90);
+}
+
+/// The tree start from the `n_roots` earliest pseudobulks finds the fates.
+fn from_roots_the_start_finds_the_fates(seeds: std::ops::RangeInclusive<u64>, n_roots: usize) {
     let mut missed = Vec::new();
     for seed in seeds {
         let (sim, reads) = fates(3, seed);
-        let root = (0..sim.n_pb)
-            .min_by(|&a, &b| sim.truth.time[a].total_cmp(&sim.truth.time[b]))
-            .unwrap();
-        let start = tree_start_from_root(&reads, 3, 3, root).expect("a tree from the root");
+        let mut by_time: Vec<usize> = (0..sim.n_pb).collect();
+        by_time.sort_by(|&a, &b| sim.truth.time[a].total_cmp(&sim.truth.time[b]));
+        let roots = &by_time[..n_roots];
+        let start = tree_start_from_roots(&reads, 3, 3, roots).expect("a tree from the roots");
         let (pure, shared) = start_purity(&start, &sim);
-        eprintln!("seed {seed}: from the root (purity, trunk shared) ({pure:.3}, {shared:.3})");
+        eprintln!(
+            "seed {seed}: from {n_roots} root(s) (purity, trunk shared) ({pure:.3}, {shared:.3})"
+        );
         if !(pure > 0.9 && shared > 0.8) {
             missed.push(seed);
         }

@@ -6,12 +6,12 @@
 
 use super::coarsen::{coarse_reads, coarsen_genes};
 use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
-use super::init::{climb, root_pseudobulk, Climb};
+use super::init::{climb, root_pseudobulks, Climb};
 use super::likelihood::Reads;
 use super::model::lineage_label;
 use super::output::{chain_stats, ChainStat, MapBasis};
 use super::readout::{grid_posterior, read_cells, GridPosterior, Snapshot};
-use super::refine::refine_genes;
+use super::refine::{genes_at_mode, refine_genes};
 use super::sampler::{self, Draws};
 use anyhow::Context;
 use data_beans::alg::feature_coarsening::FeatureCoarsening;
@@ -74,16 +74,16 @@ pub struct OdeArgs {
     #[arg(
         long,
         default_value_t = 2,
-        help = "Lineages (with more than one, every other on lineage 0's trunk until its branch time unless --no-trunk)"
+        help = "Lineages, each with its own path and its own time (unless --trunk)"
     )]
     pub lineages: usize,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Lineages apart, not on a shared trunk"
+        help = "Every other lineage on lineage 0's trunk until a branch time it fits, one clock for all"
     )]
-    pub no_trunk: bool,
+    pub trunk: bool,
 
     #[arg(
         long,
@@ -124,11 +124,15 @@ pub struct OdeArgs {
 
     #[arg(
         long,
-        help = "Cells at the root of the trajectory, one name a line: the trunk's tree start grows from the pseudobulk richest in them"
+        help = "Cells at the root of the trajectory, one name a line: the trunk's tree start grows from the pseudobulks mostly of them"
     )]
     pub root_cells: Option<std::path::PathBuf>,
 
-    #[arg(long, default_value_t = 4, help = "Chains")]
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Chains from the climb's mode (0: none, the cells read out at the mode and every gene's rates with their Laplace sds)"
+    )]
     pub chains: usize,
 
     #[arg(
@@ -311,8 +315,8 @@ fn per_chain(draws: &[Draws], of: impl Fn(&Draws) -> &Vec<Vec<f64>>) -> Vec<&Vec
 pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     senna::embed_common::mkdir_parent(&args.out)?;
     anyhow::ensure!(
-        args.lineages > 0 && args.chains > 0 && args.block_size > 0,
-        "--lineages, --chains and --block-size must be positive"
+        args.lineages > 0 && args.block_size > 0,
+        "--lineages and --block-size must be positive"
     );
     anyhow::ensure!(
         args.sweeps > args.burn,
@@ -412,9 +416,9 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         all_cells.len(),
         inputs.data_files.len()
     );
-    // The root pseudobulk, from the cells the user names.
-    let root = match &args.root_cells {
-        None => None,
+    // The root pseudobulks, from the cells the user names.
+    let roots = match &args.root_cells {
+        None => Vec::new(),
         Some(path) => {
             let path = path.to_string_lossy();
             let named: std::collections::HashSet<Box<str>> =
@@ -423,15 +427,18 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
                     .into_iter()
                     .collect();
             let member = cell_to_pb.last().expect("at least one level");
-            let Some((c, hits)) = root_pseudobulk(&named, &all_cells, member, &pbs, &sizes) else {
-                anyhow::bail!("no pseudobulk holds a cell of --root-cells");
-            };
+            let roots = root_pseudobulks(&named, &all_cells, member, &pbs, &sizes);
+            anyhow::ensure!(
+                !roots.is_empty(),
+                "no pseudobulk holds a cell of --root-cells"
+            );
             info!(
-                "ode: the root pseudobulk holds {hits} of its {} cells from --root-cells ({} named)",
-                sizes[c],
+                "ode: {} of {} pseudobulks are mostly --root-cells ({} named)",
+                roots.len(),
+                pbs.len(),
                 named.len()
             );
-            Some(c)
+            roots
         }
     };
 
@@ -450,7 +457,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let grouped = fc.as_ref().map(|fc| coarse_reads(fc, &reads));
     let fit_reads = grouped.as_ref().unwrap_or(&reads);
 
-    // The climb, then the chains from its mode.
+    // The climb, then the chains from its mode, or the mode alone.
     let opts = Climb {
         lineages: args.lineages,
         points: args.points,
@@ -460,36 +467,45 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         lr: args.lr,
         sub: args.sub,
         jitter: !args.no_jitter,
-        trunk: !args.no_trunk,
-        root,
+        trunk: args.trunk,
+        roots,
     };
     let (fit, objective) = climb(fit_reads, &opts, &dev)?;
     info!("ode: the climb's objective {objective:.4}");
     let start_at = fit.params()?;
     let share = fit.share_sd()?;
+    let log_w = fit.log_weights()?;
     drop(fit);
+    let chains = args.chains > 0;
     let kept = args.sweeps - args.burn;
     let snapshot_every = if args.snapshot_every > 0 {
         args.snapshot_every
     } else {
         kept.div_ceil(SNAPSHOTS_A_CHAIN).max(1)
     };
-    let mut draws = sampler::run(
-        fit_reads,
-        &start_at,
-        &sampler::Options {
-            kappa: args.kappa,
-            chains: args.chains,
-            sweeps: args.sweeps,
-            burn: args.burn,
-            seed: args.seed,
-            stop: Some(stop),
-            share,
-            snapshot_every,
-            laplace_every: args.laplace_every,
-            ..sampler::Options::default()
-        },
-    )?;
+    let (mut draws, mode) = if chains {
+        let draws = sampler::run(
+            fit_reads,
+            &start_at,
+            &sampler::Options {
+                kappa: args.kappa,
+                chains: args.chains,
+                sweeps: args.sweeps,
+                burn: args.burn,
+                seed: args.seed,
+                stop: Some(stop),
+                share,
+                snapshot_every,
+                laplace_every: args.laplace_every,
+                ..sampler::Options::default()
+            },
+        )?;
+        (draws, None)
+    } else {
+        info!("ode: no chains; the cells read out at the climb's mode");
+        let snap = sampler::mode_snapshot(fit_reads, &start_at, &log_w, share);
+        (Vec::new(), Some(snap))
+    };
     let capture: Vec<f64> = draws
         .iter()
         .flat_map(|d| d.log_capture.iter().copied())
@@ -504,17 +520,43 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         );
     }
     // Every other lineage's branch time off the trunk; none with them apart.
-    let branch = chain_stats(&per_chain(&draws, |d| &d.branch));
-    report_chains(&draws, &branch);
+    let branch: Vec<ChainStat> = match &mode {
+        None => chain_stats(&per_chain(&draws, |d| &d.branch)),
+        Some(snap) => {
+            info!(
+                "ode: at the mode, lineage durations {:?}, branch times {:?}",
+                start_at.t_len, start_at.branch
+            );
+            snap.params
+                .branch
+                .iter()
+                .flatten()
+                .map(|&b| ChainStat::at_mode(b, f64::NAN))
+                .collect()
+        }
+    };
+    if chains {
+        report_chains(&draws, &branch);
+    }
 
-    // Every gene's rates over the chains: on groups, every gene drawn at
-    // every snapshot of its chain.
-    let (log_gamma, log_ratio) = match &fc {
-        None => (
+    // Every gene's rates: at the mode with its Laplace sds, or over the
+    // chains (on groups, every gene drawn at every snapshot of its chain).
+    let (log_gamma, log_ratio) = match (&mode, &fc) {
+        (Some(snap), fc) => {
+            let at_mode = |rates: &[(f64, f64)]| -> Vec<ChainStat> {
+                rates
+                    .iter()
+                    .map(|&(m, s)| ChainStat::at_mode(m, s))
+                    .collect()
+            };
+            let genes = genes_at_mode(&reads, fc.as_ref(), snap);
+            (at_mode(&genes.log_gamma), at_mode(&genes.log_ratio))
+        }
+        (None, None) => (
             chain_stats(&per_chain(&draws, |d| &d.log_gamma)),
             chain_stats(&per_chain(&draws, |d| &d.log_ratio)),
         ),
-        Some(fc) => {
+        (None, Some(fc)) => {
             let genes: Vec<_> = draws
                 .iter()
                 .enumerate()
@@ -529,16 +571,20 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
             )
         }
     };
-    write_gene_rates(&args.out, &names, &log_gamma, &log_ratio)?;
+    write_gene_rates(&args.out, &names, &log_gamma, &log_ratio, chains)?;
     if let Some(fc) = &fc {
         crate::topic::model_metadata::save_coarsening_levels(&[Some(fc.clone())], &args.out)?;
     }
 
-    // Nothing to report or read out from chains stopped in burn-in.
-    let snaps: Vec<Snapshot> = draws
-        .iter_mut()
-        .flat_map(|d| std::mem::take(&mut d.snapshots))
-        .collect();
+    // The mode's one snapshot, or the chains' kept ones: nothing to report
+    // or read out from chains stopped in burn-in.
+    let snaps: Vec<Snapshot> = match mode {
+        Some(snap) => vec![snap],
+        None => draws
+            .iter_mut()
+            .flat_map(|d| std::mem::take(&mut d.snapshots))
+            .collect(),
+    };
     anyhow::ensure!(
         !snaps.is_empty(),
         "no snapshot kept: the chains stopped too early"
@@ -567,7 +613,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     }
     write_pb_time(&args.out, &pbs, &grid_posterior(fit_reads, &snaps))?;
     if !branch.is_empty() {
-        write_branch_times(&args.out, &branch)?;
+        write_branch_times(&args.out, &branch, chains)?;
     }
     write_manifest(args, &inputs, pb_tree.is_some(), !branch.is_empty())?;
     info!(
@@ -728,13 +774,16 @@ fn report_chains(draws: &[Draws], branch: &[ChainStat]) {
     say("branch time of lineage", branch);
 }
 
-/// `{out}.gene_rates.parquet`: every gene's `log γ` and `log γ/β` over the
-/// chains, with R̂ and ESS, and whether either is flagged as not mixed.
+/// `{out}.gene_rates.parquet`: every gene's `log γ` and `log γ/β` with sd,
+/// over the chains with R̂ and ESS and whether either is flagged as not
+/// mixed, or at the mode (`chains` false: the Laplace sds, R̂ and ESS NaN,
+/// nothing flagged).
 fn write_gene_rates(
     out: &str,
     names: &[Box<str>],
     log_gamma: &[ChainStat],
     log_ratio: &[ChainStat],
+    chains: bool,
 ) -> anyhow::Result<()> {
     let mut cols: Vec<(Box<str>, Vec<f32>)> = Vec::new();
     for (what, stats) in [("log_gamma", log_gamma), ("log_ratio", log_ratio)] {
@@ -747,14 +796,16 @@ fn write_gene_rates(
     let flagged: Vec<f32> = log_gamma
         .iter()
         .zip(log_ratio)
-        .map(|(a, b)| f32::from(u8::from(a.flagged() || b.flagged())))
+        .map(|(a, b)| f32::from(u8::from(chains && (a.flagged() || b.flagged()))))
         .collect();
-    info!(
-        "ode: {} of {} genes' rates flagged as not mixed (R̂ > {})",
-        flagged.iter().filter(|&&f| f > 0.0).count(),
-        names.len(),
-        super::output::RHAT_FLAG
-    );
+    if chains {
+        info!(
+            "ode: {} of {} genes' rates flagged as not mixed (R̂ > {})",
+            flagged.iter().filter(|&&f| f > 0.0).count(),
+            names.len(),
+            super::output::RHAT_FLAG
+        );
+    }
     cols.push(("flagged".into(), flagged));
     write_named_table(
         &format!("{out}.gene_rates.parquet"),
@@ -806,9 +857,10 @@ fn write_pb_time(out: &str, pbs: &[usize], grid: &GridPosterior) -> anyhow::Resu
 }
 
 /// `{out}.branch_time.tsv`: every other lineage's branch time off the
-/// trunk over the chains, on the phase scale (a share of the grid, as
-/// `pb_time`'s `phase`), with R̂ and ESS and whether it is not mixed.
-fn write_branch_times(out: &str, branch: &[ChainStat]) -> anyhow::Result<()> {
+/// trunk, on the phase scale (a share of the grid, as `pb_time`'s
+/// `phase`): over the chains with sd, R̂ and ESS and whether it is not
+/// mixed, or at the mode (`chains` false: those NaN, nothing flagged).
+fn write_branch_times(out: &str, branch: &[ChainStat], chains: bool) -> anyhow::Result<()> {
     use std::fmt::Write;
     let mut tsv = String::from("lineage\tbranch_time\tbranch_time_sd\trhat\tess\tflagged\n");
     for (i, b) in branch.iter().enumerate() {
@@ -820,7 +872,7 @@ fn write_branch_times(out: &str, branch: &[ChainStat]) -> anyhow::Result<()> {
             b.sd,
             b.rhat,
             b.ess,
-            u8::from(b.flagged())
+            u8::from(chains && b.flagged())
         )?;
     }
     std::fs::write(format!("{out}.branch_time.tsv"), tsv)?;

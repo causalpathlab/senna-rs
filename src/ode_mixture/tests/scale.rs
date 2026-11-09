@@ -53,7 +53,7 @@ fn a_run_on_groups_at_the_target_size() {
             sub: 4,
             jitter: true,
             trunk: true,
-            root: None,
+            roots: Vec::new(),
         },
         &dev,
     )

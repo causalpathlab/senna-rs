@@ -160,12 +160,12 @@ impl Fit {
         Ok(self)
     }
 
-    /// With every other lineage on lineage 0's trunk until its `branch_at`
-    /// (one for all when a single one is given), one
-    /// clock for all: the paths of `params` taken as the trunk (lineage 0's)
-    /// and every other lineage's departure `d = z_ℓ − z_0` from it, its
-    /// whitened `η_ℓ` the most probable under the prior given `d`
-    /// ([`GridPrior::whiten_scaled`] to within [`TRUNK_FIT`]).
+    /// With every other lineage on lineage 0's trunk until its branch time
+    /// (`branch_at`, one per other lineage), one clock for all: the paths
+    /// of `params` taken as the trunk (lineage 0's) and every other
+    /// lineage's departure `d = z_ℓ − z_0` from it, its whitened `η_ℓ` the
+    /// most probable under the prior given `d` ([`GridPrior::whiten_scaled`]
+    /// to within [`TRUNK_FIT`]).
     pub fn with_trunk(
         mut self,
         params: &Params,
@@ -174,20 +174,23 @@ impl Fit {
     ) -> Result<Self> {
         use nalgebra::DVector;
         let (l, n, _, h) = self.dims;
+        if branch_at.len() + 1 != l {
+            legume_numeric::candle::candle_core::bail!(
+                "ode-mixture: {} branch times for {l} lineages",
+                branch_at.len()
+            );
+        }
         let dev = self.eta.device().clone();
-        let tb: Vec<f64> = (1..l)
-            .map(|li| branch_at[(li - 1).min(branch_at.len() - 1)].clamp(0.02, 0.98))
-            .collect();
+        let tb: Vec<f64> = branch_at.iter().map(|t| t.clamp(0.02, 0.98)).collect();
         let mut eta = Vec::with_capacity(l * n * h);
         for (li, path) in params.path.iter().enumerate() {
+            let ramp = (li > 0).then(|| branch_ramp(n, tb[li - 1], self.kappa));
             let dims: Vec<DVector<f64>> = (0..h)
-                .map(|d| {
-                    if li == 0 {
-                        prior.whiten(&DVector::from_fn(n, |k, _| path[k][d]))
-                    } else {
+                .map(|d| match &ramp {
+                    None => prior.whiten(&DVector::from_fn(n, |k, _| path[k][d])),
+                    Some(r) => {
                         let dep = DVector::from_fn(n, |k, _| path[k][d] - params.path[0][k][d]);
-                        let r = branch_ramp(n, tb[li - 1], self.kappa);
-                        prior.whiten_scaled(&r, &dep, TRUNK_FIT)
+                        prior.whiten_scaled(r, &dep, TRUNK_FIT)
                     }
                 })
                 .collect();
@@ -529,6 +532,16 @@ impl Fit {
             time.push(mean);
         }
         Ok((lineage, time))
+    }
+
+    /// `[L]` the lineages' log weights.
+    pub fn log_weights(&self) -> Result<Vec<f64>> {
+        Ok(log_softmax(self.logit_pi.as_tensor(), D::Minus1)?
+            .flatten_all()?
+            .to_vec1::<f32>()?
+            .iter()
+            .map(|&x| f64::from(x))
+            .collect())
     }
 
     /// Positions per lineage, `(n − 1) sub + 1`.

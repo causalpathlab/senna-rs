@@ -22,7 +22,7 @@ fn opts(cfg: &SimConfig) -> Climb {
         steps: 2500,
         lr: 0.03,
         sub: 1,
-        root: None,
+        roots: Vec::new(),
     }
 }
 

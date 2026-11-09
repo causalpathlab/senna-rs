@@ -27,6 +27,17 @@ impl ChainStat {
     pub fn flagged(&self) -> bool {
         self.rhat.is_nan() || self.rhat > RHAT_FLAG
     }
+
+    /// A coordinate at a mode with its sd, no chains run: R̂ and ESS are
+    /// not known.
+    pub fn at_mode(mean: f64, sd: f64) -> Self {
+        Self {
+            mean,
+            sd,
+            rhat: f64::NAN,
+            ess: f64::NAN,
+        }
+    }
 }
 
 /// Every coordinate's summary from `chains[c][s][j]` (chain, kept draw,

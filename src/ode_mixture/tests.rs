@@ -11,6 +11,7 @@ mod kernel;
 mod kinetics;
 mod likelihood;
 mod mcem;
+mod mode;
 mod model;
 mod output;
 mod readout;

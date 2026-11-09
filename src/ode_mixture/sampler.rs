@@ -199,6 +199,41 @@ impl State {
     }
 }
 
+/// What the readout needs of the climb's mode when no chain runs: every
+/// pseudobulk at its most probable row under `params` and the lineages'
+/// `log_w` (the jitter of its unspliced share integrated out at
+/// `share_sd`), and its depths there.
+pub fn mode_snapshot(
+    reads: &Reads,
+    params: &Params,
+    log_w: &[f64],
+    share_sd: Option<f64>,
+) -> Snapshot {
+    let lv = params.levels();
+    let tab = match share_sd {
+        Some(sd) => super::likelihood::integrated_table(reads, &lv, sd),
+        None => super::likelihood::table(reads, &lv),
+    };
+    let n = params.positions();
+    let rows: Vec<usize> = (0..tab.nrows())
+        .into_par_iter()
+        .map(|p| {
+            let (lp, _) = super::blocks::log_posterior_row(&tab, log_w, n, p);
+            (0..lp.len())
+                .max_by(|&a, &b| lp[a].total_cmp(&lp[b]))
+                .expect("a row")
+        })
+        .collect();
+    let lambda = reads.depths(&rows, &lv);
+    Snapshot {
+        params: params.clone(),
+        log_w: log_w.to_vec(),
+        share_sd,
+        rows,
+        lambda,
+    }
+}
+
 /// Every block's seed of its own, from the chain's.
 fn block_seed(seed: u64, block: u64) -> u64 {
     seed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
