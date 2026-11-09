@@ -9,7 +9,7 @@ use super::init::{climb, root_pseudobulks, Climb};
 use super::likelihood::Reads;
 use super::model::lineage_label;
 use super::output::MapBasis;
-use super::readout::{grid_posterior, mode_snapshot, read_cells, GridPosterior, Snapshot};
+use super::readout::{grid_posterior, place, read_cells, GridPosterior, Mode};
 use super::refine::genes_at_mode;
 use anyhow::Context;
 use data_beans::alg::feature_coarsening::FeatureCoarsening;
@@ -122,7 +122,7 @@ pub struct OdeArgs {
 
     #[arg(
         long,
-        help = "Cells at the root of the trajectory, one name a line: the trunk's tree start grows from the pseudobulks mostly of them"
+        help = "Cells at the root of the trajectory, one name a line: a tree start grows from the pseudobulks mostly of them"
     )]
     pub root_cells: Option<std::path::PathBuf>,
 
@@ -374,17 +374,24 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
                     .into_iter()
                     .collect();
             let member = cell_to_pb.last().expect("at least one level");
-            let roots = root_pseudobulks(&named, &all_cells, member, &pbs, &sizes);
+            let (roots, mostly) = root_pseudobulks(&named, &all_cells, member, &pbs, &sizes);
             anyhow::ensure!(
                 !roots.is_empty(),
                 "no pseudobulk holds a cell of --root-cells"
             );
-            info!(
-                "ode: {} of {} pseudobulks are mostly --root-cells ({} named)",
-                roots.len(),
-                pbs.len(),
-                named.len()
-            );
+            if mostly {
+                info!(
+                    "ode: {} of {} pseudobulks are mostly --root-cells ({} named)",
+                    roots.len(),
+                    pbs.len(),
+                    named.len()
+                );
+            } else {
+                log::warn!(
+                    "ode: no pseudobulk is mostly --root-cells ({} named); the root is the one richest in them",
+                    named.len()
+                );
+            }
             roots
         }
     };
@@ -426,23 +433,34 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         "ode: at the mode, the unspliced reads' log capture {:.3}, jitter sd {:?}, lineage durations {:?}, branch times {:?}",
         start_at.log_capture, share, start_at.t_len, start_at.branch
     );
-    // Every pseudobulk at its most probable row: what the cells' readout
-    // and the genes' pass need of the mode.
-    let snap = mode_snapshot(fit_reads, &start_at, &log_w, share);
     // Every other lineage's branch time off the trunk; none with them apart.
-    let branch: Vec<f64> = snap.params.branch.clone().unwrap_or_default();
+    let branch: Vec<f64> = start_at.branch.clone().unwrap_or_default();
+    let mode = Mode {
+        params: start_at,
+        log_w,
+        share_sd: share,
+    };
+    // Every pseudobulk's posterior on the grid and its place at the mode:
+    // what the genes' pass needs.
+    let grid = grid_posterior(fit_reads, &mode);
+    let placed = place(fit_reads, &mode, &grid);
+    let unplaced = placed.rows.iter().filter(|r| r.is_none()).count();
+    if unplaced > 0 {
+        log::warn!(
+            "ode: {unplaced} pseudobulks the mode cannot place are left out of the genes' pass"
+        );
+    }
 
     // Every gene's rates at the mode with their Laplace sds (on groups,
     // every gene from its group's start).
-    let genes = genes_at_mode(&reads, fc.as_ref(), &snap);
+    let genes = genes_at_mode(&reads, fc.as_ref(), &mode, &placed);
     write_gene_rates(&args.out, &names, &genes.log_gamma, &genes.log_ratio)?;
     if let Some(fc) = &fc {
         crate::topic::model_metadata::save_coarsening_levels(&[Some(fc.clone())], &args.out)?;
     }
-    let snaps: Vec<Snapshot> = vec![snap];
 
     // The map on the trajectories' own axes, every cell placed by its reads.
-    let map = MapBasis::of_trajectories(&snaps, args.map_pcs)?;
+    let map = MapBasis::of_trajectories(&mode, args.map_pcs)?;
     // Every cell read once, a block at a time; QC's near-empty cells out.
     let table = read_out_cells(
         &data,
@@ -450,9 +468,8 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         fc.as_ref(),
         delta.as_ref(),
         keep.as_deref(),
-        &snaps,
+        &mode,
         &map,
-        args.lineages,
         args.block_size,
     )?;
     table.write(&args.out, map.dim())?;
@@ -462,7 +479,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     if let Some(tree) = &pb_tree {
         crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &row_names)?;
     }
-    write_pb_time(&args.out, &pbs, &grid_posterior(fit_reads, &snaps))?;
+    write_pb_time(&args.out, &pbs, &grid)?;
     if !branch.is_empty() {
         write_branch_times(&args.out, &branch)?;
     }
@@ -489,9 +506,9 @@ struct CellTable {
     velocity: Vec<f32>,
 }
 
-/// Every cell of `data` read out from `snaps` a block at a time (QC's
+/// Every cell of `data` read out at `mode` a block at a time (QC's
 /// near-empty cells, those not in `keep`, left out), placed on `map` with
-/// its velocity there (`lineages` of them).
+/// its velocity there.
 #[allow(clippy::too_many_arguments)]
 fn read_out_cells(
     data: &data_beans::sparse_io_vector::SparseIoVec,
@@ -499,11 +516,11 @@ fn read_out_cells(
     fc: Option<&FeatureCoarsening>,
     delta: Option<&DMatrix<f32>>,
     keep: Option<&[usize]>,
-    snaps: &[Snapshot],
+    mode: &Mode,
     map: &MapBasis,
-    lineages: usize,
     block_size: usize,
 ) -> anyhow::Result<CellTable> {
+    let lineages = mode.params.path.len();
     let all_cells = data.column_names()?;
     let kept_cell: Option<Vec<bool>> = keep.map(|k| {
         let mut m = vec![false; all_cells.len()];
@@ -531,7 +548,7 @@ fn read_out_cells(
             Some(fc) => coarse_reads(fc, &block),
             None => block,
         };
-        let out = read_cells(&block, snaps);
+        let out = read_cells(&block, mode);
         t.cells
             .extend(rows.iter().map(|&i| all_cells[start + i].clone()));
         for p in &out.lineage {
@@ -632,15 +649,15 @@ const PB_TIME_FLOOR: f64 = 1e-6;
 
 /// `{out}.pb_time.parquet`: every pseudobulk's posterior on the grid, a
 /// row per `(pb, lineage, position)` it has mass at, `pb` its index in the
-/// collapse's finest level (as `cell_to_pb` writes it). `phase` is the
-/// position's share of its lineage's grid (the branch time's scale);
-/// `time` the time there. A pseudobulk the mode cannot place has no row.
+/// collapse's finest level (as `cell_to_pb` writes it), `phase` the
+/// position's share of its lineage's grid (its lineage's own time, the
+/// branch time's scale too). A pseudobulk the mode cannot place has no row.
 fn write_pb_time(out: &str, pbs: &[usize], grid: &GridPosterior) -> anyhow::Result<()> {
     let n = grid.positions;
-    let labels: Vec<Box<str>> = (0..grid.time.len() / n).map(lineage_label).collect();
+    let labels: Vec<Box<str>> = (0..grid.phase.len() / n).map(lineage_label).collect();
     let (mut key, mut lineage) = (Vec::<Box<str>>::new(), Vec::<Box<str>>::new());
     let (mut position, mut phase) = (Vec::<i32>::new(), Vec::<f32>::new());
-    let (mut time, mut q) = (Vec::<f32>::new(), Vec::new());
+    let mut q = Vec::<f32>::new();
     for (row, &pb) in grid.post.row_iter().zip(pbs) {
         let pb: Box<str> = pb.to_string().into();
         for (r, &mass) in row.iter().enumerate().filter(|(_, m)| **m >= PB_TIME_FLOOR) {
@@ -648,7 +665,6 @@ fn write_pb_time(out: &str, pbs: &[usize], grid: &GridPosterior) -> anyhow::Resu
             lineage.push(labels[r / n].clone());
             position.push((r % n) as i32);
             phase.push(grid.phase[r] as f32);
-            time.push(grid.time[r] as f32);
             q.push(mass as f32);
         }
     }
@@ -660,7 +676,6 @@ fn write_pb_time(out: &str, pbs: &[usize], grid: &GridPosterior) -> anyhow::Resu
             ("lineage".into(), Column::Str(&lineage)),
             ("position".into(), Column::I32(&position)),
             ("phase".into(), Column::F32(&phase)),
-            ("time".into(), Column::F32(&time)),
             ("q".into(), Column::F32(&q)),
         ],
     )

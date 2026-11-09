@@ -92,10 +92,15 @@ pub fn coarsen_genes(
 
 /// Every group's reads, its genes' summed, `[P × K]` per track.
 pub fn coarse_reads(fc: &FeatureCoarsening, reads: &Reads) -> Reads {
+    // Gene by gene into its group, every column contiguous (the same sum
+    // in the same order as a group's genes summed).
     let sum = |m: &DMatrix<f64>| {
-        DMatrix::from_fn(m.nrows(), fc.num_coarse, |p, k| {
-            fc.coarse_to_fine[k].iter().map(|&g| m[(p, g)]).sum()
-        })
+        let mut out = DMatrix::<f64>::zeros(m.nrows(), fc.num_coarse);
+        for (g, &k) in fc.fine_to_coarse.iter().enumerate() {
+            let mut col = out.column_mut(k);
+            col += m.column(g);
+        }
+        out
     };
     Reads::from_matrices(sum(&reads.u), sum(&reads.s))
 }

@@ -99,7 +99,7 @@ and a gene's sd reports what the reads pin.
 | `{out}.cell_embedding.parquet` | every cell on the map: its log1p reads per 10⁴ on the leading `--map-pcs` components of the fitted trajectories (every lineage's levels at the mode), so the axes follow the dynamics, not other variation among the cells |
 | `{out}.cell_velocity.parquet` | every cell's velocity on that map, `d log level/dt` through the chain rule |
 | `{out}.gene_rates.parquet` | every gene's `log_gamma` and `log_ratio` (log γ/β) at the mode with the sd of its Laplace approximation |
-| `{out}.pb_time.parquet` | every finest pseudobulk's posterior over lineage and time, a row per `(pb, lineage, position)` with its `phase` (the position's share of the lineage's grid), the `time` there and mass `q`; `pb` as `{out}.cell_to_pb.parquet`'s finest level |
+| `{out}.pb_time.parquet` | every finest pseudobulk's posterior over lineage and time, a row per `(pb, lineage, position)` with its `phase` (the position's share of the lineage's grid, its lineage's own time) and mass `q`; `pb` as `{out}.cell_to_pb.parquet`'s finest level |
 | `{out}.branch_time.tsv` | with `--trunk`, every other lineage's branch time off it at the mode, on `pb_time`'s phase scale |
 | `{out}.senna.json` | the run manifest `senna view` and the MCP tools read |
 

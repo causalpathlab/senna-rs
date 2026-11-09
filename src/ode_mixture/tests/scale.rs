@@ -3,7 +3,7 @@
 use crate::ode_mixture::coarsen::coarse_reads;
 use crate::ode_mixture::init::{climb, Climb};
 use crate::ode_mixture::likelihood::Reads;
-use crate::ode_mixture::readout::mode_snapshot;
+use crate::ode_mixture::readout::{grid_posterior, place, Mode};
 use crate::ode_mixture::refine::genes_at_mode;
 use crate::ode_mixture::sim::{simulate, SimConfig};
 use data_beans::alg::feature_coarsening::coarsen_features;
@@ -64,8 +64,13 @@ fn a_run_on_groups_at_the_target_size() {
     let log_w = fit.log_weights().unwrap();
 
     let t = Instant::now();
-    let snap = mode_snapshot(&grouped, &start, &log_w, share);
-    let at_mode = genes_at_mode(&reads, Some(&fc), &snap);
+    let mode = Mode {
+        params: start,
+        log_w,
+        share_sd: share,
+    };
+    let placed = place(&grouped, &mode, &grid_posterior(&grouped, &mode));
+    let at_mode = genes_at_mode(&reads, Some(&fc), &mode, &placed);
     assert_eq!(at_mode.log_gamma.len(), genes);
     let gene_secs = t.elapsed().as_secs_f64();
 

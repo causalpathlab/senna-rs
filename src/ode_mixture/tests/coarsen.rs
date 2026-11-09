@@ -61,19 +61,17 @@ fn the_groups_tables_are_the_genes_up_to_a_pseudobulks_constant() {
     }
     eprintln!("worst relative gap {worst:.2e}");
     assert!(worst < 1e-10, "worst relative gap {worst}");
-    // The most probable row of every pseudobulk is the same under both.
+    // So every pseudobulk's posterior over the rows is the same under both.
     let log_w = [0.5f64.ln(); 2];
-    let rows = |t: &nalgebra::DMatrix<f64>| -> Vec<usize> {
-        (0..t.nrows())
-            .map(|p| {
-                let (lp, _) = log_posterior_row(t, &log_w, params.positions(), p);
-                (0..lp.len())
-                    .max_by(|&a, &b| lp[a].total_cmp(&lp[b]))
-                    .unwrap()
-            })
-            .collect()
-    };
-    assert_eq!(rows(&tab), rows(&tab_m));
+    let mut gap = 0f64;
+    for p in 0..tab.nrows() {
+        let (a, _) = log_posterior_row(&tab, &log_w, params.positions(), p);
+        let (b, _) = log_posterior_row(&tab_m, &log_w, params.positions(), p);
+        for (x, y) in a.iter().zip(&b) {
+            gap = gap.max((x - y).abs());
+        }
+    }
+    assert!(gap < 1e-6, "the posteriors differ by {gap}");
 }
 
 /// Every pseudobulk's depth is the same from the groups' levels.

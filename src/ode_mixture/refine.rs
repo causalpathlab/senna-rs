@@ -10,7 +10,7 @@
 use super::blocks::{gene_mode, to_theta, GenePrior};
 use super::coarsen::gene_params;
 use super::likelihood::{GeneRows, Reads, RowLayout};
-use super::readout::Snapshot;
+use super::readout::{Mode, Placed};
 use data_beans::alg::feature_coarsening::FeatureCoarsening;
 use rayon::prelude::*;
 
@@ -20,21 +20,37 @@ pub struct GeneLaplace {
     pub log_ratio: Vec<(f64, f64)>,
 }
 
-/// Every gene's rates at `snap` (the climb's mode, its rows and depths)
-/// by the Laplace approximation of its conditional ([`gene_mode`]), on the
-/// genes of a run on `fc`'s groups or on the run's own.
+/// Every gene's rates at `mode`, the pseudobulks `placed` at their rows and
+/// depths (one the mode cannot place is left out), by the Laplace
+/// approximation of its conditional ([`gene_mode`]), on the genes of a run
+/// on `fc`'s groups or on the run's own.
 pub fn genes_at_mode(
     reads: &Reads,
     fc: Option<&FeatureCoarsening>,
-    snap: &Snapshot,
+    mode: &Mode,
+    placed: &Placed,
 ) -> GeneLaplace {
     let params = match fc {
-        Some(fc) => gene_params(fc, &snap.params, reads),
-        None => snap.params.clone(),
+        Some(fc) => gene_params(fc, &mode.params, reads),
+        None => mode.params.clone(),
     };
     let prior = GenePrior::bounded(&params);
     let z_bar = params.path_mean();
-    let layout = RowLayout::new(&snap.rows, &snap.lambda);
+    let kept: Vec<usize> = (0..reads.u.nrows())
+        .filter(|&p| placed.rows[p].is_some())
+        .collect();
+    let (rows, lambda): (Vec<usize>, Vec<_>) = kept
+        .iter()
+        .map(|&p| (placed.rows[p].expect("placed"), placed.lambda[p]))
+        .unzip();
+    let subset;
+    let reads = if kept.len() < reads.u.nrows() {
+        subset = Reads::from_matrices(reads.u.select_rows(&kept), reads.s.select_rows(&kept));
+        &subset
+    } else {
+        reads
+    };
+    let layout = RowLayout::new(&rows, &lambda);
     let (log_gamma, log_ratio) = (0..params.beta.len())
         .into_par_iter()
         .map(|i| {
@@ -46,9 +62,9 @@ pub fn genes_at_mode(
                 params.base[i],
                 &z_bar,
             );
-            let prop = gene_mode(&params, &by_row, &z_bar, &prior, &start);
-            let (sd_gamma, sd_ratio) = prop.rate_sds(&prior);
-            ((prop.mode[0], sd_gamma), (prop.mode[1], sd_ratio))
+            let at = gene_mode(&params, &by_row, &z_bar, &prior, &start);
+            let (sd_gamma, sd_ratio) = at.rate_sds(&prior);
+            ((at.mode[0], sd_gamma), (at.mode[1], sd_ratio))
         })
         .unzip();
     GeneLaplace {

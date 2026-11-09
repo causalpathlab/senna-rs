@@ -413,15 +413,17 @@ const ROOT_SHARE: f32 = 0.5;
 
 /// The root pseudobulks from the cells the user names: of the pseudobulks
 /// (`pbs` their indices in `member`, `sizes` their cells) those mostly of
-/// named cells ([`ROOT_SHARE`]), or, none being, the one holding the most;
-/// empty when none holds one.
+/// named cells ([`ROOT_SHARE`]; `true` with them), or, none being, the one
+/// richest in them (its named cells times its share of them, so a large
+/// pseudobulk mostly of them beats a tiny pure one); empty when none holds
+/// one.
 pub fn root_pseudobulks(
     named: &std::collections::HashSet<Box<str>>,
     cells: &[Box<str>],
     member: &[usize],
     pbs: &[usize],
     sizes: &[f32],
-) -> Vec<usize> {
+) -> (Vec<usize>, bool) {
     let row_of: std::collections::HashMap<usize, usize> =
         pbs.iter().enumerate().map(|(c, &p)| (p, c)).collect();
     let mut hits = vec![0f32; pbs.len()];
@@ -434,13 +436,12 @@ pub fn root_pseudobulks(
         .filter(|&c| hits[c] >= ROOT_SHARE * sizes[c] && hits[c] > 0.0)
         .collect();
     if !mostly.is_empty() {
-        return mostly;
+        return (mostly, true);
     }
-    (0..pbs.len())
+    let richest = (0..pbs.len())
         .filter(|&c| hits[c] > 0.0)
-        .max_by(|&a, &b| hits[a].total_cmp(&hits[b]))
-        .into_iter()
-        .collect()
+        .max_by(|&a, &b| (hits[a] * hits[a] / sizes[a]).total_cmp(&(hits[b] * hits[b] / sizes[b])));
+    (richest.into_iter().collect(), false)
 }
 
 /// The k-means start, every lineage `l` with `reversed[l]` turned round.

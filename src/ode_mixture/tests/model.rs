@@ -124,3 +124,21 @@ fn the_velocities_are_the_trajectorys_slope() {
     eprintln!("worst relative gap to the slope {worst:.2e}");
     assert!(worst < 1e-2, "{worst}");
 }
+
+/// The lineages equally weighted, `[L]` log weights.
+pub(super) fn uniform_log_w(l: usize) -> Vec<f64> {
+    vec![-(l as f64).ln(); l]
+}
+
+/// The share of genes whose `truth` lies within two sds of `est`'s mean
+/// (widened by `slack`), the sds finite and positive.
+pub(super) fn coverage(est: &[(f64, f64)], truth: impl Fn(usize) -> f64, slack: f64) -> f64 {
+    let n = est.len();
+    (0..n)
+        .filter(|&g| {
+            let (m, s) = est[g];
+            s.is_finite() && s > 0.0 && (truth(g) - m).abs() <= 2.0 * s + slack
+        })
+        .count() as f64
+        / n as f64
+}

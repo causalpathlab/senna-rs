@@ -5,7 +5,7 @@
 //! every gene's rates and their sds are read; and every pseudobulk's
 //! posterior over the rows ([`log_posterior_row`]).
 
-use super::band::{dot, Band, Bordered, Factor};
+use super::band::{dot, Band, Factor};
 use super::likelihood::{softplus, GeneRows};
 use super::model::{clamped_exp, Params};
 use nalgebra::{DMatrix, DVector};
@@ -29,6 +29,21 @@ pub fn log_posterior_row(
     }
     let norm = top + logit.iter().map(|x| (x - top).exp()).sum::<f64>().ln();
     (logit.iter().map(|x| x - norm).collect(), norm)
+}
+
+/// The index of the largest of `v`, `None` where any is not finite (a
+/// pseudobulk no row can place) or there is none.
+pub fn argmax(v: impl IntoIterator<Item = f64>) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, x) in v.into_iter().enumerate() {
+        if !x.is_finite() {
+            return None;
+        }
+        if best.is_none_or(|(_, b)| x > b) {
+            best = Some((i, x));
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 /// A gene's parameters as the Laplace approximation takes them, each with a meaning of
@@ -150,34 +165,47 @@ impl GenePrior {
         theta
     }
 
-    /// The prior's log density in the gene's coordinates: at `θ` with
-    /// the link's log-Jacobian, `Σ log((hi − lo) σ(u)(1 − σ(u)))` over the
-    /// two rates (the map from `(log γ, log β)` to `θ`'s has unit Jacobian).
-    pub(super) fn linked_log_density(&self, v: &[f64]) -> f64 {
-        let jacobian = self.log_rate.map_or(0.0, |(lo, hi)| {
+    /// The link's log-Jacobian at `v`, `Σ log((hi − lo) σ(u)(1 − σ(u)))`
+    /// over the two rates (the map from `(log γ, log β)` to `θ`'s has unit
+    /// Jacobian); `0` unbounded.
+    fn log_jacobian(&self, v: &[f64]) -> f64 {
+        self.log_rate.map_or(0.0, |(lo, hi)| {
             [v[0], v[1]]
                 .iter()
                 .map(|&u| (hi - lo).ln() - softplus(u) - softplus(-u))
                 .sum()
-        });
-        self.log_density(&self.unlink(v)) + jacobian
+        })
     }
 
-    /// A normal in the gene's coordinates near the prior, `(mean, sd)`
-    /// each (the scalar slice moves' scale): the prior's own unbounded;
-    /// with bounds, the rates' prior carried through the link at its mean.
-    fn reference(&self, h: usize) -> (Vec<f64>, Vec<f64>) {
-        let (mut mean, mut sd) = (self.mean(h), self.sd(h));
+    /// The prior's log density in the gene's coordinates: at `θ` with the
+    /// link's log-Jacobian.
+    pub(super) fn linked_log_density(&self, v: &[f64]) -> f64 {
+        self.log_density(&self.unlink(v)) + self.log_jacobian(v)
+    }
+
+    /// `d log r / du` at `u`, the link's slope: `(hi − lo) σ(u)(1 − σ(u))`
+    /// with bounds, `1` without.
+    fn link_slope(&self, u: f64) -> f64 {
+        self.log_rate.map_or(1.0, |(lo, hi)| {
+            let s = sigmoid(u);
+            (hi - lo) * s * (1.0 - s)
+        })
+    }
+
+    /// The prior's sds in the gene's coordinates (the Newton steps' scale
+    /// and the fallback precision): its own unbounded; with bounds, the
+    /// rates' carried through the link at its mean.
+    fn reference_sd(&self, h: usize) -> Vec<f64> {
+        let mut sd = self.sd(h);
         if let Some((lo, hi)) = self.log_rate {
             let (mg, sg) = self.log_gamma;
             let (mr, sr) = self.log_ratio;
             for (i, (m, s)) in [(mg, sg), (mg - mr, sg.hypot(sr))].into_iter().enumerate() {
                 let p = share_of(m, lo, hi, 0.05);
-                mean[i] = logit(p);
                 sd[i] = s / ((hi - lo) * p * (1.0 - p));
             }
         }
-        (mean, sd)
+        sd
     }
 }
 
@@ -219,21 +247,15 @@ impl GenePrior {
     }
 }
 
-/// Where a gene's conditional is, as a normal in the gene's
-/// coordinates ([`GenePrior::link`]): its mode (`θ`, and linked as
-/// `centre`) and the Cholesky factor `L` of the precision `P = L Lᵀ` (the
-/// negative Hessian there, over [`WIDEN`]²).
+/// The Laplace approximation of a gene's conditional: its mode (`θ`, and
+/// linked as `centre`, [`GenePrior::link`]) and the factored precision
+/// there (the negative Hessian in the gene's coordinates).
 #[derive(Clone)]
-pub struct GeneProposal {
+pub struct GeneMode {
     pub mode: Vec<f64>,
     centre: Vec<f64>,
-    /// The proposal's precision, factored.
-    precision: Bordered,
+    precision: Factor,
 }
-
-/// The proposal's sd over the Laplace approximation's: heavier than the
-/// conditional, so its tails are covered.
-const WIDEN: f64 = 1.5;
 
 /// A failed step is halved this many times (down to about a thousandth of
 /// its length) before the search stops: a well-read gene or path's
@@ -284,15 +306,16 @@ pub fn gene_mode(
     z_bar: &[f64],
     prior: &GenePrior,
     anchor: &[f64],
-) -> GeneProposal {
+) -> GeneMode {
     // In the gene's coordinates.
-    let f =
-        |v: &[f64]| gene_ll(params, z_bar, &prior.unlink(v), by_row) + prior.linked_log_density(v);
+    let f = |v: &[f64]| {
+        let theta = prior.unlink(v);
+        gene_ll(params, z_bar, &theta, by_row) + prior.log_density(&theta) + prior.log_jacobian(v)
+    };
     let n = anchor.len();
-    let (_, sd) = prior.reference(n - 3);
+    let sd = prior.reference_sd(n - 3);
     let prior_precision = || Band::diagonal_of(&sd.iter().map(|s| s.powi(-2)).collect::<Vec<_>>());
-    let factor =
-        |p: &DMatrix<f64>| Bordered::new(Factor::new(&Band::from_dense(p), prior_precision), None);
+    let factor = |p: &DMatrix<f64>| Factor::new(&Band::from_dense(p), prior_precision);
     let eps = 1e-4;
     // At `t`, `f0 = f(t)` known.
     let hessian = |t: &[f64], f0: f64| -> (DVector<f64>, DMatrix<f64>) {
@@ -349,19 +372,19 @@ pub fn gene_mode(
             break;
         }
     }
-    let precision = factor(&(-hess / (WIDEN * WIDEN)));
-    GeneProposal {
+    GeneMode {
         mode: prior.unlink(&t),
         centre: t,
-        precision,
+        precision: factor(&-hess),
     }
 }
 
-impl GeneProposal {
+impl GeneMode {
     /// The Laplace approximation's sds of `log γ` and `log γ/β` at the
-    /// mode: the conditional's covariance is `P⁻¹/`[`WIDEN`]`²` in the
-    /// gene's coordinates, carried through the link's derivative at the
-    /// centre (`log γ/β = log γ − log β`, each rate its own `u`).
+    /// mode: the covariance `P⁻¹` in the gene's coordinates, carried through
+    /// the link's slope at the centre. With bounds the coordinates are the
+    /// two rates' `u`, so `log γ/β = log γ − log β` mixes both; without,
+    /// they are `log γ` and `log γ/β` themselves.
     pub fn rate_sds(&self, prior: &GenePrior) -> (f64, f64) {
         let n = self.centre.len();
         let column = |i: usize| {
@@ -370,23 +393,17 @@ impl GeneProposal {
             self.precision.solve(&e)
         };
         let (c0, c1) = (column(0), column(1));
-        let (v00, v01, v11) = (
-            c0[0] / (WIDEN * WIDEN),
-            c0[1] / (WIDEN * WIDEN),
-            c1[1] / (WIDEN * WIDEN),
+        let (v00, v01, v11) = (c0[0], c0[1], c1[1]);
+        let (j0, j1) = (
+            prior.link_slope(self.centre[0]),
+            prior.link_slope(self.centre[1]),
         );
-        let (j0, j1) = match prior.log_rate {
-            Some((lo, hi)) => {
-                let slope = |u: f64| {
-                    let s = sigmoid(u);
-                    (hi - lo) * s * (1.0 - s)
-                };
-                (slope(self.centre[0]), slope(self.centre[1]))
-            }
-            None => (1.0, 1.0),
-        };
         let var_gamma = j0 * j0 * v00;
-        let var_ratio = j0 * j0 * v00 - 2.0 * j0 * j1 * v01 + j1 * j1 * v11;
+        let var_ratio = if prior.log_rate.is_some() {
+            j0 * j0 * v00 - 2.0 * j0 * j1 * v01 + j1 * j1 * v11
+        } else {
+            v11
+        };
         (var_gamma.max(0.0).sqrt(), var_ratio.max(0.0).sqrt())
     }
 }

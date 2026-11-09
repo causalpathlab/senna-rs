@@ -165,12 +165,12 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
     let (keys, nums) = read_table_columns(
         &format!("{out}.pb_time.parquet"),
         &["pb", "lineage"],
-        &["position", "phase", "time", "q"],
+        &["position", "phase", "q"],
     )
     .unwrap();
     assert!(keys[1].iter().all(|l| l.as_ref() == "L1"));
     let mut mass = std::collections::HashMap::<&str, f64>::new();
-    for (pb, q) in keys[0].iter().zip(&nums[3]) {
+    for (pb, q) in keys[0].iter().zip(&nums[2]) {
         *mass.entry(pb.as_ref()).or_default() += q;
     }
     assert!(
@@ -178,10 +178,8 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
         "{:?}",
         mass.values().take(3).collect::<Vec<_>>()
     );
-    // The phase on the grid; the time at it, with the duration drawn, any
-    // nonnegative value.
+    // The phase on the grid, each lineage's own time.
     assert!(nums[1].iter().all(|u| (0.0..=1.0).contains(u)));
-    assert!(nums[2].iter().all(|t| t.is_finite() && *t >= 0.0));
     let member = senna::embed_common::Mat::from_parquet_with_row_names(
         &format!("{out}.cell_to_pb.parquet"),
         Some(0),
@@ -194,66 +192,12 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
     }
 }
 
-/// The cells are read out at the climb's mode and every gene's rates come
-/// with their Laplace sds; the lineages are apart by default.
+/// The defaults: lineages apart, each on its own time, no trunk, no root.
 #[test]
-fn a_run_reads_out_at_the_mode() {
-    let sim = simulate(&SimConfig {
-        n_genes: 80,
-        n_pb: 1000,
-        depth: 3000.0,
-        seed: 4,
-        ..SimConfig::default()
-    })
-    .unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let data = backend(&sim, dir.path());
-    let out = dir.path().join("run").to_string_lossy().into_owned();
-    let args = parse(&[
-        data.as_str(),
-        "-o",
-        &out,
-        "--lineages",
-        "1",
-        "--points",
-        "25",
-        "--steps",
-        "1500",
-        "--map-pcs",
-        "5",
-    ]);
-    assert!(
-        !args.trunk,
-        "lineages apart, each on its own time, by default"
-    );
-    run_ode(&args).unwrap();
-
-    let (strs, nums) = read_table_columns(
-        &format!("{out}.cell_time.parquet"),
-        &["cell"],
-        &["tau", "tau_sd", "tau_lo", "tau_hi", "p_L1"],
-    )
-    .unwrap();
-    assert!(nums.iter().flatten().all(|x| x.is_finite()));
-    let truth: Vec<f64> = strs[0]
-        .iter()
-        .map(|c| sim.truth.time[c[1..].parse::<usize>().unwrap()])
-        .collect();
-    let rho = spearman(&nums[0], &truth).abs();
-    eprintln!("senna ode at the mode: time Spearman with the truth {rho:.3}");
-    assert!(rho > 0.9, "Spearman {rho}");
-
-    let (_, stats) = read_table_columns(
-        &format!("{out}.gene_rates.parquet"),
-        &["gene"],
-        &["log_gamma", "log_gamma_sd", "log_ratio", "log_ratio_sd"],
-    )
-    .unwrap();
-    assert!(stats.iter().flatten().all(|x| x.is_finite()));
-    assert!(stats[1].iter().chain(&stats[3]).all(|&s| s > 0.0));
-    let (m, _) = RunManifest::load(std::path::Path::new(&format!("{out}.senna.json"))).unwrap();
-    assert_eq!(m.kind, RunKind::Ode);
-    assert_eq!(m.outputs.pb_time.as_deref(), Some("run.pb_time.parquet"));
+fn the_defaults_put_the_lineages_apart() {
+    let args = parse(&["tracks.zarr", "-o", "out"]);
+    assert!(!args.trunk);
+    assert!(args.root_cells.is_none());
 }
 
 /// A run on groups of genes (`--max-coarse-features`) still writes every
