@@ -70,6 +70,7 @@ fn from_scratch_the_climb_finds_time_and_its_direction() {
         steps: 2500,
         lr: 0.03,
         sub: 1,
+        root: None,
     };
     let (fit, objective) = climb(&train, &opts, &dev).unwrap();
     let at_truth = {
@@ -116,6 +117,7 @@ fn from_scratch_two_lineages_come_apart() {
         steps: 2500,
         lr: 0.03,
         sub: 1,
+        root: None,
     };
     let (fit, objective) = climb(&train, &opts, &dev).unwrap();
     let all = first(&sim, sim.n_pb);
@@ -169,7 +171,7 @@ fn a_tree_start_gives_both_lineages_the_trunk() {
     let sim = simulate(&cfg).unwrap();
     let t = &sim.truth;
     let reads = first(&sim, sim.n_pb);
-    let starts = tree_starts(&reads, 3);
+    let starts = tree_starts(&reads, 3, 2);
     assert_eq!(starts.len(), 3, "a start per end");
     let score = |places: &Vec<Vec<(usize, f64)>>| {
         let (mut tab, mut shared, mut trunk, mut late) = ([[0usize; 2]; 2], 0, 0, 0);
@@ -235,6 +237,7 @@ fn the_climbs_time_is_not_a_grid_step_late() {
         steps: 2500,
         lr: 0.03,
         sub: 4,
+        root: None,
     };
     let (fit, _) = climb(&train, &opts, &Device::Cpu).unwrap();
     let (_, time) = fit.posterior(&fit.reads(&train).unwrap()).unwrap();

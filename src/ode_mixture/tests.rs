@@ -10,6 +10,7 @@ mod init;
 mod kernel;
 mod kinetics;
 mod likelihood;
+mod mcem;
 mod model;
 mod output;
 mod readout;

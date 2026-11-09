@@ -71,6 +71,7 @@ fn climb_mode() -> (Params, Option<f64>) {
         steps: 2500,
         lr: 0.03,
         sub: CLIMB_SUB,
+        root: None,
     };
     let (fit, _) = climb(&first(sim(), TRAIN), &opts, &Device::Cpu).unwrap();
     (fit.params().unwrap(), fit.share_sd().unwrap())
@@ -408,7 +409,7 @@ fn on_a_trunk_the_chains_find_the_branch() {
         .unwrap()
         .with_share(Some(SHARE_START))
         .unwrap()
-        .with_trunk(&truth, &grid, 0.4)
+        .with_trunk(&truth, &grid, &[0.4])
         .unwrap();
     fit.adam(&reads, 2000, 0.01).unwrap();
     let draws = run(

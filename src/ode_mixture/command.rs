@@ -121,6 +121,12 @@ pub struct OdeArgs {
     )]
     pub lr: f64,
 
+    #[arg(
+        long,
+        help = "Cells at the root of the trajectory, one name a line: the trunk's tree start grows from the pseudobulk richest in them"
+    )]
+    pub root_cells: Option<std::path::PathBuf>,
+
     #[arg(long, default_value_t = 4, help = "Chains")]
     pub chains: usize,
 
@@ -421,6 +427,45 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let grouped = fc.as_ref().map(|fc| coarse_reads(fc, &reads));
     let fit_reads = grouped.as_ref().unwrap_or(&reads);
 
+    // The root pseudobulk, from the cells the user names.
+    let root = match &args.root_cells {
+        None => None,
+        Some(path) => {
+            let named: std::collections::HashSet<Box<str>> = std::fs::read_to_string(path)?
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(Box::from)
+                .collect();
+            let member = cell_to_pb.last().expect("at least one level");
+            let row_of: std::collections::HashMap<usize, usize> =
+                pbs.iter().enumerate().map(|(c, &p)| (p, c)).collect();
+            let mut hits = vec![0f32; pbs.len()];
+            for (cell, &p) in all_cells.iter().zip(member.iter()) {
+                if named.contains(cell) {
+                    if let Some(&c) = row_of.get(&p) {
+                        hits[c] += 1.0;
+                    }
+                }
+            }
+            // The richest: its root cells times its share of them, so a
+            // large pseudobulk mostly of them beats a tiny pure one.
+            let score = |c: usize| hits[c] * hits[c] / sizes[c];
+            let richest = (0..pbs.len())
+                .filter(|&c| hits[c] > 0.0)
+                .max_by(|&a, &b| score(a).total_cmp(&score(b)));
+            let Some(c) = richest else {
+                anyhow::bail!("no pseudobulk holds a cell of --root-cells");
+            };
+            info!(
+                "ode: the root pseudobulk holds {} of its {} cells from --root-cells ({} named)",
+                hits[c],
+                sizes[c],
+                named.len()
+            );
+            Some(c)
+        }
+    };
     // The climb, then the chains from its mode.
     let opts = Climb {
         lineages: args.lineages,
@@ -432,6 +477,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         sub: args.sub,
         jitter: !args.no_jitter,
         trunk: !args.no_trunk,
+        root,
     };
     let (fit, objective) = climb(fit_reads, &opts, &dev)?;
     info!("ode: the climb's objective {objective:.4}");

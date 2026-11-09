@@ -81,6 +81,7 @@ fn from_scratch_branching_lineages_keep_their_trunk() {
         steps: 2500,
         lr: 0.03,
         sub: 1,
+        root: None,
     };
     let (fit, objective) = climb(&train, &opts, &dev).unwrap();
     let branch_at = fit.branch_at().unwrap().unwrap()[0];

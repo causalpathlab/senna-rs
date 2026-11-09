@@ -272,7 +272,7 @@ fn with_a_trunk_the_lineages_levels_agree_before_the_branch() {
     let prior = GridPrior::new(45, 1.0, 0.25).unwrap();
     let fit = Fit::from_params(&params, &prior, &Device::Cpu)
         .unwrap()
-        .with_trunk(&params, &prior, 0.4)
+        .with_trunk(&params, &prior, &[0.4])
         .unwrap();
     assert!((fit.branch_at().unwrap().unwrap()[0] - 0.4).abs() < 1e-5);
     let (u, _) = fit.levels().unwrap();

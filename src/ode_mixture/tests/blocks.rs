@@ -530,7 +530,7 @@ fn trunk_mode() -> (
     let truth = truth_params(&sim, 133, 45);
     let fit = Fit::from_params(&truth, &grid, &Device::Cpu)
         .unwrap()
-        .with_trunk(&truth, &grid, 0.4)
+        .with_trunk(&truth, &grid, &[0.4])
         .unwrap();
     fit.adam(&reads, 1000, 0.01).unwrap();
     let params = fit.params().unwrap();

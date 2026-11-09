@@ -160,7 +160,8 @@ impl Fit {
         Ok(self)
     }
 
-    /// With every other lineage on lineage 0's trunk until `branch_at`, one
+    /// With every other lineage on lineage 0's trunk until its `branch_at`
+    /// (one for all when a single one is given), one
     /// clock for all: the paths of `params` taken as the trunk (lineage 0's)
     /// and every other lineage's departure `d = z_ℓ − z_0` from it, its
     /// whitened `η_ℓ` the most probable under the prior given `d`
@@ -169,13 +170,14 @@ impl Fit {
         mut self,
         params: &Params,
         prior: &GridPrior,
-        branch_at: f64,
+        branch_at: &[f64],
     ) -> Result<Self> {
         use nalgebra::DVector;
         let (l, n, _, h) = self.dims;
         let dev = self.eta.device().clone();
-        let tb = branch_at.clamp(0.02, 0.98);
-        let r = branch_ramp(n, tb, self.kappa);
+        let tb: Vec<f64> = (1..l)
+            .map(|li| branch_at[(li - 1).min(branch_at.len() - 1)].clamp(0.02, 0.98))
+            .collect();
         let mut eta = Vec::with_capacity(l * n * h);
         for (li, path) in params.path.iter().enumerate() {
             let dims: Vec<DVector<f64>> = (0..h)
@@ -184,6 +186,7 @@ impl Fit {
                         prior.whiten(&DVector::from_fn(n, |k, _| path[k][d]))
                     } else {
                         let dep = DVector::from_fn(n, |k, _| path[k][d] - params.path[0][k][d]);
+                        let r = branch_ramp(n, tb[li - 1], self.kappa);
                         prior.whiten_scaled(&r, &dep, TRUNK_FIT)
                     }
                 })
@@ -195,7 +198,13 @@ impl Fit {
         self.eta = var(eta, &[l, n, h], &dev)?;
         self.log_t = None;
         self.branch = (l > 1)
-            .then(|| var(vec![(tb / (1.0 - tb)).ln(); l - 1], &[l - 1], &dev))
+            .then(|| {
+                var(
+                    tb.iter().map(|t| (t / (1.0 - t)).ln()).collect(),
+                    &[l - 1],
+                    &dev,
+                )
+            })
             .transpose()?;
         Ok(self)
     }
