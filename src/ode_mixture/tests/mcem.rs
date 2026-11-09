@@ -50,20 +50,32 @@ fn purity(fit: &Fit, reads: &Reads, sim: &Sim) -> f64 {
         .filter(|&p| t.time[p] > BRANCH * 1.25)
         .collect();
     let l = weights[0].len();
-    let called: Vec<usize> = weights
+    let pairs: Vec<(usize, usize)> = past
         .iter()
-        .map(|w| (0..l).max_by(|&a, &b| w[a].total_cmp(&w[b])).unwrap())
+        .map(|&p| {
+            let w = &weights[p];
+            (
+                t.lineage[p],
+                (0..l).max_by(|&a, &b| w[a].total_cmp(&w[b])).unwrap(),
+            )
+        })
         .collect();
+    best_match(l, &pairs) as f64 / past.len() as f64
+}
+
+/// Over `(true, called)` lineage pairs, how many agree under the best
+/// one-to-one matching of the `l` lineages (every permutation tried).
+fn best_match(l: usize, pairs: &[(usize, usize)]) -> usize {
     let mut perm: Vec<usize> = (0..l).collect();
     let mut best = 0;
     permute(&mut perm, 0, &mut |perm| {
-        let right = past
+        let right = pairs
             .iter()
-            .filter(|&&p| perm[t.lineage[p]] == called[p])
+            .filter(|&&(truth, called)| perm[truth] == called)
             .count();
         best = best.max(right);
     });
-    best as f64 / past.len() as f64
+    best
 }
 
 fn permute(v: &mut Vec<usize>, k: usize, f: &mut dyn FnMut(&[usize])) {
@@ -94,21 +106,12 @@ fn start_purity(places: &Places, sim: &Sim) -> (f64, f64) {
     let l = sim.truth.path.len();
     let past: Vec<(usize, usize)> = (0..sim.n_pb)
         .filter(|&p| t.time[p] > BRANCH * 1.25 && places[p].len() == 1)
-        .map(|p| (p, places[p][0].0))
+        .map(|p| (t.lineage[p], places[p][0].0))
         .collect();
-    let mut perm: Vec<usize> = (0..l).collect();
-    let mut best = 0;
-    permute(&mut perm, 0, &mut |perm| {
-        let right = past
-            .iter()
-            .filter(|&&(p, on)| perm[t.lineage[p]] == on)
-            .count();
-        best = best.max(right);
-    });
     let trunk: Vec<usize> = (0..sim.n_pb).filter(|&p| t.trunk[p]).collect();
     let shared = trunk.iter().filter(|&&p| places[p].len() > 1).count();
     (
-        best as f64 / past.len().max(1) as f64,
+        best_match(l, &past) as f64 / past.len().max(1) as f64,
         shared as f64 / trunk.len().max(1) as f64,
     )
 }
@@ -210,8 +213,8 @@ fn from_scratch_three_fates_are_three_lineages_on_more_seeds() {
 #[ignore = "diagnostic"]
 fn diag_three_fates_each_tree_start_and_the_truth() {
     use super::model::truth_params;
-    use crate::ode_mixture::fit::{Fit, SHARE_START};
-    use crate::ode_mixture::init::params_from;
+    use crate::ode_mixture::fit::SHARE_START;
+    use crate::ode_mixture::init::{branch_times, params_from};
     use crate::ode_mixture::kernel::GridPrior;
     let env = |k: &str, d: f64| {
         std::env::var(k)
@@ -251,7 +254,7 @@ fn diag_three_fates_each_tree_start_and_the_truth() {
         .unwrap()
         .with_share(Some(SHARE_START))
         .unwrap()
-        .with_trunk(&truth, &prior, &[BRANCH])
+        .with_trunk(&truth, &prior, &vec![BRANCH; l - 1])
         .unwrap();
     let obj = at_truth
         .objective(&at_truth.reads(&reads).unwrap())
@@ -265,15 +268,7 @@ fn diag_three_fates_each_tree_start_and_the_truth() {
     for (i, places) in tree_starts(&reads, 3, l).iter().enumerate() {
         let (pure, shared) = start_purity(places, &sim);
         let start = params_from(&reads, &o, places);
-        let tb: Vec<f64> = (1..l)
-            .map(|l| {
-                places
-                    .iter()
-                    .filter(|at| at.iter().any(|&(m, _)| m == 0) && at.iter().any(|&(m, _)| m == l))
-                    .flat_map(|at| at.iter().map(|&(_, t)| t))
-                    .fold(0.05, f64::max)
-            })
-            .collect();
+        let tb = branch_times(places, l);
         let fit = Fit::from_params(&start, &prior, &dev)
             .unwrap()
             .with_share(Some(SHARE_START))

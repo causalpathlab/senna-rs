@@ -52,8 +52,9 @@ pub struct SimConfig {
     /// 0's path until `f T`, apart after.
     pub branch_at: Option<f64>,
     /// How far every branching lineage drifts from the trunk past the
-    /// branch, on its own fixed direction, on top of its draw: `0` lets
-    /// two fates wander back together, as a draw may.
+    /// branch, on its own fixed direction, on top of its draw (both scaled
+    /// by the branch's ramp, so far past the branch the drift is `√2`
+    /// this): `0` lets two fates wander back together, as a draw may.
     pub part: f64,
     pub seed: u64,
 }

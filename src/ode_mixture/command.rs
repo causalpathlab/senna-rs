@@ -6,13 +6,14 @@
 
 use super::coarsen::{coarse_reads, coarsen_genes};
 use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
-use super::init::{climb, Climb};
+use super::init::{climb, root_pseudobulk, Climb};
 use super::likelihood::Reads;
 use super::model::lineage_label;
 use super::output::{chain_stats, ChainStat, MapBasis};
 use super::readout::{grid_posterior, read_cells, GridPosterior, Snapshot};
 use super::refine::refine_genes;
 use super::sampler::{self, Draws};
+use anyhow::Context;
 use data_beans::alg::feature_coarsening::FeatureCoarsening;
 use legume_numeric::matrix::parquet::{write_named_table, Column};
 use log::info;
@@ -411,6 +412,28 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         all_cells.len(),
         inputs.data_files.len()
     );
+    // The root pseudobulk, from the cells the user names.
+    let root = match &args.root_cells {
+        None => None,
+        Some(path) => {
+            let path = path.to_string_lossy();
+            let named: std::collections::HashSet<Box<str>> =
+                legume_numeric::matrix::common_io::read_name_list(&path)
+                    .with_context(|| format!("reading --root-cells {path}"))?
+                    .into_iter()
+                    .collect();
+            let member = cell_to_pb.last().expect("at least one level");
+            let Some((c, hits)) = root_pseudobulk(&named, &all_cells, member, &pbs, &sizes) else {
+                anyhow::bail!("no pseudobulk holds a cell of --root-cells");
+            };
+            info!(
+                "ode: the root pseudobulk holds {hits} of its {} cells from --root-cells ({} named)",
+                sizes[c],
+                named.len()
+            );
+            Some(c)
+        }
+    };
 
     // The genes in groups, when they outnumber --max-coarse-features: the
     // climb and the chains on the groups' reads, every gene drawn on its
@@ -427,45 +450,6 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let grouped = fc.as_ref().map(|fc| coarse_reads(fc, &reads));
     let fit_reads = grouped.as_ref().unwrap_or(&reads);
 
-    // The root pseudobulk, from the cells the user names.
-    let root = match &args.root_cells {
-        None => None,
-        Some(path) => {
-            let named: std::collections::HashSet<Box<str>> = std::fs::read_to_string(path)?
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(Box::from)
-                .collect();
-            let member = cell_to_pb.last().expect("at least one level");
-            let row_of: std::collections::HashMap<usize, usize> =
-                pbs.iter().enumerate().map(|(c, &p)| (p, c)).collect();
-            let mut hits = vec![0f32; pbs.len()];
-            for (cell, &p) in all_cells.iter().zip(member.iter()) {
-                if named.contains(cell) {
-                    if let Some(&c) = row_of.get(&p) {
-                        hits[c] += 1.0;
-                    }
-                }
-            }
-            // The richest: its root cells times its share of them, so a
-            // large pseudobulk mostly of them beats a tiny pure one.
-            let score = |c: usize| hits[c] * hits[c] / sizes[c];
-            let richest = (0..pbs.len())
-                .filter(|&c| hits[c] > 0.0)
-                .max_by(|&a, &b| score(a).total_cmp(&score(b)));
-            let Some(c) = richest else {
-                anyhow::bail!("no pseudobulk holds a cell of --root-cells");
-            };
-            info!(
-                "ode: the root pseudobulk holds {} of its {} cells from --root-cells ({} named)",
-                hits[c],
-                sizes[c],
-                named.len()
-            );
-            Some(c)
-        }
-    };
     // The climb, then the chains from its mode.
     let opts = Climb {
         lineages: args.lineages,
