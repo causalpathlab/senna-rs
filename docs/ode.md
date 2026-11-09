@@ -20,7 +20,7 @@ The input is a two-track count backend: rows `{gene}/count/spliced` and
 ## The model
 
 Per gene `g`: a splicing rate `β_g` and a decay rate `γ_g`, shared by every
-lineage, so all of them run on one clock; an embedding `ρ_g` and a baseline
+lineage (the kinetic unit of time); an embedding `ρ_g` and a baseline
 `b_g`. Per lineage `ℓ`: a path `z_ℓ(t)` on a grid of `--points` times in
 `[0, 1]`, a Gaussian process (Matérn-5/2, length scale `--kappa`) in `--dim`
 dimensions. Transcription is held constant on each grid step:
@@ -57,8 +57,9 @@ not seen.
   levels are scaled by `e^{ω_p}`, `ω_p ~ N(0, σ²)` with `σ` fitted, so a
   pseudobulk's nuclear fraction does not pass for kinetics.
 
-Gauges: time is in units of the lineages' duration (`T = 1`); a shift of
-every baseline cancels in the multinomial; the rotation of `z` against `ρ` is
+Gauges: every lineage's time is reported as its own phase on `[0, 1]` (a
+lineage's duration against the kinetics is fitted but not read into it); a
+shift of every baseline cancels in the multinomial; the rotation of `z` against `ρ` is
 left free. Only the invariants are reported: times, rates and levels.
 
 ## Inference

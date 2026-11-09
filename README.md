@@ -236,7 +236,7 @@ senna rbm counts.zarr -o out -t 10 --hidden bernoulli
 
 Every pseudobulk on one lineage's trajectory at one time, the trajectory the
 splicing ODE solved exactly, driven by the lineage's transcription; splicing
-and decay rates shared by every lineage, so all of them run on one clock.
+and decay rates shared by every lineage (the kinetic unit of time).
 Every lineage has its own path and its own time (`--trunk` puts them on
 lineage 0's trunk until a fitted branch time, one clock for all).
 Fitted on the finest pseudobulks by a climb to a mode; every cell is read
