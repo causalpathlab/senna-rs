@@ -95,7 +95,7 @@ and a gene's sd reports what the reads pin.
 
 | file | holds |
 |---|---|
-| `{out}.cell_time.parquet` | every cell's `lineage`, `tau` with `tau_sd` and the 90% interval `tau_lo`/`tau_hi`, and `p_L1…` lineage posteriors |
+| `{out}.cell_time.parquet` | every cell's `lineage`, `tau` (its lineage's own time on `[0, 1]`; lineages are not put on one clock) with `tau_sd` and the 90% interval `tau_lo`/`tau_hi`, and `p_L1…` lineage posteriors |
 | `{out}.cell_embedding.parquet` | every cell on the map: its log1p reads per 10⁴ on the leading `--map-pcs` components of the fitted trajectories (every lineage's levels at the mode), so the axes follow the dynamics, not other variation among the cells |
 | `{out}.cell_velocity.parquet` | every cell's velocity on that map, `d log level/dt` through the chain rule |
 | `{out}.gene_rates.parquet` | every gene's `log_gamma` and `log_ratio` (log γ/β) at the mode with the sd of its Laplace approximation |

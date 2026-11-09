@@ -158,7 +158,9 @@ fn intervals_are_quantiles(t_len: f64) {
     let lv = params.levels();
     let tab = table(&reads, &lv);
     let out = read_cells(&reads, &[snap]);
-    let position = t_len / (lv.points - 1) as f64;
+    // Time is each lineage's own phase, so a position is a share of the
+    // grid whatever the duration.
+    let position = 1.0 / (lv.points - 1) as f64;
     assert!(
         (out.time_bin - position).abs() < 1e-12,
         "bin {}",
@@ -169,7 +171,7 @@ fn intervals_are_quantiles(t_len: f64) {
         let mut m: Vec<(f64, f64)> = lp
             .iter()
             .enumerate()
-            .map(|(r, x)| (params.time_at(r / lv.points, r % lv.points), x.exp()))
+            .map(|(r, x)| (params.phase_at(r % lv.points), x.exp()))
             .collect();
         m.sort_by(|a, b| a.0.total_cmp(&b.0));
         let point = |q: f64| {
@@ -193,6 +195,35 @@ fn intervals_are_quantiles(t_len: f64) {
             out.time_hi[c]
         );
     }
+}
+
+/// Time is local to each lineage: on `[0, 1]` for every cell whatever the
+/// lineages' durations, a lineage three times as long reading out on the
+/// same scale as the other.
+#[test]
+fn the_time_is_each_lineages_own_phase() {
+    let sim = cells();
+    let mut snap = truth_snap(&sim, None);
+    snap.params.t_len = vec![1.0, 3.0];
+    let reads = first(&sim, 200);
+    let out = read_cells(&reads, &[snap]);
+    let unit = |v: &[f64]| v.iter().all(|t| (0.0..=1.0).contains(t));
+    assert!(
+        unit(&out.time_mean),
+        "a mean past 1: {:?}",
+        out.time_mean.iter().cloned().fold(0.0, f64::max)
+    );
+    assert!(unit(&out.time_lo) && unit(&out.time_hi));
+    let on_long: Vec<usize> = (0..200).filter(|&c| out.lineage[c][1] > 0.5).collect();
+    assert!(!on_long.is_empty(), "no cell on the long lineage");
+    let late = on_long
+        .iter()
+        .map(|&c| out.time_mean[c])
+        .fold(0.0, f64::max);
+    assert!(
+        late > 0.5,
+        "the long lineage's cells never reach half its phase: {late}"
+    );
 }
 
 /// A cell no row can explain (its reads not finite) reads out as unknown,

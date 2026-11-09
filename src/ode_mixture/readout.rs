@@ -6,8 +6,9 @@
 //! its unspliced share integrated out ([`share_term`]) when the model has
 //! one. Over the draws the posteriors are averaged (the parameters' draws
 //! integrated out); from that mixture every cell's lineage probabilities,
-//! the mean, sd and 90% interval of its time, and its mean velocities, on
-//! each track and of its log level ([`log_rate`]).
+//! the mean, sd and 90% interval of its time (its lineage's own phase on
+//! `[0, 1]`), and its mean velocities, on each track and of its log level
+//! ([`log_rate`]).
 
 use super::blocks::log_posterior_row;
 use super::likelihood::{integrated_table, table, Depth, Reads};
@@ -44,8 +45,8 @@ pub struct CellReadout {
     /// `[C × G]` the posterior mean of `d log(ū + s̄)/dt`, every gene's
     /// relative rate of change on both tracks.
     pub velocity_log: DMatrix<f64>,
-    /// The time bins' width the intervals sit on: a position of the
-    /// shortest lineage, wider only past [`MAX_BINS`] bins.
+    /// The time bins' width the intervals sit on: a position of the grid,
+    /// wider only past [`MAX_BINS`] bins.
     pub time_bin: f64,
 }
 
@@ -112,20 +113,20 @@ pub fn log_rate(du: f64, ds: f64, u: f64, s: f64) -> f64 {
 const MAX_BINS: usize = 4096;
 
 /// Every cell of `cells` read out over the draws `snaps` (the same model:
-/// lineages and grid, checked). Time bins are one position of the
-/// shortest lineage wide (at most [`MAX_BINS`]); a cell some draw cannot
-/// place anywhere (its row not finite) is NaN throughout.
+/// lineages and grid, checked). Time is each lineage's own phase on
+/// `[0, 1]` ([`Params::phase_at`]; a lineage's duration is not read into
+/// it, so lineages are not put on one clock), its bins one position wide
+/// (at most [`MAX_BINS`]); a cell some draw cannot place anywhere (its
+/// row not finite) is NaN throughout.
 pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
     let (n_cells, genes) = (cells.u.nrows(), cells.u.ncols());
     let Some((lineages, positions)) = grid_shape(snaps) else {
         return CellReadout::empty(n_cells, genes);
     };
     let weight = 1.0 / snaps.len() as f64;
-    let durations = || snaps.iter().flat_map(|s| s.params.t_len.iter().copied());
-    let t_max = durations().fold(0.0, f64::max);
-    let finest = durations().fold(f64::INFINITY, f64::min) / (positions - 1) as f64;
-    let n_bins = ((t_max / finest).ceil() as usize + 1).min(MAX_BINS);
-    let width = finest.max(t_max / (n_bins - 1).max(1) as f64);
+    // Time is each lineage's own phase on [0, 1]: a bin a position wide.
+    let n_bins = positions.min(MAX_BINS);
+    let width = 1.0 / (n_bins - 1).max(1) as f64;
     let mut acc = vec![
         Acc {
             unknown: false,
@@ -153,7 +154,7 @@ pub fn read_cells(cells: &Reads, snaps: &[Snapshot]) -> CellReadout {
         let times: Vec<(usize, f64, usize)> = (0..rows)
             .map(|r| {
                 let (l, k) = (r / positions, r % positions);
-                let t = p.time_at(l, k);
+                let t = p.phase_at(k);
                 (l, t, ((t / width).round() as usize).min(n_bins - 1))
             })
             .collect();
