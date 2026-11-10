@@ -18,8 +18,25 @@ use log::info;
 use nalgebra::DMatrix;
 use senna::embed_common::*;
 
+/// The long help of `--max-coarse-features` as ode reads it (data-beans'
+/// flag; ode sets its default and help in the `mut_arg` below).
+const GROUPS_HELP: &str = "Fit on at most N groups of genes that share kinetics, when the\n\
+     genes kept by --max-genes outnumber N. N is a ceiling: the groups\n\
+     are built once before the climb (by timing, within bins of\n\
+     log(S/U)) and may number fewer. The climb runs on each group's\n\
+     summed reads; at its mode every gene's rates are then fitted on\n\
+     its own reads, starting from its group's, so {out}.gene_rates\n\
+     has every gene. The groups are written as {out}.coarsening.json.\n\
+     \n\
+     --no-feature-coarsening fits every gene on its own instead; so\n\
+     does 0 here.";
+
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]
+#[command(mut_arg("max_coarse_features", |a| a
+    .default_value("250")
+    .help("Fit on at most N groups of genes sharing kinetics; 0 = every gene")
+    .long_help(GROUPS_HELP)))]
 pub struct OdeArgs {
     #[arg(
         value_delimiter = ',',
@@ -405,7 +422,10 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
             info!("ode: {g} genes in {} groups", fc.num_coarse);
             Some(fc)
         }
-        None => None,
+        None => {
+            info!("ode: {g} genes, not grouped");
+            None
+        }
     };
     let grouped = fc.as_ref().map(|fc| coarse_reads(fc, &reads));
     let fit_reads = grouped.as_ref().unwrap_or(&reads);
@@ -455,8 +475,8 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     // every gene from its group's start).
     let genes = genes_at_mode(&reads, fc.as_ref(), &mode, &placed);
     write_gene_rates(&args.out, &names, &genes.log_gamma, &genes.log_ratio)?;
-    if let Some(fc) = &fc {
-        crate::topic::model_metadata::save_coarsening_levels(&[Some(fc.clone())], &args.out)?;
+    if fc.is_some() {
+        crate::topic::model_metadata::save_coarsening_levels(std::slice::from_ref(&fc), &args.out)?;
     }
 
     // The map on the trajectories' own axes, every cell placed by its reads.

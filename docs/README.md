@@ -8,6 +8,7 @@ it were a description of the code is how people end up debugging things that wer
 | doc | what it is |
 |---|---|
 | [`deconvolve.md`](deconvolve.md) | The `senna deconvolve` model and its inputs. |
+| [`ode.md`](ode.md) | The `senna ode` model: every cell's lineage, time and velocity from a mixture of splicing ODEs. |
 | [`rbm.md`](rbm.md) | The `senna rbm` model: cells as hidden units over their reads, weights through a feature embedding. |
 
 ## Moved to lupin

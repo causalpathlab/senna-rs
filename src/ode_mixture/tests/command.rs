@@ -266,3 +266,23 @@ fn a_coarsened_run_writes_every_genes_rates() {
     eprintln!("senna ode on groups: time Spearman with the truth {rho:.3}");
     assert!(rho > 0.9, "Spearman {rho}");
 }
+
+/// At the defaults ode fits on groups of genes: the cap sits below
+/// `--max-genes`, so the genes it keeps outnumber it. Both spellings of
+/// "every gene on its own" still turn the grouping off.
+#[test]
+fn the_defaults_group_the_genes() {
+    let cap = |extra: &[&str]| {
+        let argv = [&["x.zarr", "-o", "o"], extra].concat();
+        parse(&argv).coarsening.cap().map(|c| c.get())
+    };
+    let max_genes = parse(&["x.zarr", "-o", "o"]).max_genes;
+    let default = cap(&[]).expect("grouping on by default");
+    assert!(
+        default < max_genes,
+        "cap {default} vs --max-genes {max_genes}"
+    );
+    assert_eq!(cap(&["--no-feature-coarsening"]), None);
+    assert_eq!(cap(&["--max-coarse-features", "0"]), None);
+    assert_eq!(cap(&["--max-coarse-features", "40"]), Some(40));
+}
