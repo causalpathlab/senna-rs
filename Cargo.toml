@@ -46,6 +46,8 @@ metal = [
     "graph-embedding-util/metal",
 ]
 hdf5 = ["data-beans/hdf5"]
+# Also run the slow tests, fits recovered from scratch (README, "Tests").
+slow-tests = []
 
 [dependencies]
 mimalloc = "0.1"
@@ -96,3 +98,10 @@ legume-tui = { version = "0.3", default-features = false, features = ["testing"]
 # The terminal size a running program reads, in tests/detach_session.rs.
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1", features = ["fs", "termios"] }
+
+# Tests run optimized: the fits and samplers they drive are many times
+# slower unoptimized. Debug assertions and overflow checks stay on;
+# debug info keeps only line tables, for backtraces.
+[profile.test]
+opt-level = 2
+debug = "line-tables-only"

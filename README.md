@@ -291,3 +291,11 @@ model type and runs the encoder over held-out cells.
 **Outputs.** `{out}.latent.parquet` (cell × factor `z`), `{out}.dictionary.parquet`
 (gene × factor loadings `W`), `{out}.feature_mean.parquet` (per-gene mean rate
 `μ_d`), plus the standard `.safetensors` / `.model.json` / `.senna.json`.
+
+## Tests
+
+`cargo test` runs the suite optimized, with debug assertions on.
+`cargo test --features slow-tests`, as CI does, adds the slow tests:
+`senna ode` fits recovered from scratch, minutes each. Run it before a
+release or after changing the ODE sampler. `cargo test -- --ignored`
+runs every ignored test, the slow ones among them.

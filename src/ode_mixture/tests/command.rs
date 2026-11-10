@@ -53,6 +53,7 @@ fn backend(sim: &Sim, dir: &std::path::Path) -> String {
 /// rates with their sds, and a manifest the viewer reads;
 /// the cells' times rank with the truth's.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_run_writes_the_cells_tables_and_a_manifest() {
     let sim = simulate(&SimConfig {
         n_genes: 80,
@@ -204,6 +205,7 @@ fn the_defaults_put_the_lineages_apart() {
 /// gene's own rates, records its groups, and its cells' times rank with
 /// the truth's.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_coarsened_run_writes_every_genes_rates() {
     let sim = simulate(&SimConfig {
         n_genes: 80,

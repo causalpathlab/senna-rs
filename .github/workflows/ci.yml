@@ -41,8 +41,8 @@ jobs:
       - uses: ./.github/actions/system-deps
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Release: the sampler and fit tests take hours unoptimised.
-      - run: cargo test --release
+      # [profile.test] optimizes, with debug assertions on.
+      - run: cargo test --features slow-tests
 
   features:
     name: check --features hdf5

@@ -344,30 +344,43 @@ fn lanes_run_side_by_side_and_a_partition_is_waited_for() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let fake = dir.path().join("fake-senna");
-    // Sleeps, then marks its result.
+    let log = dir.path().join("log");
+    // Logs `start <out>` and `end <out>` around a 1 s sleep.
     std::fs::write(
         &fake,
-        "#!/bin/sh
+        format!(
+            "#!/bin/sh
+while [ $# -gt 0 ]; do [ \"$1\" = --out ] && out=$2; shift; done
+echo \"start $out\" >> '{log}'
 sleep 1
-while [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n",
+touch \"$out.senna.json\"
+echo \"end $out\" >> '{log}'\n",
+            log = log.display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The line of the log `line` is: order, unlike timing, holds under load.
+    let at = |line: &str| {
+        let text = std::fs::read_to_string(&log).unwrap();
+        text.lines()
+            .position(|l| l == line)
+            .unwrap_or_else(|| panic!("{line}: {text}"))
+    };
     let in_lane = |m: &str, lane: usize| {
         let mut j = job(dir.path(), Tool::Senna, &fake, m, &[m, "--out", m]);
         j.lane = lane;
         j
     };
-    let started = std::time::Instant::now();
     let q = Queue::start(vec![in_lane("vae", 0), in_lane("svd", 1)]);
     while !q.finished() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(
-        started.elapsed() < std::time::Duration::from_millis(1900),
-        "side by side"
-    );
     assert_eq!(q.states(), [State::Done, State::Done]);
+    assert!(
+        at("start vae").max(at("start svd")) < at("end vae").min(at("end svd")),
+        "side by side: both started before either ended"
+    );
 
     let dir2 = tempfile::tempdir().unwrap();
     let job2 = |m: &str, lane: usize| {
@@ -378,14 +391,10 @@ while [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; don
     };
     let mut after = job2("rbm", 1);
     after.pb_from = Some("topic.senna.json".into());
-    let started = std::time::Instant::now();
     let q = Queue::start(vec![job2("topic", 0), after]);
     while !q.finished() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(
-        started.elapsed() >= std::time::Duration::from_millis(1900),
-        "waited"
-    );
     assert_eq!(q.states(), [State::Done, State::Done]);
+    assert!(at("end topic") < at("start rbm"), "rbm waited for topic");
 }
