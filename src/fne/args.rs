@@ -167,7 +167,7 @@ pub struct FneArgs {
         help = "Typed edge list(s): lhs_type, lhs, rhs_type, rhs [, weight]",
         long_help = "Typed edge files, comma-separated or repeated.\n\
                      Every line is `lhs_type <TAB> lhs <TAB> rhs_type <TAB> rhs [<TAB> weight]`,\n\
-                     e.g. `gene TP53 term GO:0006915 1.0` or `gene TP53 word apoptosis 0.61`.\n\
+                     e.g. `gene GENE1 term GO:0006915 1.0` or `gene GENE1 word apoptosis 0.61`.\n\
                      Rows sharing a type pair form one relation named `lhs_type:rhs_type`,\n\
                      across every file.\n\
                      A relation whose two types coincide is undirected.\n\
@@ -261,9 +261,9 @@ pub struct FneArgs {
         help = "eQTL Catalogue dataset_metadata*.tsv: names each dataset's context (sample_group) and relation",
         long_help = "The eQTL Catalogue's dataset table (`dataset_metadata_r8.tsv` in\n\
                      github.com/eQTL-Catalogue/eQTL-Catalogue-resources, data_tables/).\n\
-                     A `--links eqtl-catalogue:QTD000356.credible_sets.tsv.gz` file then takes its\n\
-                     `sample_group` as its context (`blood`, `macrophage_Salmonella`, `CD4+_Th2`) and\n\
-                     `<study>_<sample_group>[_<quant>]` as its relation stem (`GTEx_v10_blood`).\n\
+                     A `--links eqtl-catalogue:QTD000001.credible_sets.tsv.gz` file then takes its\n\
+                     `sample_group` as its context (`TISSUE1`, `CT1_STIM1`, `CT2`) and\n\
+                     `<study>_<sample_group>[_<quant>]` as its relation stem (`STUDY1_TISSUE1`).\n\
                      Without it the dataset id names both."
     )]
     pub(crate) eqtl_metadata: Option<Box<str>>,
@@ -275,11 +275,11 @@ pub struct FneArgs {
         help = "--links: do not tie links to their tissue / cell type (no `context` nodes)",
         long_help = "By default a link measured in a tissue or cell type also ties its windows and its gene\n\
                      to a `context` node, in `region:context/<stem>` and `gene:context/<stem>`\n\
-                     (the link's weight): GTEx takes the tissue from the file name (`Whole_Blood`),\n\
+                     (the link's weight): GTEx takes the tissue from the file name (`<Tissue>.v10…`),\n\
                      the eQTL Catalogue the dataset's sample_group (--eqtl-metadata),\n\
                      ABC / ENCODE-rE2G the CellType column, and `preset@context:path` names it for\n\
-                     any source (e.g. `gtex@blood:Whole_Blood.v10.eQTLs.signif_pairs.parquet`, which\n\
-                     also merges it with the eQTL Catalogue's `blood`). Labels are matched exactly.\n\
+                     any source (e.g. `gtex@TISSUE2:<Tissue>.v10.eQTLs.signif_pairs.parquet`, which\n\
+                     also merges it with the eQTL Catalogue's `TISSUE2`). Labels are matched exactly.\n\
                      This flag leaves the context out."
     )]
     pub(crate) no_links_context: bool,
@@ -385,9 +385,9 @@ pub struct FneArgs {
                      \n\
                      Example:\n\
                        senna fne --links gwas-catalog:gwas_catalog_v1.0.2-associations.tsv \\\n\
-                         --links eqtl-catalogue:QTD000356.credible_sets.tsv.gz \\\n\
-                         --links gtex:Whole_Blood.v10.eQTLs.signif_pairs.parquet \\\n\
-                         --links abc:ENCODE_rE2G_K562.tsv.gz \\\n\
+                         --links eqtl-catalogue:QTD000001.credible_sets.tsv.gz \\\n\
+                         --links gtex:<Tissue>.v10.eQTLs.signif_pairs.parquet \\\n\
+                         --links abc:ENCODE_rE2G_<CellLine>.tsv.gz \\\n\
                          --gene-gff gencode.v39.basic.annotation.gtf.gz --obo efo.obo -o out/g2r"
     )]
     pub(crate) links: Vec<Box<str>>,
@@ -483,7 +483,7 @@ pub struct FneArgs {
         help = "GFF/GTF mapping Ensembl gene ids to symbols across every input",
         long_help = "A GENCODE / Ensembl GFF or GTF (gzip or not). Its `gene` rows map\n\
                      version-stripped Ensembl ids onto gene symbols before the --feature-name-kind rule,\n\
-                     for every input, so `ENSG00000141510.17` from GTEx and `TP53` from the GWAS Catalog\n\
+                     for every input, so `ENSG00000000001.17` from GTEx and `GENE1` from the GWAS Catalog\n\
                      or a PPI become one node. Without it, versions are still stripped, and a run that\n\
                      mixes ids and symbols warns."
     )]
@@ -579,7 +579,7 @@ pub struct FneArgs {
         help = "How gene names are matched across inputs",
         long_help = "How gene names are matched across inputs.\n\
                      `gene` (default) takes the last `_`-separated token as canonical,\n\
-                     so `ENSG00000_TGFB1` and `TGFB1` merge into one node.\n\
+                     so `ENSG00000_GENE1` and `GENE1` merge into one node.\n\
                      `exact` matches names as given. The other rules are `senna masked-topic`'s."
     )]
     pub(crate) feature_name_kind: FeatureNameKindArg,

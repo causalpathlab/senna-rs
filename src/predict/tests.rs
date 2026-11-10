@@ -83,8 +83,8 @@ fn coverage_is_gated_before_hiding_not_after() {
 /// cause entirely.
 #[test]
 fn hiding_matches_case_insensitively_like_the_remap_does() {
-    let genes = names(&["Cd8a", "GZMB", "ms4a1"]);
-    let out = build_remap(&genes, &genes, &opts_hiding(&["CD8A", "Ms4a1"], 0.0))
+    let genes = names(&["Genej", "GENEN", "geneq"]);
+    let out = build_remap(&genes, &genes, &opts_hiding(&["GENEJ", "Geneq"], 0.0))
         .expect("case must not defeat the hide")
         .expect("hiding always yields a remap");
     assert_eq!(out.new_to_train, vec![None, Some(1), None]);
@@ -96,11 +96,11 @@ fn hiding_matches_case_insensitively_like_the_remap_does() {
 /// has `ENSG..._SYMBOL`. The list must hide the same genes either way.
 #[test]
 fn hiding_bridges_raw_list_names_onto_a_canonical_axis() {
-    let genes = names(&["tspan6", "tnmd", "dpm1"]);
+    let genes = names(&["genev", "genet", "genek"]);
     let out = build_remap(
         &genes,
         &genes,
-        &opts_hiding(&["ENSG00000000003_TSPAN6", "ENSG00000000419_DPM1"], 0.0),
+        &opts_hiding(&["ENSG00000000010_GENEV", "ENSG00000000110_GENEK"], 0.0),
     )
     .expect("raw names must resolve onto the canonical axis")
     .expect("hiding always yields a remap");
@@ -110,11 +110,11 @@ fn hiding_bridges_raw_list_names_onto_a_canonical_axis() {
 #[test]
 fn hiding_bridges_symbol_list_names_onto_a_raw_axis() {
     let genes = names(&[
-        "ENSG00000000003_TSPAN6",
-        "ENSG00000000005_TNMD",
-        "ENSG00000000419_DPM1",
+        "ENSG00000000010_GENEV",
+        "ENSG00000000020_GENET",
+        "ENSG00000000110_GENEK",
     ]);
-    let out = build_remap(&genes, &genes, &opts_hiding(&["TSPAN6", "DPM1"], 0.0))
+    let out = build_remap(&genes, &genes, &opts_hiding(&["GENEV", "GENEK"], 0.0))
         .expect("symbols must resolve onto the raw axis")
         .expect("hiding always yields a remap");
     assert_eq!(out.new_to_train, vec![None, Some(1), None]);

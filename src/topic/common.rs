@@ -537,7 +537,7 @@ pub struct LoadProjectArgs<'a> {
     pub column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
     /// Per-name canonicalization rule applied to row names across
     /// backends. Default Exact = strict string match. Gene picks the
-    /// last token after a delimiter so `ENSG000_TGFB1` and `TGFB1`
+    /// last token after a delimiter so `ENSG000_GENE1` and `GENE1`
     /// resolve to the same row. Locus normalizes `chr1:1000-2000`,
     /// `1:1000-2000`, etc. `LocusOverlap` additionally merges overlapping
     /// intervals on the same chromosome into one cluster.

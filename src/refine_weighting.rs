@@ -360,17 +360,13 @@ pub(crate) struct CollapseArgs {
                      frame they define does not move. Each named column also stays\n\
                      its own pseudobulk instead of being averaged with cells.\n\
                      \n\
-                     This matters a lot. Measured on HCA_BM + 707 BeatAML samples\n\
-                     (bge, K=20), cell-type ARI against a cells-only fit with the\n\
-                     same batch count (0.352):\n\
-                       ordinary batch, pooled mutual adjustment .. 0.227\n\
-                       named here, greedy ....................... 0.393\n\
-                     Pooled matching drags the cell frame toward the bulk; greedy\n\
-                     removes essentially the whole penalty.\n\
+                     This matters: in an ordinary batch, pooled matching drags the\n\
+                     cell frame toward the bulk; named here, greedy correction keeps\n\
+                     the frame where the cells put it.\n\
                      \n\
-                     Always compare against a baseline with the SAME batch count —\n\
-                     a single-batch fit skips batch correction entirely (0.452 here)\n\
-                     and will overstate what admitting bulk costs you."
+                     Always compare against a baseline with the SAME batch count:\n\
+                     a single-batch fit skips batch correction entirely and will\n\
+                     overstate what admitting bulk costs you."
     )]
     pub(crate) mixture_batch: Option<Vec<Box<str>>>,
 
@@ -482,12 +478,10 @@ impl CollapseArgs {
 /// NB-Fisher gene weights for a fit, sourced from whichever population this
 /// run actually has.
 ///
-/// **Cells are the default and stay the default.** An A/B on HCA_BM (39k
-/// cells, K=20, 300 epochs) could not separate a cell-fitted trend from a
-/// pseudobulk-fitted one: the arm differences in ARI (0.0018), purity (0.0097)
-/// and held-out likelihood (0.012) all landed *inside* the spread between two
-/// runs of the same configuration (0.0057 / 0.0155 / 0.118). There is no
-/// measured reason to prefer one, so nothing changes for an ordinary fit.
+/// **Cells are the default and stay the default.** An A/B could not separate
+/// a cell-fitted trend from a pseudobulk-fitted one: every arm difference
+/// landed inside the spread between two runs of the same configuration. There
+/// is no measured reason to prefer one, so nothing changes for an ordinary fit.
 ///
 /// **`senna update --use-pb-reference` is not an ordinary fit.** There the
 /// backend holds the parent's carried pseudobulks — per-cell **rates** — beside

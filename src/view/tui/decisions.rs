@@ -270,10 +270,8 @@ mod tests {
                 evidence: Vec::new(),
             },
             why: false,
-            input: "t".into(),
-            known: ["T cell", "T cell memory", "t cell", "B cell"]
-                .map(Box::from)
-                .to_vec(),
+            input: "c".into(),
+            known: ["CT 2", "CT 2 sub", "ct 2", "L1-0"].map(Box::from).to_vec(),
             why_prefill: String::new(),
             cycle: None,
         };
@@ -282,7 +280,7 @@ mod tests {
             p.input = p.next_completion().unwrap();
             seen.push(p.input.clone());
         }
-        assert_eq!(seen, ["T cell", "T cell memory", "t cell", "T cell"]);
+        assert_eq!(seen, ["CT 2", "CT 2 sub", "ct 2", "CT 2"]);
         p.cycle = None;
         p.input = "zzz".into();
         assert_eq!(p.next_completion(), None);

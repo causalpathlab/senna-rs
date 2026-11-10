@@ -237,7 +237,7 @@ pub struct TopicArgs {
                      enlarges the feature axis and, under `senna update`, no longer\n\
                      matches the parent's.\n\
                      \n\
-                     gene   — `ENSG00000105329_TGFB1` and `TGFB1` are one feature\n\
+                     gene   — `ENSG00000000130_GENE1` and `GENE1` are one feature\n\
                      locus  — `chr1:1000-2000`, `1:1000-2000`, `chr1_1000_2000` agree\n\
                      mixed  — per-row dispatch for a heterogeneous axis\n\
                      auto   — detect from the names present\n\

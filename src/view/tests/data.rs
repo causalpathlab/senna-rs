@@ -138,19 +138,16 @@ fn marker_types_keep_their_commas() {
     let path = dir.path().join("markers.tsv");
     std::fs::write(
         &path,
-        "gene\tcell_type\nMS4A1\tB cell, naive\nCD79A\tB cell naive\nCD3E\tT cell\n",
+        "gene\tcell_type\nGENEQ\tCT 1, sub\nGENEI\tCT 1 sub\nGENEG\tCT 2\n",
     )
     .unwrap();
     let l = read_marker_labels(&path).unwrap();
     assert_eq!(l.by_name.len(), 3, "the header is no marker");
-    assert_eq!(level(&l, "MS4A1"), "B cell, naive");
+    assert_eq!(level(&l, "GENEQ"), "CT 1, sub");
     assert_eq!(
-        l.members_like("B_cell_naive"),
-        [Box::from("CD79A"), "MS4A1".into()]
+        l.members_like("CT_1_sub"),
+        [Box::from("GENEI"), "GENEQ".into()]
     );
-    assert_eq!(l.members_like("T cell"), [Box::<str>::from("CD3E")]);
-    assert!(
-        l.members_like("t cell").is_empty(),
-        "case is part of a type"
-    );
+    assert_eq!(l.members_like("CT 2"), [Box::<str>::from("GENEG")]);
+    assert!(l.members_like("ct 2").is_empty(), "case is part of a type");
 }

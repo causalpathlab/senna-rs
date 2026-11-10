@@ -218,7 +218,7 @@ pub struct VaeArgs {
                      `exact` is a strict string match.\n\
                      \n\
                      `gene` also registers each `_`-split component as an alias,\n\
-                     so `ENSG000_TGFB1` and `TGFB1` resolve to the same row.\n\
+                     so `ENSG000_GENE1` and `GENE1` resolve to the same row.\n\
                      \n\
                      `locus` normalizes `chr1:1000-2000`, `1:1000-2000`, and so on\n\
                      to one canonical form.\n\

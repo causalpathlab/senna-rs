@@ -84,11 +84,11 @@ fn record_of_the_wrong_length_is_an_error() {
 #[test]
 fn query_modalities_are_renamed_to_the_trained_ones() {
     let trained = boxed(&[
-        "CD3E/scRNA",
-        "MS4A1/scRNA",
-        "LYZ/scRNA",
-        "ADT-CD14/scADT",
-        "ADT-CD3/scADT",
+        "GENEG/scRNA",
+        "GENEQ/scRNA",
+        "GENEO/scRNA",
+        "ADT-GENEE/scADT",
+        "ADT-GENEF/scADT",
     ]);
     let detected = ge::MultiomePlan {
         files: boxed(&["gex_q.zarr", "prot_q.zarr"]),
@@ -99,8 +99,8 @@ fn query_modalities_are_renamed_to_the_trained_ones() {
         n_bridge_cells: Some(500),
     };
     let rows = vec![
-        boxed(&["CD3E", "MS4A1", "LYZ"]),
-        boxed(&["ADT-CD14", "ADT-CD3"]),
+        boxed(&["GENEG", "GENEQ", "GENEO"]),
+        boxed(&["ADT-GENEE", "ADT-GENEF"]),
     ];
     let named = reconcile_modalities(detected, &rows, &trained).unwrap();
     assert_eq!(&*named.modality[0], "scRNA");
@@ -111,7 +111,7 @@ fn query_modalities_are_renamed_to_the_trained_ones() {
 /// renaming it would claim an overlap that is not there.
 #[test]
 fn an_unmatched_query_modality_keeps_its_detected_tag() {
-    let trained = boxed(&["CD3E/scRNA", "MS4A1/scRNA"]);
+    let trained = boxed(&["GENEG/scRNA", "GENEQ/scRNA"]);
     let detected = ge::MultiomePlan {
         files: boxed(&["gex_q.zarr", "atac_q.zarr"]),
         modality: boxed(&["gex", "atac"]),
@@ -121,7 +121,7 @@ fn an_unmatched_query_modality_keeps_its_detected_tag() {
         n_bridge_cells: Some(10),
     };
     let rows = vec![
-        boxed(&["CD3E", "MS4A1"]),
+        boxed(&["GENEG", "GENEQ"]),
         boxed(&["chr1:100-200", "chr2:300-400"]),
     ];
     let named = reconcile_modalities(detected, &rows, &trained).unwrap();
@@ -133,7 +133,7 @@ fn an_unmatched_query_modality_keeps_its_detected_tag() {
 /// two different assays on the same rows.
 #[test]
 fn two_query_modalities_cannot_claim_one_trained_block() {
-    let trained = boxed(&["CD3E/scRNA", "MS4A1/scRNA", "LYZ/scRNA"]);
+    let trained = boxed(&["GENEG/scRNA", "GENEQ/scRNA", "GENEO/scRNA"]);
     let detected = ge::MultiomePlan {
         files: boxed(&["a.zarr", "b.zarr"]),
         modality: boxed(&["a", "b"]),
@@ -142,7 +142,7 @@ fn two_query_modalities_cannot_claim_one_trained_block() {
         barcode_tagged: false,
         n_bridge_cells: Some(10),
     };
-    let rows = vec![boxed(&["CD3E", "MS4A1"]), boxed(&["MS4A1", "LYZ"])];
+    let rows = vec![boxed(&["GENEG", "GENEQ"]), boxed(&["GENEQ", "GENEO"])];
     let err = reconcile_modalities(detected, &rows, &trained)
         .unwrap_err()
         .to_string();
@@ -153,13 +153,13 @@ fn two_query_modalities_cannot_claim_one_trained_block() {
 /// loaded the plain way even if its own files look multi-modal.
 #[test]
 fn a_single_modality_model_takes_no_query_layout() {
-    let trained = boxed(&["CD3E", "MS4A1", "LYZ"]);
+    let trained = boxed(&["GENEG", "GENEQ", "GENEO"]);
     assert!(trained_modalities(&trained).is_empty());
 }
 
 #[test]
 fn trained_modalities_are_read_off_the_row_names() {
-    let trained = boxed(&["CD3E/scRNA", "ADT-CD3/scADT", "MS4A1/scRNA"]);
+    let trained = boxed(&["GENEG/scRNA", "ADT-GENEF/scADT", "GENEQ/scRNA"]);
     let mut m = trained_modalities(&trained);
     m.sort();
     assert_eq!(m, boxed(&["scADT", "scRNA"]));
@@ -200,11 +200,11 @@ fn apply_stamps_a_multiome_layout_and_keeps_the_rest() {
 /// down the multiome path on the strength of one stray separator.
 #[test]
 fn a_partially_tagged_model_axis_is_single_modality() {
-    assert!(trained_modalities(&boxed(&["A/B", "CD3E", "LYZ"])).is_empty());
-    assert!(trained_modalities(&boxed(&["CD3E", "LYZ"])).is_empty());
+    assert!(trained_modalities(&boxed(&["A/B", "GENEG", "GENEO"])).is_empty());
+    assert!(trained_modalities(&boxed(&["GENEG", "GENEO"])).is_empty());
     assert!(trained_modalities(&boxed(&[])).is_empty());
     assert_eq!(
-        trained_modalities(&boxed(&["CD3E/scRNA", "ADT-CD3/scADT"])).len(),
+        trained_modalities(&boxed(&["GENEG/scRNA", "ADT-GENEF/scADT"])).len(),
         2
     );
 }
@@ -269,7 +269,7 @@ fn query_peaks_match_trained_peaks_by_their_canonical_key() {
     let trained: Vec<Box<str>> = ["chrX:0-100", "chr1:100-200"]
         .iter()
         .map(|p| key(p).into())
-        .chain(["CD3E/scRNA".into()])
+        .chain(["GENEG/scRNA".into()])
         .collect();
     let detected = ge::MultiomePlan {
         files: boxed(&["gex_q.zarr", "atac_q.zarr"]),
@@ -279,7 +279,7 @@ fn query_peaks_match_trained_peaks_by_their_canonical_key() {
         barcode_tagged: false,
         n_bridge_cells: Some(10),
     };
-    let rows = vec![boxed(&["CD3E"]), boxed(&["chrX:0-100", "chr1:100-200"])];
+    let rows = vec![boxed(&["GENEG"]), boxed(&["chrX:0-100", "chr1:100-200"])];
     let named = reconcile_modalities(detected, &rows, &trained).unwrap();
     assert_eq!(&*named.modality[0], "scRNA");
     assert_eq!(&*named.modality[1], "peaks");
