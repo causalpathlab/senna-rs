@@ -140,12 +140,12 @@ fn labels(v: &[&str]) -> Vec<Box<str>> {
 }
 
 fn model_genes() -> Vec<Box<str>> {
-    labels(&["TGFB1", "CD8A", "LYZ", "MS4A1", "GNLY"])
+    labels(&["GENES", "GENEJ", "GENEO", "GENEQ", "GENEM"])
 }
 
 #[test]
 fn genes_on_rows_is_genes_by_samples() {
-    let rows = labels(&["TGFB1", "CD8A", "LYZ", "NOTINMODEL"]);
+    let rows = labels(&["GENES", "GENEJ", "GENEO", "NOTINMODEL"]);
     let cols = labels(&["s0", "s1"]);
     let o = super::resolve_orientation(&rows, &cols, &model_genes(), None).expect("resolve");
     assert_eq!(o, super::Orientation::GenesBySamples);
@@ -154,7 +154,7 @@ fn genes_on_rows_is_genes_by_samples() {
 #[test]
 fn genes_on_columns_is_samples_by_genes() {
     let rows = labels(&["s0", "s1"]);
-    let cols = labels(&["TGFB1", "CD8A", "LYZ", "NOTINMODEL"]);
+    let cols = labels(&["GENES", "GENEJ", "GENEO", "NOTINMODEL"]);
     let o = super::resolve_orientation(&rows, &cols, &model_genes(), None).expect("resolve");
     assert_eq!(o, super::Orientation::SamplesByGenes);
 }
@@ -165,9 +165,9 @@ fn genes_on_columns_is_samples_by_genes() {
 #[test]
 fn orientation_sees_through_the_naming_convention() {
     let ensg = labels(&[
-        "ENSG00000105329_TGFB1",
-        "ENSG00000153563_CD8A",
-        "ENSG00000090382_LYZ",
+        "ENSG00000000130_GENES",
+        "ENSG00000000140_GENEJ",
+        "ENSG00000000120_GENEO",
     ]);
     let samples = labels(&["s0", "s1"]);
     let m = model_genes();
@@ -192,15 +192,15 @@ fn no_axis_matching_the_model_shows_both_axes_and_the_model() {
         .to_string();
     assert!(err.contains("r0"), "{err}");
     assert!(err.contains("c0"), "{err}");
-    assert!(err.contains("TGFB1"), "{err}");
+    assert!(err.contains("GENES"), "{err}");
 }
 
 /// Sample IDs that are themselves gene symbols make both axes score; that is
 /// an ambiguity to report, never a coin flip to resolve.
 #[test]
 fn both_axes_matching_is_an_error_naming_the_override() {
-    let rows = labels(&["TGFB1", "CD8A", "LYZ"]);
-    let cols = labels(&["MS4A1", "GNLY"]);
+    let rows = labels(&["GENES", "GENEJ", "GENEO"]);
+    let cols = labels(&["GENEQ", "GENEM"]);
     let err = super::resolve_orientation(&rows, &cols, &model_genes(), None)
         .expect_err("must fail")
         .to_string();
@@ -209,7 +209,7 @@ fn both_axes_matching_is_an_error_naming_the_override() {
 
 #[test]
 fn a_forced_orientation_wins_over_the_evidence() {
-    let rows = labels(&["TGFB1", "CD8A", "LYZ"]);
+    let rows = labels(&["GENES", "GENEJ", "GENEO"]);
     let cols = labels(&["s0", "s1"]);
     let o = super::resolve_orientation(
         &rows,
@@ -255,11 +255,11 @@ fn write_labeled_tsv(path: &std::path::Path, rows: &[Box<str>], cols: &[Box<str>
 fn a_headered_bulk_tsv_aligns_to_the_reference() {
     let dir = tempfile::tempdir().expect("tmp");
     let path = dir.path().join("bulk.tsv");
-    let genes = labels(&["TGFB1", "CD8A"]);
+    let genes = labels(&["GENES", "GENEJ"]);
     let samples = labels(&["s0", "s1"]);
     let mat = Mat::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]);
     write_labeled_tsv(&path, &genes, &samples, &mat);
-    let reference = labels(&["CD8A", "TGFB1", "LYZ"]);
+    let reference = labels(&["GENEJ", "GENES", "GENEO"]);
     let out = super::read_bulk_data_aligned(
         &[path.to_str().unwrap().into()],
         &reference,
@@ -268,7 +268,7 @@ fn a_headered_bulk_tsv_aligns_to_the_reference() {
     .expect("aligned");
     assert_eq!(out.genes, reference);
     assert_eq!(out.samples, samples);
-    // CD8A is reference row 0, TGFB1 row 1, LYZ row 2 (unobserved → 0).
+    // GENEJ is reference row 0, GENES row 1, GENEO row 2 (unobserved → 0).
     assert_eq!(
         out.data,
         Mat::from_row_slice(3, 2, &[3.0, 4.0, 1.0, 2.0, 0.0, 0.0])
@@ -280,11 +280,11 @@ fn a_headered_bulk_tsv_aligns_to_the_reference() {
 fn a_transposed_bulk_file_aligns_to_the_reference() {
     let dir = tempfile::tempdir().expect("tmp");
     let path = dir.path().join("bulk_t.tsv");
-    let genes = labels(&["TGFB1", "CD8A"]);
+    let genes = labels(&["GENES", "GENEJ"]);
     let samples = labels(&["s0", "s1"]);
     let mat = Mat::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]); // genes × samples
     write_labeled_tsv(&path, &samples, &genes, &mat.transpose());
-    let reference = labels(&["CD8A", "TGFB1", "LYZ"]);
+    let reference = labels(&["GENEJ", "GENES", "GENEO"]);
     let out = super::read_bulk_data_aligned(
         &[path.to_str().unwrap().into()],
         &reference,
@@ -388,7 +388,7 @@ fn match_key_folds_gene_case_but_keeps_a_locus_as_is() {
     use super::{is_locus, match_key};
     use data_beans::aux::feature_names::FeatureNameKind;
     let exact = FeatureNameKind::Exact;
-    assert_eq!(&*match_key(&exact, "Cd8a"), &*match_key(&exact, "CD8A"));
+    assert_eq!(&*match_key(&exact, "Genej"), &*match_key(&exact, "GENEJ"));
     // A locus keeps its case: by the shared rule it can tell scaffolds apart.
     assert!(is_locus("chrX:0-100"));
     assert_ne!(

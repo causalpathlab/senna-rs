@@ -259,7 +259,7 @@ pub(crate) fn hide_features(
 /// Build a gene remap from training gene names and new-data gene names.
 ///
 /// Tries case-insensitive exact match first; falls back to
-/// `flexible_gene_match` (handles aliases like `ENSG..._CD8A` ↔ `CD8A`,
+/// `flexible_gene_match` (handles aliases like `ENSG..._GENEJ` ↔ `GENEJ`,
 /// case differences, and `_`-delimited prefixes/suffixes).
 pub(crate) fn build_gene_remap(
     training_genes: &[Box<str>],
@@ -544,11 +544,11 @@ mod tests {
 
     #[test]
     fn spliced_filter_trim_and_gene_alias() {
-        let training = names(&["TSPAN6", "A1BG"]);
+        let training = names(&["GENEV", "GENEA"]);
         let query = names(&[
-            "ENSG00000000003_TSPAN6/count/spliced",
-            "ENSG00000000003_TSPAN6/count/unspliced",
-            "ENSGX_A1BG/count/spliced",
+            "ENSG00000000010_GENEV/count/spliced",
+            "ENSG00000000010_GENEV/count/unspliced",
+            "ENSGX_GENEA/count/spliced",
             "ENSGY_NOTFOUND/count/spliced",
         ]);
         let opts = QueryNameOpts {
@@ -558,11 +558,11 @@ mod tests {
             ..Default::default()
         };
         let remap = build_gene_remap_with(&training, &query, &opts);
-        // spliced TSPAN6 → training row 0
+        // spliced GENEV → training row 0
         assert_eq!(remap.new_to_train[0], Some(0));
-        // unspliced TSPAN6 → dropped by suffix filter
+        // unspliced GENEV → dropped by suffix filter
         assert_eq!(remap.new_to_train[1], None);
-        // spliced A1BG → training row 1
+        // spliced GENEA → training row 1
         assert_eq!(remap.new_to_train[2], Some(1));
         // spliced gene absent from dictionary → unmapped
         assert_eq!(remap.new_to_train[3], None);
@@ -574,8 +574,8 @@ mod tests {
     fn many_to_one_sums_in_dense_scatter() {
         // Two query rows resolve to the same training gene; remap_csc_to_dense
         // must accumulate, not overwrite.
-        let training = names(&["TSPAN6"]);
-        let query = names(&["AAA_TSPAN6", "BBB_TSPAN6"]);
+        let training = names(&["GENEV"]);
+        let query = names(&["AAA_GENEV", "BBB_GENEV"]);
         let opts = QueryNameOpts {
             kind: FeatureNameKind::Gene { delim: '_' },
             suffix_delim: None,

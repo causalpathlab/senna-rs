@@ -85,7 +85,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // The rule is fixed rather than exposed: `--feature-name-delim` /
     // `--feature-name-exact` were CLI knobs whose defaults ('_', fuzzy) were the
     // only settings anyone used, and `_` is the separator every loader in this
-    // workspace already writes (`ENSG…_TSPAN6`). `senna predict`
+    // workspace already writes (`ENSG…_GENE1`). `senna predict`
     // still exposes its own overrides, where query-vs-reference name bridging
     // is an actual concern.
     let feature_kind = if is_multiome {

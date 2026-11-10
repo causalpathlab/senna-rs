@@ -344,7 +344,7 @@ pub struct BulkDataOut {
 
 /// The key `name` is matched on under `kind`: data-beans' canonical form,
 /// and for a gene name also its case folded, since symbols differ in case
-/// between sources (`Cd8a`, `CD8A`). A locus keeps its case: by the shared
+/// between sources (`Gene1`, `GENE1`). A locus keeps its case: by the shared
 /// rule (`feature_names::parse_locus`) case can tell scaffolds apart.
 #[must_use]
 pub fn match_key(kind: &data_beans::aux::feature_names::FeatureNameKind, name: &str) -> Box<str> {
@@ -511,8 +511,8 @@ pub fn oriented(m: MatWithNames<Mat>, o: Orientation) -> MatWithNames<Mat> {
 ///
 /// Names are reconciled through the shared canonicalizer
 /// ([`data_beans::aux::feature_names::FeatureNameKind`]) rather than by string
-/// equality, so a bulk file naming genes `ENSG00000105329_TGFB1` aligns to a
-/// reference naming them `TGFB1` (and vice versa) with no pre-editing.
+/// equality, so a bulk file naming genes `ENSG00000000130_GENE1` aligns to a
+/// reference naming them `GENE1` (and vice versa) with no pre-editing.
 ///
 /// The rule is detected over the UNION of both axes, not the reference alone:
 /// the naming signature usually lives on only one side (a bare-symbol reference

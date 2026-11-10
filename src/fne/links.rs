@@ -202,10 +202,10 @@ impl LinkOpts {
 #[derive(Clone, Debug)]
 pub(crate) struct EqtlDataset {
     /// `sample_group`: tissue or cell type, with its condition when not
-    /// naive (`blood`, `macrophage_Salmonella`, `CD4+_Th2`).
+    /// naive (`TISSUE1`, `CT1_STIM1`, `CT2`).
     pub sample_group: Box<str>,
     /// `<study_label>_<sample_group>`, plus `_<quant_method>` when not
-    /// gene expression: the relation stem in place of `QTD000356`.
+    /// gene expression: the relation stem in place of `QTD000001`.
     pub stem: Box<str>,
 }
 
@@ -775,7 +775,7 @@ fn add_gwas_catalog(
 }
 
 /// A GTEx `phenotype_id` of an sQTL / apaQTL carries its gene last,
-/// `chr1:14829:14970:clu_1:ENSG00000227232.5`.
+/// `chr1:14829:14970:clu_1:ENSG00000000150.5`.
 fn gtex_gene(s: &str) -> &str {
     s.rsplit(':').next().unwrap_or(s).trim()
 }
@@ -854,7 +854,7 @@ fn add_eqtl_catalogue(
         opts,
     )?;
     let t = TableReader::open(path)?;
-    // `QTD000356.credible_sets` → dataset QTD000356: its sample group is
+    // `QTD000001.credible_sets` → dataset QTD000001: its sample group is
     // the context and `<study>_<sample_group>` the relation stem.
     let file = file_stem(path);
     let dataset = file.split('.').next().unwrap_or(&file);

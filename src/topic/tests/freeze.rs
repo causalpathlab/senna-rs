@@ -8,7 +8,7 @@ use data_beans::aux::feature_types::write_feature_types;
 fn only_the_source_s_gene_rows_match() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = dir.path().join("run").to_string_lossy().into_owned();
-    let names: Vec<Box<str>> = ["CD4", "TP53", "apoptosis", "CD4"]
+    let names: Vec<Box<str>> = ["GENEH", "GENEU", "apoptosis", "GENEH"]
         .iter()
         .map(|s| Box::from(*s))
         .collect();
@@ -31,7 +31,7 @@ fn only_the_source_s_gene_rows_match() {
         FeatureNameKind::Gene { delim: '_' },
     )
     .unwrap();
-    let axis: Vec<Box<str>> = ["ENSG1_CD4", "apoptosis", "ENSG2_TP53"]
+    let axis: Vec<Box<str>> = ["ENSG1_GENEH", "apoptosis", "ENSG2_GENEU"]
         .iter()
         .map(|s| Box::from(*s))
         .collect();
@@ -43,7 +43,7 @@ fn only_the_source_s_gene_rows_match() {
     assert_eq!(
         host.keep_src_indices,
         [3, 1],
-        "CD4 is the gene row, not the cell type"
+        "GENEH is the gene row, not the cell type"
     );
     assert_eq!(
         host.e_feat.row(0).iter().copied().collect::<Vec<_>>(),

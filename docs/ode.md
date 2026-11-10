@@ -56,6 +56,16 @@ not seen.
 - **Unspliced jitter** (on unless `--no-jitter`): every pseudobulk's unspliced
   levels are scaled by `e^{ω_p}`, `ω_p ~ N(0, σ²)` with `σ` fitted, so a
   pseudobulk's nuclear fraction does not pass for kinetics.
+- **Unspliced capture**: every unspliced level carries one global factor
+  `e^c` against the spliced, `c` fitted with the rest under a prior; the
+  jitter is every pseudobulk's departure from it.
+- **Genes in groups** (on unless `--no-feature-coarsening`): when the genes
+  kept by `--max-genes` outnumber `--max-coarse-features` (default 250, a
+  ceiling), the genes are grouped once before the climb, by their timing and
+  never across a bin of `log(S/U)`. The climb runs on each group's summed
+  reads, the group as one gene with shared rates and embedding; at its mode
+  every gene's rates are fitted on its own reads, starting from its group's,
+  so the outputs keep every gene.
 
 Gauges: every lineage's time is reported as its own phase on `[0, 1]` (a
 lineage's duration against the kinetics is fitted but not read into it); a
@@ -102,6 +112,7 @@ and a gene's sd reports what the reads pin.
 | `{out}.gene_rates.parquet` | every gene's `log_gamma` and `log_ratio` (log γ/β) at the mode with the sd of its Laplace approximation |
 | `{out}.pb_time.parquet` | every finest pseudobulk's posterior over lineage and time, a row per `(pb, lineage, position)` with its `phase` (the position's share of the lineage's grid, its lineage's own time) and mass `q`; `pb` as `{out}.cell_to_pb.parquet`'s finest level |
 | `{out}.branch_time.tsv` | with `--trunk`, every other lineage's branch time off it at the mode, on `pb_time`'s phase scale |
+| `{out}.coarsening.json` | when the genes were grouped, every gene's group |
 | `{out}.senna.json` | the run manifest `senna view` and the MCP tools read |
 
 In `senna view`, `y` colours the cells by time, `v` draws the velocity field

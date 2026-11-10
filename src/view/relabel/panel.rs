@@ -309,7 +309,7 @@ mod tests {
                 "clusters":{"7":{"label_before":"CT1","label_after":"CT2",
                 "calls":[{"label":"CT2","q":0.01}]},
                 "8":{"label_before":"CT1","label_after":"CT1",
-                "calls":[{"label":"ASDC","q":1.0}]}}}"#,
+                "calls":[{"label":"CT9","q":1.0}]}}}"#,
         )
         .unwrap();
         let lines = preview_lines(&v, 0.1);

@@ -258,7 +258,7 @@ pub struct BgeArgs {
                      The SAME modality across samples therefore merges, sharing one gene panel.\n\
                      DIFFERENT modalities stay on separate rows.\n\
                      That holds even when names collide.\n\
-                     Spliced versus unspliced `TSPAN6` is the usual case.\n\
+                     Spliced versus unspliced `GENE1` is the usual case.\n\
                      \n\
                      The modality tag defaults to file position: m0, m1, and so on.\n\
                      Override it with a `label=` prefix:\n\

@@ -6,7 +6,7 @@
 //! `expand_log_dict_dk`, which spreads each coarse feature's loading across its
 //! constituent genes proportional to the training-time sufficient statistics.
 //! That expansion is a lossy approximation — rare informative genes (e.g.
-//! hemoglobins for erythroid cells) can get merged into generic coarse features
+//! a gene family that marks one cell type) can get merged into generic coarse features
 //! and lose lineage-specific contrast at reporting time.
 //!
 //! This module computes an alternative *empirical* β at full gene resolution:

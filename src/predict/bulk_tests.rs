@@ -16,7 +16,7 @@ fn labels(v: &[&str]) -> Vec<Box<str>> {
 
 /// Genes × samples with a zero, a fraction and a large count.
 fn fixture() -> (Vec<Box<str>>, Vec<Box<str>>, Mat) {
-    let genes = labels(&["TGFB1", "CD8A", "LYZ"]);
+    let genes = labels(&["GENES", "GENEJ", "GENEO"]);
     let samples = labels(&["s0", "s1"]);
     let mat = Mat::from_row_slice(3, 2, &[10.0, 0.0, 2.5, 4.0, 123_456.0, 7.0]);
     (genes, samples, mat)
@@ -191,7 +191,7 @@ fn each_bulk_file_becomes_its_own_backend() {
 fn a_forced_header_names_the_samples_in_the_backend() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ids.tsv");
-    std::fs::write(&path, "gene\t2019\t2020\nTGFB1\t1\t2\nCD8A\t3\t4\n").unwrap();
+    std::fs::write(&path, "gene\t2019\t2020\nGENES\t1\t2\nGENEJ\t3\t4\n").unwrap();
     let f: Box<str> = path.to_string_lossy().into_owned().into_boxed_str();
     let (genes, _, _) = fixture();
     let bulk = materialize(
@@ -205,5 +205,5 @@ fn a_forced_header_names_the_samples_in_the_backend() {
     .expect("materialize");
     let v = open_vec(&bulk.paths()[0]);
     assert_eq!(v.column_names().unwrap(), labels(&["2019", "2020"]));
-    assert_eq!(v.row_names().unwrap(), labels(&["TGFB1", "CD8A"]));
+    assert_eq!(v.row_names().unwrap(), labels(&["GENES", "GENEJ"]));
 }

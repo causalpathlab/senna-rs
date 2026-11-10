@@ -29,7 +29,7 @@ pub struct FeatureEmbeddingArgs {
                      A `senna fne` run qualifies: its table also holds terms, words and\n\
                      cell types, and only its gene and genomic-window rows are matched.\n\
                      \n\
-                     Genes match by canonical name (`ENSG…_TP53` is `TP53`).\n\
+                     Genes match by canonical name (`ENSG…_GENE1` is `GENE1`).\n\
                      A matched gene keeps its row for the whole fit; the rest of the\n\
                      model trains as usual.\n\
                      A gene with no row: `bge` keeps it as a free, trained row;\n\

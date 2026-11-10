@@ -148,7 +148,7 @@ impl TypedGraphBuilder {
     }
 
     /// The one gene-name rule every input goes through: drop the Ensembl
-    /// version (`ENSG00000141510.17` → `ENSG00000141510`), map a bare id to
+    /// version (`ENSG00000000001.17` → `ENSG00000000001`), map a bare id to
     /// its symbol when `--gene-gff` gave one, then apply the
     /// `--feature-name-kind` rule.
     pub(crate) fn canonical_gene(&self, name: &str) -> Box<str> {

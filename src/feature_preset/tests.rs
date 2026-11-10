@@ -8,7 +8,7 @@ use nalgebra::DMatrix;
 /// table, and `feature_types.parquet` says which is which.
 fn write_fne_like(dir: &std::path::Path, with_types: bool) -> String {
     let prefix = dir.join("run").to_string_lossy().into_owned();
-    let names: Vec<Box<str>> = ["TP53", "GATA1", "GO:0006915", "apoptosis"]
+    let names: Vec<Box<str>> = ["GENEU", "GENEL", "GO:0006915", "apoptosis"]
         .iter()
         .map(|s| Box::from(*s))
         .collect();
@@ -40,7 +40,7 @@ fn gene_rows_match_the_axis_by_canonical_name_and_other_types_are_left_out() {
     let prefix = write_fne_like(dir.path(), true);
     // The word `apoptosis` also names a feature on this axis; only the GENE row
     // of the source may pin anything.
-    let axis: Vec<Box<str>> = ["ENSG1_GATA1", "ENSG2_MYC", "apoptosis", "ENSG3_TP53"]
+    let axis: Vec<Box<str>> = ["ENSG1_GENEL", "ENSG2_GENER", "apoptosis", "ENSG3_GENEU"]
         .iter()
         .map(|s| Box::from(*s))
         .collect();
@@ -53,7 +53,7 @@ fn gene_rows_match_the_axis_by_canonical_name_and_other_types_are_left_out() {
     .unwrap()
     .0;
     assert_eq!(f.ids, vec![0, 3]);
-    // GATA1 is source row 1, TP53 source row 0.
+    // GENEL is source row 1, GENEU source row 0.
     assert_eq!(f.rows, vec![0.5, 1.0, 1.5, -1.0, -0.5, 0.0]);
 }
 
@@ -61,7 +61,7 @@ fn gene_rows_match_the_axis_by_canonical_name_and_other_types_are_left_out() {
 fn without_a_types_table_every_row_is_a_candidate() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), false);
-    let axis: Vec<Box<str>> = ["apoptosis", "ENSG3_TP53"]
+    let axis: Vec<Box<str>> = ["apoptosis", "ENSG3_GENEU"]
         .iter()
         .map(|s| Box::from(*s))
         .collect();
@@ -80,7 +80,7 @@ fn without_a_types_table_every_row_is_a_candidate() {
 fn no_matching_gene_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), true);
-    let axis: Vec<Box<str>> = vec![Box::from("ENSG2_MYC")];
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG2_GENER")];
     assert!(load_preset_genes(
         &prefix,
         PresetMode::Freeze,
@@ -94,7 +94,7 @@ fn no_matching_gene_is_an_error() {
 fn the_mode_is_carried_and_a_rank_as_wide_as_the_table_is_taken() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), true);
-    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_TP53")];
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_GENEU")];
     let kind = ge::FeatureNameKind::Gene { delim: '_' };
     for mode in [
         PresetMode::Freeze,
@@ -156,19 +156,19 @@ fn the_unused_rows_are_carried_under_a_pinning_mode_only() {
         ridge: 0.0,
     });
 
-    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_TP53")];
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_GENEU")];
     for mode in [PresetMode::Freeze, lora] {
         let (_, carried) = load_preset_genes(&prefix, mode, &axis, &kind).unwrap();
         let c = carried.expect("three rows are left over");
         let names: Vec<&str> = c.names.iter().map(AsRef::as_ref).collect();
-        assert_eq!(names, ["GATA1", "GO:0006915", "apoptosis"]);
+        assert_eq!(names, ["GENEL", "GO:0006915", "apoptosis"]);
         let types: Vec<&str> = c.types.iter().map(AsRef::as_ref).collect();
         assert_eq!(types, ["gene", "term", "word"]);
         assert_eq!(c.rows.nrows(), 3);
         assert_eq!(
             c.rows.row(0).iter().copied().collect::<Vec<f32>>(),
             vec![0.5, 1.0, 1.5],
-            "GATA1 is source row 1"
+            "GENEL is source row 1"
         );
         assert_eq!(c.source, format!("{prefix}.feature_embedding.parquet"));
     }
@@ -179,7 +179,7 @@ fn the_unused_rows_are_carried_under_a_pinning_mode_only() {
 
     // The word `apoptosis` also names a feature of this axis: not carried, or
     // the output would hold that name twice.
-    let axis: Vec<Box<str>> = ["ENSG1_GATA1", "apoptosis", "ENSG3_TP53"]
+    let axis: Vec<Box<str>> = ["ENSG1_GENEL", "apoptosis", "ENSG3_GENEU"]
         .iter()
         .map(|s| Box::from(*s))
         .collect();
@@ -189,7 +189,7 @@ fn the_unused_rows_are_carried_under_a_pinning_mode_only() {
     assert_eq!(c.types, vec![Box::from("term")]);
 
     // Everything matched or taken: nothing to carry.
-    let axis: Vec<Box<str>> = ["GATA1", "apoptosis", "TP53", "GO:0006915"]
+    let axis: Vec<Box<str>> = ["GENEL", "apoptosis", "GENEU", "GO:0006915"]
         .iter()
         .map(|s| Box::from(*s))
         .collect();
@@ -203,7 +203,7 @@ fn the_unused_rows_are_carried_under_a_pinning_mode_only() {
 fn carried_rows_of_an_untyped_source_are_genes() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), false);
-    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_TP53")];
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_GENEU")];
     let (_, carried) = load_preset_genes(
         &prefix,
         PresetMode::Freeze,
@@ -222,7 +222,7 @@ fn carried_rows_of_an_untyped_source_are_genes() {
 fn the_types_are_read_when_the_flag_names_a_table_or_manifest() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), true);
-    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_TP53")];
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_GENEU")];
     let kind = ge::FeatureNameKind::Gene { delim: '_' };
     for given in [
         format!("{prefix}.feature_embedding.parquet"),
@@ -247,7 +247,7 @@ fn write_run_table(prefix: &str, suffix: &str, row_axis: &str, names: &[&str]) -
 
 fn carried_fixture() -> CarriedRows {
     CarriedRows {
-        names: vec![Box::from("GATA1"), Box::from("GO:0006915")],
+        names: vec![Box::from("GENEL"), Box::from("GO:0006915")],
         types: vec![Box::from("gene"), Box::from("term")],
         rows: DMatrix::<f32>::from_row_slice(2, 3, &[1.0, 2.0, 3.0, -1.0, -2.0, -3.0]),
         source: "src.parquet".into(),
@@ -268,7 +268,7 @@ fn appending_writes_the_full_table_and_types_every_row() {
 
     let t = DMatrix::<f32>::from_parquet(&path).unwrap();
     let names: Vec<&str> = t.rows.iter().map(AsRef::as_ref).collect();
-    assert_eq!(names, ["A", "B", "GATA1", "GO:0006915"]);
+    assert_eq!(names, ["A", "B", "GENEL", "GO:0006915"]);
     assert_eq!(
         t.mat.row(1).iter().copied().collect::<Vec<f32>>(),
         vec![10.0, 11.0, 12.0]
@@ -351,7 +351,7 @@ fn appending_replaces_a_types_table_another_run_left() {
 fn a_cell_type_named_like_a_gene_does_not_stand_in_for_it() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = dir.path().join("run").to_string_lossy().into_owned();
-    let names: Vec<Box<str>> = ["CD4", "CD4"].iter().map(|s| Box::from(*s)).collect();
+    let names: Vec<Box<str>> = ["GENEH", "GENEH"].iter().map(|s| Box::from(*s)).collect();
     DMatrix::<f32>::from_row_slice(2, 2, &[9.0, 9.0, 1.0, -1.0])
         .to_parquet_with_names(
             &format!("{prefix}.feature_embedding.parquet"),
@@ -365,7 +365,7 @@ fn a_cell_type_named_like_a_gene_does_not_stand_in_for_it() {
         &[Box::from("cell_type"), Box::from("gene")],
     )
     .unwrap();
-    let axis: Vec<Box<str>> = vec![Box::from("ENSG1_CD4")];
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG1_GENEH")];
     let (f, carried) = load_preset_genes(
         &prefix,
         PresetMode::Freeze,
@@ -377,7 +377,7 @@ fn a_cell_type_named_like_a_gene_does_not_stand_in_for_it() {
     assert_eq!(f.rows, vec![1.0, -1.0]);
     // The cell type is its own row: carried through, as a cell type.
     let c = carried.unwrap();
-    assert_eq!(c.names, vec![Box::from("CD4")]);
+    assert_eq!(c.names, vec![Box::from("GENEH")]);
     assert_eq!(c.types, vec![Box::from("cell_type")]);
 }
 
@@ -413,7 +413,7 @@ fn a_stale_types_table_is_cleared_when_nothing_is_carried() {
 fn appending_skips_a_superseded_name_and_refuses_a_width_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("run").to_string_lossy().into_owned();
-    let path = write_run_table(&out, "feature_embedding.parquet", "gene", &["A", "GATA1"]);
+    let path = write_run_table(&out, "feature_embedding.parquet", "gene", &["A", "GENEL"]);
     let mut wide = carried_fixture();
     wide.names = vec![Box::from("X"), Box::from("Y")];
     wide.rows = DMatrix::<f32>::zeros(2, 4);
@@ -426,11 +426,11 @@ fn appending_skips_a_superseded_name_and_refuses_a_width_mismatch() {
         .unwrap();
     let t = DMatrix::<f32>::from_parquet(&path).unwrap();
     let names: Vec<&str> = t.rows.iter().map(AsRef::as_ref).collect();
-    assert_eq!(names, ["A", "GATA1", "GO:0006915"]);
+    assert_eq!(names, ["A", "GENEL", "GO:0006915"]);
     assert_eq!(
         t.mat.row(1).iter().copied().collect::<Vec<f32>>(),
         vec![10.0, 11.0, 12.0],
-        "the run's own GATA1 row stands"
+        "the run's own GENEL row stands"
     );
 
     // Everything superseded: the table stands and no types table appears.
@@ -439,7 +439,7 @@ fn appending_skips_a_superseded_name_and_refuses_a_width_mismatch() {
         &out2,
         "feature_embedding.parquet",
         "gene",
-        &["GATA1", "GO:0006915"],
+        &["GENEL", "GO:0006915"],
     );
     carried_fixture()
         .append_to(&out2, "feature_embedding.parquet")

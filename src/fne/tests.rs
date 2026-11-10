@@ -130,7 +130,7 @@ fn a_pair_file_becomes_one_undirected_gene_relation_with_weights_and_canonical_n
     let p = write(
         dir.path(),
         "biogrid.tsv",
-        "# comment\nTP53\tMDM2\t2.0\nMDM2\tTP53\t0.5\nENSG0001_TP53\tTP53\nTP53\tBAX\nonly_one\n",
+        "# comment\nGENEU\tGENEP\t2.0\nGENEP\tGENEU\t0.5\nENSG0001_GENEU\tGENEU\nGENEU\tGENEC\nonly_one\n",
     );
     let mut b = TypedGraphBuilder::new(gene_kind());
     b.add_pair_file(&p, &PpiOpts::default()).unwrap();
@@ -139,13 +139,13 @@ fn a_pair_file_becomes_one_undirected_gene_relation_with_weights_and_canonical_n
     assert_eq!(g.types.name(0), "gene");
     assert_eq!(
         g.node_names,
-        vec![Box::from("TP53"), Box::from("MDM2"), Box::from("BAX")]
+        vec![Box::from("GENEU"), Box::from("GENEP"), Box::from("GENEC")]
     );
     assert_eq!(g.relations.len(), 1);
     let r = g.relations.get(0);
     assert_eq!(r.name.as_ref(), "gene:gene/biogrid");
     assert!(r.undirected);
-    // TP53–MDM2 kept once at its larger weight; the ENSG alias was a self-loop.
+    // GENEU–GENEP kept once at its larger weight; the ENSG alias was a self-loop.
     assert_eq!(g.edges.len(), 2);
     let w = g
         .edges
@@ -166,7 +166,7 @@ fn named_pairs_split_into_relations_and_polarity_overrides_take_full_ids() {
     let p = write(
         dir.path(),
         "mixed.tsv",
-        "TP53\tMDM2\tphysical\t2.0\nA\tB\tgenetic_sl\nA\tC\tgenetic_sl\t0.5\n",
+        "GENEU\tGENEP\tphysical\t2.0\nA\tB\tgenetic_sl\nA\tC\tgenetic_sl\t0.5\n",
     );
     let mut b = TypedGraphBuilder::new(gene_kind());
     b.add_named_pair_file(&p).unwrap();
@@ -276,13 +276,13 @@ fn a_typed_file_groups_rows_by_type_pair_and_matches_non_gene_names_exactly() {
     let p = write(
         dir.path(),
         "typed.tsv",
-        "gene\tTP53\tterm\tGO:1\t0.9\n\
-         gene\tENSG_TP53\tterm\tGO:2\n\
-         gene\tBAX\tcell_type\tT cell\n\
-         gene\tBAX\tcell_type\tT cell\n\
+        "gene\tGENEU\tterm\tGO:1\t0.9\n\
+         gene\tENSG_GENEU\tterm\tGO:2\n\
+         gene\tGENEC\tcell_type\tCT 2\n\
+         gene\tGENEC\tcell_type\tCT 2\n\
          term\tGO:1\tterm\tGO:2\n\
          term\tGO:2\tterm\tGO:1\n\
-         word\tapoptosis\tgene\tTP53\t0.3\n\
+         word\tapoptosis\tgene\tGENEU\t0.3\n\
          short\trow\n",
     );
     let mut b = TypedGraphBuilder::new(gene_kind());
@@ -326,7 +326,7 @@ fn a_typed_file_groups_rows_by_type_pair_and_matches_non_gene_names_exactly() {
     assert_eq!(g.relation_repeats, vec![4, 1, 1, 1]);
     assert_eq!(
         g.node_names[g.types.range(2).start as usize].as_ref(),
-        "T cell"
+        "CT 2"
     );
     g.edges.validate(&g.types, &g.relations).unwrap();
 }
@@ -517,7 +517,7 @@ fn a_membership_file_becomes_a_gene_to_label_relation_named_after_the_file() {
     let p = write(
         dir.path(),
         "markers.tsv",
-        "gene\tcelltype\nCD3E\tT cell\nCD3D\tT cell\nMS4A1\tB cell\nCD3E\tT cell\n",
+        "gene\tcelltype\nGENEG\tCT 2\nGENEF1\tCT 2\nGENEQ\tCT 1\nGENEG\tCT 2\n",
     );
     let mut b = TypedGraphBuilder::new(gene_kind());
     assert!(
@@ -534,7 +534,7 @@ fn a_membership_file_becomes_a_gene_to_label_relation_named_after_the_file() {
     assert_eq!(g.types.n_nodes(g.types.index_of("cell_type").unwrap()), 2);
     assert_eq!(
         g.node_names[3].as_ref(),
-        "T cell",
+        "CT 2",
         "labels verbatim, spaces kept"
     );
     assert!(g.edges.weight.is_none());
@@ -549,10 +549,10 @@ fn gene_sets_from_a_gaf_propagate_up_the_ontology_and_the_hierarchy_joins_as_ter
         "goa.gaf",
         &format!(
             "!gaf-version: 2.2\n{}{}{}{}",
-            gaf_row("TP53", "GO:2", "IDA"),
-            gaf_row("BAX", "GO:2", "IEA"),
-            gaf_row("MYC", "GO:3", "IDA"),
-            gaf_row("CCND1", "GO:3", "IDA"),
+            gaf_row("GENEU", "GO:2", "IDA"),
+            gaf_row("GENEC", "GO:2", "IEA"),
+            gaf_row("GENER", "GO:3", "IDA"),
+            gaf_row("GENED", "GO:3", "IDA"),
         ),
     );
     let onto = Ontology::load_obo(&obo).unwrap();
@@ -602,7 +602,7 @@ fn gmt_sets_carry_their_description_as_the_term_name() {
     let gmt = write(
         dir.path(),
         "hallmark.gmt",
-        "HALLMARK_A\tset A description\tTP53\tBAX\tMDM2\nHALLMARK_B\thttp://x\tMYC\nTINY\t\tA\n",
+        "HALLMARK_A\tset A description\tGENEU\tGENEC\tGENEP\nHALLMARK_B\thttp://x\tGENER\nTINY\t\tA\n",
     );
     let sets = read_gmt(&gmt).unwrap();
     let mut b = TypedGraphBuilder::new(gene_kind());

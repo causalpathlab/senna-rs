@@ -53,9 +53,9 @@ pub(super) fn resolve_etm_topics(
     // Robust topic recovery from CELL CLUSTERS, using the Leiden `labels` the
     // bge driver computed ONCE on this same kept-cell embedding (shared with the
     // co-embedding's temperature calibration). The previous approach (Arora/SPA
-    // convex-hull anchors on ρ) was outlier-driven: a few extreme features (e.g.
-    // immunoglobulin genes) became the hull vertices, SPA picked them, and the
-    // min-cells guard nuked the rest → K collapsed (BM1 → 2).
+    // convex-hull anchors on ρ) was outlier-driven: a few extreme features
+    // became the hull vertices, SPA picked them, and the min-cells guard
+    // nuked the rest, so K collapsed to a couple of topics.
     let (alpha, log_theta, beta_dk) = topics_from_clusters(&z, &rho, labels)?;
     let k = alpha.nrows();
     let topic_names = axis_id_names("T", k);

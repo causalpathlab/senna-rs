@@ -598,8 +598,8 @@ pub struct MaskedTopicArgs {
         long_help = "Alias-splitting delimiter for feature-network name resolution.\n\
                      When set, such as '_', each row name is registered twice.\n\
                      It registers under its full form AND every split component.\n\
-                     So `ENSG00000105329_TGFB1` matches edges naming either part.\n\
-                     That is `ENSG00000105329` or `TGFB1`.\n\
+                     So `ENSG00000000130_GENE1` matches edges naming either part.\n\
+                     That is `ENSG00000000130` or `GENE1`.\n\
                      The resolver points both aliases at one row.",
         hide = true
     )]
@@ -675,7 +675,7 @@ pub struct MaskedTopicArgs {
                      `exact` — strict string match.\n\
                      \n\
                      `gene` — also register each `_`-split component as an alias.\n\
-                     So `ENSG000_TGFB1` and `TGFB1` resolve to the same row.\n\
+                     So `ENSG000_GENE1` and `GENE1` resolve to the same row.\n\
                      \n\
                      `locus` — normalize `chr1:1000-2000`, `1:1000-2000`, and so on.\n\
                      They all reach a canonical form.\n\

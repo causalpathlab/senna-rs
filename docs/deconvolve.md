@@ -103,9 +103,9 @@ Read these before trusting a number.
 
 **Fractions are mRNA shares, not cell shares.** Profiles are normalised over
 genes, so an abundance is mRNA mass. Cell types differ substantially in mRNA per
-cell — on one real reference, DC carried 2.1× the mean and HSPC 0.44× — so the
-two quantities are not interchangeable. Converting requires per-type mRNA
-content, which is not yet modelled.
+cell (on one reference the most and least mRNA-rich types differed several
+fold), so the two quantities are not interchangeable. Converting requires
+per-type mRNA content, which is not yet modelled.
 
 **The reported range is compressed.** `A` is row-stochastic, so `f = Aᵀu` is an
 averaging operator: it can only contract dispersion, never expand it. Measured
@@ -122,12 +122,11 @@ not fix it; it only widens an interval that is centred in the wrong place. Do
 not attach a p-value to anything derived from these intervals.
 
 **Closely related types may be unresolvable.** Separability is bounded by the
-reference, not the sampler. On one real panel CD4_T and CD8_T profiles had
-cosine similarity 0.972, the canonical markers carried 0.23 % of T-cell mRNA,
-and CD4 itself showed no fold-change between them at the mRNA level. Where two
-types are that close, their split is decided by the prior, not the data. Check
-`{out}.archetypes.parquet` for diffuse readout rows before trusting a fine
-distinction.
+reference, not the sampler. Two sibling types can have near-identical profiles,
+with their canonical markers carrying a sliver of the mRNA and no fold-change
+between them at the mRNA level. Where two types are that close, their split is
+decided by the prior, not the data. Check `{out}.archetypes.parquet` for diffuse
+readout rows before trusting a fine distinction.
 
 **Leakage inflates in-sample benchmarks.** If the bulk is built from cells that
 are also in the reference, an empirical reference partly reads back counts it is

@@ -375,7 +375,7 @@ pub struct PredictArgs {
                      then matched to the model exactly, with a flexible fallback.\n\
                      `exact` keeps the rows exactly as the file spells them\n\
                      (the choice for a model trained with `--feature-name-kind exact`).\n\
-                     `gene` resolves `ENSG..._TSPAN6` to `TSPAN6`, rsplit on '_',\n\
+                     `gene` resolves `ENSG..._GENE1` to `GENE1`, rsplit on '_',\n\
                      so a symbol-keyed dictionary matches a query keyed by `<ensembl>_<symbol>`.\n\
                      `auto` aligns the rows by auto-detection and matches under `gene`.\n\
                      Applied AFTER the suffix trim (see --feature-name-suffix-delim)."
@@ -386,8 +386,8 @@ pub struct PredictArgs {
         long,
         help = "Split query row names on this char; keep prefix as base key",
         long_help = "Split query row names on this character.\n\
-                     With '/', `ENSG00000000003_TSPAN6/count/spliced` splits in two.\n\
-                     The base is `ENSG00000000003_TSPAN6`.\n\
+                     With '/', `ENSG00000000010_GENE1/count/spliced` splits in two.\n\
+                     The base is `ENSG00000000010_GENE1`.\n\
                      The suffix is `count/spliced`.\n\
                      The suffix is then available to --keep-feature-suffix.\n\
                      The base is handed to --feature-name-kind."

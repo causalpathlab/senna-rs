@@ -182,9 +182,9 @@ mod eval_features_naming {
         let dir = tempfile::tempdir().unwrap();
         let path = list_file(
             dir.path(),
-            &["ENSG00000000419_DPM1", "ENSG00000000003_TSPAN6"],
+            &["ENSG00000000110_GENEK", "ENSG00000000010_GENEV"],
         );
-        let axis = names(&["tspan6", "tnmd", "dpm1"]);
+        let axis = names(&["genev", "genet", "genek"]);
         assert_eq!(
             resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(),
             vec![2, 0]
@@ -194,11 +194,11 @@ mod eval_features_naming {
     #[test]
     fn symbols_resolve_on_a_raw_axis() {
         let dir = tempfile::tempdir().unwrap();
-        let path = list_file(dir.path(), &["DPM1", "TSPAN6"]);
+        let path = list_file(dir.path(), &["GENEK", "GENEV"]);
         let axis = names(&[
-            "ENSG00000000003_TSPAN6",
-            "ENSG00000000005_TNMD",
-            "ENSG00000000419_DPM1",
+            "ENSG00000000010_GENEV",
+            "ENSG00000000020_GENET",
+            "ENSG00000000110_GENEK",
         ]);
         assert_eq!(
             resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(),
@@ -224,12 +224,12 @@ mod eval_features_naming {
     fn a_list_matching_nothing_names_the_file_and_both_spellings() {
         let dir = tempfile::tempdir().unwrap();
         let path = list_file(dir.path(), &["chr1:100-200", "chr2:5-9"]);
-        let axis = names(&["tspan6", "tnmd", "dpm1"]);
+        let axis = names(&["genev", "genet", "genek"]);
         let err = resolve_eval_genes(Some(&path), &axis, "--eval-features")
             .unwrap_err()
             .to_string();
         assert!(err.contains("chr1:100-200"), "{err}");
-        assert!(err.contains("tspan6"), "{err}");
+        assert!(err.contains("genev"), "{err}");
         assert!(err.contains("--feature-name-kind"), "{err}");
     }
 }

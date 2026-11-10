@@ -510,7 +510,7 @@ mod tests {
     fn a_label_key_splits_words_and_keeps_case() {
         assert_eq!(label_key("CT 1, a"), "CT_1_a");
         assert_eq!(label_key("CT\t1__a"), "CT_1_a");
-        assert_ne!(label_key("T cell"), label_key("t cell"));
+        assert_ne!(label_key("CT 2"), label_key("ct 2"));
         assert_eq!(label_key(" , _ "), "", "separators only key to nothing");
     }
 
@@ -609,10 +609,10 @@ mod tests {
         write(
             dir.path(),
             "s2.json",
-            r#"{"4":{"size":10,"label":"CT1","calls":[{"label":"CT2","q":0.02},{"label":"ASDC","q":1.0}],
+            r#"{"4":{"size":10,"label":"CT1","calls":[{"label":"CT2","q":0.02},{"label":"CT9","q":1.0}],
                 "evidence":{"top":"CT2","q":0.02,"agrees":false}},
-                "5":{"size":4,"label":"CT1","calls":[{"label":"ASDC","q":1.0},{"label":"CT2","q":1.0}],
-                "evidence":{"top":"ASDC","q":1.0,"agrees":false}}}"#,
+                "5":{"size":4,"label":"CT1","calls":[{"label":"CT9","q":1.0},{"label":"CT2","q":1.0}],
+                "evidence":{"top":"CT9","q":1.0,"agrees":false}}}"#,
         );
         {
             use senna::embed_common::*;
@@ -673,7 +673,7 @@ mod tests {
             dir.path(),
             "s.json",
             r#"{"4":{"size":10,"label":"CT1","calls":[],"terms":[
-                {"source":"go","term":"T cell activation","effect":0.42,"q":0.0012,"p":0.0001,"nes":2.1},
+                {"source":"go","term":"term one","effect":0.42,"q":0.0012,"p":0.0001,"nes":2.1},
                 {"source":"go","term":"cell cycle","effect":0.2,"q":null}]},
                 "5":{"size":3,"label":"CT2","calls":[],"terms":[]}}"#,
         );
@@ -688,7 +688,7 @@ mod tests {
             round.term_lines("4", 5),
             [
                 "GO terms (top 2, by effect)",
-                "  T cell activation",
+                "  term one",
                 "    effect 0.420  NES 2.100  q 1.20e-3",
                 "  cell cycle",
                 "    effect 0.200",
