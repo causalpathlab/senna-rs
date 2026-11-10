@@ -363,7 +363,7 @@ pub(crate) struct CellTable {
 ///
 /// `geometry_latent` (not `outputs.latent`): on an embedding run the cell
 /// table is the H-space Z in `cell_embedding`, while `latent` holds log θ,
-/// which [`latent_layout_features`] would misread as raw Euclidean.
+/// which [`latent_layout_features`] would misread as an embedding.
 pub(crate) fn cell_table(
     args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
@@ -464,12 +464,14 @@ pub(crate) fn preprocess_layout_data(
 /// and a short description of the transform for logging.
 ///
 /// - topic family: `softmax(log θ / τ)` then a Hellinger square root;
-/// - embedding kinds (bge, fne, …): the raw embedding, since its magnitude
-///   carries signal and a DistL2 kNN should see it (the caller must have
-///   resolved the table through `geometry_latent`, so this is Z, never log θ);
+/// - embedding kinds (bge, fne, …): each cell's embedding scaled to unit
+///   length (cosine distance, matching lupin's trajectory and senna's
+///   critique); the caller must have resolved the table through
+///   `geometry_latent`, so this is Z, never log θ;
 /// - everything else: per-dimension z-scores.
 ///
-/// Each dimension is then winsorized to ±`trim_mads` MADs.
+/// Each dimension of a topic or z-scored table is then winsorized to
+/// ±`trim_mads` MADs.
 pub(crate) fn latent_layout_features(
     kind: senna::run_manifest::RunKind,
     latent_nk: &Mat,
@@ -478,7 +480,9 @@ pub(crate) fn latent_layout_features(
 ) -> (Mat, String) {
     let tau = theta_temperature.max(1e-6);
     let mut feat_kn: Mat = latent_nk.transpose();
-    let latent_desc: String = if kind.is_topic_family() {
+    // The topic check comes first: masked-vae is a topic kind whose cell
+    // space is signed.
+    let (latent_desc, clip): (String, bool) = if kind.is_topic_family() {
         // softmax(log_θ / τ) per cell → Hellinger sqrt. τ=1 reduces to
         // sqrt(exp(log_θ)); τ<1 sharpens, τ>1 softens.
         if (tau - 1.0).abs() > 1e-6 {
@@ -486,20 +490,24 @@ pub(crate) fn latent_layout_features(
         }
         feat_kn.normalize_exp_logits_columns_inplace();
         feat_kn.apply(|v| *v = v.sqrt());
-        if (tau - 1.0).abs() < 1e-6 {
+        let desc = if (tau - 1.0).abs() < 1e-6 {
             "Hellinger-θ".into()
         } else {
             format!("Hellinger-θ, τ={tau:.3}")
-        }
+        };
+        (desc, true)
     } else if kind.cell_space() == senna::run_manifest::CellSpace::Embedding {
-        // Unit-sphere/cosine normalization collapsed magnitude and sheared
-        // populations apart; a raw t-UMAP on the same embedding does not.
-        "raw Euclidean".into()
+        // Not clipped: clipping a dimension would shorten the unit vectors,
+        // and the co-embedded features they share a graph with are not.
+        feat_kn.normalize_columns_inplace();
+        ("unit-length (cosine)".into(), false)
     } else {
         feat_kn.scale_rows_inplace();
-        "z-scored scores".into()
+        ("z-scored scores".into(), true)
     };
-    winsorize_rows_inplace(&mut feat_kn, trim_mads);
+    if clip {
+        winsorize_rows_inplace(&mut feat_kn, trim_mads);
+    }
     (feat_kn, latent_desc)
 }
 
@@ -1058,4 +1066,30 @@ pub(crate) fn write_cell_layout(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use senna::run_manifest::RunKind;
+
+    #[test]
+    fn an_embedding_cell_is_laid_out_by_its_direction_alone() {
+        // Cells as rows at norms 1 to 10 and these angles: the first two
+        // alike, the last along the first axis, far enough out on it that
+        // clipping would shorten it.
+        let angles = [
+            0.52, 0.52, 0.54, 0.56, 0.58, 0.60, 0.62, 0.64, 0.66, 0.0_f32,
+        ];
+        let latent = Mat::from_fn(10, 2, |i, d| {
+            (i + 1) as f32 * [angles[i].cos(), angles[i].sin()][d]
+        });
+        for kind in [RunKind::Bge, RunKind::Simba] {
+            let (cells, _) = latent_layout_features(kind, &latent, 1.0, 0.5);
+            assert!((cells.column(0) - cells.column(1)).norm() < 1e-6, "{cells}");
+            for c in cells.column_iter() {
+                assert!((c.norm() - 1.0).abs() < 1e-6, "{cells}");
+            }
+        }
+    }
 }

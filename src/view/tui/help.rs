@@ -53,7 +53,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "click a cell",
-                "its cluster's summary, and the features placed nearest it (Euclidean, as the map), with edges to them",
+                "its cluster's summary, and the features placed nearest it (by direction, as the map), with edges to them",
             ),
             (
                 "click a feature",

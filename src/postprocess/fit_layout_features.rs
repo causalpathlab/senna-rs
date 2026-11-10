@@ -59,9 +59,9 @@ fn write_xy(path: &str, names: &[Box<str>], coords: &Mat, row_label: &str) -> an
 
 /// The run's feature co-embedding (`features × dims`) and its feature names,
 /// when it has one in the cells' space: an embedding run whose co-embed has
-/// the `dims` of the cell table. `None` otherwise (topic/SVD runs,
-/// interrupted embedding runs, a layout that ran on a projection instead of
-/// Z).
+/// the `dims` of the cell table. Each row is unit length, as the cells are.
+/// `None` otherwise (topic/SVD runs, interrupted embedding runs, a layout
+/// that ran on a projection instead of Z).
 pub(crate) fn read_coembedding(
     m: &RunManifest,
     mp: &Path,
@@ -73,18 +73,14 @@ pub(crate) fn read_coembedding(
     let Some(rel) = m.outputs.feature_coembedding.as_deref() else {
         return Ok(None);
     };
-    let path = run_manifest::resolve(manifest_dir(mp), rel)
-        .to_string_lossy()
-        .into_owned();
+    let dir = manifest_dir(mp);
+    let path = run_manifest::resolve(dir, rel);
     anyhow::ensure!(
-        Path::new(&path).exists(),
-        "the run's feature co-embedding is recorded at {path}, which is not here"
+        path.exists(),
+        "the run's feature co-embedding is recorded at {}, which is not here",
+        path.display()
     );
-    let MatWithNames {
-        rows: feature_names,
-        mat: coembed_dh,
-        ..
-    } = Mat::from_parquet_with_row_names(&path, Some(0))?;
+    let (feature_names, coembed_dh) = read_feature_rows(m, dir, FeatureSpace::Coembedding)?;
     if coembed_dh.ncols() != dims {
         log::warn!(
             "feature co-embed has {} dims but the cell layout ran on {dims}; \
@@ -298,6 +294,21 @@ pub(crate) fn record_cell_layout(
 mod tests {
     use super::*;
     use senna::run_manifest::RunKind;
+
+    #[test]
+    fn the_coembedding_is_read_onto_the_cells_unit_sphere() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = run_with_tables(dir.path(), true);
+        let (names, c) = read_coembedding(&m, &dir.path().join("r.senna.json"), 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(names.len(), 3);
+        for row in c.row_iter() {
+            assert!((row.norm() - 1.0).abs() < 1e-6, "{row}");
+        }
+        // g2 was (5, 0): its direction is kept.
+        assert!((c[(1, 0)] - 1.0).abs() < 1e-6 && c[(1, 1)].abs() < 1e-6);
+    }
 
     /// A bge run in `dir` with a ρ table and, if asked, a co-embedding whose
     /// row g2 points another way, so a read tells which table it came from.
