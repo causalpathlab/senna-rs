@@ -1,4 +1,5 @@
-//! `senna layout umap`: t-UMAP of every cell, as `uwot::tumap` does it. The
+//! `senna layout umap`: t-UMAP of every cell, as `uwot::tumap` does it, or
+//! UMAP's kernel when `--umap-min-dist` or `--umap-spread` is given. The
 //! run's cell table (latent, cell embedding or cell projection; see
 //! [`cell_table`]) gives a cell-cell fuzzy kNN graph, and SGD lays it out
 //! from a PCA(2) start. No landmarks, no Nyström: those are for PHATE and
@@ -47,6 +48,29 @@ pub struct LayoutUmapArgs {
 
     #[arg(
         long,
+        value_name = "DIST",
+        help = "UMAP's min_dist: how tightly points pack [default: t-UMAP's kernel]",
+        long_help = "How close points may sit on the map, as umap-learn's min_dist.\n\
+                     Larger values loosen groups into continua; smaller ones pack them\n\
+                     into tight clumps. Must lie in [0, spread].\n\
+                     \n\
+                     With neither this nor --umap-spread the layout is t-UMAP\n\
+                     (uwot::tumap, the kernel 1/(1 + d^2)). With either, it is UMAP's\n\
+                     kernel 1/(1 + a d^(2b)), its (a, b) fitted to min_dist and spread\n\
+                     as umap-learn fits them; the other defaults to umap-learn's\n\
+                     (min_dist 0.1, spread 1)."
+    )]
+    umap_min_dist: Option<f32>,
+
+    #[arg(
+        long,
+        value_name = "SCALE",
+        help = "UMAP's spread: the scale of the map's distances (see --umap-min-dist)"
+    )]
+    umap_spread: Option<f32>,
+
+    #[arg(
+        long,
         help = "Lay out cells and features together, as the `joint` method",
         long_help = "Lay out cells and features in one map, recorded as the `joint` method.\n\
                      For runs whose cells and features share one embedding (bge, simba,\n\
@@ -88,8 +112,10 @@ fn pca_init_2d(mut rows: Mat, seed: u64) -> Mat {
 }
 
 pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
+    // First, so a bad kernel is refused before the run is read.
+    let params = args.tumap_params()?;
     if args.common.target == LayoutTarget::Features {
-        return fit_feature_layout_umap(args);
+        return fit_feature_layout_umap(args, &params);
     }
     let mut resolved = resolve_inputs(&args.common)?;
     if args.joint {
@@ -103,9 +129,9 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
     }
     let prep = cell_table(&args.common, &resolved)?;
     if args.joint {
-        fit_layout_joint(args, &mut resolved, &prep)
+        fit_layout_joint(args, &params, &mut resolved, &prep)
     } else {
-        fit_cell_layout_umap(args, &mut resolved, &prep)
+        fit_cell_layout_umap(args, &params, &mut resolved, &prep)
     }
 }
 
@@ -113,6 +139,7 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
 /// the `joint` method (cells, and features on that same map).
 fn fit_layout_joint(
     args: &LayoutUmapArgs,
+    params: &TumapParams,
     resolved: &mut ResolvedViz,
     prep: &CellTable,
 ) -> anyhow::Result<()> {
@@ -132,11 +159,8 @@ fn fit_layout_joint(
         prep.cells_kn.ncols(),
         names.len()
     );
-    let (cell_coords, feature_coords) = joint_tumap(
-        &prep.cells_kn,
-        &coembed_dh.transpose(),
-        &args.tumap_params(),
-    )?;
+    let (cell_coords, feature_coords) =
+        joint_tumap(&prep.cells_kn, &coembed_dh.transpose(), params)?;
     write_cell_layout(
         &args.common,
         resolved,
@@ -151,6 +175,7 @@ fn fit_layout_joint(
 /// `cell_coords.parquet`, no `pb_coords`.
 fn fit_cell_layout_umap(
     args: &LayoutUmapArgs,
+    params: &TumapParams,
     resolved: &mut ResolvedViz,
     prep: &CellTable,
 ) -> anyhow::Result<()> {
@@ -159,20 +184,21 @@ fn fit_cell_layout_umap(
 
     // PCA(2) init (uwot's `init = "pca"`; its default is spectral) so the
     // global structure is seeded from the embedding rather than noise.
-    let cell_coords = tumap_on_columns(&prep.cells_kn, &args.tumap_params())?;
+    let cell_coords = tumap_on_columns(&prep.cells_kn, params)?;
 
     write_cell_layout(&args.common, resolved, prep, &cell_coords, "umap", None)
 }
 
 /// `--target features`: t-UMAP of the feature embedding on its own, over a
 /// cosine fuzzy kNN graph with a PCA(2) init. Same SGD as the direct cell path.
-fn fit_feature_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
+fn fit_feature_layout_umap(args: &LayoutUmapArgs, params: &TumapParams) -> anyhow::Result<()> {
     let mut input = load_feature_layout_input(&args.common)?;
-    let coords = tumap_on_columns(&input.feat_kn, &args.tumap_params())?;
+    let coords = tumap_on_columns(&input.feat_kn, params)?;
     write_feature_layout(&mut input, "umap", &coords)
 }
 
-/// Settings for a t-UMAP run straight on per-point features.
+/// Settings for a t-UMAP (or, with `kernel`, UMAP) run straight on
+/// per-point features.
 pub(crate) struct TumapParams {
     /// Neighbours per point, counting the point itself (uwot's
     /// `n_neighbors`).
@@ -183,6 +209,8 @@ pub(crate) struct TumapParams {
     pub lr: f32,
     pub block_size: usize,
     pub seed: u64,
+    /// The low-d kernel `1/(1 + a d^(2b))`'s `(a, b)`.
+    pub kernel: (f32, f32),
 }
 
 /// uwot's defaults, shared by the CLI and [`TumapParams::default`].
@@ -199,34 +227,132 @@ impl Default for TumapParams {
             lr: LEARNING_RATE,
             block_size: 1000,
             seed: 42,
+            kernel: T_UMAP,
         }
     }
 }
 
 impl LayoutUmapArgs {
-    fn tumap_params(&self) -> TumapParams {
-        TumapParams {
+    /// The SGD's settings, the kernel's range checked.
+    pub(crate) fn tumap_params(&self) -> anyhow::Result<TumapParams> {
+        Ok(TumapParams {
             knn: self.umap_knn,
             epochs: self.umap_epochs,
             negative_rate: self.umap_negative_rate,
             lr: self.umap_lr,
             block_size: self.common.block_size.unwrap_or(1000),
             seed: self.common.seed,
-        }
+            kernel: kernel(self.umap_min_dist, self.umap_spread)?,
+        })
     }
 }
 
-/// t-UMAP of the points given as columns of `feat_kn` (`dims × n`): a fuzzy
+/// t-UMAP's kernel, `1/(1 + d^2)`.
+const T_UMAP: (f32, f32) = (1.0, 1.0);
+
+/// umap-learn's defaults, taken for whichever of the two is not given.
+pub(crate) const MIN_DIST: f32 = 0.1;
+pub(crate) const SPREAD: f32 = 1.0;
+
+/// The low-d kernel for `min_dist` and `spread`: t-UMAP's when neither is
+/// given, else UMAP's `(a, b)` fitted to them, whichever is not given taken
+/// as umap-learn's.
+fn kernel(min_dist: Option<f32>, spread: Option<f32>) -> anyhow::Result<(f32, f32)> {
+    if min_dist.is_none() && spread.is_none() {
+        return Ok(T_UMAP);
+    }
+    let (min_dist, spread) = (min_dist.unwrap_or(MIN_DIST), spread.unwrap_or(SPREAD));
+    anyhow::ensure!(
+        spread.is_finite() && spread > 0.0,
+        "UMAP's spread (--umap-spread) must be positive and finite, not {spread}"
+    );
+    anyhow::ensure!(
+        (0.0..=spread).contains(&min_dist),
+        "UMAP's min_dist (--umap-min-dist) must lie in [0, spread = {spread}], not {min_dist}"
+    );
+    let (a, b) = kernel_ab(min_dist, spread);
+    info!("UMAP kernel for min_dist {min_dist}, spread {spread}: a = {a:.4}, b = {b:.4}");
+    Ok((a, b))
+}
+
+/// UMAP's kernel `1/(1 + a x^(2b))` least-squares fitted to the target
+/// curve, `1` below `min_dist` and `exp(-(x - min_dist)/spread)` above, at
+/// 300 points of `[0, 3 spread]`: umap-learn's `find_ab_params`, here by
+/// Levenberg-Marquardt from `(1, 1)` as scipy's `curve_fit` does.
+fn kernel_ab(min_dist: f32, spread: f32) -> (f32, f32) {
+    let (min_dist, spread) = (f64::from(min_dist), f64::from(spread));
+    let xs: Vec<f64> = (0..300).map(|i| 3.0 * spread * i as f64 / 299.0).collect();
+    let target = |x: f64| {
+        if x < min_dist {
+            1.0
+        } else {
+            (-(x - min_dist) / spread).exp()
+        }
+    };
+    let sse = |a: f64, b: f64| -> f64 {
+        xs.iter()
+            .map(|&x| (1.0 / (1.0 + a * x.powf(2.0 * b)) - target(x)).powi(2))
+            .sum()
+    };
+    let (mut a, mut b, mut lambda) = (1.0f64, 1.0f64, 1e-3f64);
+    let mut err = sse(a, b);
+    for _ in 0..500 {
+        // The normal equations of the residuals' Jacobian in (a, b).
+        let (mut jaa, mut jab, mut jbb, mut ga, mut gb) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for &x in &xs {
+            let p = x.powf(2.0 * b);
+            let m = 1.0 / (1.0 + a * p);
+            let r = m - target(x);
+            let da = -p * m * m;
+            // x^(2b) ln x vanishes at x = 0.
+            let db = if x > 0.0 {
+                -a * p * 2.0 * x.ln() * m * m
+            } else {
+                0.0
+            };
+            jaa += da * da;
+            jab += da * db;
+            jbb += db * db;
+            ga += da * r;
+            gb += db * r;
+        }
+        // Damp until a step lowers the error; none does at the minimum.
+        let mut stepped = false;
+        while lambda < 1e12 {
+            let (haa, hbb) = (jaa * (1.0 + lambda), jbb * (1.0 + lambda));
+            let det = haa * hbb - jab * jab;
+            let (na, nb) = (
+                a - (hbb * ga - jab * gb) / det,
+                b - (haa * gb - jab * ga) / det,
+            );
+            if na > 0.0 && nb > 0.0 && det.is_finite() {
+                let next = sse(na, nb);
+                if next < err {
+                    stepped = err - next > 1e-15 * err;
+                    (a, b, err, lambda) = (na, nb, next, lambda / 10.0);
+                    break;
+                }
+            }
+            lambda *= 10.0;
+        }
+        if !stepped {
+            break;
+        }
+    }
+    (a as f32, b as f32)
+}
+
+/// UMAP of the points given as columns of `feat_kn` (`dims × n`): a fuzzy
 /// kNN graph on the features, a PCA(2) start, then SGD. Returns `n × 2`.
 pub(crate) fn tumap_on_columns(feat_kn: &Mat, p: &TumapParams) -> anyhow::Result<Mat> {
     let rows = feat_kn.transpose();
     let edges = build_cell_cell_fuzzy_edges(&rows, p.knn, p.block_size)?;
     let mut coords = pca_init_2d(rows, p.seed);
-    run_cell_level_umap_in_place(&mut coords, &edges, p.epochs, p.negative_rate, p.lr, p.seed);
+    run_cell_level_umap_in_place(&mut coords, &edges, p);
     Ok(coords)
 }
 
-/// t-UMAP of cells and features that share one space: `cells_kn`
+/// UMAP of cells and features that share one space: `cells_kn`
 /// (`dims × cells`, the cell embedding) and `features_kn` (`dims × features`,
 /// e.g. the co-embedding) become the points of one graph. It is a fuzzy kNN
 /// over all of them, plus each feature's `knn` nearest cells, so no feature
@@ -257,7 +383,7 @@ pub(crate) fn joint_tumap(
     );
 
     let mut coords = pca_init_2d(all, p.seed);
-    run_cell_level_umap_in_place(&mut coords, &edges, p.epochs, p.negative_rate, p.lr, p.seed);
+    run_cell_level_umap_in_place(&mut coords, &edges, p);
     Ok((
         coords.rows(0, n).into_owned(),
         coords.rows(n, d).into_owned(),
@@ -351,28 +477,23 @@ fn build_cell_cell_fuzzy_edges(
     Ok(edges)
 }
 
-/// Run cell-level t-UMAP SGD from `coords`, mutating them in place.
-/// `epochs` unset: uwot's rule, 500 up to 10,000 points, else 200.
-fn run_cell_level_umap_in_place(
-    coords: &mut Mat,
-    edges: &[(usize, usize, f32)],
-    epochs: Option<usize>,
-    negative_rate: usize,
-    learning_rate: f32,
-    seed: u64,
-) {
+/// Run cell-level UMAP SGD from `coords`, mutating them in place, with
+/// `p.kernel`'s `(a, b)`. `epochs` unset: uwot's rule, 500 up to 10,000 points, else 200.
+fn run_cell_level_umap_in_place(coords: &mut Mat, edges: &[(usize, usize, f32)], p: &TumapParams) {
     let n = coords.nrows();
-    let epochs = epochs.unwrap_or(if n <= 10_000 { 500 } else { 200 });
+    let epochs = p.epochs.unwrap_or(if n <= 10_000 { 500 } else { 200 });
     let init_flat: Vec<f32> = (0..n)
         .flat_map(|i| [coords[(i, 0)], coords[(i, 1)]])
         .collect();
 
+    let (a, b) = p.kernel;
     let umap = Umap {
         n_epochs: epochs,
-        negative_sample_rate: negative_rate,
-        learning_rate,
-        seed,
-        ..Umap::tumap()
+        negative_sample_rate: p.negative_rate,
+        learning_rate: p.lr,
+        seed: p.seed,
+        a,
+        b,
     };
     info!("Cell-level UMAP SGD (epochs={epochs}) ...");
     let refined = umap.fit(edges, n, &init_flat);
@@ -420,7 +541,97 @@ mod tests {
             lr: 1.0,
             block_size: 128,
             seed: 1,
+            kernel: T_UMAP,
         }
+    }
+
+    #[test]
+    fn min_dist_and_spread_fit_the_kernel_as_umap_learn_does() {
+        // umap-learn's find_ab_params (scipy's curve_fit) at these
+        // (min_dist, spread).
+        for (min_dist, spread, a, b) in [
+            (0.1, 1.0, 1.576_943_5, 0.895_060_9),
+            (0.5, 1.0, 0.583_03, 1.334_167),
+            (0.01, 1.0, 1.895_605_9, 0.800_637_8),
+            (0.5, 2.0, 0.258_878_7, 1.057_5),
+            (0.99, 1.0, 0.119_305_3, 1.916_390_4),
+        ] {
+            let (fa, fb) = kernel_ab(min_dist, spread);
+            let near = |x: f32, y: f32| (x - y).abs() < 1e-3 * y;
+            assert!(
+                near(fa, a) && near(fb, b),
+                "min_dist {min_dist}, spread {spread}: ({fa}, {fb}), not ({a}, {b})"
+            );
+        }
+    }
+
+    #[test]
+    fn without_min_dist_or_spread_the_kernel_stays_t_umap() {
+        assert_eq!(kernel(None, None).unwrap(), T_UMAP);
+        // Either alone takes umap-learn's default for the other.
+        assert_eq!(kernel(None, Some(1.0)).unwrap(), kernel_ab(0.1, 1.0));
+        assert_eq!(kernel(Some(0.3), None).unwrap(), kernel_ab(0.3, 1.0));
+        assert!(kernel(Some(-0.1), None).is_err());
+        assert!(kernel(None, Some(0.0)).is_err());
+        assert!(kernel(Some(1.5), Some(1.0)).is_err());
+        assert!(kernel(None, Some(f32::INFINITY)).is_err());
+        assert!(kernel(Some(f32::NAN), None).is_err());
+    }
+
+    #[test]
+    fn the_min_dist_and_spread_flags_reach_the_kernel() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: LayoutUmapArgs,
+        }
+        let params = |flags: &[&str]| {
+            let argv = ["layout", "-f", "run.senna.json"].iter().chain(flags);
+            <Cli as clap::Parser>::try_parse_from(argv)
+                .unwrap()
+                .args
+                .tumap_params()
+                .unwrap()
+                .kernel
+        };
+        assert_eq!(params(&[]), T_UMAP);
+        assert_eq!(
+            params(&["--umap-min-dist", "0.5", "--umap-spread", "2"]),
+            kernel_ab(0.5, 2.0)
+        );
+    }
+
+    #[test]
+    fn a_larger_min_dist_spreads_a_group_out() {
+        let per = 200;
+        let (cells, _) = two_groups(per, 0);
+        // A group's median distance to its centroid, over the distance
+        // between the two centroids.
+        let looseness = |min_dist: f32| {
+            let p = TumapParams {
+                kernel: kernel_ab(min_dist, 1.0),
+                ..params()
+            };
+            let xy = tumap_on_columns(&cells, &p).unwrap();
+            let centroid = |g: usize| {
+                (g * per..(g + 1) * per).fold([0.0f32; 2], |[x, y], c| {
+                    [x + xy[(c, 0)] / per as f32, y + xy[(c, 1)] / per as f32]
+                })
+            };
+            let dist =
+                |p: [f32; 2], q: [f32; 2]| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt();
+            let c0 = centroid(0);
+            let mut d: Vec<f32> = (0..per)
+                .map(|c| dist([xy[(c, 0)], xy[(c, 1)]], c0))
+                .collect();
+            d.sort_by(f32::total_cmp);
+            d[per / 2] / dist(c0, centroid(1))
+        };
+        let (tight, loose) = (looseness(0.0), looseness(0.9));
+        assert!(
+            loose > 1.5 * tight,
+            "min_dist 0.9 gives {loose:.3}, min_dist 0 gives {tight:.3}"
+        );
     }
 
     #[test]

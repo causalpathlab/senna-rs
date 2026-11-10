@@ -96,6 +96,9 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
         [
             "run_fit",
             "run_help",
+            "run_predict",
+            "run_update",
+            "run_layout",
             "view_open",
             "view_map",
             "view_markers",
@@ -191,4 +194,89 @@ fn a_fit_with_no_out_takes_the_first_name_no_running_fit_holds() {
     };
     assert!(run(1).ends_with("/data_svd.senna.json"), "{}", run(1));
     assert!(run(2).ends_with("/data_svd_2.senna.json"), "{}", run(2));
+}
+
+#[test]
+fn a_predict_whose_latent_is_there_is_not_run_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("p");
+    let latent = dir.path().join("p.latent.parquet");
+    std::fs::write(&latent, b"").unwrap();
+    let (messages, status) = session(&[call(
+        1,
+        "run_predict",
+        json!({"model": dir.path().join("none"), "data": [dir.path().join("none.zarr")], "out": out}),
+    )]);
+    assert!(status.success());
+    let reply = &messages.iter().find(|m| m["id"] == 1).unwrap()["result"];
+    assert_ne!(reply["isError"], true, "{reply}");
+    assert_eq!(reply["structuredContent"]["ran"], false, "{reply}");
+    assert_eq!(
+        reply["structuredContent"]["latent"],
+        json!(latent),
+        "{reply}"
+    );
+}
+
+#[test]
+fn a_predict_with_a_flag_senna_lacks_is_refused_before_it_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (messages, status) = session(&[call(
+        1,
+        "run_predict",
+        json!({"model": dir.path().join("m"), "data": ["d.zarr"], "out": dir.path().join("p"),
+               "args": ["--no-such-flag"], "background": true}),
+    )]);
+    assert!(status.success());
+    let reply = &messages.iter().find(|m| m["id"] == 1).unwrap()["result"];
+    assert_eq!(reply["isError"], true, "{reply}");
+    assert!(reply.to_string().contains("--no-such-flag"), "{reply}");
+}
+
+#[test]
+fn a_layout_of_a_run_that_is_not_there_fails_as_a_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let (messages, status) = session(&[call(
+        1,
+        "run_layout",
+        json!({"run": dir.path().join("none.senna.json"), "method": "umap"}),
+    )]);
+    assert!(status.success());
+    let reply = &messages.iter().find(|m| m["id"] == 1).unwrap()["result"];
+    assert_eq!(reply["isError"], true, "{reply}");
+}
+
+#[test]
+fn a_predict_with_no_out_is_named_by_its_data_and_its_model() {
+    let dir = tempfile::tempdir().unwrap();
+    // In the background, so the names come back though the models are not
+    // there to predict by.
+    let data = dir.path().join("data.zarr.zip");
+    let predict =
+        |model: &str| json!({"model": dir.path().join(model), "data": [&data], "background": true});
+    let (messages, status) = session_in(
+        Some(dir.path()),
+        &[
+            call(1, "run_predict", predict("m1")),
+            call(2, "run_predict", predict("m2")),
+        ],
+    );
+    assert!(status.success());
+    let replies: Vec<&Value> = messages.iter().filter(|m| m.get("id").is_some()).collect();
+    let latent = |k: usize| {
+        replies[k]["result"]["structuredContent"]["latent"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{}", replies[k]))
+            .to_string()
+    };
+    assert!(
+        latent(1).ends_with("/data_m1_predict.latent.parquet"),
+        "{}",
+        latent(1)
+    );
+    assert!(
+        latent(2).ends_with("/data_m2_predict.latent.parquet"),
+        "{}",
+        latent(2)
+    );
 }

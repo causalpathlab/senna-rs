@@ -82,8 +82,10 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > fit to its end (`run_help` lists a method's flags) and returns its run
 > manifest; an existing run is not fitted again. A long fit runs with
 > `background`, as a job to follow with `job_wait`, in a session of `senna run`
-> the user can watch with `senna attach`. `view_open` opens a run (or a
-> lupin round) and computes a missing layout or clustering first. `view_map`
+> the user can watch with `senna attach`. `run_predict` places new cells in a
+> trained model's latent, `run_update` continues a trained model over new data,
+> and `run_layout` lays a run out again with chosen settings, umap's min_dist
+> and spread among them. `view_open` opens a run (or a lupin round) and computes a missing layout or clustering first. `view_map`
 > draws the map with its legend; its arguments stay set until changed, so pass
 > only what changes. `view_markers` lists what sets a group apart, `view_cell`
 > names a point and its groups, and `view_export` writes figures. World
@@ -93,7 +95,10 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | Tool | Does |
 |---|---|
 | `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
-| `run_help` | every flag of one method, with its help |
+| `run_help` | every flag of one method, or of `predict`, `update` or `layout <method>`, with its help |
+| `run_predict` | new cells placed in a trained model's latent (`senna predict <data> --model <model> -o <out> <flags>`); returns the latent and the per-cell predictive fit, or with `background` a job to follow |
+| `run_update` | a trained model continued over new data, or a round on its own cells (`senna update`); returns the new run's manifest |
+| `run_layout` | a run laid out again with the settings given (`senna layout <method> --from <run> <flags>`), replacing that method's layout; umap takes `min_dist` and `spread` as umap-learn's, checked before it runs; `view_open` then shows it |
 | `view_open` | opens a run or a lupin round: its maps, groupings and the groups shown, a missing layout or clustering computed first |
 | `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, the run's time or velocity field, window and zoom |
 | `view_markers` | the features that set one group apart, by the model's expected fold change, and its markers from the run's table |

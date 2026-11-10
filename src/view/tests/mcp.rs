@@ -412,3 +412,191 @@ fn a_feature_has_no_time_even_named_as_a_cell() {
         .unwrap();
     assert!(state(&s).get("time").is_none());
 }
+
+#[test]
+fn predict_runs_senna_predict_and_makes_the_out_s_latent() {
+    let a = parse(
+        json!({"model": "ref", "data": ["a.zarr", "b.zarr"], "args": ["--refine-steps", "5"]}),
+    )
+    .unwrap();
+    let t = predict_task(&a, "p");
+    assert_eq!(
+        t.argv,
+        [
+            "predict",
+            "a.zarr",
+            "b.zarr",
+            "--model",
+            "ref",
+            "-o",
+            "p",
+            "--refine-steps",
+            "5"
+        ]
+    );
+    assert_eq!(
+        t.made,
+        [
+            ("latent", PathBuf::from("p.latent.parquet")),
+            ("predictive", PathBuf::from("p.predictive.parquet"))
+        ]
+    );
+}
+
+#[test]
+fn update_runs_senna_update_and_makes_the_out_s_run() {
+    let a = parse(json!({"model": "m1", "data": ["new.zarr"], "args": ["-b", "b.txt"]})).unwrap();
+    let t = update_task(&a, "m2");
+    assert_eq!(
+        t.argv,
+        ["update", "new.zarr", "--model", "m1", "-o", "m2", "-b", "b.txt"]
+    );
+    assert_eq!(t.made, [("run", PathBuf::from("m2.senna.json"))]);
+    // No new data is a round.
+    let round = update_task(&parse(json!({"model": "m1"})).unwrap(), "m2");
+    assert_eq!(round.argv, ["update", "--model", "m1", "-o", "m2"]);
+}
+
+/// A run at `from` with cells and a feature embedding.
+fn target(from: &str) -> Target {
+    Target {
+        from: from.into(),
+        out: run_manifest::derive_out_prefix(from),
+        latent: None,
+        has_cells: true,
+        has_features: true,
+        has_coembedding: false,
+        can_resolve_topics: false,
+    }
+}
+
+fn layout(v: Value) -> Result<Task> {
+    let a: LayoutArgs = parse(v).unwrap();
+    layout_task(&a, &target(&a.run))
+}
+
+#[test]
+fn layout_lays_out_the_run_in_its_own_prefix_with_the_flags_given() {
+    let t = layout(json!({"run": "d/r.senna.json", "method": "umap", "args": ["--knn", "30"]}))
+        .unwrap();
+    assert_eq!(
+        t.argv,
+        [
+            "layout",
+            "umap",
+            "--from",
+            "d/r.senna.json",
+            "--out",
+            "d/r",
+            "--knn",
+            "30"
+        ]
+    );
+    assert_eq!(
+        t.made,
+        [("coords", PathBuf::from("d/r.umap.cell_coords.parquet"))]
+    );
+    let f =
+        layout(json!({"run": "r.senna.json", "method": "phate", "target": "features"})).unwrap();
+    assert_eq!(
+        f.argv,
+        [
+            "layout",
+            "phate",
+            "--target",
+            "features",
+            "--from",
+            "r.senna.json",
+            "--out",
+            "r"
+        ]
+    );
+    assert_eq!(
+        f.made,
+        [("coords", PathBuf::from("r.phate.feature_coords.parquet"))]
+    );
+}
+
+#[test]
+fn a_umap_layout_takes_min_dist_and_spread_as_its_flags() {
+    let t = layout(json!({"run": "r.senna.json", "method": "umap", "min_dist": 0.5, "spread": 1.5, "args": ["--umap-knn", "30"]}))
+        .unwrap();
+    assert_eq!(
+        t.argv,
+        [
+            "layout",
+            "umap",
+            "--from",
+            "r.senna.json",
+            "--out",
+            "r",
+            "--umap-min-dist",
+            "0.5",
+            "--umap-spread",
+            "1.5",
+            "--umap-knn",
+            "30"
+        ]
+    );
+    // Either alone.
+    let t = layout(json!({"run": "r.senna.json", "method": "umap", "min_dist": 0.0})).unwrap();
+    assert_eq!(t.argv[6..], ["--umap-min-dist", "0"]);
+}
+
+#[test]
+fn a_layout_senna_would_refuse_is_refused_before_it_runs() {
+    let umap = |extra: Value| {
+        let mut v = json!({"run": "r.senna.json", "method": "umap"});
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        v
+    };
+    for (bad, said) in [
+        // Not one of phate's flags.
+        (
+            json!({"run": "r.senna.json", "method": "phate", "min_dist": 0.5}),
+            "--umap-min-dist",
+        ),
+        // The kernel's range, with spread given in args.
+        (
+            umap(json!({"min_dist": 0.5, "args": ["--umap-spread", "0.3"]})),
+            "min_dist",
+        ),
+        (
+            umap(json!({"min_dist": 0.5, "args": ["--umap-min-dist", "0.2"]})),
+            "--umap-min-dist",
+        ),
+        (umap(json!({"args": ["--no-such-flag"]})), "--no-such-flag"),
+    ] {
+        let e = format!("{:#}", layout(bad.clone()).unwrap_err());
+        assert!(e.contains(said), "{bad}: {e}");
+    }
+    // A field and the other in args are checked together.
+    assert!(layout(umap(
+        json!({"spread": 2.0, "args": ["--umap-min-dist=1.5"]})
+    ))
+    .is_ok());
+}
+
+#[test]
+fn a_layout_method_senna_lacks_for_its_points_is_refused() {
+    assert!(layout(json!({"run": "r.senna.json", "method": "pca"})).is_err());
+    let e =
+        layout(json!({"run": "r.senna.json", "method": "tsne", "target": "features"})).unwrap_err();
+    assert!(format!("{e:#}").contains("umap, phate"), "{e:#}");
+}
+
+#[test]
+fn help_covers_predict_update_and_each_layout() {
+    let help = |c: &str| match &run_help(parse(json!({"method": c})).unwrap()).unwrap()[0] {
+        Content::Text(t) => t.clone(),
+        _ => panic!("help is text"),
+    };
+    assert!(help("predict").contains("--model"));
+    assert!(help("update").contains("--model"));
+    assert!(help("layout umap").contains("--umap-knn"));
+    assert!(help("layout phate").contains("--knn"));
+    assert!(run_help(parse(json!({"method": "layout pca"})).unwrap()).is_err());
+    assert!(run_help(parse(json!({"method": "view"})).unwrap()).is_err());
+}

@@ -9,8 +9,10 @@
 //! lupin's own server.
 
 use super::data::{Axis, Dataset, LabelKind, NONE};
+use super::recompute::{Step, Target};
 use super::render::{self, Viewport};
 use super::{deck, Pick, Scene, Source, VelocityStyle, ViewArgs};
+use crate::postprocess::{MIN_DIST, SPREAD};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use image::codecs::png::CompressionType;
 use legume_mcp::{Call, Content, Handler, ToolSpec};
@@ -52,7 +54,10 @@ annotation is lupin's own server. Open the day with `notebook` (kind `plan`): \
 the question, the data, and how the result will be checked. `run_fit` runs a \
 fit to its end (`run_help` lists a method's flags) and returns its run \
 manifest; an existing run is not fitted again. A long fit runs with \
-`background`, as a job to follow with `job_wait`, in a session of `senna run` the user can watch with `senna attach`. `view_open` opens a run (or a \
+`background`, as a job to follow with `job_wait`, in a session of `senna run` the user can watch with `senna attach`. \
+`run_predict` places new cells in a trained model's latent, `run_update` \
+continues a trained model over new data, and `run_layout` lays a run out \
+again with chosen settings, umap's min_dist and spread among them. `view_open` opens a run (or a \
 lupin round) and computes a missing layout or clustering first. `view_map` \
 draws the map with its legend; its arguments stay set until changed, so pass \
 only what changes. `view_markers` lists what sets a group apart, `view_cell` \
@@ -85,6 +90,9 @@ impl Handler for Tools {
         match name {
             "run_fit" => run_fit(parse(args)?, cx),
             "run_help" => run_help(parse(args)?),
+            "run_predict" => run_predict(parse(args)?, cx),
+            "run_update" => run_update(parse(args)?, cx),
+            "run_layout" => run_layout(parse(args)?, cx),
             "view_open" => {
                 let open = self.open.insert(Open::new(&parse(args)?, cx)?);
                 cx.state(&open.view_state());
@@ -141,60 +149,291 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
     ensure!(!a.data.is_empty(), "no data files");
     let out = match a.out {
         Some(out) => out,
-        None => {
-            let dir = cx
-                .results_dir()
-                .context("no results folder (records are off): pass out")?;
-            let data = Path::new(&a.data[0]).file_name().unwrap_or_default();
-            let stem = data.to_string_lossy();
-            let stem = stem.split('.').next().unwrap_or("run");
-            // The first name no running fit is writing: `{stem}_{method}`,
-            // then `_2`, `_3`, … (as many as there could be jobs and more).
-            (1..=1000)
-                .map(|k| match k {
-                    1 => format!("{stem}_{}", a.method),
-                    k => format!("{stem}_{}_{k}", a.method),
-                })
-                .map(|name| dir.join(name).to_string_lossy().into_owned())
-                .find(|out| {
-                    let manifest = absolute(Path::new(&run_manifest::default_path(out)));
-                    cx.ensure_free(&[manifest]).is_ok()
-                })
-                .context("every default name is being written by a running fit: pass out")?
-        }
+        None => default_out(cx, &a.data[0], &a.method, run_manifest::default_path)?,
     };
-    let manifest = absolute(Path::new(&run_manifest::default_path(&out)));
-    if manifest.exists() {
-        return Ok(vec![Content::Json(json!({
-            "run": manifest,
-            "kind": kind(&manifest)?,
-            "fitted": false,
-            "note": "the run is there already, of the kind given; another out fits anew",
-        }))]);
-    }
-    // legume-mcp refuses an out a background fit is still writing (naming
-    // its job) until that fit has written the manifest, and fails a fit
-    // that ends without it.
     let mut argv = vec![a.method.clone()];
     argv.extend(a.data.iter().cloned());
     argv.extend(["-o".into(), out.clone()]);
     argv.extend(a.args);
-    let summary = format!("senna {} fit of {}", a.method, a.data.join(", "));
-    let outputs = std::slice::from_ref(&manifest);
-    let fit = || format!("senna {}", a.method);
-    if a.background {
-        // Returned at once: the agent follows the job, and opens the run
-        // once it is done.
-        let mut job = background_fit(cx, &out, &argv, outputs, &summary).with_context(fit)?;
-        job["run"] = json!(manifest);
-        return Ok(vec![Content::Json(job)]);
+    let task = Task {
+        argv,
+        made: vec![("run", run_manifest::default_path(&out).into())],
+        summary: format!("senna {} fit of {}", a.method, a.data.join(", ")),
+    };
+    // legume-mcp refuses an out a background fit is still writing (naming
+    // its job) until that fit has written the manifest, and fails a fit
+    // that ends without it.
+    let mut done = start(task, a.background, cx, |t, outputs| {
+        background_fit(cx, &out, &t.argv, outputs, &t.summary)
+    })?;
+    // A background fit's run is not there yet: the agent opens it once
+    // the job is done.
+    if done.get("job").is_none() {
+        done["kind"] = json!(kind(Path::new(done["run"].as_str().unwrap_or_default()))?);
     }
-    cx.progress(&format!("senna {} → {out}", a.method));
-    cx.run_making(senna(&argv)?, outputs, &summary)
-        .with_context(fit)?;
-    Ok(vec![Content::Json(
-        json!({ "run": manifest, "kind": kind(&manifest)?, "fitted": true }),
-    )])
+    Ok(vec![Content::Json(done)])
+}
+
+/// An out in today's results folder, named by the data file `data` and
+/// `tag`: `{stem}_{tag}`, then `_2`, `_3`, …, the first whose made file
+/// (`made` of the out) no running job is writing. Not legume-mcp's
+/// `free_prefix`, which also passes over a name whose files exist: here
+/// that name is taken, so a result already made is not made again.
+fn default_out(cx: &Call, data: &str, tag: &str, made: fn(&str) -> String) -> Result<String> {
+    let dir = cx
+        .results_dir()
+        .context("no results folder (records are off): pass out")?;
+    let data = Path::new(data).file_name().unwrap_or_default();
+    let stem = data.to_string_lossy();
+    let stem = stem.split('.').next().unwrap_or("run");
+    // As many as there could be jobs, and more.
+    (1..=1000)
+        .map(|k| match k {
+            1 => format!("{stem}_{tag}"),
+            k => format!("{stem}_{tag}_{k}"),
+        })
+        .map(|name| dir.join(name).to_string_lossy().into_owned())
+        .find(|out| cx.ensure_free(&[absolute(Path::new(&made(out)))]).is_ok())
+        .context("every default name is being written by a running job: pass out")
+}
+
+/// A senna command a run tool starts, and the files it makes, each under
+/// the name the result gives it; the first shows it ran.
+#[derive(Debug)]
+struct Task {
+    argv: Vec<String>,
+    made: Vec<(&'static str, PathBuf)>,
+    summary: String,
+}
+
+impl Task {
+    fn outputs(&self) -> Vec<PathBuf> {
+        self.made.iter().map(|(_, p)| absolute(p)).collect()
+    }
+
+    /// The made files by name, as the result gives them.
+    fn named(&self) -> Value {
+        let named = self
+            .made
+            .iter()
+            .map(|(k, p)| (k.to_string(), json!(absolute(p))));
+        Value::Object(named.collect())
+    }
+
+    /// The command line, as an error names it.
+    fn line(&self) -> String {
+        format!("senna {}", legume_mcp::command_line(&self.argv))
+    }
+
+    /// `senna {argv}` to its end, verbose, its log the call's progress;
+    /// `guarded`, recorded with its outputs as its guard on replay, else
+    /// recorded to run every time.
+    fn run(&self, guarded: bool, cx: &Call) -> Result<()> {
+        let outputs = if guarded { self.outputs() } else { vec![] };
+        cx.progress(&self.summary);
+        cx.run_making(senna(&self.argv)?, &outputs, &self.summary)
+            .with_context(|| self.line())?;
+        Ok(())
+    }
+}
+
+/// `task` run, or with `background` started by `spawn` (given the task
+/// and its outputs, giving the job as the agent is told it). A task whose
+/// first file is there already is not run.
+fn start(
+    task: Task,
+    background: bool,
+    cx: &Call,
+    spawn: impl FnOnce(&Task, &[PathBuf]) -> Result<Value>,
+) -> Result<Value> {
+    senna_parses(&task.argv)?;
+    let mut done = task.named();
+    let outputs = task.outputs();
+    if outputs[0].exists() {
+        done["ran"] = json!(false);
+        done["note"] = json!("it is there already; another out runs anew");
+    } else if background {
+        let job = spawn(&task, &outputs).with_context(|| task.line())?;
+        done.as_object_mut()
+            .expect("named() is an object")
+            .extend(job.as_object().cloned().unwrap_or_default());
+    } else {
+        task.run(true, cx)?;
+        done["ran"] = json!(true);
+    }
+    Ok(done)
+}
+
+/// `task` as this server's job, which ends with the server.
+fn server_job(task: &Task, outputs: &[PathBuf], cx: &Call) -> Result<Value> {
+    Ok(json!({
+        "job": cx.spawn_job(senna(&task.argv)?, outputs, &task.summary)?,
+        "note": "it runs as this job until it ends or the server does; follow it with job_status or job_wait",
+    }))
+}
+
+/// `run_predict`'s and `run_update`'s arguments.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelArgs {
+    model: String,
+    #[serde(default)]
+    data: Vec<String>,
+    out: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    background: bool,
+}
+
+/// `senna {command} {data} --model {model} -o {out} {args}`.
+fn model_argv(command: &str, a: &ModelArgs, out: &str) -> Vec<String> {
+    let mut argv = vec![command.to_string()];
+    argv.extend(a.data.iter().cloned());
+    argv.extend(["--model".into(), a.model.clone(), "-o".into(), out.into()]);
+    argv.extend(a.args.iter().cloned());
+    argv
+}
+
+fn latent_path(out: &str) -> String {
+    format!("{out}.latent.parquet")
+}
+
+/// `senna predict` into `out`: the latent and the per-cell predictive fit.
+fn predict_task(a: &ModelArgs, out: &str) -> Task {
+    Task {
+        argv: model_argv("predict", a, out),
+        made: vec![
+            ("latent", latent_path(out).into()),
+            ("predictive", format!("{out}.predictive.parquet").into()),
+        ],
+        summary: format!("senna predict of {} by {}", a.data.join(", "), a.model),
+    }
+}
+
+/// The new cells in a trained model's latent, as `senna predict` puts them.
+fn run_predict(a: ModelArgs, cx: &Call) -> Result<Vec<Content>> {
+    let out = match &a.out {
+        Some(out) => out.clone(),
+        None => {
+            let data = a
+                .data
+                .first()
+                .context("no data files to name the out by: pass out")?;
+            // By model too: the same cells in another model's latent are
+            // another result.
+            let model = Path::new(&a.model).file_name().unwrap_or_default();
+            let tag = format!("{}_predict", model.to_string_lossy());
+            default_out(cx, data, &tag, latent_path)?
+        }
+    };
+    let done = start(predict_task(&a, &out), a.background, cx, |t, o| {
+        server_job(t, o, cx)
+    })?;
+    Ok(vec![Content::Json(done)])
+}
+
+/// `senna update` into `out`: a new run.
+fn update_task(a: &ModelArgs, out: &str) -> Task {
+    let summary = match a.data.is_empty() {
+        true => format!("senna update round of {}", a.model),
+        false => format!("senna update of {} with {}", a.model, a.data.join(", ")),
+    };
+    Task {
+        argv: model_argv("update", a, out),
+        made: vec![("run", run_manifest::default_path(out).into())],
+        summary,
+    }
+}
+
+/// A trained model continued over new data, or a round on its own cells:
+/// a new run.
+fn run_update(a: ModelArgs, cx: &Call) -> Result<Vec<Content>> {
+    let out = a.out.as_deref().context("pass out: the new run's prefix")?;
+    let done = start(update_task(&a, out), a.background, cx, |t, o| {
+        server_job(t, o, cx)
+    })?;
+    Ok(vec![Content::Json(done)])
+}
+
+#[derive(Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+enum LayoutTarget {
+    #[default]
+    Cells,
+    Features,
+}
+
+impl LayoutTarget {
+    fn step(self) -> Step {
+        match self {
+            Self::Cells => Step::CellLayout,
+            Self::Features => Step::FeatureLayout,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayoutArgs {
+    run: String,
+    method: String,
+    #[serde(default)]
+    target: LayoutTarget,
+    min_dist: Option<f32>,
+    spread: Option<f32>,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+/// `senna layout {method} …` as `view_open` lays out the run `t`, with
+/// the flags given.
+fn layout_task(a: &LayoutArgs, t: &Target) -> Result<Task> {
+    let step = a.target.step();
+    one_of(&a.method, step.settings())
+        .with_context(|| format!("senna's {} methods", step.label()))?;
+    let mut argv = step.argv(t, &a.method);
+    for (flag, v) in [("--umap-min-dist", a.min_dist), ("--umap-spread", a.spread)] {
+        if let Some(v) = v {
+            argv.extend([flag.into(), v.to_string()]);
+        }
+    }
+    argv.extend(a.args.iter().cloned());
+    // The kernel's range too, which clap leaves to the layout.
+    if let crate::Commands::Layout {
+        cmd: crate::LayoutCmd::Umap(umap),
+    } = senna_parses(&argv)?.commands
+    {
+        umap.tumap_params()?;
+    }
+    let made = step.outputs(t, &a.method).remove(0);
+    Ok(Task {
+        argv,
+        made: vec![("coords", made.into())],
+        summary: format!("senna layout {} of {}", a.method, a.run),
+    })
+}
+
+/// The run laid out again with the flags given, replacing that method's
+/// layout. Always run, as the flags are the point, and recorded with no
+/// outputs, so without a guard: a replay redoes it after any earlier
+/// layout of the method. Its file is held and checked here instead, and
+/// gets no row in results/INDEX.tsv (legume-mcp records no step that
+/// replaces its outputs).
+fn run_layout(a: LayoutArgs, cx: &Call) -> Result<Vec<Content>> {
+    let task = layout_task(&a, &Target::load(&a.run)?)?;
+    let outputs = task.outputs();
+    cx.ensure_free(&outputs)?;
+    task.run(false, cx)?;
+    ensure!(
+        outputs[0].exists(),
+        "senna layout ended without {}",
+        outputs[0].display()
+    );
+    let mut done = task.named();
+    done["ran"] = json!(true);
+    done["note"] = json!(format!("view_open the run with map {} to see it", a.method));
+    Ok(vec![Content::Json(done)])
 }
 
 /// The fit `senna {argv}` in the background, from this server's folder:
@@ -243,6 +482,16 @@ fn background_fit(
     }
 }
 
+/// `argv` as senna parses it: a call senna would refuse is refused here,
+/// before senna is started, with clap's error on one line.
+fn senna_parses(argv: &[String]) -> Result<crate::Cli> {
+    let cli = <crate::Cli as clap::CommandFactory>::command();
+    let matches = legume_mcp::cli::check(&cli, argv)?;
+    Ok(<crate::Cli as clap::FromArgMatches>::from_arg_matches(
+        &matches,
+    )?)
+}
+
 /// `senna {argv}` as a child, verbose: its log is the call's progress.
 fn senna(argv: &[String]) -> Result<Command> {
     // This server's own binary, found even when it was reinstalled since.
@@ -254,10 +503,16 @@ fn senna(argv: &[String]) -> Result<Command> {
 }
 
 fn check_method(method: &str) -> Result<()> {
+    one_of(method, &METHODS).context("senna's fits")
+}
+
+/// `name`, if it is one of `list`.
+fn one_of(name: &str, list: &[impl AsRef<str>]) -> Result<()> {
+    let list: Vec<&str> = list.iter().map(AsRef::as_ref).collect();
     ensure!(
-        METHODS.contains(&method),
-        "method {method} is not one of {}",
-        METHODS.join(", ")
+        list.contains(&name),
+        "{name} is not one of {}",
+        list.join(", ")
     );
     Ok(())
 }
@@ -284,16 +539,35 @@ struct HelpArgs {
     method: String,
 }
 
-/// The method's help, read here: nothing runs, so the session script
+/// The commands `run_help` covers: the fits, and those the other run
+/// tools start.
+fn helped() -> Vec<String> {
+    let others = ["predict", "update"].into_iter().map(String::from);
+    let layouts = Step::CellLayout
+        .settings()
+        .iter()
+        .map(|m| format!("layout {m}"));
+    METHODS
+        .iter()
+        .map(|m| m.to_string())
+        .chain(others)
+        .chain(layouts)
+        .collect()
+}
+
+/// The command's help, read here: nothing runs, so the session script
 /// records no step.
 fn run_help(a: HelpArgs) -> Result<Vec<Content>> {
     use clap::CommandFactory;
-    check_method(&a.method)?;
+    one_of(&a.method, &helped())?;
     let mut cli = crate::Cli::command();
     cli.build();
-    let sub = cli
-        .find_subcommand_mut(&a.method)
-        .with_context(|| format!("no subcommand {}", a.method))?;
+    let mut sub = &mut cli;
+    for word in a.method.split(' ') {
+        sub = sub
+            .find_subcommand_mut(word)
+            .with_context(|| format!("no subcommand {}", a.method))?;
+    }
     Ok(vec![Content::Text(sub.render_long_help().to_string())])
 }
 
@@ -1002,6 +1276,7 @@ fn png(img: image::RgbaImage, level: CompressionType) -> Result<Vec<u8>> {
 fn specs() -> Vec<ToolSpec> {
     let spec = ToolSpec::new;
     let group = json!({"type": ["string", "integer"]});
+    let job = json!({"type": "boolean", "description": "Run as a job of this server and return its id at once; follow it with job_status or job_wait [default: false]"});
     let xy = |what: &str| json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": what});
     vec![
         spec(
@@ -1025,11 +1300,72 @@ fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "run_help",
-            "Every flag of one fit, with its help, as `senna {method} --help` prints it.",
+            "Every flag of one fit, or of the command another run tool starts, with its \
+             help, as `senna {method} --help` prints it.",
             json!({
                 "type": "object",
-                "properties": {"method": {"enum": METHODS}},
+                "properties": {"method": {"enum": helped()}},
                 "required": ["method"],
+                "additionalProperties": false,
+            }),
+        ),
+        spec(
+            "run_predict",
+            "Place new cells in a trained model's latent as `senna predict {data} --model \
+             {model} -o {out} {args}`, and return the latent's path (and the per-cell \
+             predictive fit's). The model is a topic, masked-topic, masked-vae, \
+             masked-sbp, vae, svd, bge or simba run's prefix. An out whose latent exists is \
+             not run again. Writes no run to view_open and no layout.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "Trained run's prefix (its {out}, without .senna.json)"},
+                    "data": {"type": "array", "items": {"type": "string"}, "description": "New data files (.zarr, .zarr.zip, .h5); none with --bulk in args"},
+                    "out": {"type": "string", "description": "Output prefix: {out}.latent.parquet, {out}.predictive.parquet [default: today's results folder, by data file]"},
+                    "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (predict) lists them, e.g. [\"-b\", \"batch.txt\"]"},
+                    "background": job,
+                },
+                "required": ["model"],
+                "additionalProperties": false,
+            }),
+        ),
+        spec(
+            "run_update",
+            "Continue a trained model as `senna update {data} --model {model} -o {out} \
+             {args}`: it absorbs the new data into a new run, or with no data runs a \
+             round on its own cells. Returns the new run's manifest, for view_open. An \
+             out whose manifest exists is not run again.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "Parent run's prefix (its {out}, without .senna.json)"},
+                    "data": {"type": "array", "items": {"type": "string"}, "description": "New data files to absorb; none makes a round"},
+                    "out": {"type": "string", "description": "The new run's prefix, not the parent's"},
+                    "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (update) lists them; -b names the new data's batch files when the parent had batches"},
+                    "background": job,
+                },
+                "required": ["model", "out"],
+                "additionalProperties": false,
+            }),
+        ),
+        spec(
+            "run_layout",
+            "Lay out a run again with the settings given, as `senna layout {method} --from \
+             {run} {args}`, replacing that method's layout in the run (e.g. umap with \
+             min_dist 0.5 and [\"--umap-knn\", \"30\"]; phate or tsne with \
+             [\"--knn\", \"30\", \"--similarity-threshold\", \"0.2\"]). Always runs. Then \
+             view_open the run with that map to see it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "run": {"type": "string", "description": "Run manifest ({out}.senna.json)"},
+                    "method": {"enum": Step::CellLayout.settings(), "description": "Layout method; the feature embedding takes umap or phate"},
+                    "target": {"enum": ["cells", "features"], "description": "Lay out the cells, or the feature embedding on its own [default: cells]"},
+                    "min_dist": {"type": "number", "minimum": 0, "description": format!("umap only: umap-learn's min_dist, in [0, spread] [default {MIN_DIST} when spread is given]; larger loosens groups into continua, smaller packs them. With neither this nor spread, t-UMAP")},
+                    "spread": {"type": "number", "exclusiveMinimum": 0, "description": format!("umap only: umap-learn's spread, the scale of the map's distances [default {SPREAD} when min_dist is given]")},
+                    "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (layout {method}) lists them"},
+                },
+                "required": ["run", "method"],
                 "additionalProperties": false,
             }),
         ),
