@@ -99,18 +99,24 @@ fn run_layout(a: LayoutArgs, cx: &Call) -> Result<Vec<Content>> {
 
 pub(super) fn specs() -> Vec<ToolSpec> {
     let spec = ToolSpec::new;
+    let (cells, features) = (
+        Step::CellLayout.settings().join(", "),
+        Step::FeatureLayout.settings().join(", "),
+    );
     vec![spec(
         "run_layout",
-        "Lay out a run again with the settings given, as `senna layout {method} --from \
-             {run} {args}`, replacing that method's layout in the run (e.g. umap with \
-             min_dist 0.5 and [\"--knn\", \"30\"]; phate or tsne with \
-             [\"--knn\", \"30\", \"--n-landmarks\", \"300\"]). Always runs. Then \
-             view_open the run with that map to see it.",
+        &format!(
+            "Lay out a run again with the settings given, as `senna layout {{method}} --from \
+             {{run}} {{args}}`, replacing that method's layout in the run: cells by {cells}, \
+             the feature embedding by {features} (e.g. umap with min_dist 0.5 and \
+             [\"--knn\", \"30\"]). Writes {{run}}.{{method}}.cell_coords.parquet (or \
+             feature_coords). Always runs. Then view_open the run with that map to see it."
+        ),
         json!({
             "type": "object",
             "properties": {
                 "run": {"type": "string", "description": "Run manifest ({out}.senna.json)"},
-                "method": {"enum": Step::CellLayout.settings(), "description": "Layout method; the feature embedding takes umap or phate"},
+                "method": {"enum": Step::CellLayout.settings(), "description": format!("Layout method; the feature embedding takes {features}")},
                 "target": {"enum": ["cells", "features"], "description": "Lay out the cells, or the feature embedding on its own [default: cells]"},
                 "min_dist": {"type": "number", "minimum": 0, "description": format!("umap only: umap-learn's min_dist, in [0, spread] [default {MIN_DIST} when spread is given]; larger loosens groups into continua, smaller packs them. With neither this nor spread, t-UMAP")},
                 "spread": {"type": "number", "exclusiveMinimum": 0, "description": format!("umap only: umap-learn's spread, the scale of the map's distances [default {SPREAD} when min_dist is given]")},

@@ -39,10 +39,15 @@ use source::EmbeddingSource;
 /// per-sample streams of different chains cannot coincide.
 pub(super) const SEED_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 
+/// The out of a deconvolution of the run `from` given none.
+pub fn default_out(from: &str) -> String {
+    format!("{}.deconv", run_manifest::derive_out_prefix(from))
+}
+
 pub fn run(args: &DeconvolveArgs) -> Result<()> {
     let out: String = match args.out.as_deref() {
         Some(o) => o.to_string(),
-        None => format!("{}.deconv", run_manifest::derive_out_prefix(&args.from)),
+        None => default_out(&args.from),
     };
     mkdir_parent(&out)?;
 

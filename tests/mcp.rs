@@ -97,8 +97,13 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
             "run_fit",
             "run_help",
             "run_predict",
+            "run_probe",
             "run_update",
+            "run_critique",
+            "run_impute",
+            "run_deconvolve",
             "run_layout",
+            "run_step",
             "view_open",
             "view_map",
             "view_markers",
@@ -197,16 +202,21 @@ fn a_fit_with_no_out_takes_the_first_name_no_running_fit_holds() {
 }
 
 #[test]
-fn a_predict_whose_latent_is_there_is_not_run_again() {
+fn a_predict_whose_files_are_there_is_not_run_again_and_half_of_them_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("p");
     let latent = dir.path().join("p.latent.parquet");
+    let predictive = dir.path().join("p.predictive.parquet");
     std::fs::write(&latent, b"").unwrap();
-    let (messages, status) = session(&[call(
-        1,
-        "run_predict",
-        json!({"model": dir.path().join("none"), "data": [dir.path().join("none.zarr")], "out": out}),
-    )]);
+    let predict = json!({"model": dir.path().join("none"), "data": [dir.path().join("none.zarr")], "out": out});
+    let (messages, status) = session(&[call(1, "run_predict", predict.clone())]);
+    assert!(status.success());
+    let reply = &messages.iter().find(|m| m["id"] == 1).unwrap()["result"];
+    assert_eq!(reply["isError"], true, "{reply}");
+    assert!(reply.to_string().contains("not written over"), "{reply}");
+
+    std::fs::write(&predictive, b"").unwrap();
+    let (messages, status) = session(&[call(1, "run_predict", predict)]);
     assert!(status.success());
     let reply = &messages.iter().find(|m| m["id"] == 1).unwrap()["result"];
     assert_ne!(reply["isError"], true, "{reply}");
@@ -216,6 +226,7 @@ fn a_predict_whose_latent_is_there_is_not_run_again() {
         json!(latent),
         "{reply}"
     );
+    assert_eq!(std::fs::read(&latent).unwrap(), b"");
 }
 
 #[test]

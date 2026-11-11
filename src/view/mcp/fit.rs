@@ -1,7 +1,7 @@
 //! `run_fit` and `run_help`: senna's fits, run to their end, and the
 //! flags of every command the run tools start.
 
-use super::jobs::{default_out, one_of, senna, start, Task};
+use super::jobs::{one_of, planned, senna, start, Task};
 use super::parse;
 use crate::view::recompute::Step;
 use anyhow::{ensure, Context, Result};
@@ -35,25 +35,28 @@ struct FitArgs {
     background: bool,
 }
 
+/// `senna {method} {data} -o {out} {args}`, making the run's manifest.
+fn fit_task(a: &FitArgs, out: &str) -> Task {
+    let mut argv = vec![a.method.clone()];
+    argv.extend(a.data.iter().cloned());
+    argv.extend(["-o".into(), out.into()]);
+    argv.extend(a.args.iter().cloned());
+    Task {
+        argv,
+        made: vec![("run", run_manifest::default_path(out).into())],
+        summary: format!("senna {} fit of {}", a.method, a.data.join(", ")),
+    }
+}
+
 /// `senna {method} {data} -o {out} {args}` as a child, unless the run is
 /// there already. Without an out, the run goes in today's results folder,
 /// named by its first data file and method.
 fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
     check_method(&a.method)?;
     ensure!(!a.data.is_empty(), "no data files");
-    let out = match a.out {
-        Some(out) => out,
-        None => default_out(cx, &a.data[0], &a.method, run_manifest::default_path)?,
-    };
-    let mut argv = vec![a.method.clone()];
-    argv.extend(a.data.iter().cloned());
-    argv.extend(["-o".into(), out.clone()]);
-    argv.extend(a.args);
-    let task = Task {
-        argv,
-        made: vec![("run", run_manifest::default_path(&out).into())],
-        summary: format!("senna {} fit of {}", a.method, a.data.join(", ")),
-    };
+    let (out, task) = planned(cx, a.out.as_deref(), Some(&a.data[0]), &a.method, |out| {
+        Ok(fit_task(&a, out))
+    })?;
     // legume-mcp refuses an out a background fit is still writing (naming
     // its job) until that fit has written the manifest, and fails a fit
     // that ends without it.
@@ -133,7 +136,17 @@ struct HelpArgs {
 /// The commands `run_help` covers: the fits, and those the other run
 /// tools start.
 fn helped() -> Vec<String> {
-    let others = ["predict", "update"].into_iter().map(String::from);
+    let others = [
+        "predict",
+        "probe",
+        "update",
+        "critique",
+        "impute",
+        "deconvolve",
+    ]
+    .into_iter()
+    .chain(super::steps::COMMANDS)
+    .map(String::from);
     let layouts = Step::CellLayout
         .settings()
         .iter()

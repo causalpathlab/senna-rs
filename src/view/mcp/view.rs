@@ -4,6 +4,7 @@
 use super::jobs::senna;
 use super::{absolute, parse};
 use crate::view::data::{Axis, Dataset, LabelKind, Labels, NONE};
+use crate::view::recompute::Step;
 use crate::view::render::{self, Viewport};
 use crate::view::{
     color, deck, features, prepare_run, state, velocity, Pick, Scene, Source, VelocityStyle,
@@ -804,7 +805,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "run": {"type": "string", "description": "Run manifest ({out}.senna.json) or a lupin round's"},
-                    "map": {"type": "string", "description": "Layout to start on (umap, phate, tsne); computed when missing"},
+                    "map": {"type": "string", "description": format!("Layout to start on ({}); computed when missing", Step::CellLayout.settings().join(", "))},
                 },
                 "required": ["run"],
                 "additionalProperties": false,

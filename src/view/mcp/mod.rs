@@ -9,14 +9,20 @@
 //! lupin's own server.
 //!
 //! `mod.rs` holds the server and hands each call to its family's module:
-//! `fit` runs fits, `model` works with a trained model on new data,
-//! `layout` lays a run out again, and `view` holds a run open and draws
-//! it. `jobs` builds and starts the senna commands they run.
+//! `fit` runs fits; `predict` scores new data against a trained model,
+//! `model` continues one (and critiques fits for its rounds), and
+//! `reference` reads new data through a reference; `layout` lays a run
+//! out again and `steps` runs the other analysis commands; `view` holds a
+//! run open and draws it. `jobs` builds, checks and starts the senna
+//! commands they run.
 
 mod fit;
 mod jobs;
 mod layout;
 mod model;
+mod predict;
+mod reference;
+mod steps;
 mod view;
 
 use anyhow::{bail, Context, Result};
@@ -56,14 +62,24 @@ pub struct Tools {
 impl Handler for Tools {
     fn tools(&self) -> Vec<ToolSpec> {
         let mut specs = fit::specs();
+        specs.extend(predict::specs());
         specs.extend(model::specs());
+        specs.extend(reference::specs());
         specs.extend(layout::specs());
+        specs.extend(steps::specs());
         specs.extend(view::specs());
         specs
     }
 
     fn call(&mut self, name: &str, args: Value, cx: &Call) -> Result<Vec<Content>> {
-        for family in [fit::call, model::call, layout::call] {
+        for family in [
+            fit::call,
+            predict::call,
+            model::call,
+            reference::call,
+            layout::call,
+            steps::call,
+        ] {
             if let Some(out) = family(name, &args, cx)? {
                 return Ok(out);
             }
