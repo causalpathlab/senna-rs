@@ -60,7 +60,17 @@ impl Step {
     /// resolutions, nothing for the joint layout.
     pub fn settings(self) -> &'static [&'static str] {
         match self {
-            Step::CellLayout => &["umap", "phate", "tsne"],
+            Step::CellLayout => &[
+                "umap",
+                "phate",
+                "tsne",
+                "lle",
+                "sugiyama",
+                "stress",
+                "forceatlas2",
+                "diffusion",
+                "radial",
+            ],
             Step::FeatureLayout => &["umap", "phate"],
             Step::CellClusters | Step::FeatureClusters => &RESOLUTIONS,
             Step::JointLayout | Step::Topics => &[],
@@ -508,7 +518,20 @@ mod tests {
     #[test]
     fn layouts_set_their_method_and_clusterings_their_resolution() {
         let t = target(true);
-        assert_eq!(Step::CellLayout.settings(), ["umap", "phate", "tsne"]);
+        assert_eq!(
+            Step::CellLayout.settings(),
+            [
+                "umap",
+                "phate",
+                "tsne",
+                "lle",
+                "sugiyama",
+                "stress",
+                "forceatlas2",
+                "diffusion",
+                "radial"
+            ]
+        );
         assert_eq!(Step::FeatureLayout.settings(), ["umap", "phate"]);
         assert_eq!(Step::CellClusters.settings(), RESOLUTIONS);
         assert_eq!(Step::FeatureClusters.settings(), RESOLUTIONS);

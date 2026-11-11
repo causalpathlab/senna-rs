@@ -179,7 +179,7 @@ fn print_logo() {
                   senna run   (choose data, methods and flags in the terminal)\n  \
                   2. Held-out inference senna predict            (apply trained model)\n  \
                   3. Cluster cells     senna clustering --from run.senna.json --latent L --out O\n  \
-                  4. 2D layout         senna layout {phate|tsne|umap} --from run.senna.json\n\
+                  4. 2D layout         senna layout {phate|tsne|umap|lle|sugiyama|stress|forceatlas2|diffusion|radial} --from run.senna.json\n\
                   \n\
                   Annotation, trajectory, association, and figures live in `lupin`\n\
                   (`lupin --help`).\n\
@@ -797,19 +797,19 @@ enum Commands {
 
     // ─────────── 4. Layout ───────────
     #[command(
-        about = "2D layout of cells (umap, or phate / tsne over pseudobulks of the cell graph).",
+        about = "2D layout of cells (umap, or phate / tsne / lle / stress / forceatlas2 / diffusion / radial / sugiyama over pseudobulks of the cell graph).",
         long_about = "Builds one kNN graph of the run's cells (its latent or cell projection).\n\
-                      umap lays the cells out on it directly. phate and tsne lay out\n\
+                      umap lays the cells out on it directly. The others lay out\n\
                       pseudobulks: the graph coarsened into groups of cells and collapsed\n\
                       onto them; every cell is then placed via Nyström.\n\
                       \n\
                       Each method writes `{out}.{method}.*.parquet` and is kept under\n\
-                      `manifest.layout.methods`, so umap / phate / tsne sit side by side;\n\
+                      `manifest.layout.methods`, so the methods sit side by side;\n\
                       `manifest.layout.{cell_coords, pb_coords}` point at the latest.\n\
                       On embedding runs, features are also placed on the cell map, and\n\
                       `--target features` lays out the feature embedding on its own.\n\
                       \n\
-                      Pick a method: `senna layout {phate|tsne|umap} --from run.senna.json`.",
+                      Pick a method: `senna layout {phate|tsne|umap|lle|sugiyama|stress|forceatlas2|diffusion|radial} --from run.senna.json`.",
         visible_alias = "lay",
         subcommand_required = true,
         arg_required_else_help = true
@@ -837,7 +837,7 @@ enum Commands {
         long_about = format!(
             "Interactive terminal viewer for `senna layout` results.\n\
                       \n\
-                      Switch between layout methods (umap / phate / tsne) and spaces:\n\
+                      Switch between layout methods (umap / phate / tsne / lle / stress / ...) and spaces:\n\
                       cells, features placed on the cell map, and features on their own.\n\
                       Colour by annotation, clusters, topics, batch or marker membership,\n\
                       focus one group, zoom and pan. Uses kitty / sixel / iTerm2 images\n\
@@ -968,6 +968,68 @@ enum LayoutCmd {
     )]
     Tsne(LayoutTsneArgs),
     #[command(
+        about = "Modified LLE of pseudobulks on the graph between them.",
+        long_about = "Locally linear embedding (MLLE) of pseudobulks.\n\
+                      \n\
+                      Each pseudobulk is rebuilt from its neighbours in the graph between\n\
+                      the pseudobulks (the cell kNN graph, coarsened and collapsed), from\n\
+                      their mean features; the 2D layout keeps those weights.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Lle(LayoutLleArgs),
+    #[command(
+        about = "Layered (Sugiyama) drawing of pseudobulks, top to bottom from a root.",
+        long_about = "Layered drawing of pseudobulks on the graph between them (the cell\n\
+                      kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      Layers are the breadth-first levels from a root, one end of the\n\
+                      graph's longest path; within a layer, pseudobulks are ordered by\n\
+                      barycentre sweeps so branches sit side by side.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Sugiyama(LayoutSugiyamaArgs),
+    #[command(
+        about = "Stress majorization of pseudobulks on the graph between them.",
+        long_about = "Stress layout of pseudobulks on the graph between them (the cell\n\
+                      kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      Pseudobulks are placed so their 2D distances match their shortest\n\
+                      path lengths in the graph (an edge's length is one over its weight),\n\
+                      by stochastic gradient descent; global distances are kept.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Stress(LayoutStressArgs),
+    #[command(
+        about = "ForceAtlas2 of pseudobulks on the graph between them.",
+        long_about = "Force-directed (ForceAtlas2) layout of pseudobulks on the graph\n\
+                      between them (the cell kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      Edges pull by their weight, every pair pushes apart by one over\n\
+                      its distance, with ForceAtlas2's adaptive speed.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Forceatlas2(LayoutForceAtlas2Args),
+    #[command(
+        about = "Diffusion components of pseudobulks on the graph between them.",
+        long_about = "Diffusion map of pseudobulks on the graph between them (the cell\n\
+                      kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      The two leading non-trivial eigenvectors of the graph's random\n\
+                      walk, each scaled by its eigenvalue to the --diffusion-t.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Diffusion(LayoutDiffusionArgs),
+    #[command(
+        about = "Radial tree of pseudobulks on the graph between them.",
+        long_about = "Radial tree layout of pseudobulks on the graph between them (the\n\
+                      cell kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      The graph's maximum spanning tree, rooted at its centre, drawn\n\
+                      with each depth on a ring and each subtree in its own wedge.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Radial(LayoutRadialArgs),
+    #[command(
         about = "UMAP of cells over their fuzzy kNN graph.",
         long_about = "UMAP layout of cells.\n\
                       \n\
@@ -1079,6 +1141,24 @@ fn main() -> anyhow::Result<()> {
             }
             LayoutCmd::Phate(args) => {
                 fit_layout_phate(args)?;
+            }
+            LayoutCmd::Lle(args) => {
+                fit_layout_lle(args)?;
+            }
+            LayoutCmd::Sugiyama(args) => {
+                fit_layout_sugiyama(args)?;
+            }
+            LayoutCmd::Stress(args) => {
+                fit_layout_stress(args)?;
+            }
+            LayoutCmd::Forceatlas2(args) => {
+                fit_layout_forceatlas2(args)?;
+            }
+            LayoutCmd::Diffusion(args) => {
+                fit_layout_diffusion(args)?;
+            }
+            LayoutCmd::Radial(args) => {
+                fit_layout_radial(args)?;
             }
         },
         Commands::Clustering(args) => {

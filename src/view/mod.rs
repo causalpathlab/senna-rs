@@ -59,7 +59,9 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        help = "Start on this layout method (umap, phate, tsne); computed first when the run lacks it"
+        help = "Start on this layout method (any `senna layout` method: umap, phate, tsne, lle, \
+                stress, forceatlas2, diffusion, radial, sugiyama); computed first when the run \
+                lacks it"
     )]
     pub method: Option<Box<str>>,
 

@@ -171,7 +171,7 @@ pub struct LayoutCommonArgs {
     #[arg(
         long,
         default_value_t = 42,
-        help = "RNG seed for random PB-coordinate initialisation (tsne / mst)"
+        help = "RNG seed for the random starts of tsne, stress and forceatlas2"
     )]
     pub seed: u64,
 
