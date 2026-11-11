@@ -459,7 +459,6 @@ fn predict_matching_latents(
         refine_lr: 0.01,
         refine_reg: 1.0,
         decoder_only: false,
-        delta_iters: 3,
         // Coverage is reported; imputation adds no gate of its own.
         min_gene_overlap: 0.0,
         verbose: args.verbose,

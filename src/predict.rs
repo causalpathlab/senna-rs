@@ -19,7 +19,7 @@ use crate::topic::model_metadata::{
     load_coarsening, load_dictionary, load_shortlist_weights, TopicModelMetadata,
 };
 use crate::topic::predict_common::{
-    decoder_only_inference_dense, estimate_delta, predictive_llik_dense, LatentMode,
+    decoder_only_inference_dense, predictive_llik_dense, LatentMode,
 };
 use crate::topic::predict_eval::{
     evaluate_predictions, mean_finite, resolve_eval_genes, EvalArgs, EvalOutcome, Reconstruction,
@@ -57,7 +57,7 @@ pub struct PredictArgs {
         help = "Held-out data files (.zarr or .h5); or --bulk for a dense table",
         long_help = "Sparse backends to score with the pre-trained model.\n\
                      Gene sets may differ from training. Missing genes are padded.\n\
-                     Per-batch delta is re-estimated from the frozen dictionary.\n\
+                     With -b, the encoder's null is built as training built it.\n\
                      Give these, or --bulk, not both."
     )]
     pub(crate) data_files: Vec<Box<str>>,
@@ -135,16 +135,17 @@ pub struct PredictArgs {
         help = "Evaluation minibatch size",
         long_help = "Cells per scored block.\n\
                      \n\
-                     IGNORED for vae models, which are scored at the block size\n\
-                     they were TRAINED at: that encoder carries a batch norm, so\n\
-                     its latent depends on how cells are grouped, and scoring at\n\
-                     a different size would move it. The substitution is logged."
+                     IGNORED for a model whose run manifest records its training\n\
+                     block size: it is scored at that size, because every encoder's\n\
+                     input is standardised over the block a cell is scored in (and\n\
+                     the vae's carries a batch norm), so another size would move the\n\
+                     latent. The substitution is logged."
     )]
     pub(crate) minibatch_size: usize,
 
     #[arg(
         long,
-        help = "Cells per delta-estimation block (auto by default)",
+        help = "Cells per block of the scoring delta pass (auto by default)",
         hide = true
     )]
     pub(crate) block_size: Option<usize>,
@@ -207,20 +208,6 @@ pub struct PredictArgs {
                      Those default to 100 / 0.05 if --refine-steps was left at 0."
     )]
     pub(crate) decoder_only: bool,
-
-    #[arg(
-        long,
-        default_value_t = 3,
-        help = "Iterative TMLE rounds for held-out batch δ (0 = legacy single-pass plug-in)",
-        long_help = "Per iteration: encode all cells with current δ → θ̂;\n\
-                     refit δ as Σ_obs / Σ_pred per batch.\n\
-                     Applies to the dense topic family and to every masked head.\n\
-                     NB-Fisher-weighted for nb / nbmixture / masked decoders,\n\
-                     using the saved {model}.dispersion.parquet when present.\n\
-                     Default 3 typically converges;\n\
-                     0 reverts to the legacy 1/K-marginal plug-in."
-    )]
-    pub(crate) delta_iters: usize,
 
     #[arg(
         long,
@@ -510,21 +497,6 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         metadata.n_features_encoder,
     );
 
-    // Residual-mode x0 needs per-pseudobulk-group mu_residual, which only
-    // exists after a multilevel collapse pass over the held-out data — and
-    // the predict path skips that pass. We feed Batch-style x0 instead, so
-    // the encoder sees a different-distribution null than it saw at training.
-    // Say what predict does and what removes the mismatch; `residual` is the
-    // training default, so this is not a misconfiguration to "fix".
-    if metadata.adj_method.as_ref() == "residual" {
-        log::warn!(
-            "model was trained with --adj-method residual (the training default); predict \
-             builds its held-out null per batch, a differently shaped null than the encoder \
-             saw in training, so θ̂ may be biased on held-out data. A model trained with \
-             --adj-method batch is scored under the null it saw."
-        );
-    }
-
     use crate::topic::model_metadata::{
         masked_head_from_model_type, MODEL_TYPE_INDEXED_MASKED, MODEL_TYPE_MASKED_SBP,
         MODEL_TYPE_MASKED_VAE, MODEL_TYPE_TOPIC, MODEL_TYPE_VAE,
@@ -557,7 +529,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
 /// row average, and its moment-matched bias sits at zero like every trained gene's.
 /// `--decoder-only` and `--refine-steps` have nothing to act on here and are rejected
 /// rather than silently ignored, so a command line that asks for refinement does not come
-/// back looking like it got it. `--delta-iters` and `--batch-files` are inert here too:
+/// back looking like it got it. `--batch-files` is inert here too:
 /// bge has no per-batch δ, and its projection is per cell.
 ///
 /// ⚠️ Read `.predictive.parquet` from a bge model as a FLOOR on novelty, not a verdict —
@@ -876,6 +848,8 @@ fn resolve_mode(args: &PredictArgs) -> LatentMode {
 }
 
 pub(crate) mod bulk;
+mod delta;
+pub(crate) mod null;
 
 #[cfg(test)]
 mod tests;
@@ -976,14 +950,15 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         regularization: args.refine_reg,
     };
 
+    let fit = null::RecordedFit::read(&args.model);
     let s = score_dense_backend(DenseScoreArgs {
         model: &args.model,
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
         preload: args.preload_data,
-        minibatch_size: args.minibatch_size,
+        minibatch_size: fit.minibatch(args.minibatch_size),
         block_size: args.block_size,
-        delta_iters: args.delta_iters,
+        held_out: held_out(args, &fit),
         query_name_opts: &args.query_name_opts()?,
         metadata,
         mode,
@@ -1012,8 +987,10 @@ pub(crate) struct DenseScoreArgs<'a> {
     pub batch_files: Option<&'a [Box<str>]>,
     pub preload: bool,
     pub minibatch_size: usize,
+    /// Cells per block of the scoring δ pass (`None` = auto).
     pub block_size: Option<usize>,
-    pub delta_iters: usize,
+    /// The encoder's null and the scoring δ from the held-out batches.
+    pub held_out: null::HeldOut<'a>,
     pub query_name_opts: &'a QueryNameOpts,
     pub metadata: &'a TopicModelMetadata,
     pub mode: LatentMode,
@@ -1041,7 +1018,8 @@ pub(crate) struct DenseScored {
     pub total: Vec<f32>,
     pub gene_remap: Option<GeneRemap>,
     pub beta_dk: Mat,
-    /// The TMLE-refined δ, so the caller can regress it out when writing a residual backend.
+    /// The scoring δ from the encoded cells, so the caller can regress it out
+    /// when writing a residual backend.
     pub delta_db: Option<Mat>,
 }
 
@@ -1085,12 +1063,16 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
     let new_genes = data_vec.row_names()?;
     let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
-    let delta_db = estimate_delta(
-        &data_vec,
-        &beta_dk,
-        metadata.theta_mean.as_deref(),
+    // The encoder's null, built the way training built it; the scoring δ
+    // comes from the encoded cells afterwards.
+    let null = null::encoder_null(
+        a.held_out,
+        a.model,
+        metadata,
+        &mut data_vec,
         gene_remap.as_ref(),
-        a.block_size,
+        coarsening.as_ref(),
+        a.dev,
     )?;
 
     let dev = a.dev;
@@ -1123,14 +1105,13 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
         model_prefix: a.model,
         encoder: &encoder,
         data_vec: &data_vec,
-        delta_db,
+        null: null.as_ref(),
         gene_remap: gene_remap.as_ref(),
         coarsening: coarsening.as_ref(),
         beta_dk: &beta_dk,
-        delta_iters: a.delta_iters,
         dev,
-        adj_method: AdjMethod::Batch,
         minibatch_size: a.minibatch_size,
+        delta_block: a.held_out.wants_delta().then_some(a.block_size),
         mode: a.mode,
         refine_config: a.refine_config,
     };
@@ -1163,14 +1144,14 @@ struct DensePredictInputs<'a> {
     model_prefix: &'a str,
     encoder: &'a LogSoftmaxEncoder,
     data_vec: &'a SparseIoVec,
-    delta_db: Option<Mat>,
+    null: Option<&'a null::EncoderNull>,
     gene_remap: Option<&'a GeneRemap>,
     coarsening: Option<&'a FeatureCoarsening>,
     beta_dk: &'a Mat,
-    delta_iters: usize,
     dev: &'a Device,
-    adj_method: AdjMethod,
     minibatch_size: usize,
+    /// The scoring δ's block size, or `None` for no δ.
+    delta_block: Option<Option<usize>>,
     mode: LatentMode,
     refine_config: &'a TopicRefinementConfig,
 }
@@ -1191,14 +1172,13 @@ where
         model_prefix,
         encoder,
         data_vec,
-        delta_db,
+        null,
         gene_remap,
         coarsening,
         beta_dk,
-        delta_iters,
         dev,
-        adj_method,
         minibatch_size,
+        delta_block,
         mode,
         refine_config,
     } = inputs;
@@ -1225,55 +1205,6 @@ where
         }
     }
     let decoder = decoders.last().expect("at least one decoder level");
-
-    // Iterative TMLE δ refinement: replaces the single-pass plug-in with a
-    // per-cell θ̂-aware obs/pred update (NB-Fisher-weighted when φ is saved).
-    // `delta_iters == 0` falls through with the plug-in δ unchanged.
-    let delta_db = if delta_iters > 0 {
-        if let Some(initial) = delta_db {
-            let phi_opt = crate::topic::model_metadata::load_dispersion(model_prefix)?;
-            let phi_for_iter: Option<&[f32]> = match metadata
-                .decoder_types
-                .first()
-                .map(std::convert::AsRef::as_ref)
-            {
-                Some("nb" | "nbmixture") => phi_opt.as_deref(),
-                _ => None,
-            };
-            let refined = crate::predict_tmle::iterate_delta_dense(
-                delta_iters,
-                initial,
-                data_vec,
-                encoder,
-                gene_remap,
-                coarsening,
-                beta_dk,
-                phi_for_iter,
-                minibatch_size,
-                dev,
-                &adj_method,
-            )?;
-            Some(refined)
-        } else {
-            None
-        }
-    } else {
-        delta_db
-    };
-
-    // Delta tensor at encoder D (coarsened if applicable). Note: dense
-    // refinement uses the encoder's input dim, which equals D_finest here.
-    let delta_tensor = delta_db
-        .as_ref()
-        .map(|db| -> anyhow::Result<Tensor> {
-            let mut db = db.clone();
-            if let Some(fc) = coarsening {
-                db = fc.aggregate_rows_ds(&db);
-            }
-            let t = db.to_tensor(dev)?.transpose(0, 1)?.contiguous()?;
-            Ok(t)
-        })
-        .transpose()?;
 
     let ntot = data_vec.num_columns();
     let kk = metadata.n_topics;
@@ -1314,18 +1245,28 @@ where
                 data_vec,
                 encoder,
                 decoder,
-                delta_tensor: delta_tensor.as_ref(),
+                null,
                 gene_remap,
                 coarsening,
                 dev,
-                adj_method: &adj_method,
                 mode,
                 refine_config,
             })
         },
     )?;
-    // Return the finalized (TMLE-refined) δ so the caller can regress it
-    // out when writing the residual backend.
+    // The scoring δ, from the encoded cells: the caller reconstructs and
+    // regresses it out of the residual backend with it.
+    let delta_db = match delta_block {
+        Some(block) => delta::delta_from_theta(
+            data_vec,
+            &z_nk.map(f32::exp),
+            gene_remap,
+            beta_dk,
+            delta::nb_dispersion(model_prefix, metadata)?.as_deref(),
+            block,
+        )?,
+        None => None,
+    };
     Ok((z_nk, llik, total, delta_db))
 }
 
@@ -1335,11 +1276,10 @@ struct PredictBlockDenseArgs<'a, Dec> {
     data_vec: &'a SparseIoVec,
     encoder: &'a LogSoftmaxEncoder,
     decoder: &'a Dec,
-    delta_tensor: Option<&'a Tensor>,
+    null: Option<&'a null::EncoderNull>,
     gene_remap: Option<&'a GeneRemap>,
     coarsening: Option<&'a FeatureCoarsening>,
     dev: &'a Device,
-    adj_method: &'a AdjMethod,
     mode: LatentMode,
     refine_config: &'a TopicRefinementConfig,
 }
@@ -1350,26 +1290,21 @@ fn predict_block_dense<Dec>(
 where
     Dec: DecoderModuleT,
 {
-    use crate::topic::common::expand_delta_for_block;
-
     let PredictBlockDenseArgs {
         lb,
         ub,
         data_vec,
         encoder,
         decoder,
-        delta_tensor,
+        null,
         gene_remap,
         coarsening,
         dev,
-        adj_method,
         mode,
         refine_config,
     } = a;
 
-    let x0_nd = delta_tensor
-        .map(|delta_bm| expand_delta_for_block(data_vec, delta_bm, adj_method, lb, ub, dev))
-        .transpose()?;
+    let x0_nd = null::block_x0(null, data_vec, lb, ub, dev)?;
 
     let csc = data_vec.read_columns_csc(lb..ub)?;
     let x_at_dec = remap_and_coarsen_dense(&csc, gene_remap, coarsening, dev)?;
@@ -1415,16 +1350,7 @@ fn remap_and_coarsen_dense(
     dev: &Device,
 ) -> anyhow::Result<Tensor> {
     let nd = if let Some(remap) = gene_remap {
-        let ncols = csc.ncols();
-        let mut out = Mat::zeros(remap.d_train, ncols);
-        for j in 0..ncols {
-            let col = csc.col(j);
-            for (&row_new, &val) in col.row_indices().iter().zip(col.values().iter()) {
-                if let Some(row_train) = remap.new_to_train[row_new] {
-                    out[(row_train, j)] += val;
-                }
-            }
-        }
+        let out = crate::topic::eval::remap_csc_to_dense(csc, remap);
         if let Some(fc) = coarsening {
             fc.aggregate_rows_ds(&out)
                 .to_tensor(dev)?
@@ -1454,8 +1380,8 @@ fn remap_and_coarsen_dense(
 /// on the held-out cells, and writes the latent plus the per-cell full-cell
 /// predictive log-likelihood (`{out}.predictive.parquet`, via
 /// [`predictive_llik_masked`]) — the reconstruction-residual fit score. Encoder
-/// forward only (no decoder refinement); batch correction at predict is
-/// gene-mean only.
+/// forward only (no decoder refinement), under the null training gave the
+/// encoder (see `null`).
 fn predict_masked(
     args: &PredictArgs,
     metadata: &TopicModelMetadata,
@@ -1463,19 +1389,19 @@ fn predict_masked(
 ) -> anyhow::Result<()> {
     use crate::topic::model_metadata::masked_head_label;
 
+    let fit = null::RecordedFit::read(&args.model);
     let scored = score_masked_backend(MaskedScoreArgs {
         model: &args.model,
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
         preload: args.preload_data,
-        minibatch_size: args.minibatch_size,
+        minibatch_size: fit.minibatch(args.minibatch_size),
         query_name_opts: &args.query_name_opts()?,
         metadata,
         head,
         need_llik: true,
         block_size: args.block_size,
-        delta_iters: args.delta_iters,
-        estimate_batch_delta: true,
+        held_out: held_out(args, &fit),
         dev: &args.resolve_device()?,
     })?;
     let (masked_training_genes, masked_beta_dk) = load_dictionary(&args.model)?;
@@ -1500,9 +1426,9 @@ fn predict_masked(
     )?;
     if let Some(delta) = scored.delta_db.as_ref() {
         // The dense path writes δ into the residual backend; the masked path has no
-        // residual output, so this line is the only record of what the encoder was
-        // fed. A mean far from 1 says the query batches sit well off the training
-        // marginal — read the latent with that in mind.
+        // residual output, so this line is the only record of the δ the score was
+        // taken under. A mean far from 1 says the query batches sit well off the
+        // training marginal: read the score with that in mind.
         info!(
             "held-out δ: {} genes × {} batches, mean {:.3}",
             delta.nrows(),
@@ -1530,8 +1456,8 @@ pub(crate) struct MaskedScored {
     /// Query→training gene mapping used for the scores; `probe` reuses it for
     /// the influence/gradient pass.
     pub gene_remap: Option<GeneRemap>,
-    /// Per-batch δ `[D_train, B]` the latent was encoded under — `None` for a
-    /// single-batch query.
+    /// Per-batch δ `[D_train, B]` the score was taken under, from the encoded
+    /// cells; `None` for a single-batch query or when none was asked for.
     pub delta_db: Option<Mat>,
 }
 
@@ -1549,20 +1475,18 @@ pub(crate) struct MaskedScoreArgs<'a> {
     /// since the score costs a second full pass over every column plus a dense
     /// `[D, minibatch]` reconstruction per block.
     pub need_llik: bool,
-    /// Cells per δ-estimation block (`None` = auto).
+    /// Cells per block of the scoring δ pass (`None` = auto).
     pub block_size: Option<usize>,
-    /// TMLE rounds for the held-out δ; `0` keeps the plug-in estimate.
-    pub delta_iters: usize,
-    /// Estimate a per-batch δ from the query and apply it to the encoder null
-    /// and the predictive likelihood.
+    /// The encoder's null and the scoring δ from the held-out batches; the
+    /// δ also scores the predictive likelihood.
     ///
-    /// **Opt-in, because δ is fitted from the query's own gene marginal.** That
-    /// is what `predict` wants — it is the held-out batch effect — and exactly
-    /// what `probe` must not have: δ absorbs compositional novelty, which is
-    /// the signal probe exists to detect, and a query's batch count depends on
-    /// how many files the user happened to pass, so leaving it implicit made
-    /// probe's calibration and query arms score under different models.
-    pub estimate_batch_delta: bool,
+    /// **Explicit, because both are fitted from the query itself.** That is
+    /// what `predict` wants (it is the held-out batch effect) and exactly what
+    /// `probe` must not have: they absorb compositional novelty, the signal
+    /// probe exists to detect, and a query's batch count depends on how many
+    /// files the user happened to pass, so leaving it implicit made probe's
+    /// calibration and query arms score under different models.
+    pub held_out: null::HeldOut<'a>,
     /// Where the encoder and decoder run.
     pub dev: &'a Device,
 }
@@ -1627,22 +1551,6 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
     let new_genes = data_vec.row_names()?;
     let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
-    // Held-out batch effect, the same contrast the dense path takes: query pseudobulk
-    // per batch against the training-implied gene marginal `Σ_k θ̄_k·exp(β_dk)`. The
-    // masked path used to skip this and pass NO null to the encoder — see
-    // `iterate_delta_masked` for what that cost.
-    let delta_db = if a.estimate_batch_delta {
-        estimate_delta(
-            &data_vec,
-            &beta_dk,
-            a.metadata.theta_mean.as_deref(),
-            gene_remap.as_ref(),
-            a.block_size,
-        )?
-    } else {
-        None
-    };
-
     let dev = a.dev;
     let mut parameters = candle_nn::VarMap::new();
     let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
@@ -1665,7 +1573,20 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
     info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;
 
-    let adj_method = AdjMethod::Batch;
+    // The encoder's null, built the way training built it (the masked encoder
+    // reads the full gene axis, so no coarsening).
+    let null = null::encoder_null(
+        a.held_out,
+        a.model,
+        a.metadata,
+        &mut data_vec,
+        gene_remap.as_ref(),
+        None,
+        dev,
+    )?;
+    let adj_method = null
+        .as_ref()
+        .map_or(AdjMethod::Residual, |n| n.adj_method.clone());
     let eval_config = EvaluateLatentMaskedConfig {
         dev,
         adj_method: &adj_method,
@@ -1677,41 +1598,12 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         feature_mean: &feature_mean,
         head: a.head,
     };
-    // Refine δ against the encoder, if asked. The masked decoder is NB (its
-    // `dispersion.parquet` is always written), so the Fisher weights use the saved φ
-    // when it is there; a multinomial-trained masked model carries an untrained φ, and
-    // the weighting is then merely uninformative rather than wrong.
-    let delta_db = match (delta_db, a.delta_iters) {
-        (Some(initial), n) if n > 0 => {
-            let phi = crate::topic::model_metadata::load_dispersion(a.model)?;
-            Some(crate::predict_tmle::iterate_delta_masked(
-                n,
-                initial,
-                &data_vec,
-                &encoder,
-                &eval_config,
-                a.head,
-                gene_remap.as_ref(),
-                &beta_dk,
-                phi.as_deref(),
-            )?)
-        }
-        (d, _) => d,
-    };
-    // `[B, D_train]` for the encoder null — the orientation the fit-time latent write
-    // uses (`masked_topic.rs`), so predict and fit encode a batch the same way.
-    let delta_bd = delta_db
-        .as_ref()
-        .map(|db| -> anyhow::Result<Tensor> {
-            Ok(db.to_tensor(dev)?.transpose(0, 1)?.contiguous()?)
-        })
-        .transpose()?;
 
     let z_nk = evaluate_latent_masked(
         &data_vec,
         &encoder,
         &eval_config,
-        delta_bd.as_ref(),
+        null.as_ref().map(|n| &n.null),
         gene_remap.as_ref().map(|r| r.new_to_train.as_slice()),
     )?;
 
@@ -1727,8 +1619,21 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 
     // The stored latent stays raw (`z` for the Gaussian head); scoring needs
     // proportions, so convert per the head rather than assuming `exp`.
+    // The scoring δ, from the encoded cells.
+    let theta_nk = crate::topic::model_metadata::latent_to_theta(&z_nk, a.head);
+    let delta_db = if a.held_out.wants_delta() {
+        delta::delta_from_theta(
+            &data_vec,
+            &theta_nk,
+            gene_remap.as_ref(),
+            &beta_dk,
+            delta::nb_dispersion(a.model, a.metadata)?.as_deref(),
+            a.block_size,
+        )?
+    } else {
+        None
+    };
     let (llik, total) = if a.need_llik {
-        let theta_nk = crate::topic::model_metadata::latent_to_theta(&z_nk, a.head);
         predictive_llik_masked(
             &data_vec,
             &theta_nk,
@@ -1836,10 +1741,9 @@ fn predictive_llik_masked(
 
 /// Held-out latent inference for the Gaussian VAE ([`MODEL_TYPE_VAE`]).
 /// Rebuilds the [`GaussianEncoder`] and runs it (encoder-only, eval mode →
-/// posterior mean `z`) over the held-out cells. Like `predict_masked`, batch
-/// correction is gene-mean only (the per-gene `μ_d` divisor inside
-/// `anscombe_residual`); a per-cell residual null is a future refinement. The
-/// latent is continuous factors, so there is no decoder refinement to do.
+/// posterior mean `z`) over the held-out cells, under the null training gave
+/// the encoder (see `null`), like `predict_masked`. The latent is continuous
+/// factors, so there is no decoder refinement to do.
 fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
     // The vae path is encoder-only: it never calls `resolve_mode`, so the
     // latent-mode flags have no effect here. Say so instead of ignoring them
@@ -1855,15 +1759,17 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
     // The decoder is rebuilt so a vae run is scorable like every other family.
     // It used to be skipped (latent only, no `.predictive.parquet`), which left
     // vae the one family a benchmark could not grade on the shared columns.
+    let fit = null::RecordedFit::read(&args.model);
     let s = score_vae_backend(VaeScoreArgs {
         model: &args.model,
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
         preload: args.preload_data,
-        minibatch_size: vae_training_minibatch(&args.model, args.minibatch_size),
+        minibatch_size: fit.minibatch(args.minibatch_size),
         query_name_opts: &args.query_name_opts()?,
         metadata,
         need_llik: true,
+        held_out: held_out(args, &fit),
         dev: &args.resolve_device()?,
     })?;
 
@@ -1917,6 +1823,8 @@ pub(crate) struct VaeScoreArgs<'a> {
     /// `predict` wants the latent only and passes `false`, which also skips rebuilding the
     /// decoder entirely. `probe` needs the per-cell score and passes `true`.
     pub need_llik: bool,
+    /// The encoder's null and the scoring δ from the held-out batches.
+    pub held_out: null::HeldOut<'a>,
     /// Where the encoder and decoder run.
     pub dev: &'a Device,
 }
@@ -1934,6 +1842,17 @@ pub(crate) struct VaeScored {
     pub recon: Option<(Mat, Vec<f32>)>,
 }
 
+/// What predict takes from the held-out batches: the encoder's null and the
+/// scoring δ, or only the δ for `--bulk`, whose whole samples are not cells
+/// to collapse into pseudobulks.
+fn held_out<'a>(args: &PredictArgs, fit: &'a null::RecordedFit) -> null::HeldOut<'a> {
+    if args.bulk.is_empty() {
+        null::HeldOut::NullAndDelta(fit)
+    } else {
+        null::HeldOut::Delta
+    }
+}
+
 /// Encoder pass for a `senna vae` model, optionally with the NB predictive score.
 ///
 /// **This is new capability, not a refactor.** `predict_vae` never built a decoder, so the
@@ -1944,50 +1863,6 @@ pub(crate) struct VaeScored {
 /// model is `π = softmax_d(z·W + b)`, a per-cell softmax over the gene axis, not a mixture of
 /// per-topic simplices. So the parquet shortcut the masked path uses is invalid here and the
 /// score must go through the rebuilt decoder.
-/// The block size the run was TRAINED with, which is the one to score it at.
-///
-/// `GaussianEncoder` carries a `BatchNorm`, so its output depends on the block
-/// a cell is scored in — `senna vae`'s own `--minibatch-size` help says as
-/// much ("minibatch size is not fit-neutral"). Scoring at predict's default
-/// while the model was fitted at vae's puts the encoder on batch statistics it
-/// never saw, and the latent moves. Taking the training value removes that
-/// systematic mismatch.
-///
-/// It is the DECLARED value: training may shrink the block further to fit
-/// device memory, and that effective size is not recorded, so this narrows the
-/// gap rather than closing it. A manifest that cannot be read falls back to
-/// what the caller asked for.
-fn vae_training_minibatch(model: &str, requested: usize) -> usize {
-    /// `VaeArgs::minibatch_size.unwrap_or(100)` — the fit's own default when
-    /// the flag was left unset.
-    const VAE_TRAIN_DEFAULT: usize = 100;
-    let Ok((manifest, _)) = senna::run_manifest::load_for(model) else {
-        return requested;
-    };
-    if manifest.train_args.is_none() {
-        return requested;
-    }
-    match manifest.train_args_as::<crate::vae::VaeArgs>(model) {
-        Ok(recorded) => {
-            let trained_at = recorded.minibatch_size.unwrap_or(VAE_TRAIN_DEFAULT);
-            if trained_at != requested {
-                info!(
-                    "Scoring at the training block size ({trained_at}, not {requested}): the \
-                     encoder's batch norm makes the latent block-dependent"
-                );
-            }
-            trained_at
-        }
-        Err(e) => {
-            log::warn!(
-                "{model}: cannot read the recorded fit configuration ({e}); scoring at \
-                 {requested}, which may differ from the block size the encoder was fitted at"
-            );
-            requested
-        }
-    }
-}
-
 pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored> {
     use crate::topic::model_metadata::load_feature_mean;
 
@@ -2107,6 +1982,16 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
         Some((loadings_dk.clone(), bias))
     });
 
+    // The encoder's null, built the way training built it.
+    let null = null::encoder_null(
+        a.held_out,
+        a.model,
+        metadata,
+        &mut data_vec,
+        gene_remap.as_ref(),
+        coarsening.as_ref(),
+        dev,
+    )?;
     let ntot = data_vec.num_columns();
     let (z_nk, llik, total) = run_predict_blocks(
         ntot,
@@ -2123,12 +2008,13 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
             ),
         dev,
         |(lb, ub)| {
-            // Gene-mean null only (x0 = None): the divisive μ_d correction is
-            // baked into the encoder via `feature_mean`.
+            // The divisive μ_d correction is baked into the encoder via
+            // `feature_mean`; `x0` is the held-out null, when there is one.
             let csc = data_vec.read_columns_csc(lb..ub)?;
             let x_nd =
                 remap_and_coarsen_dense(&csc, gene_remap.as_ref(), coarsening.as_ref(), dev)?;
-            let (z, _) = encoder.forward_t(&x_nd, None, false)?;
+            let x0 = null::block_x0(null.as_ref(), &data_vec, lb, ub, dev)?;
+            let (z, _) = encoder.forward_t(&x_nd, x0.as_ref(), false)?;
             let z_mat = Mat::from_tensor(&z.to_device(&Device::Cpu)?)?;
             let Some(dec) = decoder else {
                 return Ok((lb, z_mat, Vec::new(), Vec::new()));

@@ -47,9 +47,11 @@ mod deconvolve;
 mod docs;
 mod embed_diag;
 mod empirical_dict;
-mod eval_topic;
 mod feature_embedding_args;
 mod feature_preset;
+#[cfg(test)]
+#[path = "tests/fit_cli.rs"]
+mod fit_cli;
 mod fne;
 mod geometry;
 mod hvg;
@@ -65,7 +67,9 @@ mod pbg_train_args;
 mod planted;
 mod postprocess;
 mod predict;
-mod predict_tmle;
+#[cfg(test)]
+#[path = "tests/predict_null.rs"]
+mod predict_null_tests;
 mod probe;
 mod rbm;
 mod rbm_core;
@@ -96,7 +100,6 @@ use critique::{run_critique, CritiqueArgs};
 use deconvolve::DeconvolveArgs;
 use docs::{run_docs, DocsArgs};
 use embed_diag::*;
-use eval_topic::*;
 use fne::{fit_fne, FneArgs};
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
@@ -571,9 +574,9 @@ enum Commands {
                       TYPICAL USE -- score a trained model on a held-out half:\n\
                       \x20 data-beans split data.zarr -o cv --test-frac 0.2 \\\n\
                       \x20     --coord positions.csv --coord-columns 4,5 --grid 8\n\
-                      \x20 senna topic cv.train.zarr.zip -o model --adj-method batch\n\
-                      \x20 senna predict cv.test.zarr.zip --model model -o pred \\\n\
-                      \x20     --null-from cv.train.zarr.zip --eval-features panel.txt\n\
+                      \x20 senna topic cv.train.zarr.zip -b train.batch.txt -o model\n\
+                      \x20 senna predict cv.test.zarr.zip -b test.batch.txt --model model \\\n\
+                      \x20     -o pred --null-from cv.train.zarr.zip --eval-features panel.txt\n\
                       \n\
                       BULK -- a dense genes x samples table (parquet or tsv) goes in\n\
                       through --bulk instead of a backend; everything after that is the\n\
@@ -587,12 +590,16 @@ enum Commands {
                       \x20    and is an upper reference rather than a floor.\n\
                       \x20 2. --eval-features must be the SAME file for every arm, or\n\
                       \x20    each model is graded on its own curriculum.\n\
-                      \x20 3. Train with --adj-method batch. Under the default (residual)\n\
-                      \x20    predict warns and the latent may be biased.\n\
+                      \x20 3. A model trained with batches needs the held-out cells'\n\
+                      \x20    batches too (-b), so its encoder gets the null it trained with.\n\
                       \n\
                       Dense and indexed models are auto-dispatched via model.json.\n\
                       Gene-set misalignment is handled by flexible name matching.\n\
-                      Per-batch delta is re-estimated from the frozen dictionary.\n\
+                      The encoder's null is built as training built it: the held-out\n\
+                      cells are collapsed with the model's own settings, and each cell\n\
+                      reads its pseudobulk's fold (--adj-method residual) or its batch's\n\
+                      delta (batch). A model trained without batches gets none.\n\
+                      Scoring takes each batch's delta from the encoded cells.\n\
                       \n\
                       Latent modes are encoder-only (the default), encoder+refine,\n\
                       and decoder-only.\n\
@@ -731,9 +738,6 @@ enum Commands {
                       Writes {out}.imputed.parquet (N_new × n_ref_features)."
     )]
     Impute(ImputeArgs),
-
-    #[command(about = "[deprecated] Alias for `senna predict`.")]
-    EvalTopic(EvalTopicArgs),
 
     #[command(
         about = "Effective rank and common-mode readout of a run's embedding tables.",
@@ -1121,9 +1125,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Impute(args) => {
             impute_model(args)?;
-        }
-        Commands::EvalTopic(args) => {
-            eval_topic_model(args)?;
         }
         Commands::EmbedDiag(args) => {
             embed_diag(args)?;

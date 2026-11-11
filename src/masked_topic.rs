@@ -906,7 +906,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         num_levels: args.collapse.num_levels,
         iter_opt: args.collapse.iter_opt,
         block_size: args.block_size,
-        out: &args.out,
+        out: Some(&args.out),
         max_features: effective_hvg.n_hvg,
         feature_list_file: effective_hvg.feature_list_file,
         must_train_file: effective_hvg.must_train_file,

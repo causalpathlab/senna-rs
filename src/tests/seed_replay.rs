@@ -1,28 +1,9 @@
 //! A fit replays from its `--seed`: the same seed on the same data writes the
 //! same latent, bit for bit, in every family that trains a network.
 
+use crate::fit_cli::{latent, parse};
 use crate::planted::planted_zarr;
-use clap::Parser;
-use legume_numeric::matrix::traits::IoOps;
 use senna::embed_common::Mat;
-
-#[derive(Parser)]
-struct Cli<A: clap::Args> {
-    #[command(flatten)]
-    args: A,
-}
-
-fn parse<A: clap::Args>(argv: &[&str]) -> A {
-    let mut full = vec!["fit"];
-    full.extend_from_slice(argv);
-    Cli::<A>::try_parse_from(full).expect("valid argv").args
-}
-
-fn latent(prefix: &str) -> Mat {
-    Mat::from_parquet_with_row_names(&format!("{prefix}.latent.parquet"), Some(0))
-        .expect("latent")
-        .mat
-}
 
 /// Fit `run` into three prefixes, seeds 7, 7 and 8, on the planted data:
 /// the first two latents are identical and the third is not.

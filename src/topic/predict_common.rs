@@ -1,26 +1,14 @@
 //! Shared helpers for the unified `senna predict` subcommand.
 //!
-//! - `estimate_delta`: per-batch δ from new-data pseudobulk vs frozen β
-//!   (lifted from the original `eval_topic.rs` so the indexed path can use it).
 //! - `decoder_only_inference_*`: optimize θ logits against the frozen decoder
 //!   from a uniform start, no encoder involvement.
 //! - `predictive_llik_*`: wrap decoder forwards to return just the per-cell
 //!   log-likelihood tensor.
 
-use crate::topic::eval::GeneRemap;
 use candle_core::{Device, Result as CandleResult, Tensor, Var};
 use candle_nn::ops;
 use legume_numeric::candle::traits::DecoderModuleT;
 use senna::embed_common::*;
-
-/// Lower / upper bounds on per-(gene, batch) δ. Stops a single noisy batch
-/// from blowing up the encoder's null input when one batch has near-zero
-/// coverage of a gene that is highly expressed under the training mixture.
-pub const DELTA_CLAMP_MIN: f32 = 0.01;
-pub const DELTA_CLAMP_MAX: f32 = 100.0;
-/// Floor on the predicted-proportion denominator in the obs/pred ratio,
-/// avoiding division by zero for genes that no topic produces.
-pub const DELTA_PRED_EPS: f32 = 1e-10;
 
 /// Latent inference mode chosen by the caller from CLI flags.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,166 +70,4 @@ pub fn predictive_llik_dense<Dec: DecoderModuleT>(
     x_nd: &Tensor,
 ) -> CandleResult<Tensor> {
     decoder.llik_gene_chunked(log_z_nk, x_nd, SCORE_GENE_CHUNK)
-}
-
-/// Per-batch sums accumulated across blocks during one TMLE iteration.
-/// `pb_obs[d,b]` and `pb_pred[d,b]` are NB-Fisher-weighted when `phi` is
-/// supplied; otherwise unweighted (Poisson / multinomial).
-pub struct DeltaSums {
-    pub pb_obs: Mat,  // [D_train, B]
-    pub pb_pred: Mat, // [D_train, B]
-}
-
-impl DeltaSums {
-    pub fn zeros(d_train: usize, n_batches: usize) -> Self {
-        Self {
-            pb_obs: Mat::zeros(d_train, n_batches),
-            pb_pred: Mat::zeros(d_train, n_batches),
-        }
-    }
-
-    pub fn merge_into(&mut self, other: &Self) {
-        self.pb_obs += &other.pb_obs;
-        self.pb_pred += &other.pb_pred;
-    }
-}
-
-/// Closed-form δ from per-batch obs and predicted sums.
-///
-/// `δ[d,b] = pb_obs[d,b] / max(pb_pred[d,b], eps)`, clamped to [0.01, 100].
-/// When all batches share the same generative law, δ stays near 1.
-pub fn solve_delta_from_sums(sums: &DeltaSums) -> Mat {
-    let d = sums.pb_obs.nrows();
-    let b = sums.pb_obs.ncols();
-    let mut delta = Mat::zeros(d, b);
-    for bi in 0..b {
-        for di in 0..d {
-            let num = sums.pb_obs[(di, bi)];
-            let den = sums.pb_pred[(di, bi)].max(DELTA_PRED_EPS);
-            delta[(di, bi)] = (num / den).clamp(DELTA_CLAMP_MIN, DELTA_CLAMP_MAX);
-        }
-    }
-    delta
-}
-
-/// NB Fisher info per cell-gene at the working δ=1 hypothesis.
-///
-/// `w[d,j] = φ[d] / (μ[d,j] + φ[d])` where `μ[d,j] = lib[j] · pred[d,j]`
-/// and `pred[d,j] = Σ_k θ̂[j,k] · exp(β[d,k])`. Returns `1.0` for all (d,j)
-/// when `phi` is `None` (Poisson / multinomial decoder).
-pub fn nb_fisher_weight(phi: Option<&[f32]>, mu: f32, d: usize) -> f32 {
-    match phi {
-        None => 1.0,
-        Some(phi) => {
-            let pd = phi[d].max(1e-6);
-            pd / (mu + pd)
-        }
-    }
-}
-
-/// Estimate per-batch δ from new-data pseudobulk and the frozen training dictionary.
-///
-/// `delta[d,b] = (pb_test[d,b] / lib_b) / predicted[d]`, where
-/// `predicted[d] = Σ_k θ̄_train[k] · exp(β[d,k])` is the gene-d proportion
-/// implied by the training topic mixture. This makes δ a proper contrast
-/// against training: held-out batch composition vs the training marginal.
-///
-/// `theta_mean = None` falls back to uniform 1/K weighting (legacy behavior;
-/// only correct if training θ̄ was uniform).
-pub fn estimate_delta(
-    data_vec: &SparseIoVec,
-    beta_dk: &Mat,
-    theta_mean: Option<&[f32]>,
-    gene_remap: Option<&GeneRemap>,
-    block_size: Option<usize>,
-) -> anyhow::Result<Option<Mat>> {
-    let n_batches = data_vec.num_batches();
-    if n_batches <= 1 {
-        info!("Single batch or no batches — skipping delta estimation");
-        return Ok(None);
-    }
-
-    let d_train = beta_dk.nrows();
-    let k = beta_dk.ncols();
-
-    let exp_beta = beta_dk.map(f32::exp);
-    let weights: Vec<f32> = if let Some(tm) = theta_mean {
-        anyhow::ensure!(
-            tm.len() == k,
-            "theta_mean length {} != n_topics {}",
-            tm.len(),
-            k,
-        );
-        let s: f32 = tm.iter().sum();
-        if s > 0.0 {
-            tm.iter().map(|x| x / s).collect()
-        } else {
-            vec![1.0 / k as f32; k]
-        }
-    } else {
-        info!("estimate_delta: theta_mean missing — falling back to uniform 1/K");
-        vec![1.0 / k as f32; k]
-    };
-    let mut predicted = nalgebra::DVector::<f32>::zeros(d_train);
-    for d in 0..d_train {
-        let mut acc = 0.0;
-        for kk in 0..k {
-            acc += weights[kk] * exp_beta[(d, kk)];
-        }
-        predicted[d] = acc;
-    }
-    let pred_sum: f32 = predicted.iter().sum();
-    if pred_sum > 0.0 {
-        predicted /= pred_sum;
-    }
-
-    let d_new = data_vec.num_rows();
-    let ntot = data_vec.num_columns();
-    let mut pb_new = Mat::zeros(d_new, n_batches);
-
-    let block_size = block_size
-        .unwrap_or_else(|| legume_numeric::matrix::utils::default_block_size(data_vec.num_rows()));
-    for lb in (0..ntot).step_by(block_size) {
-        let ub = (lb + block_size).min(ntot);
-        let csc = data_vec.read_columns_csc(lb..ub)?;
-        let batch_ids = data_vec.get_batch_membership(lb..ub);
-        for (local_j, &batch_id) in batch_ids.iter().enumerate() {
-            let col = csc.col(local_j);
-            for (&row, &val) in col.row_indices().iter().zip(col.values().iter()) {
-                pb_new[(row, batch_id)] += val;
-            }
-        }
-    }
-
-    let mut pb_train = Mat::zeros(d_train, n_batches);
-    if let Some(remap) = gene_remap {
-        for (new_idx, opt_train) in remap.new_to_train.iter().enumerate() {
-            if let Some(&train_idx) = opt_train.as_ref() {
-                // Accumulate, not overwrite: with a many-to-one query→train
-                // remap (e.g. spliced+unspliced both resolving to one gene),
-                // each contributing query row adds to the training pseudobulk.
-                let mut dst = pb_train.row_mut(train_idx);
-                dst += &pb_new.row(new_idx);
-            }
-        }
-    } else {
-        pb_train.copy_from(&pb_new);
-    }
-
-    let mut delta_db = Mat::zeros(d_train, n_batches);
-    for b in 0..n_batches {
-        let lib: f32 = pb_train.column(b).sum();
-        if lib <= 0.0 {
-            delta_db.column_mut(b).fill(1.0);
-            continue;
-        }
-        for d in 0..d_train {
-            let obs_prop = pb_train[(d, b)] / lib;
-            let pred = predicted[d].max(DELTA_PRED_EPS);
-            delta_db[(d, b)] = (obs_prop / pred).clamp(DELTA_CLAMP_MIN, DELTA_CLAMP_MAX);
-        }
-    }
-
-    info!("Estimated delta: {d_train} genes × {n_batches} batches");
-    Ok(Some(delta_db))
 }

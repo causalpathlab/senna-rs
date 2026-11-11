@@ -399,6 +399,7 @@ fn cal_and_query<S: Scored>(
 }
 
 fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyhow::Result<()> {
+    use crate::predict::null::HeldOut;
     use crate::predict::{score_dense_backend, score_vae_backend, DenseScoreArgs, VaeScoreArgs};
     use crate::topic::eval::QueryNameOpts;
     use crate::topic::model_metadata::TopicModelMetadata;
@@ -428,17 +429,17 @@ fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyho
                 query_name_opts: &qopts,
                 metadata: &metadata,
                 need_llik: true,
+                held_out: HeldOut::Ignore,
                 dev: &dev,
             })
         })?,
         // `LatentMode::Encoder` mirrors the masked path (encoder-only, no per-cell refinement),
         // so `refine_config` is never read.
         //
-        // ⚠️ `delta_iters: 0` keeps the legacy single-pass plug-in δ rather than the TMLE
-        // refinement `predict` defaults to. δ is estimated **from the query**, so refining it
-        // would let a genuinely novel batch explain itself away as a batch effect — the aliasing
-        // failure, on exactly the query this tool exists to flag. The plug-in is the conservative
-        // end of that trade; the masked path has no δ at all.
+        // `HeldOut::Ignore`: no held-out null for the encoder and no δ. Either, fitted
+        // from the query, would let a genuinely novel batch explain itself away as a
+        // batch effect, the aliasing failure, on exactly the query this tool exists to
+        // flag.
         RunKind::Topic => cal_and_query(args, |files| {
             score_dense_backend(DenseScoreArgs {
                 model: &args.model,
@@ -447,7 +448,7 @@ fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyho
                 preload: args.preload_data,
                 minibatch_size: args.minibatch_size,
                 block_size: None,
-                delta_iters: 0,
+                held_out: HeldOut::Ignore,
                 query_name_opts: &qopts,
                 metadata: &metadata,
                 mode: LatentMode::Encoder,
