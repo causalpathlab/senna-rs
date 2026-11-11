@@ -270,7 +270,12 @@ fn simba_writes_bge_shaped_artifacts_and_a_manifest_downstream_commands_can_open
 
 /// Cell × cell cosine table of a cell × H matrix.
 fn cosines(z: &Mat) -> Mat {
-    crate::geometry::similarity::compute_cosine_similarity(&z.transpose())
+    let mut unit = z.clone();
+    for mut row in unit.row_iter_mut() {
+        let norm = row.norm().max(f32::MIN_POSITIVE);
+        row /= norm;
+    }
+    &unit * unit.transpose()
 }
 
 /// Mean cosine within the two planted groups minus the mean across them.

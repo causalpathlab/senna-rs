@@ -797,11 +797,11 @@ enum Commands {
 
     // ─────────── 4. Layout ───────────
     #[command(
-        about = "2D layout of cells (tsne / umap / phate) over batch-corrected pseudobulks.",
-        long_about = "Builds PBs by batch-corrected multi-level collapsing.\n\
-                      PB-PB cosine similarity is computed on log1p-CPM gene vectors.\n\
-                      The chosen method lays those out.\n\
-                      Every cell is then projected via Nyström.\n\
+        about = "2D layout of cells (umap, or phate / tsne over pseudobulks of the cell graph).",
+        long_about = "Builds one kNN graph of the run's cells (its latent or cell projection).\n\
+                      umap lays the cells out on it directly. phate and tsne lay out\n\
+                      pseudobulks: the graph coarsened into groups of cells and collapsed\n\
+                      onto them; every cell is then placed via Nyström.\n\
                       \n\
                       Each method writes `{out}.{method}.*.parquet` and is kept under\n\
                       `manifest.layout.methods`, so umap / phate / tsne sit side by side;\n\
@@ -958,21 +958,21 @@ enum LayoutCmd {
     #[command(about = "PHATE diffusion embedding of pseudobulks (recommended default).")]
     Phate(LayoutPhateArgs),
     #[command(
-        about = "t-SNE of pseudobulks on raw-gene similarity (random init).",
+        about = "t-SNE of pseudobulks on the graph between them (random init).",
         long_about = "t-SNE layout of pseudobulks.\n\
                       \n\
-                      Similarity is computed on raw genes.\n\
+                      Its affinities are the graph between the pseudobulks: the cell kNN\n\
+                      graph, coarsened into pseudobulks and collapsed onto them.\n\
                       The embedding starts from a random initialization.\n\
                       Cells are then placed from their pseudobulk coordinates."
     )]
     Tsne(LayoutTsneArgs),
     #[command(
-        about = "UMAP-style SGD of pseudobulks over the fuzzy kNN graph.",
-        long_about = "UMAP-style layout of pseudobulks.\n\
+        about = "UMAP of cells over their fuzzy kNN graph.",
+        long_about = "UMAP layout of cells.\n\
                       \n\
-                      A fuzzy kNN graph is built over the pseudobulks.\n\
-                      Attractive and repulsive forces are then optimized by SGD.\n\
-                      Cells are placed from their pseudobulk coordinates."
+                      The cells' fuzzy kNN graph (the one the pseudobulk layouts\n\
+                      coarsen) is laid out by SGD of attractive and repulsive forces."
     )]
     Umap(LayoutUmapArgs),
 }

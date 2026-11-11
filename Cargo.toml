@@ -105,3 +105,6 @@ rustix = { version = "1", features = ["fs", "termios"] }
 [profile.test]
 opt-level = 2
 debug = "line-tables-only"
+
+[patch.crates-io]
+legume-numeric = { git = "https://github.com/causalpathlab/legume-numeric", branch = "ypp/shared-graph" }

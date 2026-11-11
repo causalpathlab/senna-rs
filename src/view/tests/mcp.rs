@@ -519,7 +519,7 @@ fn layout_lays_out_the_run_in_its_own_prefix_with_the_flags_given() {
 
 #[test]
 fn a_umap_layout_takes_min_dist_and_spread_as_its_flags() {
-    let t = layout(json!({"run": "r.senna.json", "method": "umap", "min_dist": 0.5, "spread": 1.5, "args": ["--umap-knn", "30"]}))
+    let t = layout(json!({"run": "r.senna.json", "method": "umap", "min_dist": 0.5, "spread": 1.5, "args": ["--knn", "30"]}))
         .unwrap();
     assert_eq!(
         t.argv,
@@ -534,7 +534,7 @@ fn a_umap_layout_takes_min_dist_and_spread_as_its_flags() {
             "0.5",
             "--umap-spread",
             "1.5",
-            "--umap-knn",
+            "--knn",
             "30"
         ]
     );
@@ -595,7 +595,7 @@ fn help_covers_predict_update_and_each_layout() {
     };
     assert!(help("predict").contains("--model"));
     assert!(help("update").contains("--model"));
-    assert!(help("layout umap").contains("--umap-knn"));
+    assert!(help("layout umap").contains("--knn"));
     assert!(help("layout phate").contains("--knn"));
     assert!(run_help(parse(json!({"method": "layout pca"})).unwrap()).is_err());
     assert!(run_help(parse(json!({"method": "view"})).unwrap()).is_err());

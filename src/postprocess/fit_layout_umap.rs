@@ -6,7 +6,8 @@
 //! t-SNE, which cannot take every cell.
 
 use super::fit_layout_common::{
-    cell_table, resolve_inputs, write_cell_layout, CellTable, LayoutCommonArgs, ResolvedViz,
+    cell_graph, cell_table, others, resolve_inputs, write_cell_layout, CellTable, LayoutCommonArgs,
+    ResolvedViz,
 };
 use super::fit_layout_features::{
     load_feature_layout_input, read_coembedding, write_feature_layout, LayoutTarget,
@@ -37,14 +38,6 @@ pub struct LayoutUmapArgs {
 
     #[arg(long, default_value_t = LEARNING_RATE, help = "Initial learning rate")]
     umap_lr: f32,
-
-    #[arg(
-        long,
-        alias = "umap-finetune-knn",
-        default_value_t = N_NEIGHBORS,
-        help = "Neighbours per point, counting the point itself (uwot's n_neighbors)"
-    )]
-    umap_knn: usize,
 
     #[arg(
         long,
@@ -236,7 +229,7 @@ impl LayoutUmapArgs {
     /// The SGD's settings, the kernel's range checked.
     pub(crate) fn tumap_params(&self) -> anyhow::Result<TumapParams> {
         Ok(TumapParams {
-            knn: self.umap_knn,
+            knn: self.common.knn,
             epochs: self.umap_epochs,
             negative_rate: self.umap_negative_rate,
             lr: self.umap_lr,
@@ -342,11 +335,12 @@ fn kernel_ab(min_dist: f32, spread: f32) -> (f32, f32) {
     (a as f32, b as f32)
 }
 
-/// UMAP of the points given as columns of `feat_kn` (`dims × n`): a fuzzy
-/// kNN graph on the features, a PCA(2) start, then SGD. Returns `n × 2`.
+/// UMAP of the points given as columns of `feat_kn` (`dims × n`): their
+/// [`cell_graph`], the one the PB layouts coarsen, a PCA(2) start, then
+/// SGD. Returns `n × 2`.
 pub(crate) fn tumap_on_columns(feat_kn: &Mat, p: &TumapParams) -> anyhow::Result<Mat> {
     let rows = feat_kn.transpose();
-    let edges = build_cell_cell_fuzzy_edges(&rows, p.knn, p.block_size)?;
+    let edges = cell_graph(&rows, p.knn, p.block_size)?;
     let mut coords = pca_init_2d(rows, p.seed);
     run_cell_level_umap_in_place(&mut coords, &edges, p);
     Ok(coords)
@@ -374,7 +368,7 @@ pub(crate) fn joint_tumap(
     all.rows_mut(0, n).tr_copy_from(cells_kn);
     all.rows_mut(n, d).tr_copy_from(features_kn);
 
-    let mut edges = build_cell_cell_fuzzy_edges(&all, p.knn, p.block_size)?;
+    let mut edges = cell_graph(&all, p.knn, p.block_size)?;
     edges.extend(feature_to_cell_edges(cells_kn, features_kn, p.knn)?);
     let edges = merge_fuzzy_edges(edges);
     info!(
@@ -435,46 +429,6 @@ fn merge_fuzzy_edges(edges: Vec<(usize, usize, f32)>) -> Vec<(usize, usize, f32)
         }
     }
     out
-}
-
-/// The neighbours a point has besides itself, when `knn` counts the point
-/// as uwot's `n_neighbors` does.
-fn others(knn: usize) -> usize {
-    knn.saturating_sub(1).max(1)
-}
-
-/// The undirected fuzzy kNN edge list of the rows of `rows` (points ×
-/// dims), as uwot builds it (`knn` counting each point itself): one edge
-/// per pair (`i < j`) with its UMAP membership.
-fn build_cell_cell_fuzzy_edges(
-    rows: &Mat,
-    knn: usize,
-    block_size: usize,
-) -> anyhow::Result<Vec<(usize, usize, f32)>> {
-    let n = rows.nrows();
-    info!("Cell-cell fuzzy kNN (n={n}, n_neighbors={knn}) ...");
-    let (graph, fuzzy) = legume_numeric::matrix::knn_graph::KnnGraph::from_rows_fuzzy(
-        rows,
-        legume_numeric::matrix::knn_graph::KnnGraphArgs {
-            knn: others(knn),
-            block_size,
-            reciprocal: false,
-        },
-    )?;
-
-    let edges: Vec<(usize, usize, f32)> = graph
-        .edges
-        .par_iter()
-        .zip(fuzzy.par_iter())
-        .filter_map(|(&(i, j), &w)| (w > 0.0).then_some((i, j, w)))
-        .collect();
-    info!(
-        "Cell-cell fuzzy kNN: {} cells, {} edges (mean deg = {:.1})",
-        n,
-        edges.len(),
-        2.0 * edges.len() as f32 / n.max(1) as f32
-    );
-    Ok(edges)
 }
 
 /// Run cell-level UMAP SGD from `coords`, mutating them in place, with

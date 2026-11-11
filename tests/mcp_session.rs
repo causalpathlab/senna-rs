@@ -180,7 +180,7 @@ fn predict_layout_and_update_run_on_a_fit_and_are_recorded() {
             ),
             (
                 "run_layout",
-                json!({"run": project.join("fit.senna.json"), "method": "umap", "min_dist": 0.5, "args": ["--umap-knn", "5"]}),
+                json!({"run": project.join("fit.senna.json"), "method": "umap", "min_dist": 0.5, "args": ["--knn", "5"]}),
             ),
             (
                 "run_update",

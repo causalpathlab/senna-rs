@@ -1352,8 +1352,8 @@ fn specs() -> Vec<ToolSpec> {
             "run_layout",
             "Lay out a run again with the settings given, as `senna layout {method} --from \
              {run} {args}`, replacing that method's layout in the run (e.g. umap with \
-             min_dist 0.5 and [\"--umap-knn\", \"30\"]; phate or tsne with \
-             [\"--knn\", \"30\", \"--similarity-threshold\", \"0.2\"]). Always runs. Then \
+             min_dist 0.5 and [\"--knn\", \"30\"]; phate or tsne with \
+             [\"--knn\", \"30\", \"--n-landmarks\", \"300\"]). Always runs. Then \
              view_open the run with that map to see it.",
             json!({
                 "type": "object",
