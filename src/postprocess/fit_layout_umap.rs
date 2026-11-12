@@ -561,9 +561,10 @@ mod tests {
         let (cells, _) = two_groups(per, 0);
         // A group's median distance to its centroid, over the distance
         // between the two centroids.
-        let looseness = |min_dist: f32| {
+        let looseness_at = |min_dist: f32, seed: u64| {
             let p = TumapParams {
                 kernel: kernel_ab(min_dist, 1.0),
+                seed,
                 ..params()
             };
             let xy = tumap_on_columns(&cells, &p).unwrap();
@@ -581,6 +582,10 @@ mod tests {
             d.sort_by(f32::total_cmp);
             d[per / 2] / dist(c0, centroid(1))
         };
+        // The parallel SGD is not deterministic, so one run's ratio varies
+        // widely; the mean over a few seeds is stable.
+        let looseness =
+            |min_dist: f32| (1..=3).map(|s| looseness_at(min_dist, s)).sum::<f32>() / 3.0;
         let (tight, loose) = (looseness(0.0), looseness(0.9));
         assert!(
             loose > 1.5 * tight,

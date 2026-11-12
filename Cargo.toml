@@ -1,6 +1,6 @@
 [package]
 name = "senna-rs"
-version = "0.24.7"
+version = "0.25.0"
 edition = "2021"
 rust-version = "1.91"
 license = "MIT"
@@ -52,7 +52,7 @@ slow-tests = []
 [dependencies]
 mimalloc = "0.1"
 data-beans = { version = "0.10", default-features = false, features = ["aux", "alg"] }
-legume-numeric = { version = "0.9", features = ["matrix", "param", "candle", "mcmc"] }
+legume-numeric = { version = "0.9.8", features = ["matrix", "param", "candle", "mcmc"] }
 genomic-data = { version = "0.6", package = "legume-genomic-types" }
 graph-embedding-util = { version = "0.10", package = "legume-graph-embedding" }
 hsblock = { version = "0.2", package = "hsblock-rs" }
@@ -105,6 +105,3 @@ rustix = { version = "1", features = ["fs", "termios"] }
 [profile.test]
 opt-level = 2
 debug = "line-tables-only"
-
-[patch.crates-io]
-legume-numeric = { git = "https://github.com/causalpathlab/legume-numeric", branch = "ypp/shared-graph" }
