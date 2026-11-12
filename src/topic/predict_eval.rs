@@ -198,7 +198,7 @@ pub(crate) enum Reconstruction<'a> {
     Topic {
         exp_beta_dk: Mat,
         theta_nk: &'a Mat,
-        delta_db: Option<&'a Mat>,
+        delta_db: Option<&'a crate::predict::delta::ScoringDelta>,
     },
     /// `exp(b + ρ·θ)`, the log-linear embedding `bge` fits.
     Embedding {
@@ -248,8 +248,16 @@ impl Reconstruction<'_> {
         }
     }
 
+    /// The δ the rate is scored under, when it has one.
+    pub(crate) fn scoring_delta(&self) -> Option<&crate::predict::delta::ScoringDelta> {
+        match self {
+            Self::Topic { delta_db, .. } => *delta_db,
+            Self::Embedding { .. } => None,
+        }
+    }
+
     /// Expected profile for cells `lb..lb+n`, as `[D × n]`.
-    fn block(&self, data_vec: &SparseIoVec, lb: usize, n: usize) -> Mat {
+    fn block(&self, lb: usize, n: usize) -> Mat {
         let theta = match self {
             Self::Topic { theta_nk, .. } => theta_nk.rows(lb, n).into_owned(),
             Self::Embedding { theta_nh, .. } => theta_nh.rows(lb, n).into_owned(),
@@ -260,13 +268,7 @@ impl Reconstruction<'_> {
             ..
         } = self
         {
-            let batch_ids = data_vec.get_batch_membership(lb..lb + n);
-            for (j, &b) in batch_ids.iter().enumerate() {
-                let mut col = rate.column_mut(j);
-                col.component_mul_assign(&delta.column(b));
-                let z = col.sum().max(1e-12);
-                col /= z;
-            }
+            delta.apply(&mut rate, lb);
         }
         rate
     }
@@ -392,6 +394,8 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
     let d_train = recon.n_features();
     let ceiling_comp =
         empirical_composition(data_vec, gene_remap, &eval_genes, d_train, minibatch_size)?;
+    // A null read off the held-out cells already carries their batches.
+    let null_is_batch_free = null_comp.is_some();
     let null_comp = null_comp.unwrap_or_else(|| ceiling_comp.clone());
     let ntot = data_vec.num_columns();
     let mut per_gene_store = PredictEval::new(eval_genes, keep_per_gene);
@@ -411,30 +415,44 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
     // the run, so recomputing `ln(p/z)` inside the cell loop spent two divides
     // and two transcendentals per (cell, expressed gene) on a value that never
     // changes. Indexed by position within `eval.genes()`.
+    let scored_genes = per_gene_store.genes().to_vec();
     let log_table = |composition: &[f32]| -> Vec<f64> {
         let at = |g: usize| composition.get(g).copied().unwrap_or(0.0);
-        let z = per_gene_store
-            .genes()
-            .iter()
-            .map(|&g| at(g))
-            .sum::<f32>()
-            .max(1e-12);
-        per_gene_store
-            .genes()
+        let z = scored_genes.iter().map(|&g| at(g)).sum::<f32>().max(1e-12);
+        scored_genes
             .iter()
             .map(|&g| {
                 f64::from((at(g) / z).max(legume_numeric::matrix::agreement::PROB_FLOOR)).ln()
             })
             .collect()
     };
-    let log_null = log_table(&null_comp);
+    // The null gets the batch term the model got: one table per group of
+    // cells that share a δ, and one group in all when there is no δ. A
+    // group's table is formed for the blocks that hold its cells and no
+    // longer, so the tables held never outnumber a block's groups.
+    let scoring_delta = recon.scoring_delta();
+    let group_of = |cell: usize| scoring_delta.map_or(0, |d| d.group(cell));
     let log_ceiling = log_table(&ceiling_comp);
-    let scored_genes = per_gene_store.genes().to_vec();
+    let mut group_null: rustc_hash::FxHashMap<usize, Vec<f64>> = rustc_hash::FxHashMap::default();
 
     for (lb, ub) in create_jobs(ntot, 0, Some(minibatch_size)) {
         let csc = data_vec.read_columns_csc(lb..ub)?;
         let n_block = csc.ncols();
-        let recon_dn = recon.block(data_vec, lb, n_block);
+        let recon_dn = recon.block(lb, n_block);
+        let here: rustc_hash::FxHashSet<usize> = (lb..lb + n_block).map(group_of).collect();
+        group_null.retain(|g, _| here.contains(g));
+        for g in here {
+            group_null.entry(g).or_insert_with(|| match scoring_delta {
+                Some(delta) => log_table(&delta.null_composition(
+                    g,
+                    &null_comp,
+                    &scored_genes,
+                    null_is_batch_free,
+                )),
+                None => log_table(&null_comp),
+            });
+        }
+        let group_null = &group_null;
 
         // Scored in parallel across the block. Each cell is independent and the
         // dominant term is two rank sorts over the evaluation axis — which by
@@ -463,6 +481,7 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
                     .sum::<f32>()
                     .max(1e-12);
 
+                let log_null = &group_null[&group_of(lb + j)];
                 let (mut count, mut model, mut null, mut ceiling) = (0f64, 0f64, 0f64, 0f64);
                 for (slot, &g) in scored_genes.iter().enumerate() {
                     let x = f64::from(obs[g]);

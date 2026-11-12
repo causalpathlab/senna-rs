@@ -12,9 +12,11 @@
 //! cell reads its null off its own pseudobulk or batch. Nothing is written.
 //!
 //! This is the encoder's input only. Scoring the held-out counts needs the
-//! per-batch rate multiplier from the encoded cells, which
-//! `predict::delta::delta_from_theta` gives; the two are kept apart.
+//! per-batch rate multiplier, which `predict::delta::scoring_delta` gives
+//! (the trained one, or one cross-fitted from the encoded cells); the two
+//! are kept apart.
 
+use crate::predict::delta::ScoringSpec;
 use crate::refine_weighting::CollapseArgs;
 use crate::topic::common::{collapse_loaded_finest, expand_delta_for_block, ProjectSettings};
 use crate::topic::eval::GeneRemap;
@@ -118,20 +120,23 @@ impl RecordedFit {
 #[derive(Clone, Copy)]
 pub(crate) enum HeldOut<'a> {
     /// Neither the encoder's null nor the scoring δ. `probe` wants this:
-    /// both are fitted from the query, and would absorb the novelty it
-    /// looks for.
+    /// fitted from the query, they would absorb the novelty it looks for.
     Ignore,
     /// The scoring δ only (`--bulk`: whole samples are not cells to
     /// collapse into pseudobulks).
-    Delta,
+    Delta(ScoringSpec),
     /// The encoder's null, built with the fit's recorded settings, and the
     /// scoring δ.
-    NullAndDelta(&'a RecordedFit),
+    NullAndDelta(&'a RecordedFit, ScoringSpec),
 }
 
 impl HeldOut<'_> {
-    pub(crate) fn wants_delta(self) -> bool {
-        !matches!(self, HeldOut::Ignore)
+    /// How to get the scoring δ, or `None` for no δ.
+    pub(crate) fn scoring(self) -> Option<ScoringSpec> {
+        match self {
+            HeldOut::Ignore => None,
+            HeldOut::Delta(spec) | HeldOut::NullAndDelta(_, spec) => Some(spec),
+        }
     }
 }
 
@@ -177,7 +182,7 @@ pub(crate) fn encoder_null(
     coarsening: Option<&FeatureCoarsening>,
     dev: &Device,
 ) -> anyhow::Result<Option<EncoderNull>> {
-    let HeldOut::NullAndDelta(fit) = held_out else {
+    let HeldOut::NullAndDelta(fit, _) = held_out else {
         return Ok(None);
     };
     if !model_has_null(model) {

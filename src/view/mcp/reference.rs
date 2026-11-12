@@ -114,7 +114,10 @@ pub(super) fn specs() -> Vec<ToolSpec> {
              {data} --model {model} -o {out}`: each cell is placed in the model's latent and \
              pools the counts of its nearest reference cells (the model's own training cells \
              unless reference names another run). Writes {out}.imputed.parquet (new cells × \
-             reference features), returned. An out whose table exists is not run again.",
+             reference features), returned. Batches adjust only the query's latent (batch_files, \
+             two or more batches); the imputed values are the neighbours' raw reference counts \
+             and carry their batch effects and depths. An out whose table exists is not run \
+             again.",
             json!({
                 "type": "object",
                 "properties": {
@@ -122,7 +125,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "data": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "New data files (.zarr, .h5)"},
                     "out": {"type": "string", "description": "Output prefix [default: today's results folder, by data file and model]"},
                     "reference": {"type": "string", "description": "Run whose training cells are the reference (--reference) [default: the model's]"},
-                    "batch_files": {"type": "array", "items": {"type": "string"}, "description": "Batch membership of the data (-b), one per data file"},
+                    "batch_files": {"type": "array", "items": {"type": "string"}, "description": "Batch membership of the data (-b), one per data file; for the query's latent only"},
                     "knn": {"type": "integer", "minimum": 1, "description": "Reference neighbours pooled per new cell (--knn) [default: 25]"},
                     "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (impute) lists them"},
                     "background": job,
@@ -137,8 +140,10 @@ pub(super) fn specs() -> Vec<ToolSpec> {
              as `senna deconvolve --from {from} --bulk {bulk} -o {out}` (a Gibbs sampler over \
              measured archetype profiles). Writes {out}.fractions.tsv (returned as fractions; \
              mRNA shares, not cell shares), {out}.fractions_ci.tsv, {out}.abundance.tsv, \
-             {out}.residual.tsv and per-type expression. An out whose fractions exist is not \
-             run again.",
+             {out}.residual.tsv and per-type expression. No batch effect is modelled: \
+             reference profiles are raw sums with batches ignored, and nothing absorbs a \
+             bulk-versus-single-cell platform shift. An out whose fractions exist is not run \
+             again.",
             json!({
                 "type": "object",
                 "properties": {

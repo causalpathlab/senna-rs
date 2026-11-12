@@ -48,6 +48,7 @@ struct PredictCall {
     #[serde(default)]
     null_from: Vec<String>,
     eval_features: Option<String>,
+    scoring_delta: Option<String>,
     #[serde(default)]
     latent: Latent,
     refine_steps: Option<usize>,
@@ -85,6 +86,7 @@ fn predict_task(a: &PredictCall, out: &str) -> Result<Task> {
             .each("-b", &a.batch_files)
             .many("--null-from", &a.null_from)
             .flag("--eval-features", a.eval_features.as_deref())
+            .flag("--scoring-delta", a.scoring_delta.as_deref())
             .switch("--decoder-only", a.latent == Latent::Decoder)
             .flag("--refine-steps", steps)
             .rest(&a.args),
@@ -267,7 +269,11 @@ pub(super) fn specs() -> Vec<ToolSpec> {
              projection onto its frozen dictionary, and a bge or simba run by projecting each \
              cell onto its frozen gene table. A model trained with batches needs the held-out \
              cells' batches (batch_files, one per data file) to give its encoder the null it \
-             was trained with. An out with a prediction is not written over: its \
+             was trained with (rebuilt from those cells; it needs two or more batches). The \
+             score of a topic or masked run takes a per-batch effect delta as scoring_delta \
+             says; by default the trained one for a training batch and a cross-fitted one \
+             for other batches, never one fitted on the counts it scores, and the null \
+             takes the same batch term. Other runs are scored with no delta. An out with a prediction is not written over: its \
              summary is returned instead, so a background prediction's is read by calling \
              again with its out.",
             json!({
@@ -279,6 +285,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "out": {"type": "string", "description": "Output prefix [default: today's results folder, by data file and model]"},
                     "batch_files": files("Batch membership of the data (-b), one file per data file"),
                     "null_from": files("Training data whose gene composition is the null (--null-from); pass the train half"),
+                    "scoring_delta": {"enum": ["auto", "train", "crossfit", "none", "heldout"], "description": "Per-batch delta the score is taken under (--scoring-delta). auto: trained delta for a batch named like a training batch, cross-fitted for other batches when there are two or more, none for a model trained without batches; train: trained only, refuses a new batch; crossfit: each fold of a batch under the delta of its other folds; none: the batch-free rate; heldout: fitted on the scored cells, optimistic [default: auto]"},
                     "eval_features": {"type": "string", "description": "Score on these features only, one name per line (--eval-features); the same file for every model compared"},
                     "latent": {"enum": ["encoder", "refine", "decoder"], "description": "encoder: the encoder's pass, or the projection; refine: then refine_steps decoder-side steps (--refine-steps); decoder: no encoder, fitted to the frozen decoder (--decoder-only). refine and decoder are for topic runs [default: encoder]"},
                     "refine_steps": {"type": "integer", "minimum": 1, "description": "Steps for refine (required) or decoder [decoder default: 100]"},

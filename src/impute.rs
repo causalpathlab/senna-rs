@@ -88,7 +88,7 @@ pub struct ImputeArgs {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Per-file batch labels for the reference data"
+        help = "Per-file batch labels for the reference data (checked; not used by the imputation)"
     )]
     pub reference_batch_files: Option<Vec<Box<str>>>,
 
@@ -96,7 +96,7 @@ pub struct ImputeArgs {
         short,
         long,
         value_delimiter = ',',
-        help = "Per-file batch labels for --data-files"
+        help = "Per-file batch labels for --data-files (the query encoder's null; imputed values stay unadjusted)"
     )]
     pub batch_files: Option<Vec<Box<str>>>,
 
@@ -452,6 +452,8 @@ fn predict_matching_latents(
         batch_files: args.batch_files.clone(),
         minibatch_size: args.minibatch_size,
         block_size: args.block_size,
+        scoring_delta: crate::predict::delta::ScoringDeltaMode::Auto,
+        scoring_folds: crate::predict::delta::DEFAULT_SCORING_FOLDS,
         preload_data: args.preload_data,
         device: args.device.clone(),
         device_no: args.device_no,

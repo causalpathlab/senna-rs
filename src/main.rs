@@ -79,6 +79,9 @@ mod resolve_topics;
 #[cfg(feature = "view")]
 mod run;
 #[cfg(test)]
+#[path = "tests/scoring_delta.rs"]
+mod scoring_delta_tests;
+#[cfg(test)]
 #[path = "tests/seed_replay.rs"]
 mod seed_replay_tests;
 #[cfg(all(test, feature = "view"))]
@@ -599,7 +602,20 @@ enum Commands {
                       cells are collapsed with the model's own settings, and each cell\n\
                       reads its pseudobulk's fold (--adj-method residual) or its batch's\n\
                       delta (batch). A model trained without batches gets none.\n\
-                      Scoring takes each batch's delta from the encoded cells.\n\
+\n\
+                      BATCH EFFECTS. Two things read the batches (-b), separately:\n\
+                      \x20 the latent    the encoder gets a null rebuilt from the held-out cells\n\
+                      \x20               themselves. It needs two or more held-out batches; with one\n\
+                      \x20               batch (or no -b) the encoder gets none. The trained delta\n\
+                      \x20               is not used here.\n\
+                      \x20 the score     --scoring-delta, default `auto`: the trained delta\n\
+                      \x20               ({model}.delta.parquet) for a held-out batch named like a\n\
+                      \x20               training batch; a cross-fitted delta for other batches when\n\
+                      \x20               there are two or more; none for a model trained without\n\
+                      \x20               batches. A count is never scored under a delta it helped\n\
+                      \x20               fit, and the null takes the same batch term.\n\
+                      The score's delta is for topic and masked models; vae, bge, simba and svd\n\
+                      are scored with no delta.\n\
                       \n\
                       Latent modes are encoder-only (the default), encoder+refine,\n\
                       and decoder-only.\n\
@@ -612,10 +628,11 @@ enum Commands {
                       \x20    across genes.\n\
                       \x20 eval_count                    counts on the scored genes\n\
                       \x20 eval_llik_per_count           multinomial nats/count\n\
-                      \x20 eval_null_llik_per_count      the same, for a null that gives\n\
-                      \x20    every cell the test half's OBSERVED composition.\n\
-                      \x20    It does not depend on the model, so every arm scored\n\
-                      \x20    on the same test half and genes shares one floor.\n\
+                      \x20 eval_null_llik_per_count      the same, for a null with no\n\
+                      \x20    cell-specific information: the --null-from composition\n\
+                      \x20    (the test half's own without it), given the batch term\n\
+                      \x20    the model's rate got. Arms scored on the same test half\n\
+                      \x20    and genes under one --scoring-delta share one floor.\n\
                       The last four are the comparable ones. Rank methods on\n\
                       eval_llik_per_count MINUS eval_null_llik_per_count: the absolute\n\
                       value is set by how many genes the multinomial spreads over, so\n\
@@ -736,6 +753,15 @@ enum Commands {
                       Pass --reference (or the explicit --reference-* flags)\n\
                       to impute against a different reference.\n\
                       \n\
+                      BATCH EFFECTS. Only the matching latent is batch-adjusted, and\n\
+                      only on the query side: with -b and two or more query batches the\n\
+                      encoder gets a null rebuilt from the query (as in `senna predict`);\n\
+                      an svd model is projected with no batch term. The imputed values\n\
+                      are NOT adjusted: they are weighted sums of the neighbours' raw\n\
+                      reference counts, so they carry those cells' batch effects and\n\
+                      depths, not the query's. No delta is divided out or put back.\n\
+                      --reference-batch-files is checked and otherwise unused.\n\
+                      \n\
                       Writes {out}.imputed.parquet (N_new × n_ref_features)."
     )]
     Impute(ImputeArgs),
@@ -796,7 +822,13 @@ enum Commands {
                       {out}.expression/*.parquet, and component diagnostics.\n\
                       \n\
                       Reported fractions are mRNA shares, not cell shares, and their\n\
-                      range is compressed. See senna/docs/deconvolve.md for the limits."
+                      range is compressed. See senna/docs/deconvolve.md for the limits.\n\
+                      \n\
+                      BATCH EFFECTS. None are modelled. Archetype profiles are raw\n\
+                      count sums over the reference cells with their batches ignored\n\
+                      (no delta is divided out), and the likelihood has no per-gene\n\
+                      factor between the bulk and the single-cell reference, so a\n\
+                      platform or cohort shift goes into the fractions."
     )]
     Deconvolve(DeconvolveArgs),
 
