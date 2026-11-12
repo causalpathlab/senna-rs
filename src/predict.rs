@@ -152,6 +152,49 @@ pub struct PredictArgs {
 
     #[arg(
         long,
+        value_enum,
+        default_value_t = delta::ScoringDeltaMode::Auto,
+        value_name = "MODE",
+        help = "Where the per-batch δ the held-out score is taken under comes from",
+        long_help = "The topic families score held-out counts against δ_{g,b}·Σ_k θ_k·exp(β_gk),\n\
+                     renormalised per cell. This picks δ.\n\
+                     \n\
+                     auto      the trained δ ({model}.delta.parquet) for a held-out batch named\n\
+                     \x20         like a training batch; a cross-fitted δ for any other batch\n\
+                     \x20         when there are two or more held-out batches; no δ at all\n\
+                     \x20         for a model trained without batches\n\
+                     train     the trained δ only; every held-out batch must be a training batch\n\
+                     crossfit  each batch's cells are dealt to --scoring-folds folds, and a\n\
+                     \x20         fold is scored under the δ fitted on the batch's other folds\n\
+                     none      no δ: the batch-free rate θβ\n\
+                     heldout   δ fitted on the very cells it scores. In-sample (genes × batches\n\
+                     \x20         free parameters), so the score is optimistic; kept for comparison\n\
+                     \n\
+                     No count is scored under a δ it helped fit, except with `heldout`.\n\
+                     The null gets the same batch term: δ·null under a trained δ (with\n\
+                     --null-from), and the gene composition of the cells δ was fitted on\n\
+                     otherwise. δ reads every mapped gene, the ones --ablate-features hides\n\
+                     included.\n\
+                     \n\
+                     A fitted δ is a batch's whole observed-to-predicted ratio per gene, so\n\
+                     it also takes up what the dictionary misses in that batch; the trained\n\
+                     δ is a contrast between batches. Compare scores taken under one mode.\n\
+                     --residual-include-delta divides by one δ per batch: the trained one,\n\
+                     or the batch's own fit."
+    )]
+    pub(crate) scoring_delta: delta::ScoringDeltaMode,
+
+    #[arg(
+        long,
+        default_value_t = delta::DEFAULT_SCORING_FOLDS,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(2..),
+        value_name = "K",
+        help = "Folds per batch of the cross-fitted scoring δ (at least 2)"
+    )]
+    pub(crate) scoring_folds: usize,
+
+    #[arg(
+        long,
         help = "Load all columns into memory before evaluation",
         hide = true
     )]
@@ -393,6 +436,14 @@ pub struct PredictArgs {
 }
 
 impl PredictArgs {
+    /// How this run gets its scoring δ.
+    fn scoring_spec(&self) -> delta::ScoringSpec {
+        delta::ScoringSpec {
+            mode: self.scoring_delta,
+            folds: self.scoring_folds,
+        }
+    }
+
     /// The compute device this run asks for, resolved once.
     fn resolve_device(&self) -> anyhow::Result<Device> {
         self.device.to_device(self.device_no)
@@ -848,7 +899,7 @@ fn resolve_mode(args: &PredictArgs) -> LatentMode {
 }
 
 pub(crate) mod bulk;
-mod delta;
+pub(crate) mod delta;
 pub(crate) mod null;
 
 #[cfg(test)]
@@ -899,6 +950,23 @@ fn build_remap(
         info!("Genes match training — no remapping needed");
         Ok(None)
     }
+}
+
+/// The remap the observed counts are read through to score them: the query's
+/// rows on the model's axis WITHOUT the ablation. The encoder's remap has the
+/// hidden genes pointing at `None`, which is right for its input and wrong
+/// for anything that reads the scored counts (the scoring δ, the agreement
+/// pass), since the scored genes are the hidden ones.
+fn scoring_remap(
+    training_genes: &[Box<str>],
+    new_genes: &[Box<str>],
+    opts: &QueryNameOpts,
+) -> anyhow::Result<Option<GeneRemap>> {
+    let unhidden = QueryNameOpts {
+        hide: None,
+        ..opts.clone()
+    };
+    build_remap(training_genes, new_genes, &unhidden)
 }
 
 /// Aggregate a `[D_full]` per-gene mean to `[D_coarse]` so the divisor
@@ -1018,9 +1086,9 @@ pub(crate) struct DenseScored {
     pub total: Vec<f32>,
     pub gene_remap: Option<GeneRemap>,
     pub beta_dk: Mat,
-    /// The scoring δ from the encoded cells, so the caller can regress it out
+    /// The δ the cells are scored under, so the caller can regress it out
     /// when writing a residual backend.
-    pub delta_db: Option<Mat>,
+    pub delta_db: Option<delta::ScoringDelta>,
 }
 
 pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<DenseScored> {
@@ -1064,7 +1132,7 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
     let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
     // The encoder's null, built the way training built it; the scoring δ
-    // comes from the encoded cells afterwards.
+    // is got afterwards, as `a.scoring` says.
     let null = null::encoder_null(
         a.held_out,
         a.model,
@@ -1108,21 +1176,38 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
         null: null.as_ref(),
         gene_remap: gene_remap.as_ref(),
         coarsening: coarsening.as_ref(),
-        beta_dk: &beta_dk,
         dev,
         minibatch_size: a.minibatch_size,
-        delta_block: a.held_out.wants_delta().then_some(a.block_size),
         mode: a.mode,
         refine_config: a.refine_config,
     };
 
-    let (z_nk, llik, total, delta_final) = match decoder_name {
+    let (z_nk, llik, total) = match decoder_name {
         "multinom" => predict_dense_with_decoder::<MultinomTopicDecoder>(inputs)?,
         "nb" => predict_dense_with_decoder::<NbTopicDecoder>(inputs)?,
         name if name == NBMIXTURE_NAME => {
             predict_dense_with_decoder::<NbMixtureTopicDecoder>(inputs)?
         }
         other => anyhow::bail!("unsupported decoder type in metadata: {other}"),
+    };
+
+    // The scoring δ: the caller reconstructs with it and regresses it out of
+    // the residual backend.
+    let delta_final = if let Some(spec) = a.held_out.scoring() {
+        let score_remap = scoring_remap(&training_genes, &new_genes, a.query_name_opts)?;
+        delta::scoring_delta(&delta::ScoringDeltaArgs {
+            spec,
+            model: a.model,
+            training_genes: &training_genes,
+            data_vec: &data_vec,
+            theta_nk: &z_nk.map(f32::exp),
+            gene_remap: score_remap.as_ref(),
+            beta_dk: &beta_dk,
+            phi: delta::nb_dispersion(a.model, metadata)?.as_deref(),
+            block_size: a.block_size,
+        })?
+    } else {
+        None
     };
 
     Ok(DenseScored {
@@ -1147,17 +1232,14 @@ struct DensePredictInputs<'a> {
     null: Option<&'a null::EncoderNull>,
     gene_remap: Option<&'a GeneRemap>,
     coarsening: Option<&'a FeatureCoarsening>,
-    beta_dk: &'a Mat,
     dev: &'a Device,
     minibatch_size: usize,
-    /// The scoring δ's block size, or `None` for no δ.
-    delta_block: Option<Option<usize>>,
     mode: LatentMode,
     refine_config: &'a TopicRefinementConfig,
 }
 
-/// `(log θ [N×K], per-cell llik, per-cell total, finalized per-batch δ)`.
-type DensePredictOut = (Mat, Vec<f32>, Vec<f32>, Option<Mat>);
+/// `(log θ [N×K], per-cell llik, per-cell total)`.
+type DensePredictOut = (Mat, Vec<f32>, Vec<f32>);
 
 fn predict_dense_with_decoder<Dec>(
     inputs: DensePredictInputs<'_>,
@@ -1175,10 +1257,8 @@ where
         null,
         gene_remap,
         coarsening,
-        beta_dk,
         dev,
         minibatch_size,
-        delta_block,
         mode,
         refine_config,
     } = inputs;
@@ -1254,20 +1334,7 @@ where
             })
         },
     )?;
-    // The scoring δ, from the encoded cells: the caller reconstructs and
-    // regresses it out of the residual backend with it.
-    let delta_db = match delta_block {
-        Some(block) => delta::delta_from_theta(
-            data_vec,
-            &z_nk.map(f32::exp),
-            gene_remap,
-            beta_dk,
-            delta::nb_dispersion(model_prefix, metadata)?.as_deref(),
-            block,
-        )?,
-        None => None,
-    };
-    Ok((z_nk, llik, total, delta_db))
+    Ok((z_nk, llik, total))
 }
 
 struct PredictBlockDenseArgs<'a, Dec> {
@@ -1424,18 +1491,6 @@ fn predict_masked(
         &scored.total,
         agreement.as_ref(),
     )?;
-    if let Some(delta) = scored.delta_db.as_ref() {
-        // The dense path writes δ into the residual backend; the masked path has no
-        // residual output, so this line is the only record of the δ the score was
-        // taken under. A mean far from 1 says the query batches sit well off the
-        // training marginal: read the score with that in mind.
-        info!(
-            "held-out δ: {} genes × {} batches, mean {:.3}",
-            delta.nrows(),
-            delta.ncols(),
-            delta.iter().sum::<f32>() / (delta.nrows() * delta.ncols()).max(1) as f32
-        );
-    }
     info!(
         "predict complete ({}, encoder-only latent + full-cell predictive llik)",
         masked_head_label(head)
@@ -1456,9 +1511,8 @@ pub(crate) struct MaskedScored {
     /// Query→training gene mapping used for the scores; `probe` reuses it for
     /// the influence/gradient pass.
     pub gene_remap: Option<GeneRemap>,
-    /// Per-batch δ `[D_train, B]` the score was taken under, from the encoded
-    /// cells; `None` for a single-batch query or when none was asked for.
-    pub delta_db: Option<Mat>,
+    /// The δ the score was taken under; `None` when it took none.
+    pub delta_db: Option<delta::ScoringDelta>,
 }
 
 pub(crate) struct MaskedScoreArgs<'a> {
@@ -1619,17 +1673,21 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 
     // The stored latent stays raw (`z` for the Gaussian head); scoring needs
     // proportions, so convert per the head rather than assuming `exp`.
-    // The scoring δ, from the encoded cells.
+    // The scoring δ, as `a.scoring` says.
     let theta_nk = crate::topic::model_metadata::latent_to_theta(&z_nk, a.head);
-    let delta_db = if a.held_out.wants_delta() {
-        delta::delta_from_theta(
-            &data_vec,
-            &theta_nk,
-            gene_remap.as_ref(),
-            &beta_dk,
-            delta::nb_dispersion(a.model, a.metadata)?.as_deref(),
-            a.block_size,
-        )?
+    let delta_db = if let Some(spec) = a.held_out.scoring() {
+        let score_remap = scoring_remap(&training_genes, &new_genes, a.query_name_opts)?;
+        delta::scoring_delta(&delta::ScoringDeltaArgs {
+            spec,
+            model: a.model,
+            training_genes: &training_genes,
+            data_vec: &data_vec,
+            theta_nk: &theta_nk,
+            gene_remap: score_remap.as_ref(),
+            beta_dk: &beta_dk,
+            phi: delta::nb_dispersion(a.model, a.metadata)?.as_deref(),
+            block_size: a.block_size,
+        })?
     } else {
         None
     };
@@ -1672,15 +1730,15 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 /// simplex heads reach it with `exp(log θ)` and the Gaussian masked-VAE head
 /// with `softmax(z)`. See `crate::topic::model_metadata::latent_to_theta`.
 ///
-/// With a per-batch `delta_db` the composition is `δ_{d,b} · Σ_k θ_k·exp(β_dk)`,
+/// With a scoring δ the composition is `δ_{d,g(j)} · Σ_k θ_k·exp(β_dk)`,
 /// renormalized over genes per cell — the multinomial analogue of the NB head's
-/// `μ = θβ · residual · lib`, so a batch's held-out score is taken against the same
-/// batch-adjusted rate its latent was encoded from.
+/// `μ = θβ · residual · lib`. Which δ a cell reads is `delta::ScoringDelta`'s
+/// business: the trained one, or one fitted on other cells of its batch.
 fn predictive_llik_masked(
     data_vec: &SparseIoVec,
     theta_nk: &Mat,
     beta_dk: &Mat,
-    delta_db: Option<&Mat>,
+    delta_db: Option<&delta::ScoringDelta>,
     gene_remap: Option<&GeneRemap>,
     minibatch_size: usize,
 ) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
@@ -1698,13 +1756,7 @@ fn predictive_llik_masked(
             let theta_kn = theta_nk.rows(lb, n_block).transpose();
             let mut recon_dn = &exp_beta_dk * theta_kn; // [D_train, n_block]
             if let Some(delta) = delta_db {
-                let batch_ids = data_vec.get_batch_membership(lb..ub);
-                for (j, &b) in batch_ids.iter().enumerate() {
-                    let mut col = recon_dn.column_mut(j);
-                    col.component_mul_assign(&delta.column(b));
-                    let z = col.sum().max(1e-12);
-                    col /= z;
-                }
+                delta.apply(&mut recon_dn, lb);
             }
 
             let mut llik = vec![0f32; n_block];
@@ -1847,9 +1899,9 @@ pub(crate) struct VaeScored {
 /// to collapse into pseudobulks.
 fn held_out<'a>(args: &PredictArgs, fit: &'a null::RecordedFit) -> null::HeldOut<'a> {
     if args.bulk.is_empty() {
-        null::HeldOut::NullAndDelta(fit)
+        null::HeldOut::NullAndDelta(fit, args.scoring_spec())
     } else {
-        null::HeldOut::Delta
+        null::HeldOut::Delta(args.scoring_spec())
     }
 }
 
@@ -2162,7 +2214,7 @@ struct FinalizePredict<'a> {
     llik: &'a [f32],
     total: &'a [f32],
     beta_dk: &'a Mat,
-    delta_db: Option<&'a Mat>,
+    delta_db: Option<&'a delta::ScoringDelta>,
     gene_remap: Option<&'a GeneRemap>,
 }
 
@@ -2218,10 +2270,13 @@ fn evaluate_agreement(a: AgreementInputs<'_>) -> anyhow::Result<Option<EvalOutco
     // counts through it would read the scored genes as zero and grade every model
     // against a blank. Rebuilding costs one name-matching pass and removes the
     // chance of a caller handing over the encoder's view by mistake.
-    let mut scoring_opts = a.args.query_name_opts()?;
-    scoring_opts.hide = None;
-    let score_remap = build_remap(a.training_genes, &a.data_vec.row_names()?, &scoring_opts)?;
+    let score_remap = scoring_remap(
+        a.training_genes,
+        &a.data_vec.row_names()?,
+        &a.args.query_name_opts()?,
+    )?;
 
+    let delta_label = a.recon.scoring_delta().map_or("none", |d| d.label());
     let mut out = evaluate_predictions(EvalArgs {
         data_vec: a.data_vec,
         null_comp: training_marginal(a.args, a.training_genes, &eval_genes)?,
@@ -2232,7 +2287,10 @@ fn evaluate_agreement(a: AgreementInputs<'_>) -> anyhow::Result<Option<EvalOutco
         keep_per_gene: restrict.is_some(),
     })?;
     out.train_gene_names = a.training_genes.to_vec();
-    info!("Agreement: {}", out.summary().line());
+    info!(
+        "Agreement (scoring δ: {delta_label}; the null takes the same batch term): {}",
+        out.summary().line()
+    );
     Ok(Some(out))
 }
 
@@ -2444,7 +2502,7 @@ fn write_residual_backend(
     data_vec: &SparseIoVec,
     z_nk: &Mat,
     beta_dk: &Mat,
-    delta_db: Option<&Mat>,
+    delta_db: Option<&delta::ScoringDelta>,
     gene_remap: Option<&GeneRemap>,
 ) -> anyhow::Result<()> {
     let Some(path) = args.residual_out.as_deref() else {
@@ -2454,6 +2512,12 @@ fn write_residual_backend(
     let threshold = args.residual_threshold;
     // δ to fold into μ (None ⇒ topics-only denominator).
     let delta = args.residual_include_delta.then_some(delta_db).flatten();
+    if args.residual_include_delta && delta.is_none() && data_vec.num_batches() > 1 {
+        log::warn!(
+            "--residual-include-delta: this run has no scoring δ (see --scoring-delta), so the \
+             residual keeps its batch effects; `crossfit` or `heldout` fits one from the cells"
+        );
+    }
 
     let kk = beta_dk.ncols();
     anyhow::ensure!(
@@ -2490,7 +2554,6 @@ fn write_residual_backend(
 
             // Scatter pred onto the held-out gene axis as the per-cell
             // denominator μ_dn [D_test, n_block]; optionally weight by δ.
-            let batch_ids = delta.map(|_| data_vec.get_batch_membership(lb..ub));
             let mut mu_dn = Mat::zeros(d_test, n_block);
             for jloc in 0..n_block {
                 for &row_new in csc.col(jloc).row_indices() {
@@ -2502,7 +2565,7 @@ fn write_residual_backend(
                     };
                     let mut mu = pred_dn[(row_train, jloc)];
                     if let Some(delta) = delta {
-                        mu *= delta[(row_train, batch_ids.as_ref().unwrap()[jloc])];
+                        mu *= delta.of_batch(row_train, lb + jloc);
                     }
                     mu_dn[(row_new, jloc)] = mu;
                 }

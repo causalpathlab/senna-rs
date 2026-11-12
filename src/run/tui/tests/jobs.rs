@@ -84,12 +84,20 @@ fn a_job_whose_result_exists_does_not_run() {
 #[cfg(unix)]
 #[test]
 fn a_stopped_queue_is_waited_for_and_its_fit_killed() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let slow = dir.path().join("slow-senna");
-    std::fs::write(&slow, "#!/bin/sh\nexec sleep 30\n").unwrap();
-    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let job = |m: &str| job(dir.path(), Tool::Senna, &slow, m, &[m, "--out", m]);
+    // A program already on disk, not a script written here: executing a file
+    // just written fails with "Text file busy" whenever another test forks
+    // while it is still open for writing.
+    let slow = Path::new("/bin/sh");
+    let job = |m: &str| {
+        job(
+            dir.path(),
+            Tool::Senna,
+            slow,
+            m,
+            &["-c", "exec sleep 30", "--out", m],
+        )
+    };
     let q = Queue::start(vec![job("a"), job("b")]);
     while q.shared.lock().unwrap().states[0] != State::Running {
         std::thread::sleep(std::time::Duration::from_millis(5));

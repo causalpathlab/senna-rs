@@ -388,3 +388,20 @@ mod feature_name_kind_reaches_the_loader {
         assert_eq!(opts.kind, FeatureNameKind::Gene { delim: '_' });
     }
 }
+
+// Bar: the scored counts are read through the unhidden remap, so the scoring
+// δ and the agreement pass see the genes an ablation hides from the encoder.
+#[test]
+fn the_scoring_remap_keeps_the_hidden_features() {
+    let genes = names(&["a", "b", "c", "d"]);
+    let query = names(&["a", "b", "x", "d"]);
+    let hidden = opts_hiding(&["b", "d"], 0.0);
+    let scored = scoring_remap(&genes, &query, &hidden)
+        .expect("remap")
+        .expect("the axes differ");
+    assert_eq!(scored.new_to_train, vec![Some(0), Some(1), None, Some(3)]);
+    // Axes match and nothing is hidden: no remap is needed.
+    assert!(scoring_remap(&genes, &genes, &hidden)
+        .expect("remap")
+        .is_none());
+}

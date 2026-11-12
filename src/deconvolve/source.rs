@@ -97,7 +97,7 @@ impl EmbeddingSource {
             .iter()
             .map(|f| resolve(f).into_boxed_str())
             .collect();
-        built.annotation_path = manifest.annotate.annotation.as_deref().map(&resolve);
+        built.annotation_path = manifest.annotate.annotation.as_deref().map(resolve);
         Ok(built)
     }
 
