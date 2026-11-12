@@ -348,8 +348,9 @@ pub(crate) fn posterior_seed(seed: u64, level: usize) -> u64 {
 pub(crate) fn sample_collapsed_data(
     collapsed: &CollapsedOut,
     seed: u64,
+    batch_null: Option<&Mat>,
 ) -> anyhow::Result<(Mat, Option<Mat>, Mat)> {
-    let (mixed_dn, batch_dn, target_dn) = sample_collapsed_data_dp(collapsed, seed)?;
+    let (mixed_dn, batch_dn, target_dn) = sample_collapsed_data_dp(collapsed, seed, batch_null)?;
     Ok((
         mixed_dn.transpose(),
         batch_dn.map(|b| b.transpose()),
@@ -365,20 +366,27 @@ pub(crate) fn sample_collapsed_data(
 /// column-major `[D, P]` buffer already IS the row-major `[P, D]` one (see
 /// `legume_numeric::candle::data::masked_dense`). Callers that want host `[P, D]` matrices
 /// still get them from [`sample_collapsed_data`].
+///
+/// The encoder's null is `batch_null` (`[D, P]`, see [`batch_level_nulls`])
+/// when one is given, else a draw of the pseudobulks' own fold `μ_residual`.
 pub(crate) fn sample_collapsed_data_dp(
     collapsed: &CollapsedOut,
     seed: u64,
+    batch_null: Option<&Mat>,
 ) -> anyhow::Result<(Mat, Option<Mat>, Mat)> {
     use legume_numeric::matrix::rand_util::name_seed;
     let mixed_dn = collapsed
         .mu_observed
         .posterior_sample_seeded(name_seed(seed, "observed"))?;
 
-    let batch_dn = collapsed
-        .mu_residual
-        .as_ref()
-        .map(|x| x.posterior_sample_seeded(name_seed(seed, "residual")))
-        .transpose()?;
+    let batch_dn = match batch_null {
+        Some(null) => Some(null.clone()),
+        None => collapsed
+            .mu_residual
+            .as_ref()
+            .map(|x| x.posterior_sample_seeded(name_seed(seed, "residual")))
+            .transpose()?,
+    };
 
     let target_dn = if let Some(adj) = &collapsed.mu_adjusted {
         adj.posterior_sample_seeded(name_seed(seed, "adjusted"))?
@@ -387,6 +395,97 @@ pub(crate) fn sample_collapsed_data_dp(
     };
 
     Ok((mixed_dn, batch_dn, target_dn))
+}
+
+/// The encoder's training null of each level under `--adj-method batch`,
+/// `[D, P_level]`, or `None` under `residual` or when the collapse found one
+/// batch.
+///
+/// At inference a cell reads its batch's `δ[g, b]`. A training pseudobulk
+/// mixes cells of several batches, so it reads the same δ mixed by its batch
+/// shares, `Σ_b δ[g,b] · n_bp / n_p`: what its counts carry of the batch
+/// effect under the collapse's own model `E[obs_gp] = μ_gp · Σ_b δ_gb n_bp`.
+/// Every level reads the finest level's δ (posterior mean), the one written
+/// to `{out}.delta.parquet` and read back at inference and by `predict`.
+///
+/// Without this the encoder trained on the pseudobulk's own fold `μ_residual`
+/// whatever the method, and met a per-batch δ only at inference.
+pub(crate) fn batch_level_nulls(
+    adj_method: &AdjMethod,
+    collapsed_levels: &[CollapsedOut],
+    cell_to_pb_per_level: Option<&[Vec<usize>]>,
+    data_vec: &SparseIoVec,
+) -> anyhow::Result<Option<Vec<Mat>>> {
+    if !matches!(adj_method, AdjMethod::Batch) {
+        return Ok(None);
+    }
+    let Some(delta) = collapsed_levels.last().and_then(|c| c.delta.as_ref()) else {
+        return Ok(None);
+    };
+    let delta_db = delta.posterior_mean();
+    let cell_to_pb_per_level = cell_to_pb_per_level.ok_or_else(|| {
+        anyhow::anyhow!("--adj-method batch needs the collapse's cell → pseudobulk membership")
+    })?;
+    anyhow::ensure!(
+        cell_to_pb_per_level.len() == collapsed_levels.len(),
+        "{} levels of cell → pseudobulk membership for {} collapsed levels",
+        cell_to_pb_per_level.len(),
+        collapsed_levels.len()
+    );
+    let batches = data_vec.get_batch_membership(0..data_vec.num_columns());
+    // A carried pseudobulk column stands for many cells (`--pb-reference`);
+    // the collapse weighs it so, and so must its share.
+    let weights = data_vec.column_multiplicities();
+    collapsed_levels
+        .iter()
+        .zip(cell_to_pb_per_level)
+        .map(|(collapsed, cell_to_pb)| {
+            let n_pb = collapsed.mu_observed.posterior_mean().ncols();
+            let shares = batch_shares(&batches, cell_to_pb, weights, delta_db.ncols(), n_pb)?;
+            Ok(delta_db * shares)
+        })
+        .collect::<anyhow::Result<Vec<Mat>>>()
+        .map(Some)
+}
+
+/// `[B, P]`: the share of each pseudobulk's cells that each batch holds,
+/// a column counting for `weights` cells (one each without). A pseudobulk
+/// with no cell takes an even share of every batch.
+fn batch_shares(
+    batches: &[usize],
+    cell_to_pb: &[usize],
+    weights: Option<&[f32]>,
+    n_batches: usize,
+    n_pb: usize,
+) -> anyhow::Result<Mat> {
+    anyhow::ensure!(
+        batches.len() == cell_to_pb.len(),
+        "{} cells with a batch, {} with a pseudobulk",
+        batches.len(),
+        cell_to_pb.len()
+    );
+    anyhow::ensure!(
+        weights.is_none_or(|w| w.len() == batches.len()),
+        "column weights do not cover the {} cells",
+        batches.len()
+    );
+    let mut shares = Mat::zeros(n_batches, n_pb);
+    for (cell, (&b, &p)) in batches.iter().zip(cell_to_pb).enumerate() {
+        anyhow::ensure!(
+            b < n_batches && p < n_pb,
+            "cell in batch {b} of {n_batches}, pseudobulk {p} of {n_pb}"
+        );
+        shares[(b, p)] += weights.map_or(1.0, |w| w[cell]);
+    }
+    for mut col in shares.column_iter_mut() {
+        let n = col.sum();
+        if n > 0.0 {
+            col /= n;
+        } else {
+            col.fill(1.0 / n_batches as f32);
+        }
+    }
+    Ok(shares)
 }
 
 /// Per-gene mean rate `μ_d` from a `[D, n_pb]` pseudobulk posterior mean —
@@ -411,14 +510,18 @@ pub(crate) fn build_level_data(
     level_coarsenings: &[Option<FeatureCoarsening>],
     enc_coarsening: Option<&FeatureCoarsening>,
     seed: u64,
+    batch_nulls: Option<&[Mat]>,
 ) -> anyhow::Result<Vec<(Mat, Option<Mat>, Mat)>> {
     collapsed_levels
         .iter()
         .zip(level_coarsenings.iter())
         .enumerate()
         .map(|(level, (collapsed, dec_fc))| {
-            let (mixed_nd, batch_nd, target_nd) =
-                sample_collapsed_data(collapsed, posterior_seed(seed, level))?;
+            let (mixed_nd, batch_nd, target_nd) = sample_collapsed_data(
+                collapsed,
+                posterior_seed(seed, level),
+                batch_nulls.map(|n| &n[level]),
+            )?;
 
             let enc_nd = if let Some(fc) = enc_coarsening {
                 fc.aggregate_columns_nd(&mixed_nd)

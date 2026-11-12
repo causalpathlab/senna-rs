@@ -448,11 +448,18 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     // aggregated to the width its side trains at. The encoder reads `mixed`
     // (μ observed), the decoder reconstructs `target` (μ adjusted); `batch` is
     // the per-cell null.
+    let batch_nulls = crate::topic::common::batch_level_nulls(
+        &args.adj_method,
+        &collapsed_levels,
+        cell_to_pb_per_level.as_deref(),
+        &data_vec,
+    )?;
     let level_data: Vec<(Mat, Option<Mat>, Mat)> = crate::topic::common::build_level_data(
         &collapsed_levels,
         &level_coarsenings,
         finest_coarsening,
         args.seed,
+        batch_nulls.as_deref(),
     )?;
     let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()
@@ -522,6 +529,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         num_levels,
         level_decoder_dims: level_decoder_dims.clone(),
         adj_method: args.adj_method.as_str().into(),
+        batch_null_in_training: batch_nulls.is_some(),
         has_coarsening: finest_coarsening.is_some(),
         embedding_dim: None,
         enc_context_size: None,

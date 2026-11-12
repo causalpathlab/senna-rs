@@ -347,11 +347,13 @@ pub struct MaskedTopicArgs {
         value_enum,
         default_value = "residual",
         help = "Batch adjustment (batch|residual)",
-        long_help = "batch    — subtract per-batch pseudobulk mean.\n\
-                     residual — divide by fitted delta per pseudobulk group.\n\
-                     \n\
-                     `senna predict` builds its held-out null per batch,\n\
-                     so a model trained with `batch` is scored under the null it saw."
+        long_help = "batch    — divide by the per-batch delta: one fold per gene per batch.\n\
+                     \x20          The encoder trains on it and reads it at inference, and\n\
+                     \x20          `senna predict` reads the trained delta for a batch the\n\
+                     \x20          model was trained on, one held-out batch included.\n\
+                     residual — divide by each pseudobulk group's own fold (finer than a\n\
+                     \x20          batch; `senna predict` re-estimates it from the held-out\n\
+                     \x20          cells, which takes two or more held-out batches)."
     )]
     adj_method: AdjMethod,
 
@@ -1215,6 +1217,14 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         seed: args.seed,
     };
 
+    // Under `--adj-method batch` the encoder trains on the δ it reads at
+    // inference, mixed by each pseudobulk's batch shares.
+    let batch_nulls = crate::topic::common::batch_level_nulls(
+        &args.adj_method,
+        &collapsed_levels,
+        cell_to_pb_per_level.as_deref(),
+        &data_vec,
+    )?;
     let scores = train_masked(
         &collapsed_levels,
         &base_encoder,
@@ -1222,6 +1232,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         &train_config,
         args.mask_fraction,
         &masked_opts,
+        batch_nulls.as_deref(),
     )?;
 
     info!("Writing down the model parameters");
@@ -1300,6 +1311,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         num_levels,
         level_decoder_dims: level_decoder_dims.clone(),
         adj_method: args.adj_method.as_str().into(),
+        batch_null_in_training: batch_nulls.is_some(),
         has_coarsening,
         embedding_dim: Some(h),
         // `None` marks a window-free model: every consumer reads it dense. A
@@ -1378,10 +1390,15 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     {
         use crate::topic::eval_indexed::evaluate_latent_masked_rows;
         let (eff_cells, max_cells) = latent_sharpness(&theta_nk);
-        let null_pd = finest_collapsed
-            .mu_residual
-            .as_ref()
-            .map(|r| r.posterior_mean().transpose());
+        // The null those rows trained under: the batch δ mixed by shares
+        // under `--adj-method batch`, the pseudobulk's own fold otherwise.
+        let null_pd = match batch_nulls.as_ref().and_then(|n| n.last()) {
+            Some(null) => Some(null.transpose()),
+            None => finest_collapsed
+                .mu_residual
+                .as_ref()
+                .map(|r| r.posterior_mean().transpose()),
+        };
         let z_pk = evaluate_latent_masked_rows(
             finest_collapsed.mu_observed.posterior_mean(),
             null_pd.as_ref(),

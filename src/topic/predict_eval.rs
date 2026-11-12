@@ -205,7 +205,30 @@ pub(crate) enum Reconstruction<'a> {
         rho_dh: Mat,
         b_feat: &'a [f32],
         theta_nh: &'a Mat,
+        delta_db: Option<&'a crate::predict::delta::ScoringDelta>,
     },
+}
+
+/// `exp(b + ρ·θ)` for a block of latents, `[D × n]`, each column up to its own
+/// scale: the log-linear rate of the embedding families.
+pub(crate) fn embedding_rate(rho_dh: &Mat, b_feat: &[f32], theta_rows: &Mat) -> Mat {
+    debug_assert_eq!(
+        b_feat.len(),
+        rho_dh.nrows(),
+        "feature bias and embedding disagree on the feature axis"
+    );
+    let mut rate = rho_dh * theta_rows.transpose();
+    for (d, b) in b_feat.iter().enumerate().take(rate.nrows()) {
+        rate.row_mut(d).add_scalar_mut(*b);
+    }
+    // Shift each column to its own max before exponentiating: the logits are
+    // unbounded and only their differences matter once the column is
+    // normalised, so this is exact, not an approximation.
+    for mut col in rate.column_iter_mut() {
+        let m = col.max();
+        col.apply(|v| *v = (*v - m).exp());
+    }
+    rate
 }
 
 impl Reconstruction<'_> {
@@ -226,33 +249,14 @@ impl Reconstruction<'_> {
     fn rate(&self, theta_rows: &Mat) -> Mat {
         match self {
             Self::Topic { exp_beta_dk, .. } => exp_beta_dk * theta_rows.transpose(),
-            Self::Embedding { rho_dh, b_feat, .. } => {
-                debug_assert_eq!(
-                    b_feat.len(),
-                    rho_dh.nrows(),
-                    "feature bias and embedding disagree on the feature axis"
-                );
-                let mut rate = rho_dh * theta_rows.transpose();
-                for (d, b) in b_feat.iter().enumerate().take(rate.nrows()) {
-                    rate.row_mut(d).add_scalar_mut(*b);
-                }
-                // Shift each column to its own max before exponentiating: the
-                // logits are unbounded and only their differences matter once the
-                // column is normalised, so this is exact, not an approximation.
-                for mut col in rate.column_iter_mut() {
-                    let m = col.max();
-                    col.apply(|v| *v = (*v - m).exp());
-                }
-                rate
-            }
+            Self::Embedding { rho_dh, b_feat, .. } => embedding_rate(rho_dh, b_feat, theta_rows),
         }
     }
 
     /// The δ the rate is scored under, when it has one.
     pub(crate) fn scoring_delta(&self) -> Option<&crate::predict::delta::ScoringDelta> {
         match self {
-            Self::Topic { delta_db, .. } => *delta_db,
-            Self::Embedding { .. } => None,
+            Self::Topic { delta_db, .. } | Self::Embedding { delta_db, .. } => *delta_db,
         }
     }
 
@@ -263,11 +267,7 @@ impl Reconstruction<'_> {
             Self::Embedding { theta_nh, .. } => theta_nh.rows(lb, n).into_owned(),
         };
         let mut rate = self.rate(&theta);
-        if let Self::Topic {
-            delta_db: Some(delta),
-            ..
-        } = self
-        {
+        if let Some(delta) = self.scoring_delta() {
             delta.apply(&mut rate, lb);
         }
         rate

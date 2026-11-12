@@ -580,8 +580,9 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
 /// row average, and its moment-matched bias sits at zero like every trained gene's.
 /// `--decoder-only` and `--refine-steps` have nothing to act on here and are rejected
 /// rather than silently ignored, so a command line that asks for refinement does not come
-/// back looking like it got it. `--batch-files` is inert here too:
-/// bge has no per-batch δ, and its projection is per cell.
+/// back looking like it got it. With batches, the counts of a batch the run was
+/// trained on are divided by its trained per-batch gene fold before projection, and
+/// the agreement score takes a δ under `--scoring-delta`.
 ///
 /// ⚠️ Read `.predictive.parquet` from a bge model as a FLOOR on novelty, not a verdict —
 /// see [`crate::bge::score::BgeEmbedding::score`] for the measurement. `--eval-mask-fraction`
@@ -594,12 +595,6 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
          run, whose only inference is the Poisson-MAP projection onto the frozen ρ.",
         args.model
     );
-    if args.batch_files.is_some() {
-        log::warn!(
-            "--batch-files has no effect on a {kind} run: the projection is per cell against a \
-             frozen ρ, with no per-batch δ to estimate"
-        );
-    }
     if args.residual_out.is_some() {
         log::warn!(
             "--residual-out is not available for a {kind} run (no count decoder to regress \
@@ -610,9 +605,15 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
     let model = crate::bge::score::BgeEmbedding::open(&args.model)?;
     let qopts = args.query_name_opts()?;
     let fit = model.score_with_init(
-        &args.data_files,
-        args.preload_data,
-        args.minibatch_size,
+        crate::bge::score::QueryRead {
+            files: &args.data_files,
+            batches: Some(crate::bge::score::QueryBatches {
+                files: args.batch_files.as_deref(),
+                model: &args.model,
+            }),
+            preload: args.preload_data,
+            block: args.minibatch_size,
+        },
         &qopts,
         crate::bge::score::InitOpts {
             align: (!args.no_init_genes).then_some(graph_embedding_util::transfer::AlignKnobs {
@@ -627,6 +628,14 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
     // ρ is held row-major `[D, H]` for the projection; the eval pass wants it as
     // a matrix, so it is reshaped once here rather than per block.
     let rho_dh = Mat::from_row_slice(model.gene_names.len(), model.h, &model.rho);
+    let scoring = embedding_scoring_delta(EmbeddingScore {
+        args,
+        training_genes: &model.gene_names,
+        data_vec: &fit.data_vec,
+        rho_dh: &rho_dh,
+        b_feat: &model.b_feat,
+        theta_nh: &fit.latent,
+    })?;
     let agreement = evaluate_agreement(AgreementInputs {
         args,
         training_genes: &model.gene_names,
@@ -635,6 +644,7 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
             rho_dh,
             b_feat: &model.b_feat,
             theta_nh: &fit.latent,
+            delta_db: scoring.as_ref(),
         },
     })?;
 
@@ -952,6 +962,42 @@ fn build_remap(
     }
 }
 
+/// What an embedding family (vae, bge, simba) hands the scoring δ.
+struct EmbeddingScore<'a> {
+    args: &'a PredictArgs,
+    /// The model's feature axis, which `rho_dh` and `b_feat` live on.
+    training_genes: &'a [Box<str>],
+    data_vec: &'a SparseIoVec,
+    rho_dh: &'a Mat,
+    b_feat: &'a [f32],
+    theta_nh: &'a Mat,
+}
+
+/// The scoring δ of an embedding family, under the same `--scoring-delta`
+/// rule as the topic families: its rate `exp(b + ρ·θ)`, normalised over
+/// genes, takes δ as theirs does.
+fn embedding_scoring_delta(e: EmbeddingScore<'_>) -> anyhow::Result<Option<delta::ScoringDelta>> {
+    let score_remap = scoring_remap(
+        e.training_genes,
+        &e.data_vec.row_names()?,
+        &e.args.query_name_opts()?,
+    )?;
+    delta::scoring_delta(&delta::ScoringDeltaArgs {
+        spec: e.args.scoring_spec(),
+        model: &e.args.model,
+        training_genes: e.training_genes,
+        data_vec: e.data_vec,
+        theta_nk: e.theta_nh,
+        gene_remap: score_remap.as_ref(),
+        rate: delta::RateModel::Embedding {
+            rho_dh: e.rho_dh,
+            b_feat: e.b_feat,
+        },
+        phi: None,
+        block_size: e.args.block_size,
+    })
+}
+
 /// The remap the observed counts are read through to score them: the query's
 /// rows on the model's axis WITHOUT the ablation. The encoder's remap has the
 /// hidden genes pointing at `None`, which is right for its input and wrong
@@ -1135,8 +1181,11 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
     // is got afterwards, as `a.scoring` says.
     let null = null::encoder_null(
         a.held_out,
-        a.model,
-        metadata,
+        null::NullModel {
+            prefix: a.model,
+            metadata,
+            training_genes: &training_genes,
+        },
         &mut data_vec,
         gene_remap.as_ref(),
         coarsening.as_ref(),
@@ -1202,7 +1251,9 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
             data_vec: &data_vec,
             theta_nk: &z_nk.map(f32::exp),
             gene_remap: score_remap.as_ref(),
-            beta_dk: &beta_dk,
+            rate: delta::RateModel::Topic {
+                exp_beta_dk: &beta_dk.map(f32::exp),
+            },
             phi: delta::nb_dispersion(a.model, metadata)?.as_deref(),
             block_size: a.block_size,
         })?
@@ -1631,8 +1682,11 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
     // reads the full gene axis, so no coarsening).
     let null = null::encoder_null(
         a.held_out,
-        a.model,
-        a.metadata,
+        null::NullModel {
+            prefix: a.model,
+            metadata: a.metadata,
+            training_genes: &training_genes,
+        },
         &mut data_vec,
         gene_remap.as_ref(),
         None,
@@ -1684,7 +1738,9 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
             data_vec: &data_vec,
             theta_nk: &theta_nk,
             gene_remap: score_remap.as_ref(),
-            beta_dk: &beta_dk,
+            rate: delta::RateModel::Topic {
+                exp_beta_dk: &beta_dk.map(f32::exp),
+            },
             phi: delta::nb_dispersion(a.model, a.metadata)?.as_deref(),
             block_size: a.block_size,
         })?
@@ -1831,6 +1887,17 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
     // stays the backend's own NB density and is NOT comparable across
     // families; `eval_llik_per_count` is.
     let (training_genes, _) = load_dictionary(&args.model)?;
+    let scoring = match s.recon.as_ref() {
+        Some((rho_dh, b_feat)) => embedding_scoring_delta(EmbeddingScore {
+            args,
+            training_genes: &training_genes,
+            data_vec: &s.data_vec,
+            rho_dh,
+            b_feat,
+            theta_nh: &s.z_nk,
+        })?,
+        None => None,
+    };
     let agreement = match s.recon.as_ref() {
         Some((rho_dh, b_feat)) => evaluate_agreement(AgreementInputs {
             args,
@@ -1840,6 +1907,7 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
                 rho_dh: rho_dh.clone(),
                 b_feat,
                 theta_nh: &s.z_nk,
+                delta_db: scoring.as_ref(),
             },
         })?,
         None => {
@@ -2037,8 +2105,11 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     // The encoder's null, built the way training built it.
     let null = null::encoder_null(
         a.held_out,
-        a.model,
-        metadata,
+        null::NullModel {
+            prefix: a.model,
+            metadata,
+            training_genes: &training_genes,
+        },
         &mut data_vec,
         gene_remap.as_ref(),
         coarsening.as_ref(),

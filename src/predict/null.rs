@@ -168,6 +168,15 @@ pub(crate) fn model_has_null(model: &str) -> bool {
     std::path::Path::new(&format!("{model}.delta.parquet")).exists()
 }
 
+/// The model a null is built for.
+#[derive(Clone, Copy)]
+pub(crate) struct NullModel<'a> {
+    pub prefix: &'a str,
+    pub metadata: &'a TopicModelMetadata,
+    /// The model's gene axis, which its trained δ is read onto.
+    pub training_genes: &'a [Box<str>],
+}
+
 /// The encoder's null for the held-out cells in `data_vec`, on the
 /// encoder's axis (`gene_remap`, then `coarsening`) and on `dev`, or `None`
 /// when `held_out` asks for none or the model was trained without one.
@@ -175,19 +184,26 @@ pub(crate) fn model_has_null(model: &str) -> bool {
 /// finest pseudobulk membership on it.
 pub(crate) fn encoder_null(
     held_out: HeldOut<'_>,
-    model: &str,
-    metadata: &TopicModelMetadata,
+    model: NullModel<'_>,
     data_vec: &mut SparseIoVec,
     gene_remap: Option<&GeneRemap>,
     coarsening: Option<&FeatureCoarsening>,
     dev: &Device,
 ) -> anyhow::Result<Option<EncoderNull>> {
+    let NullModel {
+        prefix: model,
+        metadata,
+        training_genes,
+    } = model;
     let HeldOut::NullAndDelta(fit, _) = held_out else {
         return Ok(None);
     };
     if !model_has_null(model) {
         info!("{model}: trained without a batch null; none for the held-out cells");
         return Ok(None);
+    }
+    if let Some(null) = trained_null(model, metadata, training_genes, data_vec, coarsening, dev)? {
+        return Ok(Some(null));
     }
     let Some(names) = data_vec
         .batch_names()
@@ -251,6 +267,37 @@ pub(crate) fn encoder_null(
     Ok(Some(EncoderNull {
         null: null_dp.to_tensor(dev)?.transpose(0, 1)?.contiguous()?,
         adj_method,
+    }))
+}
+
+/// The encoder's null from the TRAINED δ, `[held-out batches, D_enc]`, when
+/// the encoder trained on a per-batch δ and every held-out batch is one the
+/// model was trained on; `None` otherwise, and the caller estimates a null
+/// from the held-out cells.
+///
+/// Nothing is fitted on the held-out cells here, so one batch is enough.
+fn trained_null(
+    model: &str,
+    metadata: &TopicModelMetadata,
+    training_genes: &[Box<str>],
+    data_vec: &SparseIoVec,
+    coarsening: Option<&FeatureCoarsening>,
+    dev: &Device,
+) -> anyhow::Result<Option<EncoderNull>> {
+    if metadata.adj_method.as_ref() != "batch" || !metadata.batch_null_in_training {
+        return Ok(None);
+    }
+    let Some(mut null_db) =
+        crate::predict::delta::trained_delta_of_batches(model, training_genes, data_vec)?
+    else {
+        return Ok(None);
+    };
+    if let Some(fc) = coarsening {
+        null_db = fc.aggregate_rows_ds(&null_db);
+    }
+    Ok(Some(EncoderNull {
+        null: null_db.to_tensor(dev)?.transpose(0, 1)?.contiguous()?,
+        adj_method: AdjMethod::Batch,
     }))
 }
 

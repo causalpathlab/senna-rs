@@ -158,8 +158,9 @@ pub struct JointTopicArgs {
         value_enum,
         default_value = "residual",
         help = "Batch adjustment (batch|residual)",
-        long_help = "batch    — subtract per-batch pseudobulk mean.\n\
-                     residual — divide by fitted delta per pseudobulk group."
+        long_help = "batch    — divide by the per-batch delta at inference; the encoder\n\
+                     \x20          still trains on the pseudobulk fold here.\n\
+                     residual — divide by each pseudobulk group's own fold."
     )]
     pub(crate) adj_method: AdjMethod,
 

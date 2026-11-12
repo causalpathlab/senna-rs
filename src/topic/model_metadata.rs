@@ -153,6 +153,12 @@ pub struct TopicModelMetadata {
     pub level_decoder_dims: Vec<usize>,
     /// Adjustment method: "batch" or "residual"
     pub adj_method: Box<str>,
+    /// Whether the encoder TRAINED on the per-batch δ as its null (a
+    /// `batch` fit from the version that first did). `false` for a
+    /// `residual` fit, and for an older `batch` fit, whose encoder trained
+    /// on the pseudobulks' own fold and met δ only at inference.
+    #[serde(default)]
+    pub batch_null_in_training: bool,
     /// Whether feature coarsening was used
     pub has_coarsening: bool,
     /// [D, H] feature embedding width (`indexed_topic` only)

@@ -268,12 +268,14 @@ pub(super) fn specs() -> Vec<ToolSpec> {
              masked-sbp, masked-vae and vae runs through their encoder, an svd run by Nyström \
              projection onto its frozen dictionary, and a bge or simba run by projecting each \
              cell onto its frozen gene table. A model trained with batches needs the held-out \
-             cells' batches (batch_files, one per data file) to give its encoder the null it \
-             was trained with (rebuilt from those cells; it needs two or more batches). The \
-             score of a topic or masked run takes a per-batch effect delta as scoring_delta \
-             says; by default the trained one for a training batch and a cross-fitted one \
-             for other batches, never one fitted on the counts it scores, and the null \
-             takes the same batch term. Other runs are scored with no delta. An out with a prediction is not written over: its \
+             cells' batches (batch_files, one per data file). A run fitted with --adj-method \
+             batch then reads its trained per-batch effect delta for batches it was trained on \
+             (one batch is enough), and a bge run divides their counts by its trained fold; \
+             otherwise the encoder's null is rebuilt from the held-out cells, which needs two \
+             or more batches. The score of a topic, masked, vae, bge or simba run takes a \
+             delta as scoring_delta says; by default the trained one for a training batch and \
+             a cross-fitted one for other batches, never one fitted on the counts it scores, \
+             and the null takes the same batch term. An svd run is scored with no delta. An out with a prediction is not written over: its \
              summary is returned instead, so a background prediction's is read by calling \
              again with its out.",
             json!({

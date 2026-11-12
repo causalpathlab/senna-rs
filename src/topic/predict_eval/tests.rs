@@ -65,6 +65,7 @@ fn the_embedding_rate_is_a_softmax_of_the_logits() {
         rho_dh: rho.clone(),
         b_feat: &b,
         theta_nh: &theta,
+        delta_db: None,
     };
 
     let logits: Vec<f32> = (0..3)
@@ -92,11 +93,13 @@ fn the_max_shift_does_not_change_the_composition() {
         rho_dh: rho.clone(),
         b_feat: &small,
         theta_nh: &theta,
+        delta_db: None,
     };
     let b = Reconstruction::Embedding {
         rho_dh: rho,
         b_feat: &huge,
         theta_nh: &theta,
+        delta_db: None,
     };
     close(
         &normalized(&a.rate(&theta), 0),

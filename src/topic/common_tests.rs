@@ -1,6 +1,6 @@
 //! Inheriting a source run's coarsening ladder under `--init-from`.
 
-use super::inherit_level_coarsenings;
+use super::{batch_shares, inherit_level_coarsenings};
 use crate::topic::eval::GeneRemap;
 use crate::topic::model_metadata::save_coarsening_levels;
 use data_beans::alg::feature_coarsening::FeatureCoarsening;
@@ -40,4 +40,25 @@ fn without_a_remap_a_same_length_level_is_inherited_as_is() {
     let profiles = Mat::zeros(4, 1);
     let levels = inherit_level_coarsenings(&prefix, 1, 4, None, &profiles).unwrap();
     assert_eq!(levels[0].as_ref().unwrap().fine_to_coarse, vec![0, 0, 1, 1]);
+}
+
+// Bar: a pseudobulk's share of each batch is its cells' share, columns sum
+// to one, and an empty pseudobulk takes an even share.
+#[test]
+fn batch_shares_are_each_pseudobulks_cell_shares() {
+    let batches = [0, 0, 1, 1, 1, 0];
+    let cell_to_pb = [0, 0, 0, 1, 1, 1];
+    let shares = batch_shares(&batches, &cell_to_pb, None, 2, 3).unwrap();
+    let want = Mat::from_row_slice(
+        2,
+        3,
+        &[2.0 / 3.0, 1.0 / 3.0, 0.5, 1.0 / 3.0, 2.0 / 3.0, 0.5],
+    );
+    assert!((shares - want).abs().max() < 1e-6);
+    assert!(batch_shares(&batches, &cell_to_pb[..5], None, 2, 3).is_err());
+    assert!(batch_shares(&batches, &cell_to_pb, None, 2, 1).is_err());
+    // A carried column that stands for 4 cells counts as 4.
+    let weights = [4.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+    let weighted = batch_shares(&batches, &cell_to_pb, Some(&weights), 2, 3).unwrap();
+    assert!((weighted[(0, 0)] - 5.0 / 6.0).abs() < 1e-6);
 }

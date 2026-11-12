@@ -25,11 +25,18 @@ pub(crate) use legume_numeric::candle::vae::masked_topic::IndexedTrainConfig;
 fn build_level_data(
     collapsed_levels: &[CollapsedOut],
     seed: u64,
+    batch_nulls: Option<&[Mat]>,
 ) -> anyhow::Result<Vec<(Mat, Option<Mat>, Mat)>> {
     collapsed_levels
         .iter()
         .enumerate()
-        .map(|(level, c)| sample_collapsed_data_dp(c, posterior_seed(seed, level)))
+        .map(|(level, c)| {
+            sample_collapsed_data_dp(
+                c,
+                posterior_seed(seed, level),
+                batch_nulls.map(|n| &n[level]),
+            )
+        })
         .collect()
 }
 
@@ -42,8 +49,9 @@ pub(crate) fn train_masked(
     config: &IndexedTrainConfig,
     mask_fraction: f64,
     opts: &legume_numeric::candle::vae::masked_topic::MaskedTrainOpts,
+    batch_nulls: Option<&[Mat]>,
 ) -> anyhow::Result<TrainScores> {
-    let level_data = build_level_data(collapsed_levels, opts.seed)?;
+    let level_data = build_level_data(collapsed_levels, opts.seed, batch_nulls)?;
     let level_refs: Vec<legume_numeric::candle::vae::masked_topic::LevelData> = level_data
         .iter()
         .map(|(a, b, c)| (a, b.as_ref(), c))

@@ -62,6 +62,26 @@ pub struct BgeEmbedding {
     pub cell_encoder: Option<String>,
 }
 
+/// The query's batches, for a caller that wants them read.
+#[derive(Clone, Copy)]
+pub struct QueryBatches<'a> {
+    /// One batch file per data file (`-b`); `None` makes each file a batch.
+    pub files: Option<&'a [Box<str>]>,
+    /// The run's prefix, where its trained per-batch gene fold is.
+    pub model: &'a str,
+}
+
+/// What a scorer reads of the query.
+#[derive(Clone, Copy)]
+pub struct QueryRead<'a> {
+    pub files: &'a [Box<str>],
+    /// `Some` reads the query's batches and adjusts by the trained fold.
+    pub batches: Option<QueryBatches<'a>>,
+    pub preload: bool,
+    /// Columns read per slab.
+    pub block: usize,
+}
+
 /// How `predict` treats the new data's genes the model never saw.
 #[derive(Clone, Copy, Debug)]
 pub struct InitOpts {
@@ -243,22 +263,36 @@ impl BgeEmbedding {
         qopts: &QueryNameOpts,
         dev: &Device,
     ) -> anyhow::Result<BgeFit> {
-        self.score_with_init(files, preload, block, qopts, InitOpts::OFF, dev)
+        let read = QueryRead {
+            files,
+            batches: None,
+            preload,
+            block,
+        };
+        self.score_with_init(read, qopts, InitOpts::OFF, dev)
     }
 
     /// [`Self::score`] with the gene-axis alignment: genes the model never saw are
     /// initialized through the modules (see `super::transfer`) instead of dropped.
     /// With `init.enabled == false`, or a query with no unseen genes, this is
     /// byte-identical to [`Self::score`].
+    ///
+    /// With `batches`, the query's batches are read, and cells of batches the
+    /// run was trained on have their counts divided by the run's own per-batch
+    /// gene fold before they are projected, as its training cells were.
     pub fn score_with_init(
         &self,
-        files: &[Box<str>],
-        preload: bool,
-        block: usize,
+        read: QueryRead<'_>,
         qopts: &QueryNameOpts,
         init: InitOpts,
         dev: &Device,
     ) -> anyhow::Result<BgeFit> {
+        let QueryRead {
+            files,
+            batches,
+            preload,
+            block,
+        } = read;
         use super::transfer::{profiles_by_cluster, score_initialized, union_remap};
         use graph_embedding_util::transfer::{
             align_gene_axis, moment_matched_bias, pseudobulk_count, AlignInputs, GeneStatus,
@@ -268,13 +302,25 @@ impl BgeEmbedding {
         let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
             ReadSharedRowsArgs {
                 data_files: files.to_vec(),
+                batch_files: batches.and_then(|b| b.files.map(<[_]>::to_vec)),
                 preload,
                 feature_kind: qopts.loader_kind.clone(),
                 ..Default::default()
             },
             &self.gene_names,
         )?)?;
-        let data_vec = loaded.data;
+        let mut data_vec = loaded.data;
+        let fold = match batches {
+            Some(b) => {
+                data_vec.register_batch_membership(&loaded.batch);
+                crate::predict::delta::trained_delta_of_batches(
+                    b.model,
+                    &self.gene_names,
+                    &data_vec,
+                )?
+            }
+            None => None,
+        };
         info!(
             "Query data: {} features × {} cells",
             data_vec.num_rows(),
@@ -342,6 +388,7 @@ impl BgeEmbedding {
             side: &side,
             n_model,
             block,
+            fold: fold.as_ref(),
         })?;
 
         let mut init_out: Option<InitOutcome> = None;
@@ -461,6 +508,7 @@ impl BgeEmbedding {
                     side: &side,
                     n_model,
                     block,
+                    fold: fold.as_ref(),
                 })?;
             }
 
@@ -546,6 +594,9 @@ struct ProjectAll<'a> {
     /// not scored here.
     n_model: usize,
     block: usize,
+    /// `[n_model, batches]` per-batch gene fold to divide each cell's counts
+    /// by before it is placed (the run's trained δ), or `None`.
+    fold: Option<&'a Mat>,
 }
 
 struct ProjectAllOut {
@@ -591,6 +642,7 @@ fn project_all(a: ProjectAll<'_>) -> anyhow::Result<ProjectAllOut> {
         while lb < ntot && group.len() < group_nodes {
             let ub = (lb + a.block).min(group_lb + group_nodes).min(ntot);
             let csc = a.data_vec.read_columns_csc(lb..ub)?;
+            let batch_ids = a.fold.map(|_| a.data_vec.get_batch_membership(lb..ub));
             // One walk per cell yields both the remapped entries and the cell's
             // total; the total used to be a third pass over the same nonzeros.
             // Parallel per cell, matching the `multinomial_ll` pass below — the
@@ -604,6 +656,13 @@ fn project_all(a: ProjectAll<'_>) -> anyhow::Result<ProjectAllOut> {
                         .iter()
                         .zip(col.values())
                         .filter_map(|(&i, &v)| a.remap[i].map(|t| (t as u32, v)))
+                        .map(|(t, v)| match (a.fold, batch_ids.as_ref()) {
+                            // Initialized genes (past the model's own) have no fold.
+                            (Some(fold), Some(b)) if (t as usize) < fold.nrows() => {
+                                (t, v / fold[(t as usize, b[j])])
+                            }
+                            _ => (t, v),
+                        })
                         .collect();
                     let tot = pos.iter().map(|&(_, v)| v).sum::<f32>();
                     (pos, tot)
