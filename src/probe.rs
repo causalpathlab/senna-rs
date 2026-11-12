@@ -180,7 +180,7 @@ fn report_counterfactual(
     model: &MaskedModel<'_>,
     cal: &MaskedScored,
     query: &MaskedScored,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<serde_json::Value> {
     let dev = candle_core::Device::Cpu;
     let bank = CellBank::from_scored(model, cal, query, &dev)?;
 
@@ -226,7 +226,22 @@ fn report_counterfactual(
         .collect();
     info!("per-topic ||g_k||: [{}]", per_topic.join(", "));
 
-    Ok(())
+    Ok(serde_json::json!({
+        "benefit": b,
+        "benefit_se": b_se,
+        "benefit_ci99": [b_lo, b_hi],
+        "benefit_cos": bcos,
+        "forgetting": f,
+        "forgetting_se": f_se,
+        "forgetting_ci99": [f_lo, f_hi],
+        "forgetting_cos": fcos,
+        "pull_norm": pull,
+        "pull_norm_per_topic": r.pull_norm_per_topic,
+        "n_fit": r.n_fit,
+        "n_eval_query": r.n_eval_query,
+        "n_eval_calib": r.n_eval_calib,
+        "warning": r.fd_warning(),
+    }))
 }
 
 /// Per-cell fit = predictive log-likelihood / count (depth-invariant).
@@ -248,6 +263,8 @@ struct Verdict<'a> {
     cal_fit: Vec<f32>,
     q_fit: Vec<f32>,
     q_names: Vec<Box<str>>,
+    /// `--counterfactual`'s effects, as `{out}.probe.json` records them.
+    counterfactual: Option<serde_json::Value>,
 }
 
 pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
@@ -318,6 +335,7 @@ fn probe_bge(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyhow::Re
         cal_fit: per_cell_fit(&cal.llik, &cal.total),
         q_fit: per_cell_fit(&query.llik, &query.total),
         q_names: query.data_vec.column_names()?,
+        counterfactual: None,
     })
 }
 
@@ -331,9 +349,11 @@ fn probe_masked(args: &ProbeArgs) -> anyhow::Result<()> {
     let query = scored(&args.data_files)?;
 
     // Counterfactual axes: contrast this batch against the reference control arm.
-    if args.counterfactual {
-        report_counterfactual(args, &model, &cal, &query)?;
-    }
+    let counterfactual = if args.counterfactual {
+        Some(report_counterfactual(args, &model, &cal, &query)?)
+    } else {
+        None
+    };
 
     write_verdict(Verdict {
         args,
@@ -341,6 +361,7 @@ fn probe_masked(args: &ProbeArgs) -> anyhow::Result<()> {
         cal_fit: per_cell_fit(&cal.llik, &cal.total),
         q_fit: per_cell_fit(&query.llik, &query.total),
         q_names: query.data_vec.column_names()?,
+        counterfactual,
     })
 }
 
@@ -399,6 +420,7 @@ fn cal_and_query<S: Scored>(
 }
 
 fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyhow::Result<()> {
+    use crate::predict::null::HeldOut;
     use crate::predict::{score_dense_backend, score_vae_backend, DenseScoreArgs, VaeScoreArgs};
     use crate::topic::eval::QueryNameOpts;
     use crate::topic::model_metadata::TopicModelMetadata;
@@ -428,17 +450,17 @@ fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyho
                 query_name_opts: &qopts,
                 metadata: &metadata,
                 need_llik: true,
+                held_out: HeldOut::Ignore,
                 dev: &dev,
             })
         })?,
         // `LatentMode::Encoder` mirrors the masked path (encoder-only, no per-cell refinement),
         // so `refine_config` is never read.
         //
-        // ⚠️ `delta_iters: 0` keeps the legacy single-pass plug-in δ rather than the TMLE
-        // refinement `predict` defaults to. δ is estimated **from the query**, so refining it
-        // would let a genuinely novel batch explain itself away as a batch effect — the aliasing
-        // failure, on exactly the query this tool exists to flag. The plug-in is the conservative
-        // end of that trade; the masked path has no δ at all.
+        // `HeldOut::Ignore`: no held-out null for the encoder and no δ. Either, fitted
+        // from the query, would let a genuinely novel batch explain itself away as a
+        // batch effect, the aliasing failure, on exactly the query this tool exists to
+        // flag.
         RunKind::Topic => cal_and_query(args, |files| {
             score_dense_backend(DenseScoreArgs {
                 model: &args.model,
@@ -447,7 +469,7 @@ fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyho
                 preload: args.preload_data,
                 minibatch_size: args.minibatch_size,
                 block_size: None,
-                delta_iters: 0,
+                held_out: HeldOut::Ignore,
                 query_name_opts: &qopts,
                 metadata: &metadata,
                 mode: LatentMode::Encoder,
@@ -465,6 +487,7 @@ fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyho
         cal_fit,
         q_fit,
         q_names,
+        counterfactual: None,
     })
 }
 
@@ -475,6 +498,7 @@ fn write_verdict(v: Verdict<'_>) -> anyhow::Result<()> {
         cal_fit,
         q_fit,
         q_names,
+        counterfactual,
     } = v;
 
     let thr = quantile(&cal_fit, args.alpha);
@@ -495,9 +519,7 @@ fn write_verdict(v: Verdict<'_>) -> anyhow::Result<()> {
         "COVERED — certify"
     };
 
-    // Per-cell fit and flag — the only output not already in the log, and the only place
-    // *which* cells were flagged is recorded. A summary `.probe.json` used to be written
-    // alongside; it duplicated the log lines below field for field and nothing read it.
+    // Per-cell fit and flag: the only place *which* cells were flagged is recorded.
     let mut tsv = String::from("cell\tfit\tflag\n");
     for (nm, &f) in q_names.iter().zip(&q_fit) {
         tsv.push_str(&format!("{nm}\t{f:.6}\t{}\n", u8::from(f < thr)));
@@ -516,5 +538,28 @@ fn write_verdict(v: Verdict<'_>) -> anyhow::Result<()> {
     );
     info!("probe verdict: {verdict}");
     info!("Wrote {}.probe.tsv", args.out);
+
+    // The batch's numbers, for a reader that is not the log (`senna mcp`'s
+    // run_probe).
+    let summary = serde_json::json!({
+        "model_type": model_type,
+        "verdict": if novel { "novel" } else { "covered" },
+        "alpha": args.alpha,
+        "threshold": thr,
+        "cells": n,
+        "flagged": n_flag,
+        "flag_rate": rate,
+        "p_value": pval,
+        "counterfactual": counterfactual,
+    });
+    std::fs::write(
+        format!("{}.probe.json", args.out),
+        serde_json::to_string_pretty(&summary)?,
+    )?;
+    info!("Wrote {}.probe.json", args.out);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests/probe_verdict.rs"]
+mod tests;

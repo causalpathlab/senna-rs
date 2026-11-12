@@ -3,7 +3,8 @@
 //! - The cell table to lay out, from the run's own outputs: its latent (or
 //!   cell embedding), else its cached cell projection. The count data is
 //!   never read, so a run can be laid out where its data is not.
-//! - PBs from landmarks or projection bits, PB-PB similarity, tail pruning.
+//! - The cell kNN graph every layout reads; PBs coarsened from it (or
+//!   projection bits), the graph between them, tail pruning.
 //! - Cheap Nyström cell placement.
 //! - Shared output writer.
 //!
@@ -16,36 +17,13 @@ use super::fit_layout_features::{
 };
 use super::viz_prep::{aggregate_features_by_group, select_pb_coverage};
 use crate::geometry::cell_layout::project_cells_nystrom;
-use crate::geometry::similarity::{
-    compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
-};
 use data_beans::alg::random_projection::binary_sort_columns;
-use rand::{rngs::SmallRng, SeedableRng};
-use rayon::prelude::*;
 use senna::embed_common::*;
 use senna::run_manifest::{self, LayoutEntry, RunManifest};
 use std::path::PathBuf;
 
-/// How to pick landmarks for the latent-driven layout path.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
-#[clap(rename_all = "kebab-case")]
-pub enum LandmarkStrategy {
-    /// Uniform random subsample of cells. Largest topics dominate the
-    /// landmark set in proportion to their cell count.
-    Random,
-    /// Argmax-stratified: equal landmark budget per active topic. Use
-    /// when one topic dominates and you want minor topics resolved
-    /// without intra-major-topic substructure overwhelming the layout.
-    /// Falls back to Random for non-topic kinds (SVD).
-    PerTopic,
-}
-
 /// Default winsorization of layout features, in MADs (`--trim-cell-mads`).
 pub(crate) const DEFAULT_TRIM_MADS: f32 = 5.0;
-
-/// Self-loop amount added during similarity regularization to prevent
-/// isolated nodes from collapsing the layout.
-const SELF_LOOP_REG: f32 = 0.01;
 
 /// Args shared by `senna layout phate`, `tsne` and `umap`.
 ///
@@ -135,14 +113,6 @@ pub struct LayoutCommonArgs {
     pub block_size: Option<usize>,
 
     #[arg(
-        long,
-        default_value_t = 0.0,
-        help = "Similarity threshold for graph edges",
-        long_help = "Edges with similarity below this are zeroed. Default 0 = no threshold."
-    )]
-    pub similarity_threshold: f32,
-
-    #[arg(
         long = "trim-cell-mads",
         default_value_t = DEFAULT_TRIM_MADS,
         help = "Winsorize cell features to ±N MADs before the layout; 0 = off",
@@ -159,18 +129,14 @@ pub struct LayoutCommonArgs {
 
     #[arg(
         long,
-        help = "Local scaling using k-th neighbor distance",
-        long_help = "Zelnik-Manor & Perona local scaling.\n\
-                     σ_i = distance to k-th nearest neighbour;\n\
-                     S_scaled(i,j) = S(i,j) / sqrt(σ_i σ_j)."
-    )]
-    pub local_scale_k: Option<usize>,
-
-    #[arg(
-        long,
         short = 'k',
+        alias = "umap-knn",
         default_value_t = 15,
-        help = "Number of nearest PBs for cell projection"
+        help = "Neighbours per cell, counting itself, in the cell kNN graph; and PBs a cell is placed by",
+        long_help = "Neighbours per cell in the cell kNN graph every layout reads (counting\n\
+                     the cell itself, as uwot's n_neighbors): cell-level UMAP lays it out,\n\
+                     and the PB layouts coarsen and collapse it. Also how many nearest PBs\n\
+                     place each cell after a PB layout."
     )]
     pub knn: usize,
 
@@ -184,11 +150,13 @@ pub struct LayoutCommonArgs {
     #[arg(
         long,
         default_value_t = 0.95,
-        help = "Keep smallest PB set covering this fraction of cells",
+        help = "Keep smallest PB set covering this fraction of cells (projection-bit PBs)",
         long_help = "Drop PB samples in the long tail,\n\
                      until the remaining set holds at least this fraction of all cells.\n\
                      - 1.0: keep every PB (no filtering)\n\
-                     - 0.95 (default): remove minor subpopulations"
+                     - 0.95 (default): remove minor subpopulations\n\
+                     Only the projection-bit PBs of a run without a latent have such a\n\
+                     tail: PBs coarsened from the cell graph are even, and all kept."
     )]
     pub pb_coverage: f32,
 
@@ -203,22 +171,22 @@ pub struct LayoutCommonArgs {
     #[arg(
         long,
         default_value_t = 42,
-        help = "RNG seed for random PB-coordinate initialisation (tsne / mst)"
+        help = "RNG seed for the random starts of tsne, stress and forceatlas2"
     )]
     pub seed: u64,
 
     #[arg(
         long,
         default_value_t = 1000,
-        help = "Landmark count for latent-driven layout",
-        long_help = "Used only when a trained latent is available.\n\
-                     That means a topic or svd manifest.\n\
+        help = "PB count for the PB layouts (PHATE, t-SNE)",
+        long_help = "How many PBs the PB layouts (PHATE, t-SNE) lay out.\n\
+                     The cell kNN graph is coarsened by rounds of heavy-edge matching\n\
+                     until this many groups remain: each round merges cells, then groups,\n\
+                     with the neighbour they are most strongly linked to, so a PB never\n\
+                     spans a gap in the graph. Fewer gives larger, smoother PBs; more\n\
+                     gives finer ones. Aim for a few dozen cells per PB.\n\
                      \n\
-                     A random subsample of cells becomes the PB landmarks.\n\
-                     Each cell is assigned to its nearest landmark. Lower values give fewer,\n\
-                     denser PBs, so crisper clusters. Higher values give finer resolution,\n\
-                     but blobbier output.\n\
-                     \n\
+                     With --target features: how many features PHATE lays out itself.\n\
                      A run laid out from its cell projection ignores this."
     )]
     pub n_landmarks: usize,
@@ -239,20 +207,6 @@ pub struct LayoutCommonArgs {
                      This affects the latent path only. Projection-space layouts ignore it."
     )]
     pub theta_temperature: f32,
-
-    #[arg(
-        long,
-        value_enum,
-        default_value = "per-topic",
-        help = "Landmark sampling strategy for latent-driven layout",
-        long_help = "per-topic — the default.\n\
-                     \x20 Equal landmark budget per active argmax topic.\n\
-                     \x20 Tightens cluster-level structure when one topic dominates.\n\
-                     \x20 Topic-only; it falls back to random for SVD.\n\
-                     random    — uniform random subsample.\n\
-                     \x20 Largest topics get the most landmarks."
-    )]
-    pub landmark_strategy: LandmarkStrategy,
 }
 
 /// PHATE diffusion-embedding args. Shared by `layout phate` (main
@@ -262,13 +216,17 @@ pub struct PhateCliArgs {
     #[arg(long, default_value_t = 20, help = "PHATE diffusion time t")]
     pub phate_t: usize,
 
-    #[arg(long, default_value_t = 5, help = "PHATE adaptive-bandwidth kNN")]
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "PHATE adaptive-bandwidth kNN (--target features; PBs diffuse on their graph)"
+    )]
     pub phate_knn: usize,
 
     #[arg(
         long,
         default_value_t = 40.0,
-        help = "PHATE alpha-decay kernel exponent"
+        help = "PHATE alpha-decay kernel exponent (--target features; PBs diffuse on their graph)"
     )]
     pub phate_alpha: f32,
 
@@ -335,15 +293,15 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
     })
 }
 
-/// The landmark (PB) layout PHATE and t-SNE run on: PBs of the run's cell
-/// table, their similarity, and the cells to place by Nyström.
+/// What PHATE and t-SNE lay out: the run's PBs, the graph between them, and
+/// the cells to place by Nyström.
 pub(crate) struct PbLayoutPrep {
     pub cells: CellTable,
     pub pb_size: Vec<usize>,
     pub pb_membership_kept: Vec<usize>,
-    /// `(n_pb × n_pb)` PB-PB similarity, post threshold / local scaling
-    /// / diagonal regularization.
-    pub pb_similarity: Mat,
+    /// The graph between PBs: the cell graph collapsed onto them, each
+    /// pair's edge weights summed (`(a, b, w)`, `a < b`, sorted).
+    pub pb_edges: Vec<(usize, usize, f32)>,
     /// `(dims × n_pb)` each PB's mean cell features.
     pub pb_kp: Mat,
 }
@@ -363,7 +321,7 @@ pub(crate) struct CellTable {
 ///
 /// `geometry_latent` (not `outputs.latent`): on an embedding run the cell
 /// table is the H-space Z in `cell_embedding`, while `latent` holds log θ,
-/// which [`latent_layout_features`] would misread as raw Euclidean.
+/// which [`latent_layout_features`] would misread as an embedding.
 pub(crate) fn cell_table(
     args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
@@ -440,22 +398,119 @@ fn read_cell_proj(args: &LayoutCommonArgs, path: &str) -> anyhow::Result<(Vec<Bo
     Ok((cell_names, proj_kn))
 }
 
-/// The landmark layout for PHATE and t-SNE, whose O(n³) MDS / O(n²)
-/// repulsion cannot take every cell: landmarks of the run's cell table (its
-/// latent, else its cell projection), laid out on their own, cells then
-/// placed by Nyström.
+/// The PB layout for PHATE and t-SNE, whose O(n³) MDS / O(n²) repulsion
+/// cannot take every cell: the run's cell table (its latent, else its cell
+/// projection), its kNN graph ([`cell_graph`], the one cell-level UMAP lays
+/// out), the cells grouped into PBs, and the graph between the PBs.
+///
+/// With a latent the groups come from coarsening the cell graph (rounds of
+/// heavy-edge matching down to `--n-landmarks`), so a PB never spans a gap
+/// in it; from a cached projection they are its projection bits.
 pub(crate) fn preprocess_layout_data(
     args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
 ) -> anyhow::Result<PbLayoutPrep> {
     let cells = cell_table(args, resolved)?;
-    let m = &resolved.manifest;
-    if m.outputs.geometry_latent().is_some() {
-        info!("PBs: landmarks of the latent (kind={})", m.kind);
-        preprocess_layout_data_from_latent(args, cells, m.kind)
+    let edges = cell_graph(
+        &cells.cells_kn.transpose(),
+        args.knn,
+        args.block_size.unwrap_or(1000),
+    )?;
+    let n_cells = cells.cells_kn.ncols();
+    let (membership, coverage) = if resolved.manifest.outputs.geometry_latent().is_some() {
+        let target = args.n_landmarks.min(n_cells).max(1);
+        info!(
+            "PBs: the cell graph coarsened to {target} (kind={})",
+            resolved.manifest.kind
+        );
+        // Even groups, so no long tail to prune: the smallest are the ones
+        // that could not merge, small populations of their own.
+        let membership =
+            legume_numeric::matrix::coarsen::coarsen(n_cells, &edges, target, args.seed);
+        (membership, 1.0)
     } else {
         info!("PBs: projection bits of the cell projection");
-        preprocess_layout_data_from_cache(args, cells)
+        let kk = args.sort_dim.min(cells.cells_kn.nrows()).min(n_cells);
+        let membership = canonicalize_codes(&binary_sort_columns(&cells.cells_kn, kk)?);
+        (membership, args.pb_coverage)
+    };
+    Ok(pseudobulks(cells, &edges, membership, coverage))
+}
+
+/// The run's cell kNN graph, the one every layout reads: the undirected
+/// fuzzy kNN of the rows of `rows` (cells × dims) as uwot builds it (`knn`
+/// counting each cell itself), one edge per pair (`i < j`) with its UMAP
+/// membership.
+pub(crate) fn cell_graph(
+    rows: &Mat,
+    knn: usize,
+    block_size: usize,
+) -> anyhow::Result<Vec<(usize, usize, f32)>> {
+    let n = rows.nrows();
+    info!("Cell kNN graph (n={n}, n_neighbors={knn}) ...");
+    let edges = legume_numeric::matrix::knn_graph::KnnGraph::fuzzy_edges_of_rows(
+        rows,
+        legume_numeric::matrix::knn_graph::KnnGraphArgs {
+            knn: others(knn),
+            block_size,
+            reciprocal: false,
+        },
+    )?;
+    info!(
+        "Cell kNN graph: {n} cells, {} edges (mean degree {:.1})",
+        edges.len(),
+        2.0 * edges.len() as f32 / n.max(1) as f32
+    );
+    Ok(edges)
+}
+
+/// The neighbours a point has besides itself, when `knn` counts the point
+/// as uwot's `n_neighbors` does.
+pub(crate) fn others(knn: usize) -> usize {
+    knn.saturating_sub(1).max(1)
+}
+
+/// PBs from a grouping of the cells (`membership_full`, ids `0..`): the
+/// long tail pruned to `coverage` of the cells (cells of a dropped PB get
+/// `usize::MAX`), each PB's mean features, and the cell graph `edges`
+/// collapsed onto the PBs.
+fn pseudobulks(
+    cells: CellTable,
+    edges: &[(usize, usize, f32)],
+    membership_full: Vec<usize>,
+    coverage: f32,
+) -> PbLayoutPrep {
+    let n_pb_full = membership_full.iter().max().map_or(0, |&g| g + 1);
+    let mut pb_size_full = vec![0usize; n_pb_full];
+    for &g in &membership_full {
+        pb_size_full[g] += 1;
+    }
+    let kept = select_pb_coverage(&pb_size_full, coverage);
+    let covered: usize = kept.iter().map(|&i| pb_size_full[i]).sum();
+    let total = membership_full.len();
+    info!(
+        "Coverage filter: kept {} / {n_pb_full} PBs covering {covered} / {total} cells ({:.1}%)",
+        kept.len(),
+        100.0 * covered as f32 / total.max(1) as f32
+    );
+    let mut old_to_new = vec![usize::MAX; n_pb_full];
+    for (new_i, &old_i) in kept.iter().enumerate() {
+        old_to_new[old_i] = new_i;
+    }
+    let pb_membership_kept: Vec<usize> = membership_full.iter().map(|&g| old_to_new[g]).collect();
+    let pb_size: Vec<usize> = kept.iter().map(|&i| pb_size_full[i]).collect();
+    let n_pb = kept.len();
+    let pb_kp = aggregate_features_by_group(&cells.cells_kn, &pb_membership_kept, n_pb);
+
+    // Edges of the dropped PBs' cells (`usize::MAX`) fall away.
+    let pb_edges = legume_numeric::matrix::coarsen::collapse(edges, &pb_membership_kept);
+    info!("PB graph: {n_pb} PBs, {} edges", pb_edges.len());
+    PbLayoutPrep {
+        cells,
+        pb_size,
+        pb_membership_kept,
+        pb_edges,
+        pb_kp,
     }
 }
 
@@ -464,12 +519,14 @@ pub(crate) fn preprocess_layout_data(
 /// and a short description of the transform for logging.
 ///
 /// - topic family: `softmax(log θ / τ)` then a Hellinger square root;
-/// - embedding kinds (bge, fne, …): the raw embedding, since its magnitude
-///   carries signal and a DistL2 kNN should see it (the caller must have
-///   resolved the table through `geometry_latent`, so this is Z, never log θ);
+/// - embedding kinds (bge, fne, …): each cell's embedding scaled to unit
+///   length (cosine distance, matching lupin's trajectory and senna's
+///   critique); the caller must have resolved the table through
+///   `geometry_latent`, so this is Z, never log θ;
 /// - everything else: per-dimension z-scores.
 ///
-/// Each dimension is then winsorized to ±`trim_mads` MADs.
+/// Each dimension of a topic or z-scored table is then winsorized to
+/// ±`trim_mads` MADs.
 pub(crate) fn latent_layout_features(
     kind: senna::run_manifest::RunKind,
     latent_nk: &Mat,
@@ -478,7 +535,9 @@ pub(crate) fn latent_layout_features(
 ) -> (Mat, String) {
     let tau = theta_temperature.max(1e-6);
     let mut feat_kn: Mat = latent_nk.transpose();
-    let latent_desc: String = if kind.is_topic_family() {
+    // The topic check comes first: masked-vae is a topic kind whose cell
+    // space is signed.
+    let (latent_desc, clip): (String, bool) = if kind.is_topic_family() {
         // softmax(log_θ / τ) per cell → Hellinger sqrt. τ=1 reduces to
         // sqrt(exp(log_θ)); τ<1 sharpens, τ>1 softens.
         if (tau - 1.0).abs() > 1e-6 {
@@ -486,277 +545,25 @@ pub(crate) fn latent_layout_features(
         }
         feat_kn.normalize_exp_logits_columns_inplace();
         feat_kn.apply(|v| *v = v.sqrt());
-        if (tau - 1.0).abs() < 1e-6 {
+        let desc = if (tau - 1.0).abs() < 1e-6 {
             "Hellinger-θ".into()
         } else {
             format!("Hellinger-θ, τ={tau:.3}")
-        }
+        };
+        (desc, true)
     } else if kind.cell_space() == senna::run_manifest::CellSpace::Embedding {
-        // Unit-sphere/cosine normalization collapsed magnitude and sheared
-        // populations apart; a raw t-UMAP on the same embedding does not.
-        "raw Euclidean".into()
+        // Not clipped: clipping a dimension would shorten the unit vectors,
+        // and the co-embedded features they share a graph with are not.
+        feat_kn.normalize_columns_inplace();
+        ("unit-length (cosine)".into(), false)
     } else {
         feat_kn.scale_rows_inplace();
-        "z-scored scores".into()
+        ("z-scored scores".into(), true)
     };
-    winsorize_rows_inplace(&mut feat_kn, trim_mads);
+    if clip {
+        winsorize_rows_inplace(&mut feat_kn, trim_mads);
+    }
     (feat_kn, latent_desc)
-}
-
-/// Latent-driven layout: topic θ is log-softmax on disk, so we apply
-/// Hellinger (`exp().sqrt()`) to make cosine ≡ Bhattacharyya; SVD
-/// scores are z-scored instead. PBs come from a random landmark
-/// subsample (nearest-landmark assignment via HNSW) and PB-PB
-/// similarity uses a UMAP-style fuzzy kNN graph — dense cosine on
-/// Hellinger-θ saturates and collapses the layout to rank-1.
-fn preprocess_layout_data_from_latent(
-    args: &LayoutCommonArgs,
-    cells: CellTable,
-    kind: senna::run_manifest::RunKind,
-) -> anyhow::Result<PbLayoutPrep> {
-    let feat_kn = &cells.cells_kn;
-    let n_cells = feat_kn.ncols();
-
-    let n_pb_target = args.n_landmarks.min(n_cells).max(1);
-    let use_per_topic =
-        args.landmark_strategy == LandmarkStrategy::PerTopic && kind.is_topic_family();
-
-    let landmark_cells: Vec<usize> = if use_per_topic {
-        // Bucket cells by argmax topic, then pick ~equal budget from each.
-        // Small topics contribute all their cells; budget is the floor.
-        // feat_kn is [n_topics × n_cells] column-major, so feat_kn.column(c)
-        // is contiguous — cache-friendly vs strided latent_nk row access.
-        let n_topics = feat_kn.nrows();
-        let argmax_per_cell: Vec<usize> = (0..n_cells)
-            .into_par_iter()
-            .map(|c| feat_kn.column(c).argmax().0)
-            .collect();
-        let mut by_topic: Vec<Vec<usize>> = vec![Vec::new(); n_topics];
-        for (c, &t) in argmax_per_cell.iter().enumerate() {
-            by_topic[t].push(c);
-        }
-        let active: Vec<usize> = (0..n_topics).filter(|&t| !by_topic[t].is_empty()).collect();
-        let n_active = active.len().max(1);
-        let per_topic_budget = (n_pb_target / n_active).max(1);
-
-        let mut rng = SmallRng::seed_from_u64(args.seed);
-        let mut picked: Vec<usize> = Vec::with_capacity(n_pb_target);
-        for &t in &active {
-            let cells = &by_topic[t];
-            let take = per_topic_budget.min(cells.len());
-            let sampled: Vec<usize> = rand::seq::index::sample(&mut rng, cells.len(), take)
-                .into_iter()
-                .map(|i| cells[i])
-                .collect();
-            picked.extend(sampled);
-        }
-        picked.sort_unstable();
-        info!(
-            "Per-topic landmarks: {} active topic(s) × ~{} budget = {} landmarks (seed={})",
-            n_active,
-            per_topic_budget,
-            picked.len(),
-            args.seed
-        );
-        picked
-    } else {
-        let mut rng = SmallRng::seed_from_u64(args.seed);
-        let mut picked: Vec<usize> = rand::seq::index::sample(&mut rng, n_cells, n_pb_target)
-            .into_iter()
-            .collect();
-        picked.sort_unstable();
-        info!(
-            "Random landmarks: picked {} cells as PBs (seed={})",
-            picked.len(),
-            args.seed
-        );
-        picked
-    };
-    let n_pb_full = landmark_cells.len();
-
-    let landmark_cols: Vec<nalgebra::DVectorView<f32>> =
-        landmark_cells.iter().map(|&c| feat_kn.column(c)).collect();
-    let landmark_dict = legume_numeric::matrix::knn_match::ColumnDict::from_dvector_views(
-        landmark_cols,
-        (0..n_pb_full).collect(),
-    );
-
-    let membership_full: Vec<usize> = (0..n_cells)
-        .into_par_iter()
-        .map_init(
-            || Vec::<f32>::with_capacity(feat_kn.nrows()),
-            |query, c| {
-                query.clear();
-                query.extend(feat_kn.column(c).iter().copied());
-                match landmark_dict.search_by_query_data(query, 1) {
-                    Ok((ids, _)) => ids.first().copied().unwrap_or(usize::MAX),
-                    Err(_) => usize::MAX,
-                }
-            },
-        )
-        .collect();
-
-    let pb_size_full: Vec<usize> = {
-        let mut counts = vec![0usize; n_pb_full];
-        for &g in &membership_full {
-            if g < n_pb_full {
-                counts[g] += 1;
-            }
-        }
-        counts
-    };
-    let kept_indices = select_pb_coverage(&pb_size_full, args.pb_coverage);
-    let covered: usize = kept_indices.iter().map(|&i| pb_size_full[i]).sum();
-    let total_cells: usize = pb_size_full.iter().sum();
-    info!(
-        "Coverage filter: kept {} / {} landmarks covering {} / {} cells ({:.1}%)",
-        kept_indices.len(),
-        n_pb_full,
-        covered,
-        total_cells,
-        100.0 * covered as f32 / total_cells.max(1) as f32
-    );
-
-    let mut old_to_new = vec![usize::MAX; n_pb_full];
-    for (new_i, &old_i) in kept_indices.iter().enumerate() {
-        old_to_new[old_i] = new_i;
-    }
-    let pb_membership_kept: Vec<usize> = membership_full
-        .iter()
-        .map(|&g| {
-            if g < n_pb_full {
-                old_to_new[g]
-            } else {
-                usize::MAX
-            }
-        })
-        .collect();
-    let pb_size: Vec<usize> = kept_indices.iter().map(|&i| pb_size_full[i]).collect();
-
-    let pb_centroids_kp =
-        aggregate_features_by_group(feat_kn, &pb_membership_kept, kept_indices.len());
-
-    let n_pb = pb_centroids_kp.ncols();
-    let knn = args.knn.clamp(1, n_pb.saturating_sub(1).max(1));
-    info!("Building fuzzy kNN graph on PB centroids: n_pb={n_pb}, knn={knn}");
-    let (graph, fuzzy) = legume_numeric::matrix::knn_graph::KnnGraph::from_columns_fuzzy(
-        &pb_centroids_kp,
-        legume_numeric::matrix::knn_graph::KnnGraphArgs {
-            knn,
-            block_size: args.block_size.unwrap_or(1000),
-            reciprocal: false,
-        },
-    )?;
-
-    // √(sᵢ·sⱼ)/mean_size normalises so weighted mean ≈ 1, keeping fuzzy
-    // magnitudes comparable to the unweighted case.
-    let mean_size = (total_cells as f32) / (n_pb as f32).max(1.0);
-    let sqrt_size: Vec<f32> = pb_size.iter().map(|&s| (s as f32).sqrt()).collect();
-
-    let mut sim = Mat::zeros(n_pb, n_pb);
-    for (&(i, j), &w) in graph.edges.iter().zip(fuzzy.iter()) {
-        let scale = (sqrt_size[i] * sqrt_size[j]) / mean_size.max(1e-6);
-        let ws = w * scale;
-        sim[(i, j)] = ws;
-        sim[(j, i)] = ws;
-    }
-    let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
-
-    Ok(PbLayoutPrep {
-        cells,
-        pb_size,
-        pb_membership_kept,
-        pb_similarity,
-        pb_kp: pb_centroids_kp,
-    })
-}
-
-/// PBs of a run's cached cell projection (a run without a latent): cells
-/// partitioned by hashing the projection, PB features and similarity in
-/// projection space.
-fn preprocess_layout_data_from_cache(
-    args: &LayoutCommonArgs,
-    cells: CellTable,
-) -> anyhow::Result<PbLayoutPrep> {
-    let proj_kn = &cells.cells_kn;
-
-    // 3. Partition: binary_sort_columns runs RSVD + sign-hashing on the
-    //    projection and returns a per-cell bucket code. Canonicalize
-    //    those codes to contiguous PB ids in [0, n_pb). No data_vec
-    //    groups needed — the partition is a pure function of proj_kn.
-    let n_cells = proj_kn.ncols();
-    let kk = args.sort_dim.min(proj_kn.nrows()).min(n_cells);
-    let codes = binary_sort_columns(proj_kn, kk)?;
-    let (membership_full, n_pb_full) = canonicalize_codes(&codes);
-    info!("Partitioned {n_cells} cells into {n_pb_full} PBs");
-
-    // 4. Coverage-prune PBs (same policy as the latent path).
-    let pb_size_full: Vec<usize> = {
-        let mut counts = vec![0usize; n_pb_full];
-        for &g in &membership_full {
-            if g < n_pb_full {
-                counts[g] += 1;
-            }
-        }
-        counts
-    };
-    let kept_indices = select_pb_coverage(&pb_size_full, args.pb_coverage);
-    let covered: usize = kept_indices.iter().map(|&i| pb_size_full[i]).sum();
-    let total_cells: usize = pb_size_full.iter().sum();
-    info!(
-        "Coverage filter: kept {} / {} PBs covering {} / {} cells ({:.1}%)",
-        kept_indices.len(),
-        n_pb_full,
-        covered,
-        total_cells,
-        100.0 * covered as f32 / total_cells.max(1) as f32
-    );
-
-    let mut old_to_new = vec![usize::MAX; n_pb_full];
-    for (new_i, &old_i) in kept_indices.iter().enumerate() {
-        old_to_new[old_i] = new_i;
-    }
-    let pb_membership_kept: Vec<usize> = membership_full
-        .iter()
-        .map(|&g| {
-            if g < n_pb_full {
-                old_to_new[g]
-            } else {
-                usize::MAX
-            }
-        })
-        .collect();
-    let pb_size: Vec<usize> = kept_indices.iter().map(|&i| pb_size_full[i]).collect();
-
-    // 5. PB centroids in proj space (kp = proj_dim × n_pb_kept).
-    let pb_centroids_kp =
-        aggregate_features_by_group(proj_kn, &pb_membership_kept, kept_indices.len());
-
-    // 6. PB-PB cosine similarity directly on the proj-space centroids —
-    //    columns of `pb_centroids_kp` are the PB vectors, which is the
-    //    convention `compute_cosine_similarity` expects.
-    let sim = compute_cosine_similarity(&pb_centroids_kp);
-    let sim = if args.similarity_threshold > 0.0 {
-        threshold_similarity(&sim, args.similarity_threshold)
-    } else {
-        sim
-    };
-    let sim = if let Some(k) = args.local_scale_k {
-        let scaled = local_scale_similarity(&sim, k);
-        info!("Applied local scaling with k={k}");
-        scaled
-    } else {
-        sim
-    };
-    let pb_similarity = regularize_similarity(&sim, SELF_LOOP_REG);
-
-    Ok(PbLayoutPrep {
-        cells,
-        pb_size,
-        pb_membership_kept,
-        pb_similarity,
-        pb_kp: pb_centroids_kp,
-    })
 }
 
 /// Robustly winsorize each feature dimension (row) of a column-per-cell matrix
@@ -810,8 +617,8 @@ fn median_of(buf: &mut [f32]) -> f32 {
 }
 
 /// Canonicalize raw bucket codes from `binary_sort_columns` into
-/// contiguous PB ids `[0, n_pb)`. Returns `(membership, n_pb)`.
-fn canonicalize_codes(codes: &[usize]) -> (Vec<usize>, usize) {
+/// contiguous PB ids `[0, n_pb)`.
+fn canonicalize_codes(codes: &[usize]) -> Vec<usize> {
     use std::collections::HashMap;
     let mut mapping: HashMap<usize, usize> = HashMap::new();
     let mut membership = Vec::with_capacity(codes.len());
@@ -820,8 +627,7 @@ fn canonicalize_codes(codes: &[usize]) -> (Vec<usize>, usize) {
         let id = *mapping.entry(c).or_insert(next_id);
         membership.push(id);
     }
-    let n = mapping.len();
-    (membership, n)
+    membership
 }
 
 /// Load cluster assignments (one-column parquet of cell IDs) and validate length.
@@ -849,21 +655,6 @@ pub(crate) fn load_cluster_assignments(
     Ok(clusters)
 }
 
-/// Uniform-random 2D coordinate init for PB-level layouts, in `[-1, 1]²`.
-/// Shared by `layout tsne` and `layout mst` so both are reproducible
-/// via the common `--seed` flag.
-pub(crate) fn random_init_2d(n: usize, seed: u64) -> Mat {
-    use rand::rngs::SmallRng;
-    use rand::{RngExt, SeedableRng};
-    let mut rng = SmallRng::seed_from_u64(seed);
-    let mut out = Mat::zeros(n, 2);
-    for i in 0..n {
-        out[(i, 0)] = rng.random_range(-1.0..1.0);
-        out[(i, 1)] = rng.random_range(-1.0..1.0);
-    }
-    out
-}
-
 /// Cheap Nyström cell placement: each cell from its nearest PBs in the cell
 /// table's space.
 fn nystrom_cell_coords(args: &LayoutCommonArgs, prep: &PbLayoutPrep, pb_coords: &Mat) -> Mat {
@@ -878,7 +669,7 @@ fn nystrom_cell_coords(args: &LayoutCommonArgs, prep: &PbLayoutPrep, pb_coords: 
     coords
 }
 
-/// Finish a landmark layout: place cells by Nyström, write the PB and cell
+/// Finish a PB layout: place cells by Nyström, write the PB and cell
 /// coordinates, and record them in the run's manifest.
 pub(crate) fn finalize_viz(
     args: &LayoutCommonArgs,
@@ -1058,4 +849,74 @@ pub(crate) fn write_cell_layout(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use senna::run_manifest::RunKind;
+
+    /// Two groups of cells, 200 each, in 5 dimensions; the first 200 cells
+    /// are one group.
+    fn two_groups() -> CellTable {
+        let n = 400;
+        let cells_kn = Mat::from_fn(5, n, |d, c| {
+            let wobble = ((c * 7 + d * 13) % 17) as f32 / 17.0 - 0.5;
+            let centre = if d == 0 && c >= 200 { 20.0 } else { 0.0 };
+            centre + wobble + 0.01 * (c % 200) as f32 * (d == 1) as u8 as f32
+        });
+        let names = (0..n).map(|c| format!("c{c}").into_boxed_str()).collect();
+        CellTable { names, cells_kn }
+    }
+
+    #[test]
+    fn pseudobulks_are_the_cell_graph_coarsened() {
+        let cells = two_groups();
+        let mut edges = cell_graph(&cells.cells_kn.transpose(), 15, 256).unwrap();
+        // A few stray edges between the groups, as noisy graphs have.
+        edges.extend((0..10).map(|k| (k * 13, 200 + k * 17, 0.1)));
+        let membership = legume_numeric::matrix::coarsen::coarsen(400, &edges, 40, 1);
+        let prep = pseudobulks(cells, &edges, membership, 1.0);
+
+        // No PB spans both groups.
+        let n_pb = prep.pb_kp.ncols();
+        assert!(n_pb >= 40, "{n_pb} PBs");
+        for g in 0..n_pb {
+            let mine: Vec<usize> = (0..400)
+                .filter(|&c| prep.pb_membership_kept[c] == g)
+                .collect();
+            assert!(
+                mine.iter().all(|&c| (c < 200) == (mine[0] < 200)),
+                "PB {g} spans both"
+            );
+            // Its features are its cells' mean.
+            let mean = mine.iter().fold(nalgebra::DVector::zeros(5), |s, &c| {
+                s + prep.cells.cells_kn.column(c)
+            }) / mine.len() as f32;
+            assert!((prep.pb_kp.column(g) - mean).norm() < 1e-4);
+        }
+        // The PB graph is the cell graph collapsed.
+        let collapsed = legume_numeric::matrix::coarsen::collapse(&edges, &prep.pb_membership_kept);
+        assert_eq!(prep.pb_edges, collapsed);
+    }
+
+    #[test]
+    fn an_embedding_cell_is_laid_out_by_its_direction_alone() {
+        // Cells as rows at norms 1 to 10 and these angles: the first two
+        // alike, the last along the first axis, far enough out on it that
+        // clipping would shorten it.
+        let angles = [
+            0.52, 0.52, 0.54, 0.56, 0.58, 0.60, 0.62, 0.64, 0.66, 0.0_f32,
+        ];
+        let latent = Mat::from_fn(10, 2, |i, d| {
+            (i + 1) as f32 * [angles[i].cos(), angles[i].sin()][d]
+        });
+        for kind in [RunKind::Bge, RunKind::Simba] {
+            let (cells, _) = latent_layout_features(kind, &latent, 1.0, 0.5);
+            assert!((cells.column(0) - cells.column(1)).norm() < 1e-6, "{cells}");
+            for c in cells.column_iter() {
+                assert!((c.norm() - 1.0).abs() < 1e-6, "{cells}");
+            }
+        }
+    }
 }

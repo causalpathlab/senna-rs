@@ -1,4 +1,5 @@
 use super::*;
+use crate::view::mcp::INSTRUCTIONS;
 
 fn open() -> Open {
     Open::of(crate::view::tests::scene(), PathBuf::from("r.senna.json"))

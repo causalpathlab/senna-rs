@@ -1,14 +1,12 @@
-//! `senna layout phate`: PB landmarks of the run's cell table laid out
-//! with PHATE diffusion embedding over their mean features.
-//! Cells placed by cheap Nyström.
+//! `senna layout phate`: PHATE on the graph between the run's PBs (its cell
+//! kNN graph, coarsened and collapsed). Cells placed by cheap Nyström.
 
 use super::fit_layout_common::{
     finalize_viz, preprocess_layout_data, resolve_inputs, LayoutCommonArgs, PhateCliArgs,
 };
 use super::fit_layout_features::{load_feature_layout_input, write_feature_layout, LayoutTarget};
-use super::viz_prep::apply_svd_preprocessing;
 use crate::geometry::cell_layout::project_cells_nystrom;
-use crate::geometry::phate::phate_layout_2d;
+use crate::geometry::phate::{phate_layout_2d, phate_layout_2d_on_graph};
 use senna::embed_common::*;
 
 #[derive(Args, Debug)]
@@ -18,13 +16,6 @@ pub struct LayoutPhateArgs {
 
     #[clap(flatten)]
     phate: PhateCliArgs,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "SVD preprocessing: keep top N components (0 = skip, use raw features)"
-    )]
-    svd_dims: usize,
 }
 
 pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
@@ -32,19 +23,12 @@ pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
         return fit_feature_layout_phate(args);
     }
     let mut resolved = resolve_inputs(&args.common)?;
-    // PHATE is PB-level (diffusion-MDS over landmark features → 2D, O(n³)
-    // MDS): landmarks of the run's cell table, cells placed by Nyström.
+    // PHATE is PB-level (diffusion-MDS, O(n³) MDS): it diffuses on the
+    // graph between the PBs, the run's cell graph collapsed onto them;
+    // cells are then placed by Nyström.
     let prep = preprocess_layout_data(&args.common, &resolved)?;
-
-    // Each PB's mean cell features, a row per PB.
-    let features = prep.pb_kp.transpose();
-    let features = if args.svd_dims > 0 {
-        apply_svd_preprocessing(&features, args.svd_dims)?
-    } else {
-        features
-    };
-
-    let pb_coords = phate_layout_2d(&features, &(&args.phate).into());
+    let pb_coords =
+        phate_layout_2d_on_graph(prep.pb_kp.ncols(), &prep.pb_edges, &(&args.phate).into());
 
     finalize_viz(&args.common, &mut resolved, &prep, &pb_coords, "phate")
 }

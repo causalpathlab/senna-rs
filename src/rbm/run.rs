@@ -119,7 +119,7 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         num_levels: args.collapse.num_levels,
         iter_opt: args.collapse.iter_opt,
         block_size: Some(args.block_size),
-        out: &args.out,
+        out: Some(&args.out),
         max_features: hvg.n_hvg,
         feature_list_file: hvg.feature_list_file,
         must_train_file: hvg.must_train_file,

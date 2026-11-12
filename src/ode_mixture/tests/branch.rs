@@ -58,6 +58,7 @@ fn purity(rows: &[usize], weights: &[Vec<f64>], truth: &[usize]) -> ([[usize; 2]
 /// it, and over every branch pseudobulk the fit must call as many as the
 /// truth's parameters do.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn from_scratch_branching_lineages_keep_their_trunk() {
     let tb = 0.4;
     let cfg = SimConfig {

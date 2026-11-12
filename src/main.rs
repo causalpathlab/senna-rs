@@ -47,9 +47,11 @@ mod deconvolve;
 mod docs;
 mod embed_diag;
 mod empirical_dict;
-mod eval_topic;
 mod feature_embedding_args;
 mod feature_preset;
+#[cfg(test)]
+#[path = "tests/fit_cli.rs"]
+mod fit_cli;
 mod fne;
 mod geometry;
 mod hvg;
@@ -65,7 +67,9 @@ mod pbg_train_args;
 mod planted;
 mod postprocess;
 mod predict;
-mod predict_tmle;
+#[cfg(test)]
+#[path = "tests/predict_null.rs"]
+mod predict_null_tests;
 mod probe;
 mod rbm;
 mod rbm_core;
@@ -96,7 +100,6 @@ use critique::{run_critique, CritiqueArgs};
 use deconvolve::DeconvolveArgs;
 use docs::{run_docs, DocsArgs};
 use embed_diag::*;
-use eval_topic::*;
 use fne::{fit_fne, FneArgs};
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
@@ -179,7 +182,7 @@ fn print_logo() {
                   senna run   (choose data, methods and flags in the terminal)\n  \
                   2. Held-out inference senna predict            (apply trained model)\n  \
                   3. Cluster cells     senna clustering --from run.senna.json --latent L --out O\n  \
-                  4. 2D layout         senna layout {phate|tsne|umap} --from run.senna.json\n\
+                  4. 2D layout         senna layout {phate|tsne|umap|lle|sugiyama|stress|forceatlas2|diffusion|radial} --from run.senna.json\n\
                   \n\
                   Annotation, trajectory, association, and figures live in `lupin`\n\
                   (`lupin --help`).\n\
@@ -571,9 +574,9 @@ enum Commands {
                       TYPICAL USE -- score a trained model on a held-out half:\n\
                       \x20 data-beans split data.zarr -o cv --test-frac 0.2 \\\n\
                       \x20     --coord positions.csv --coord-columns 4,5 --grid 8\n\
-                      \x20 senna topic cv.train.zarr.zip -o model --adj-method batch\n\
-                      \x20 senna predict cv.test.zarr.zip --model model -o pred \\\n\
-                      \x20     --null-from cv.train.zarr.zip --eval-features panel.txt\n\
+                      \x20 senna topic cv.train.zarr.zip -b train.batch.txt -o model\n\
+                      \x20 senna predict cv.test.zarr.zip -b test.batch.txt --model model \\\n\
+                      \x20     -o pred --null-from cv.train.zarr.zip --eval-features panel.txt\n\
                       \n\
                       BULK -- a dense genes x samples table (parquet or tsv) goes in\n\
                       through --bulk instead of a backend; everything after that is the\n\
@@ -587,12 +590,16 @@ enum Commands {
                       \x20    and is an upper reference rather than a floor.\n\
                       \x20 2. --eval-features must be the SAME file for every arm, or\n\
                       \x20    each model is graded on its own curriculum.\n\
-                      \x20 3. Train with --adj-method batch. Under the default (residual)\n\
-                      \x20    predict warns and the latent may be biased.\n\
+                      \x20 3. A model trained with batches needs the held-out cells'\n\
+                      \x20    batches too (-b), so its encoder gets the null it trained with.\n\
                       \n\
                       Dense and indexed models are auto-dispatched via model.json.\n\
                       Gene-set misalignment is handled by flexible name matching.\n\
-                      Per-batch delta is re-estimated from the frozen dictionary.\n\
+                      The encoder's null is built as training built it: the held-out\n\
+                      cells are collapsed with the model's own settings, and each cell\n\
+                      reads its pseudobulk's fold (--adj-method residual) or its batch's\n\
+                      delta (batch). A model trained without batches gets none.\n\
+                      Scoring takes each batch's delta from the encoded cells.\n\
                       \n\
                       Latent modes are encoder-only (the default), encoder+refine,\n\
                       and decoder-only.\n\
@@ -657,7 +664,8 @@ enum Commands {
                       \n\
                       Usage:\n\
                       senna probe --model M --calibration ref.zarr query.zarr -o out\n  \
-                      Writes {out}.probe.tsv (per-cell fit + flag)."
+                      Writes {out}.probe.tsv (per-cell fit + flag) and {out}.probe.json\n\
+                      (the verdict, and the --counterfactual effects)."
     )]
     Probe(ProbeArgs),
 
@@ -732,9 +740,6 @@ enum Commands {
     )]
     Impute(ImputeArgs),
 
-    #[command(about = "[deprecated] Alias for `senna predict`.")]
-    EvalTopic(EvalTopicArgs),
-
     #[command(
         about = "Effective rank and common-mode readout of a run's embedding tables.",
         long_about = "Read the cell embedding, the per-gene loading and, when the run\n\
@@ -797,19 +802,19 @@ enum Commands {
 
     // ─────────── 4. Layout ───────────
     #[command(
-        about = "2D layout of cells (tsne / umap / phate) over batch-corrected pseudobulks.",
-        long_about = "Builds PBs by batch-corrected multi-level collapsing.\n\
-                      PB-PB cosine similarity is computed on log1p-CPM gene vectors.\n\
-                      The chosen method lays those out.\n\
-                      Every cell is then projected via Nyström.\n\
+        about = "2D layout of cells (umap, or phate / tsne / lle / stress / forceatlas2 / diffusion / radial / sugiyama over pseudobulks of the cell graph).",
+        long_about = "Builds one kNN graph of the run's cells (its latent or cell projection).\n\
+                      umap lays the cells out on it directly. The others lay out\n\
+                      pseudobulks: the graph coarsened into groups of cells and collapsed\n\
+                      onto them; every cell is then placed via Nyström.\n\
                       \n\
                       Each method writes `{out}.{method}.*.parquet` and is kept under\n\
-                      `manifest.layout.methods`, so umap / phate / tsne sit side by side;\n\
+                      `manifest.layout.methods`, so the methods sit side by side;\n\
                       `manifest.layout.{cell_coords, pb_coords}` point at the latest.\n\
                       On embedding runs, features are also placed on the cell map, and\n\
                       `--target features` lays out the feature embedding on its own.\n\
                       \n\
-                      Pick a method: `senna layout {phate|tsne|umap} --from run.senna.json`.",
+                      Pick a method: `senna layout {phate|tsne|umap|lle|sugiyama|stress|forceatlas2|diffusion|radial} --from run.senna.json`.",
         visible_alias = "lay",
         subcommand_required = true,
         arg_required_else_help = true
@@ -837,7 +842,7 @@ enum Commands {
         long_about = format!(
             "Interactive terminal viewer for `senna layout` results.\n\
                       \n\
-                      Switch between layout methods (umap / phate / tsne) and spaces:\n\
+                      Switch between layout methods (umap / phate / tsne / lle / stress / ...) and spaces:\n\
                       cells, features placed on the cell map, and features on their own.\n\
                       Colour by annotation, clusters, topics, batch or marker membership,\n\
                       focus one group, zoom and pan. Uses kitty / sixel / iTerm2 images\n\
@@ -958,21 +963,83 @@ enum LayoutCmd {
     #[command(about = "PHATE diffusion embedding of pseudobulks (recommended default).")]
     Phate(LayoutPhateArgs),
     #[command(
-        about = "t-SNE of pseudobulks on raw-gene similarity (random init).",
+        about = "t-SNE of pseudobulks on the graph between them (random init).",
         long_about = "t-SNE layout of pseudobulks.\n\
                       \n\
-                      Similarity is computed on raw genes.\n\
+                      Its affinities are the graph between the pseudobulks: the cell kNN\n\
+                      graph, coarsened into pseudobulks and collapsed onto them.\n\
                       The embedding starts from a random initialization.\n\
                       Cells are then placed from their pseudobulk coordinates."
     )]
     Tsne(LayoutTsneArgs),
     #[command(
-        about = "UMAP-style SGD of pseudobulks over the fuzzy kNN graph.",
-        long_about = "UMAP-style layout of pseudobulks.\n\
+        about = "Modified LLE of pseudobulks on the graph between them.",
+        long_about = "Locally linear embedding (MLLE) of pseudobulks.\n\
                       \n\
-                      A fuzzy kNN graph is built over the pseudobulks.\n\
-                      Attractive and repulsive forces are then optimized by SGD.\n\
-                      Cells are placed from their pseudobulk coordinates."
+                      Each pseudobulk is rebuilt from its neighbours in the graph between\n\
+                      the pseudobulks (the cell kNN graph, coarsened and collapsed), from\n\
+                      their mean features; the 2D layout keeps those weights.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Lle(LayoutLleArgs),
+    #[command(
+        about = "Layered (Sugiyama) drawing of pseudobulks, top to bottom from a root.",
+        long_about = "Layered drawing of pseudobulks on the graph between them (the cell\n\
+                      kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      Layers are the breadth-first levels from a root, one end of the\n\
+                      graph's longest path; within a layer, pseudobulks are ordered by\n\
+                      barycentre sweeps so branches sit side by side.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Sugiyama(LayoutSugiyamaArgs),
+    #[command(
+        about = "Stress majorization of pseudobulks on the graph between them.",
+        long_about = "Stress layout of pseudobulks on the graph between them (the cell\n\
+                      kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      Pseudobulks are placed so their 2D distances match their shortest\n\
+                      path lengths in the graph (an edge's length is one over its weight),\n\
+                      by stochastic gradient descent; global distances are kept.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Stress(LayoutStressArgs),
+    #[command(
+        about = "ForceAtlas2 of pseudobulks on the graph between them.",
+        long_about = "Force-directed (ForceAtlas2) layout of pseudobulks on the graph\n\
+                      between them (the cell kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      Edges pull by their weight, every pair pushes apart by one over\n\
+                      its distance, with ForceAtlas2's adaptive speed.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Forceatlas2(LayoutForceAtlas2Args),
+    #[command(
+        about = "Diffusion components of pseudobulks on the graph between them.",
+        long_about = "Diffusion map of pseudobulks on the graph between them (the cell\n\
+                      kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      The two leading non-trivial eigenvectors of the graph's random\n\
+                      walk, each scaled by its eigenvalue to the --diffusion-t.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Diffusion(LayoutDiffusionArgs),
+    #[command(
+        about = "Radial tree of pseudobulks on the graph between them.",
+        long_about = "Radial tree layout of pseudobulks on the graph between them (the\n\
+                      cell kNN graph, coarsened and collapsed).\n\
+                      \n\
+                      The graph's maximum spanning tree, rooted at its centre, drawn\n\
+                      with each depth on a ring and each subtree in its own wedge.\n\
+                      Cells are then placed from their pseudobulk coordinates."
+    )]
+    Radial(LayoutRadialArgs),
+    #[command(
+        about = "UMAP of cells over their fuzzy kNN graph.",
+        long_about = "UMAP layout of cells.\n\
+                      \n\
+                      The cells' fuzzy kNN graph (the one the pseudobulk layouts\n\
+                      coarsen) is laid out by SGD of attractive and repulsive forces."
     )]
     Umap(LayoutUmapArgs),
 }
@@ -1060,9 +1127,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Impute(args) => {
             impute_model(args)?;
         }
-        Commands::EvalTopic(args) => {
-            eval_topic_model(args)?;
-        }
         Commands::EmbedDiag(args) => {
             embed_diag(args)?;
         }
@@ -1079,6 +1143,24 @@ fn main() -> anyhow::Result<()> {
             }
             LayoutCmd::Phate(args) => {
                 fit_layout_phate(args)?;
+            }
+            LayoutCmd::Lle(args) => {
+                fit_layout_lle(args)?;
+            }
+            LayoutCmd::Sugiyama(args) => {
+                fit_layout_sugiyama(args)?;
+            }
+            LayoutCmd::Stress(args) => {
+                fit_layout_stress(args)?;
+            }
+            LayoutCmd::Forceatlas2(args) => {
+                fit_layout_forceatlas2(args)?;
+            }
+            LayoutCmd::Diffusion(args) => {
+                fit_layout_diffusion(args)?;
+            }
+            LayoutCmd::Radial(args) => {
+                fit_layout_radial(args)?;
             }
         },
         Commands::Clustering(args) => {

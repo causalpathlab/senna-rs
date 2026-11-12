@@ -877,7 +877,7 @@ pub struct RunOutputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// `{out}.model.json` — topic-model metadata for `senna
-    /// eval-topic` (topic / masked-topic / joint-topic only).
+    /// predict` (topic / masked-topic / joint-topic only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
     /// `{out}.pb_gene.parquet` — G × P pseudobulk gene aggregates at the

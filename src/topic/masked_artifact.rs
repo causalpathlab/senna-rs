@@ -141,15 +141,13 @@ impl<'a> MaskedModel<'a> {
             model: self.prefix,
             data_files: files,
             batch_files: None,
-            // `probe` takes no batch files, so there is never a δ to iterate.
             block_size: None,
-            delta_iters: 0,
-            // No δ. probe compares a calibration arm against a query arm, and δ is
-            // fitted from whichever arm it is given — it would absorb exactly the
-            // compositional novelty probe is looking for, and only on the arm with
-            // more than one inferred batch. Both arms must be scored by the same
-            // frozen model.
-            estimate_batch_delta: false,
+            // No encoder null and no δ. probe compares a calibration arm against a
+            // query arm, and both are fitted from whichever arm they are given: they
+            // would absorb exactly the compositional novelty probe is looking for,
+            // and only on the arm with more than one inferred batch. Both arms must
+            // be scored by the same frozen model.
+            held_out: crate::predict::null::HeldOut::Ignore,
             preload,
             minibatch_size,
             query_name_opts: &qopts,

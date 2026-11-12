@@ -4,4 +4,4 @@
 //! the `From<&PhateCliArgs>` conversion in `postprocess::fit_layout_common`)
 //! stable.
 
-pub use legume_numeric::matrix::layout::{phate_layout_2d, PhateArgs};
+pub use legume_numeric::matrix::layout::{phate_layout_2d, phate_layout_2d_on_graph, PhateArgs};

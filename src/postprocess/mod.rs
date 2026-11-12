@@ -1,6 +1,9 @@
 mod fit_layout_common;
 pub(crate) mod fit_layout_features;
+mod fit_layout_graph;
+mod fit_layout_lle;
 mod fit_layout_phate;
+mod fit_layout_sugiyama;
 mod fit_layout_tsne;
 mod fit_layout_umap;
 pub(crate) mod viz_prep;
@@ -9,6 +12,9 @@ pub(crate) mod viz_prep;
 #[cfg(feature = "view")]
 pub(crate) use fit_layout_common::{latent_layout_features, DEFAULT_TRIM_MADS};
 
+pub use fit_layout_graph::*;
+pub use fit_layout_lle::*;
 pub use fit_layout_phate::*;
+pub use fit_layout_sugiyama::*;
 pub use fit_layout_tsne::*;
 pub use fit_layout_umap::*;

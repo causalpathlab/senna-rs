@@ -1,28 +1,23 @@
-//! `senna mcp`: the viewer and senna's fits as Model Context Protocol tools,
-//! served over stdio with legume-mcp.
-//!
-//! The view tools hold one run and one view between calls, as the terminal
-//! viewer holds them: `view_map` changes only what it is given, then draws
-//! the map. The run tools start `senna` as a child, as `senna run` does, so
-//! stdout carries only the protocol and the child's log comes back as
-//! progress. lupin rounds are read as they are on disk; making them is
-//! lupin's own server.
+//! The view tools: one run held open between calls, drawn as the
+//! terminal viewer draws it.
 
-use super::data::{Axis, Dataset, LabelKind, NONE};
-use super::render::{self, Viewport};
-use super::{deck, Pick, Scene, Source, VelocityStyle, ViewArgs};
+use super::jobs::senna;
+use super::{absolute, parse};
+use crate::view::data::{Axis, Dataset, LabelKind, Labels, NONE};
+use crate::view::recompute::Step;
+use crate::view::render::{self, Viewport};
+use crate::view::{
+    color, deck, features, prepare_run, state, velocity, Pick, Scene, Source, VelocityStyle,
+    ViewArgs,
+};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use image::codecs::png::CompressionType;
-use legume_mcp::{Call, Content, Handler, ToolSpec};
+use legume_mcp::{Call, Content, ToolSpec};
 use legume_tui::export::PageSize;
-use senna::run_manifest::{self, RunManifest};
+use senna::run_manifest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-/// The fits `run_fit` runs: those `senna run` queues.
-use crate::run::tui::METHODS;
 
 /// Width of a map drawn without one: enough to read a layout by, small
 /// enough to keep the image cheap for the agent.
@@ -44,222 +39,48 @@ const REACH_PX: f32 = 12.0;
 /// Features `view_markers` lists without a count.
 const MARKERS: usize = 12;
 
-/// What the agent is told when it connects, word for word the block the
-/// README gives for clients that do not pass it on.
-pub const INSTRUCTIONS: &str = "\
-Use senna's MCP tools to embed single-cell data and look at the result; \
-annotation is lupin's own server. Open the day with `notebook` (kind `plan`): \
-the question, the data, and how the result will be checked. `run_fit` runs a \
-fit to its end (`run_help` lists a method's flags) and returns its run \
-manifest; an existing run is not fitted again. A long fit runs with \
-`background`, as a job to follow with `job_wait`, in a session of `senna run` the user can watch with `senna attach`. `view_open` opens a run (or a \
-lupin round) and computes a missing layout or clustering first. `view_map` \
-draws the map with its legend; its arguments stay set until changed, so pass \
-only what changes. `view_markers` lists what sets a group apart, `view_cell` \
-names a point and its groups, and `view_export` writes figures. World \
-coordinates are the layout's, y up. Close with `notebook` (kind \
-`conclusion`) and tell the user where the records are.";
+/// A view tool's call on the run held open; `None` for another family's.
+pub(super) fn call(
+    open: &mut Option<Open>,
+    name: &str,
+    args: &Value,
+    cx: &Call,
+) -> Result<Option<Vec<Content>>> {
+    let out = match name {
+        "view_open" => {
+            let open = open.insert(Open::new(&parse(args.clone())?, cx)?);
+            cx.state(&open.view_state());
+            vec![Content::Json(open.summary())]
+        }
+        "view_map" => {
+            let open = held(open)?;
+            let out = open.map(parse(args.clone())?)?;
+            // What a person following the server sees next.
+            cx.state(&open.view_state());
+            out
+        }
+        "view_markers" => held(open)?.markers(parse(args.clone())?)?,
+        "view_cell" => held(open)?.cell(parse(args.clone())?)?,
+        "view_export" => held(open)?.export(parse(args.clone())?)?,
+        _ => return Ok(None),
+    };
+    Ok(Some(out))
+}
 
-/// The tools, and the run they have open.
-#[derive(Default)]
-pub struct Tools {
-    open: Option<Open>,
+/// The run held open, for every view tool but `view_open`.
+fn held(open: &mut Option<Open>) -> Result<&mut Open> {
+    open.as_mut()
+        .ok_or_else(|| anyhow!("no run open: call view_open first"))
 }
 
 /// An open run and the view on it.
-struct Open {
+pub(super) struct Open {
     scene: Scene,
     run: PathBuf,
     /// The world window asked for; `None` fits the whole map.
     window: Option<[f32; 4]>,
     /// The last map drawn, for `view_cell` pixels.
     drawn: Option<Viewport>,
-}
-
-impl Handler for Tools {
-    fn tools(&self) -> Vec<ToolSpec> {
-        specs()
-    }
-
-    fn call(&mut self, name: &str, args: Value, cx: &Call) -> Result<Vec<Content>> {
-        match name {
-            "run_fit" => run_fit(parse(args)?, cx),
-            "run_help" => run_help(parse(args)?),
-            "view_open" => {
-                let open = self.open.insert(Open::new(&parse(args)?, cx)?);
-                cx.state(&open.view_state());
-                Ok(vec![Content::Json(open.summary())])
-            }
-            "view_map" => {
-                let open = self.open()?;
-                let out = open.map(parse(args)?)?;
-                // What a person following the server sees next.
-                cx.state(&open.view_state());
-                Ok(out)
-            }
-            "view_markers" => self.open()?.markers(parse(args)?),
-            "view_cell" => self.open()?.cell(parse(args)?),
-            "view_export" => self.open()?.export(parse(args)?),
-            _ => bail!("unknown tool {name}"),
-        }
-    }
-}
-
-impl Tools {
-    fn open(&mut self) -> Result<&mut Open> {
-        self.open
-            .as_mut()
-            .ok_or_else(|| anyhow!("no run open: call view_open first"))
-    }
-}
-
-fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T> {
-    serde_json::from_value(args).context("reading the arguments")
-}
-
-fn absolute(path: &Path) -> PathBuf {
-    run_manifest::from_cwd(path)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FitArgs {
-    method: String,
-    data: Vec<String>,
-    out: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    background: bool,
-}
-
-/// `senna {method} {data} -o {out} {args}` as a child, unless the run is
-/// there already. Without an out, the run goes in today's results folder,
-/// named by its first data file and method.
-fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
-    check_method(&a.method)?;
-    ensure!(!a.data.is_empty(), "no data files");
-    let out = match a.out {
-        Some(out) => out,
-        None => {
-            let dir = cx
-                .results_dir()
-                .context("no results folder (records are off): pass out")?;
-            let data = Path::new(&a.data[0]).file_name().unwrap_or_default();
-            let stem = data.to_string_lossy();
-            let stem = stem.split('.').next().unwrap_or("run");
-            // The first name no running fit is writing: `{stem}_{method}`,
-            // then `_2`, `_3`, … (as many as there could be jobs and more).
-            (1..=1000)
-                .map(|k| match k {
-                    1 => format!("{stem}_{}", a.method),
-                    k => format!("{stem}_{}_{k}", a.method),
-                })
-                .map(|name| dir.join(name).to_string_lossy().into_owned())
-                .find(|out| {
-                    let manifest = absolute(Path::new(&run_manifest::default_path(out)));
-                    cx.ensure_free(&[manifest]).is_ok()
-                })
-                .context("every default name is being written by a running fit: pass out")?
-        }
-    };
-    let manifest = absolute(Path::new(&run_manifest::default_path(&out)));
-    if manifest.exists() {
-        return Ok(vec![Content::Json(json!({
-            "run": manifest,
-            "kind": kind(&manifest)?,
-            "fitted": false,
-            "note": "the run is there already, of the kind given; another out fits anew",
-        }))]);
-    }
-    // legume-mcp refuses an out a background fit is still writing (naming
-    // its job) until that fit has written the manifest, and fails a fit
-    // that ends without it.
-    let mut argv = vec![a.method.clone()];
-    argv.extend(a.data.iter().cloned());
-    argv.extend(["-o".into(), out.clone()]);
-    argv.extend(a.args);
-    let summary = format!("senna {} fit of {}", a.method, a.data.join(", "));
-    let outputs = std::slice::from_ref(&manifest);
-    let fit = || format!("senna {}", a.method);
-    if a.background {
-        // Returned at once: the agent follows the job, and opens the run
-        // once it is done.
-        let mut job = background_fit(cx, &out, &argv, outputs, &summary).with_context(fit)?;
-        job["run"] = json!(manifest);
-        return Ok(vec![Content::Json(job)]);
-    }
-    cx.progress(&format!("senna {} → {out}", a.method));
-    cx.run_making(senna(&argv)?, outputs, &summary)
-        .with_context(fit)?;
-    Ok(vec![Content::Json(
-        json!({ "run": manifest, "kind": kind(&manifest)?, "fitted": true }),
-    )])
-}
-
-/// The fit `senna {argv}` in the background, from this server's folder:
-/// on `senna run`'s Run screen in a session of its own, which a
-/// person can attach to and which outlives this server; where there are
-/// no sessions, a job of this server's. The job, as the agent is told it.
-fn background_fit(
-    cx: &Call,
-    out: &str,
-    argv: &[String],
-    outputs: &[PathBuf],
-    summary: &str,
-) -> Result<Value> {
-    #[cfg(unix)]
-    {
-        let mut watch = legume_mcp::own_command(["run", "--"])?;
-        watch.args(argv);
-        let label = Path::new(out)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned());
-        let started = cx.start_session_job(legume_mcp::SessionJob {
-            tool: crate::tui::TOOL,
-            screen: "fit".into(),
-            label,
-            watch,
-            record: senna(argv)?,
-            outputs: outputs.to_vec(),
-            summary: summary.into(),
-        })?;
-        let session = started.session;
-        Ok(json!({
-            "job": started.job,
-            "session": session,
-            "note": format!(
-                "the fit runs as this job, on senna run's screen in session {session} (`senna attach {session}` shows it to the user), and goes on if this server ends; follow it with job_status or job_wait, then open the run with view_open once the job is done"
-            ),
-        }))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = out;
-        Ok(json!({
-            "job": cx.spawn_job(senna(argv)?, outputs, summary)?,
-            "note": "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done",
-        }))
-    }
-}
-
-/// `senna {argv}` as a child, verbose: its log is the call's progress.
-fn senna(argv: &[String]) -> Result<Command> {
-    // This server's own binary, found even when it was reinstalled since.
-    let mut senna = legume_mcp::own_command(argv)?;
-    if !argv.iter().any(|f| f == "-v" || f == "--verbose") {
-        senna.arg("-v");
-    }
-    Ok(senna)
-}
-
-fn check_method(method: &str) -> Result<()> {
-    ensure!(
-        METHODS.contains(&method),
-        "method {method} is not one of {}",
-        METHODS.join(", ")
-    );
-    Ok(())
 }
 
 /// `width`, or `default`, within what a picture may be.
@@ -272,31 +93,6 @@ fn width(width: Option<usize>, default: usize) -> Result<usize> {
     Ok(width)
 }
 
-/// The kind of fit the run `manifest` records.
-fn kind(manifest: &Path) -> Result<Value> {
-    let (m, _) = RunManifest::load(manifest)?;
-    Ok(serde_json::to_value(m.kind)?)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HelpArgs {
-    method: String,
-}
-
-/// The method's help, read here: nothing runs, so the session script
-/// records no step.
-fn run_help(a: HelpArgs) -> Result<Vec<Content>> {
-    use clap::CommandFactory;
-    check_method(&a.method)?;
-    let mut cli = crate::Cli::command();
-    cli.build();
-    let sub = cli
-        .find_subcommand_mut(&a.method)
-        .with_context(|| format!("no subcommand {}", a.method))?;
-    Ok(vec![Content::Text(sub.render_long_help().to_string())])
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenArgs {
@@ -306,7 +102,7 @@ struct OpenArgs {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub(super) struct MapArgs {
+pub(in crate::view) struct MapArgs {
     round: Option<String>,
     map: Option<String>,
     space: Option<String>,
@@ -316,7 +112,7 @@ pub(super) struct MapArgs {
     observed: Option<bool>,
     time: Option<bool>,
     velocity: Option<VelocityArg>,
-    pub(super) bbox: Option<[f32; 4]>,
+    pub(in crate::view) bbox: Option<[f32; 4]>,
     fit: Option<bool>,
     center: Option<[f32; 2]>,
     zoom: Option<f32>,
@@ -396,7 +192,7 @@ impl Open {
         let args = view_args(&a.run, a.map.as_deref())?;
         // Missing layouts and clusters, as `senna view` computes them, but
         // as children whose output stays off the protocol.
-        super::prepare_run(&args, &a.run, &|why, argv, outputs| {
+        prepare_run(&args, &a.run, &|why, argv, outputs| {
             cx.progress(why);
             let outputs: Vec<PathBuf> = outputs.iter().map(|o| absolute(Path::new(o))).collect();
             cx.run_making(senna(argv)?, &outputs, why).map(drop)
@@ -445,7 +241,7 @@ impl Open {
             || s.data
                 .run
                 .as_ref()
-                .is_some_and(|(m, _)| super::velocity::Field::available(m));
+                .is_some_and(|(m, _)| velocity::Field::available(m));
         json!({
             "run": self.run,
             "maps": maps,
@@ -749,7 +545,7 @@ impl Open {
 /// (another layout, or a round with other bounds): a window kept from
 /// before no longer applies. The terminal viewer applies an agent's view
 /// with it as `view_map` does.
-pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
+pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
     // A round the view does not show is read now and swapped in last.
     let round = match &a.round {
         Some(r) if !shows_round(scene, Path::new(r)) => Some(Dataset::load(r)?),
@@ -817,16 +613,14 @@ pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
             a.feature.as_deref().is_none_or(str::is_empty),
             "colour by time or by a feature, not both"
         );
-        ensure!(data.times.is_some(), super::features::NO_TIMES);
+        ensure!(data.times.is_some(), features::NO_TIMES);
     }
     // The field, read now when it is asked for and the view has none of
     // this run's: the round's run, when a round is swapped in.
-    let has_field = s.velocity.is_some()
-        && round
-            .as_ref()
-            .is_none_or(|r| super::state::same_run(&s.data, r));
+    let has_field =
+        s.velocity.is_some() && round.as_ref().is_none_or(|r| state::same_run(&s.data, r));
     let field = (a.velocity.and_then(VelocityArg::style).is_some() && !has_field)
-        .then(|| super::velocity::Field::of_run(data.run.as_ref()))
+        .then(|| velocity::Field::of_run(data.run.as_ref()))
         .transpose()?
         .map(std::sync::Arc::new);
 
@@ -877,9 +671,6 @@ pub(super) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
     Ok(moved)
 }
 
-/// The server's name, as `initialize` reports it and watchers find it.
-pub(crate) const SERVER: &str = "senna";
-
 /// The view_map arguments a published view sets.
 const VIEW_KEYS: [&str; 10] = [
     "round",
@@ -896,7 +687,7 @@ const VIEW_KEYS: [&str; 10] = [
 
 /// An agent's published view ([`Open::view_state`]): the manifest it
 /// shows, and the rest as view_map's arguments.
-pub(super) fn agent_view(state: &Value) -> Result<(PathBuf, MapArgs)> {
+pub(in crate::view) fn agent_view(state: &Value) -> Result<(PathBuf, MapArgs)> {
     let shown = state["round"]
         .as_str()
         .or(state["run"].as_str())
@@ -933,7 +724,7 @@ fn find_space(data: &Dataset, method: &str, kind: &str) -> Result<usize> {
 
 /// Group `name` of `labels`: a level's name, or for clusters its id (`3`,
 /// `C3` or lupin's `K3`, the ids of the round shown).
-fn group_of(labels: &super::data::Labels, name: &str) -> Result<u32> {
+fn group_of(labels: &Labels, name: &str) -> Result<u32> {
     let by_name = labels
         .levels
         .iter()
@@ -978,8 +769,8 @@ fn nearest(xy: &[[f32; 2]], at: [f32; 2]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-fn hex(c: super::color::Rgb) -> String {
-    let [r, g, b] = super::color::to_srgb_senna(c);
+fn hex(c: color::Rgb) -> String {
+    let [r, g, b] = color::to_srgb_senna(c);
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
@@ -999,40 +790,11 @@ fn png(img: image::RgbaImage, level: CompressionType) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn specs() -> Vec<ToolSpec> {
+pub(super) fn specs() -> Vec<ToolSpec> {
     let spec = ToolSpec::new;
     let group = json!({"type": ["string", "integer"]});
     let xy = |what: &str| json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": what});
     vec![
-        spec(
-            "run_fit",
-            "Fit a senna embedding as `senna {method} {data} -o {out} {args}` and return \
-             the absolute path of its run manifest. An out whose manifest exists is not \
-             fitted again; one a background fit is still writing is refused, naming its \
-             job (job_wait for it). Fits can take long; progress carries the log.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "method": {"enum": METHODS, "description": "The fit"},
-                    "data": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Data files (.zarr, .zarr.zip, .h5)"},
-                    "out": {"type": "string", "description": "Output prefix; the run is {out}.senna.json [default: today's results folder, by data file and method]"},
-                    "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help lists them, e.g. [\"-b\", \"batch.txt\"]"},
-                    "background": {"type": "boolean", "description": "Run the fit as a job and return its id at once, for a fit longer than a call can wait; follow it with job_status or job_wait [default: false]"},
-                },
-                "required": ["method", "data"],
-                "additionalProperties": false,
-            }),
-        ),
-        spec(
-            "run_help",
-            "Every flag of one fit, with its help, as `senna {method} --help` prints it.",
-            json!({
-                "type": "object",
-                "properties": {"method": {"enum": METHODS}},
-                "required": ["method"],
-                "additionalProperties": false,
-            }),
-        ),
         spec(
             "view_open",
             "Open a run and summarize it: its maps (layout × points), its groupings, \
@@ -1043,7 +805,7 @@ fn specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "run": {"type": "string", "description": "Run manifest ({out}.senna.json) or a lupin round's"},
-                    "map": {"type": "string", "description": "Layout to start on (umap, phate, tsne); computed when missing"},
+                    "map": {"type": "string", "description": format!("Layout to start on ({}); computed when missing", Step::CellLayout.settings().join(", "))},
                 },
                 "required": ["run"],
                 "additionalProperties": false,
@@ -1123,5 +885,5 @@ fn specs() -> Vec<ToolSpec> {
 }
 
 #[cfg(test)]
-#[path = "tests/mcp.rs"]
+#[path = "../tests/mcp.rs"]
 mod tests;

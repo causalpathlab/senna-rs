@@ -117,6 +117,7 @@ fn rate_errors(c: &Climbed, genes: &[usize]) -> (f64, f64) {
 /// Lineage 0's duration is the unit and the simulator's is 1, so the
 /// fitted rates are in the truth's unit with no map between them.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn from_scratch_the_rates_are_the_truths_where_the_reads_pin_them() {
     let c = kinetics();
     let genes = pinned(&c.sim);
@@ -136,6 +137,7 @@ fn from_scratch_the_rates_are_the_truths_where_the_reads_pin_them() {
 /// are without it: rates and time. (The shared model loses the rates
 /// already at the smaller jitter.)
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn with_the_jitter_in_the_model_the_gates_survive_a_jitter_of_the_unspliced_share() {
     for j in [0.3, 1.0] {
         let cfg = SimConfig {
@@ -161,6 +163,7 @@ fn with_the_jitter_in_the_model_the_gates_survive_a_jitter_of_the_unspliced_shar
 /// With no jitter in the reads, the jitter in the model costs nothing: the
 /// gates pass and the fitted jitter is small.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn with_no_jitter_in_the_reads_the_jitter_in_the_model_stays_small() {
     let c = kinetics();
     let (gamma, _) = rate_errors(c, &pinned(&c.sim));
@@ -176,6 +179,7 @@ fn with_no_jitter_in_the_reads_the_jitter_in_the_model_stays_small() {
 /// spread (not their sum), and the gates pass: neither is pushed into the
 /// rates.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_climb_finds_a_global_capture_apart_from_the_jitter() {
     for (c_true, j) in [(-1.2, 0.0), (-1.2, 0.3), (0.6, 0.3)] {
         capture_gate(c_true, j, 1);

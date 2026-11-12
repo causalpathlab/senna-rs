@@ -261,6 +261,7 @@ pub(crate) fn hide_features(
 /// Tries case-insensitive exact match first; falls back to
 /// `flexible_gene_match` (handles aliases like `ENSG..._GENEJ` ↔ `GENEJ`,
 /// case differences, and `_`-delimited prefixes/suffixes).
+#[cfg(test)]
 pub(crate) fn build_gene_remap(
     training_genes: &[Box<str>],
     new_data_genes: &[Box<str>],
@@ -362,9 +363,9 @@ pub(crate) fn build_gene_remap_with(
 /// The one gene-coverage policy, shared by every path that scores query data
 /// against a trained model.
 ///
-/// It used to be spelled three times — `predict`, `eval_topic` and `bge/score`
-/// each carried their own hardcoded "at least 10% of the model's genes" gate —
-/// so the same query was accepted or refused depending on which command saw it.
+/// Each command that scored query data (`predict`, `bge/score`) used to carry
+/// its own hardcoded "at least 10% of the model's genes" gate, so the same
+/// query was accepted or refused depending on which command saw it.
 ///
 /// **A low overlap is not by itself an error**, which is why the floor is off
 /// unless asked for: a targeted panel legitimately measures a small slice of a
@@ -396,54 +397,9 @@ pub(crate) fn ensure_gene_coverage(
     Ok(())
 }
 
-/// Evaluate latent states with optional gene remapping and pre-computed delta.
-///
-/// When `gene_remap` is `Some`, per-block CSC data is scattered from new-data
-/// row order to training gene order. When `None`, data is used as-is.
-pub(crate) fn evaluate_latent_with_gene_remap<Enc, Dec>(
-    data_vec: &SparseIoVec,
-    encoder: &Enc,
-    delta_db: Option<&Mat>,
-    gene_remap: Option<&GeneRemap>,
-    config: &EvaluateLatentConfig<Dec>,
-) -> anyhow::Result<Mat>
-where
-    Enc: EncoderModuleT + Send + Sync,
-    Dec: DecoderModuleT + Send + Sync,
-{
-    let ntot = data_vec.num_columns();
-    let kk = encoder.dim_latent();
-
-    let delta = delta_db.map(|db| {
-        let mut db = db.clone();
-        if let Some(fc) = config.feature_coarsening {
-            db = fc.aggregate_rows_ds(&db);
-        }
-        db.to_tensor(config.dev)
-            .expect("delta to tensor")
-            .transpose(0, 1)
-            .expect("transpose")
-            .contiguous()
-            .expect("contiguous")
-    });
-
-    let block_config = EvaluateBlockConfig {
-        dev: config.dev,
-        delta: delta.as_ref(),
-        feature_coarsening: config.feature_coarsening,
-        decoder: config.decoder,
-        refine_config: config.refine_config,
-        adj_method: config.adj_method.clone(),
-        gene_remap,
-    };
-
-    process_blocks(ntot, kk, config.minibatch_size, config.dev, |block| {
-        evaluate_block(block, data_vec, encoder, &block_config)
-    })
-}
-
-/// Scatter CSC rows from new-data order to training gene order.
-fn remap_csc_to_dense(csc: &nalgebra_sparse::CscMatrix<f32>, remap: &GeneRemap) -> Mat {
+/// Scatter CSC rows from new-data order to training gene order, dense
+/// `[D_train, N]`; rows several query rows map to are summed.
+pub(crate) fn remap_csc_to_dense(csc: &nalgebra_sparse::CscMatrix<f32>, remap: &GeneRemap) -> Mat {
     let ncols = csc.ncols();
     let mut out = Mat::zeros(remap.d_train, ncols);
     for j in 0..ncols {

@@ -82,8 +82,10 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > fit to its end (`run_help` lists a method's flags) and returns its run
 > manifest; an existing run is not fitted again. A long fit runs with
 > `background`, as a job to follow with `job_wait`, in a session of `senna run`
-> the user can watch with `senna attach`. `view_open` opens a run (or a
-> lupin round) and computes a missing layout or clustering first. `view_map`
+> the user can watch with `senna attach`. `run_predict` places new cells in a
+> trained model's latent, `run_update` continues a trained model over new data,
+> and `run_layout` lays a run out again with chosen settings, umap's min_dist
+> and spread among them. `view_open` opens a run (or a lupin round) and computes a missing layout or clustering first. `view_map`
 > draws the map with its legend; its arguments stay set until changed, so pass
 > only what changes. `view_markers` lists what sets a group apart, `view_cell`
 > names a point and its groups, and `view_export` writes figures. World
@@ -93,7 +95,15 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | Tool | Does |
 |---|---|
 | `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
-| `run_help` | every flag of one method, with its help |
+| `run_help` | every flag of one method, or of a command another run tool starts (`predict`, `probe`, `update`, `critique`, `impute`, `deconvolve`, a `run_step` command, `layout <method>`), with its help |
+| `run_predict` | new cells placed in a trained model's latent (`senna predict`), with the null, eval features, batches, bulk tables and latent mode as options; returns the latent, the predictive table and the mean held-out and null log-likelihood per count |
+| `run_probe` | whether a frozen model explains new cells (`senna probe`): the covered or novel verdict, and with `counterfactual` (masked runs) the benefit and forgetting an update on them would bring, read from `{out}.probe.json` |
+| `run_update` | a trained model continued into a new run (`senna update`): new samples absorbed, or a round on its own cells taking `run_critique`'s peer labels; returns the new run's manifest |
+| `run_critique` | where fits disagree on which pseudobulks are alike (`senna critique`); with `questions`, the peer labels for an update round |
+| `run_impute` | full-feature counts on new cells from their nearest reference cells (`senna impute`); returns `{out}.imputed.parquet` |
+| `run_deconvolve` | bulk samples split into cell-type fractions against a run's annotated cells (`senna deconvolve`); returns the fractions file |
+| `run_layout` | a run laid out again with the settings given (`senna layout <method> --from <run> <flags>`), replacing that method's layout; umap takes `min_dist` and `spread` as umap-learn's, checked before it runs; `view_open` then shows it |
+| `run_step` | one of the other analysis commands: `clustering`, `resolve-topics`, `resolve-embedding-space` and `embed-diag` on a run, `joint-topic`, `joint-svd` and `fne` on data files; returns what it made |
 | `view_open` | opens a run or a lupin round: its maps, groupings and the groups shown, a missing layout or clustering computed first |
 | `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, the run's time or velocity field, window and zoom |
 | `view_markers` | the features that set one group apart, by the model's expected fold change, and its markers from the run's table |
@@ -286,3 +296,11 @@ model type and runs the encoder over held-out cells.
 **Outputs.** `{out}.latent.parquet` (cell × factor `z`), `{out}.dictionary.parquet`
 (gene × factor loadings `W`), `{out}.feature_mean.parquet` (per-gene mean rate
 `μ_d`), plus the standard `.safetensors` / `.model.json` / `.senna.json`.
+
+## Tests
+
+`cargo test` runs the suite optimized, with debug assertions on.
+`cargo test --features slow-tests`, as CI does, adds the slow tests:
+`senna ode` fits recovered from scratch, minutes each. Run it before a
+release or after changing the ODE sampler. `cargo test -- --ignored`
+runs every ignored test, the slow ones among them.

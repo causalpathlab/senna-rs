@@ -204,6 +204,7 @@ fn from_roots_the_start_finds_the_fates(seeds: std::ops::RangeInclusive<u64>, n_
 /// Three fates off one trunk, each its own lineage: the fitted lineages
 /// are the fates, time in order.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn from_scratch_three_fates_are_three_lineages() {
     let (rho, pure) = check(3, 1);
     assert!(rho.abs() > 0.9, "time Spearman {rho}");
@@ -212,7 +213,7 @@ fn from_scratch_three_fates_are_three_lineages() {
 
 /// [`from_scratch_three_fates_are_three_lineages`] on more seeds.
 #[test]
-#[ignore = "slow: a climb per seed"]
+#[ignore = "extra seeds: a climb per seed"]
 fn from_scratch_three_fates_are_three_lineages_on_more_seeds() {
     for seed in 2..=3 {
         let (rho, pure) = check(3, seed);

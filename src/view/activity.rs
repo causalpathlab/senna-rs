@@ -1117,8 +1117,8 @@ impl Activity {
         Ok(best(&scores, &e.features.names, top))
     }
 
-    /// The mean cell embedding `z` of `cells` (those in the model): where
-    /// they sit in the space the cell map was laid out from.
+    /// The mean cell embedding `z` of `cells` (those in the model), for
+    /// scores against the average cell.
     pub fn cells_z<'a>(
         &mut self,
         cells: impl IntoIterator<Item = &'a str>,
@@ -1138,14 +1138,39 @@ impl Activity {
         Ok(row_mean(z, &rows))
     }
 
-    /// The `top` cells whose embedding is nearest `at` (Euclidean), scored
-    /// by minus the distance.
+    /// The way `cells` (those in the model) point together, the mean of
+    /// their unit embeddings: where they sit on the cell map, whose cells
+    /// are laid out by direction.
+    pub fn cells_direction<'a>(
+        &mut self,
+        cells: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vector, String> {
+        let e = self.expected()?;
+        let Model::Embedding { z, .. } = &e.model else {
+            return Err("placing cells needs an embedding run".into());
+        };
+        let index = e.cell_index();
+        let rows: Vec<usize> = cells
+            .into_iter()
+            .filter_map(|c| index.get(c).map(|&n| n as usize))
+            .collect();
+        if rows.is_empty() {
+            return Err("none of these cells is in the model".into());
+        }
+        let sum = rows.iter().fold(Vector::zeros(z.ncols()), |s, &r| {
+            s + unit(z.row(r).transpose())
+        });
+        Ok(unit(sum))
+    }
+
+    /// The `top` cells whose embedding points nearest `at`'s way (see
+    /// [`nearest_directions`]).
     pub fn cells_near(&mut self, at: &Vector, top: usize) -> Result<Vec<(Box<str>, f32)>, String> {
         let e = self.expected()?;
         let Model::Embedding { z, .. } = &e.model else {
             return Err("placing cells needs an embedding run".into());
         };
-        nearest_rows(z, at, &e.cells, None, top)
+        nearest_directions(z, at, &e.cells, None, top)
             .ok_or_else(|| "the co-embedding and the cell embedding differ in width".into())
     }
 
@@ -1515,10 +1540,11 @@ fn embedding(
     ))
 }
 
-/// The `top` rows of `m` nearest `at` (Euclidean), with their `names`,
-/// scored by minus the distance; `skip` left out. None when `at` is not of
-/// `m`'s width.
-pub(super) fn nearest_rows(
+/// The `top` rows of `m` pointing nearest `at`'s way, with their `names`:
+/// each scaled to unit length, as an embedding run's cells and features are
+/// laid out, and scored by minus the distance between them; `skip` left
+/// out. None when `at` is not of `m`'s width.
+pub(super) fn nearest_directions(
     m: &Mat,
     at: &Vector,
     names: &[Box<str>],
@@ -1528,17 +1554,28 @@ pub(super) fn nearest_rows(
     if m.ncols() != at.len() {
         return None;
     }
+    let at = unit(at.clone());
     let mut scores: Vec<f32> = (0..m.nrows())
         .into_par_iter()
         .map(|i| {
-            let d2: f32 = (0..m.ncols()).map(|j| (m[(i, j)] - at[j]).powi(2)).sum();
-            -d2.sqrt()
+            let row = unit(m.row(i).transpose());
+            -(row - &at).norm()
         })
         .collect();
     if let Some(i) = skip {
         scores[i] = f32::NAN;
     }
     Some(best(&scores, names, top))
+}
+
+/// `v` scaled to unit length; a zero vector stays zero.
+fn unit(v: Vector) -> Vector {
+    let n = v.norm();
+    if n > 1e-9 {
+        v / n
+    } else {
+        v
+    }
 }
 
 /// Mean of the given rows of `m`, as a column vector.
@@ -1672,6 +1709,26 @@ mod tests {
         assert!((near[0].1 - 0.57).abs() < 1e-5);
         assert!(tiny(false).near_feature("NOPE", 3).is_err());
         assert!(tiny(true).near_feature("GENE0", 3).is_err());
+    }
+
+    #[test]
+    fn cells_near_a_place_rank_by_direction_as_the_map_is_laid_out() {
+        // z per cell: c4 (0.7, 0.5) points nearest (1.4, 1.0)'s way, though
+        // c2 (0.9, 0.3) sits closer to (0.7, 0.5) by plain distance.
+        let mut a = tiny(false);
+        let at = Vector::from_vec(vec![1.4, 1.0]);
+        let near = a.cells_near(&at, 2).unwrap();
+        assert_eq!(&*near[0].0, "c4");
+        assert!(near[0].1.abs() < 1e-6, "{near:?}");
+        // Where c1 and c3 point together: the mean of their unit vectors.
+        let both = a.cells_direction(["c1", "c3", "not-in-model"]).unwrap();
+        let (c1, c3) = (
+            unit(Vector::from_vec(vec![0.4, 0.2])),
+            unit(Vector::from_vec(vec![0.2, 0.8])),
+        );
+        assert!((&both - unit(c1 + c3)).norm() < 1e-6);
+        assert!((both.norm() - 1.0).abs() < 1e-6);
+        assert!(a.cells_direction(["cx"]).is_err());
     }
 
     #[test]

@@ -51,6 +51,7 @@ fn the_start_orders_pseudobulks_along_the_trajectory() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn from_scratch_the_climb_finds_time_and_its_direction() {
     let cfg = SimConfig {
         fine: 133,
@@ -96,6 +97,7 @@ fn from_scratch_the_climb_finds_time_and_its_direction() {
 /// Two lineages from scratch: each true lineage in a fitted one of its
 /// own, and time right within each.
 #[test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn from_scratch_two_lineages_come_apart() {
     let cfg = SimConfig {
         lineages: 2,

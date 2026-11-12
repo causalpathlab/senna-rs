@@ -782,44 +782,17 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         output_keep_idx
     };
 
-    let mut selected_features: Option<HvgSelection> = None;
-
-    // HVG-weighted projection: down-weight uninformative genes so the
-    // random sketch (and hence the PB partitioning + cached cell_proj)
-    // reflects variable biology. Collapsing still reads all genes.
-    let hvg_enabled = args.max_features > 0 || args.feature_list_file.is_some();
-    let must_train = load_must_train(args.must_train_file, hvg_enabled)?;
-    if hvg_enabled {
-        selected_features = Some(select_hvg_streaming(
-            &data_vec,
-            (args.max_features > 0).then_some(args.max_features),
-            args.feature_list_file,
-            must_train.as_ref(),
-            args.block_size,
-        )?);
-    }
-
-    let proj_kn = if let Some(sel) = selected_features.as_ref() {
-        let weights = sel.row_weights(data_vec.num_rows());
-        data_vec
-            .project_columns_weighted(
-                args.proj_dim,
-                args.block_size,
-                Some(&batch_membership),
-                &weights,
-            )?
-            .proj
-    } else {
-        data_vec
-            .project_columns_with_batch_correction(
-                args.proj_dim,
-                args.block_size,
-                Some(&batch_membership),
-            )?
-            .proj
-    };
-
-    info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
+    let (proj_kn, selected_features) = select_and_project(
+        &data_vec,
+        &batch_membership,
+        &ProjectSettings {
+            proj_dim: args.proj_dim,
+            block_size: args.block_size,
+            max_features: args.max_features,
+            feature_list_file: args.feature_list_file,
+            must_train_file: args.must_train_file,
+        },
+    )?;
 
     let done = ProjectedData {
         data_vec,
@@ -832,6 +805,80 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
     Ok(done)
 }
 
+/// The HVG selection and sketch a fit runs on its loaded cells.
+pub struct ProjectSettings<'a> {
+    pub proj_dim: usize,
+    pub block_size: Option<usize>,
+    /// Keep the top N HVGs for the sketch; 0 disables.
+    pub max_features: usize,
+    pub feature_list_file: Option<&'a str>,
+    pub must_train_file: Option<&'a str>,
+}
+
+/// HVG selection (when `s` asks for one) and the random projection of the
+/// loaded `data_vec`, batch-corrected by `batch_membership`: the half of
+/// [`load_and_project`] after the read.
+fn select_and_project(
+    data_vec: &SparseIoVec,
+    batch_membership: &[Box<str>],
+    s: &ProjectSettings,
+) -> anyhow::Result<(Mat, Option<HvgSelection>)> {
+    // HVG-weighted projection: down-weight uninformative genes so the
+    // random sketch (and hence the PB partitioning + cached cell_proj)
+    // reflects variable biology. Collapsing still reads all genes.
+    let hvg_enabled = s.max_features > 0 || s.feature_list_file.is_some();
+    let must_train = load_must_train(s.must_train_file, hvg_enabled)?;
+    let selected_features = hvg_enabled
+        .then(|| {
+            select_hvg_streaming(
+                data_vec,
+                (s.max_features > 0).then_some(s.max_features),
+                s.feature_list_file,
+                must_train.as_ref(),
+                s.block_size,
+            )
+        })
+        .transpose()?;
+
+    let proj_kn = if let Some(sel) = selected_features.as_ref() {
+        let weights = sel.row_weights(data_vec.num_rows());
+        data_vec
+            .project_columns_weighted(s.proj_dim, s.block_size, Some(batch_membership), &weights)?
+            .proj
+    } else {
+        data_vec
+            .project_columns_with_batch_correction(
+                s.proj_dim,
+                s.block_size,
+                Some(batch_membership),
+            )?
+            .proj
+    };
+    info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
+    Ok((proj_kn, selected_features))
+}
+
+/// Sketch and multilevel-collapse an already loaded `data_vec` with its
+/// `batch_membership`, as [`load_and_collapse`] does after its read, and
+/// return the finest level only (the coarser ones are dropped at once).
+/// The finest group membership stays registered on `data_vec`, as at
+/// training. Writes nothing.
+pub fn collapse_loaded_finest(
+    data_vec: &mut SparseIoVec,
+    batch_membership: &[Box<str>],
+    project: &ProjectSettings,
+    params: &MultilevelParams,
+) -> anyhow::Result<CollapsedOut> {
+    let (proj_kn, _) = select_and_project(data_vec, batch_membership, project)?;
+    info!("Multi-level collapsing with pb-samples ...");
+    // Levels come back finest first.
+    data_vec
+        .collapse_columns_multilevel_vec(&proj_kn, batch_membership, params)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("the collapse returned no level"))
+}
+
 pub struct LoadCollapseArgs<'a> {
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
@@ -842,7 +889,9 @@ pub struct LoadCollapseArgs<'a> {
     pub num_levels: usize,
     pub iter_opt: usize,
     pub block_size: Option<usize>,
-    pub out: &'a str,
+    /// Where the run writes the collapse's side files (its δ and kept
+    /// preprocessing); `None` writes none.
+    pub out: Option<&'a str>,
     /// Keep top N HVGs (via binned residual variance) for the random
     /// projection; 0 disables. Collapsing still reads all genes.
     pub max_features: usize,
@@ -986,7 +1035,8 @@ pub fn collapse_multilevel(
     }
 }
 
-/// Load sparse data, project, multi-level collapse, and write delta output.
+/// Load sparse data, project, multi-level collapse, and write delta output
+/// (when `args.out` is `Some`).
 ///
 /// Shared pipeline for topic and masked-topic models. The pre-collapse
 /// portion (read + batch + HVG + project) is delegated to
@@ -1017,7 +1067,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
         multiome: args.multiome.clone(),
-        out: Some(args.out),
+        out: args.out,
         reuse: args.reuse,
     })?;
 
@@ -1084,8 +1134,8 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
 
     // 4. Write delta output from finest level
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
-    if let Some(batch_db) = finest_collapsed.delta.as_ref() {
-        let outfile = args.out.to_string() + ".delta.parquet";
+    if let (Some(batch_db), Some(out)) = (finest_collapsed.delta.as_ref(), args.out) {
+        let outfile = out.to_string() + ".delta.parquet";
         info!("Writing batch delta: {outfile}");
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;

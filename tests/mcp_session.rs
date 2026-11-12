@@ -158,3 +158,67 @@ fn a_background_fit_that_succeeds_is_recorded() {
     // The run's own script beside it, as `senna run` writes one.
     assert!(project.join("fit.cmd.sh").exists());
 }
+
+#[test]
+fn predict_layout_and_update_run_on_a_fit_and_are_recorded() {
+    let sessions = private();
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path();
+    let data = planted::planted_zarr(project);
+    let fit = project.join("fit");
+    let replies = server(
+        &sessions,
+        project,
+        &[
+            (
+                "run_fit",
+                json!({"method": "topic", "data": [&data], "out": fit, "args": ["-t", "2", "-i", "2"]}),
+            ),
+            (
+                "run_predict",
+                json!({"model": fit, "data": [&data], "out": project.join("p"), "background": true}),
+            ),
+            (
+                "run_layout",
+                json!({"run": project.join("fit.senna.json"), "method": "umap", "min_dist": 0.5, "args": ["--knn", "5"]}),
+            ),
+            (
+                "run_update",
+                json!({"model": fit, "out": project.join("fit2"), "args": ["--epochs", "1"]}),
+            ),
+            // Last, so the predict runs beside the layout and the update.
+            ("job_wait", json!({"id": "job-1", "seconds": 120})),
+        ],
+    );
+    for r in &replies {
+        assert_ne!(r["isError"], true, "{r}");
+    }
+    assert_eq!(structured(&replies[4])["state"], "done", "{}", replies[4]);
+    let latent = project.join("p.latent.parquet");
+    assert_eq!(structured(&replies[1])["latent"], json!(latent));
+    assert!(latent.exists());
+    let coords = project.join("fit.umap.cell_coords.parquet");
+    assert_eq!(structured(&replies[2])["coords"], json!(coords));
+    assert_eq!(structured(&replies[2])["ran"], true);
+    assert!(coords.exists());
+    let day = std::fs::read_dir(project.join("results"))
+        .unwrap()
+        .flatten()
+        .find(|e| e.path().is_dir())
+        .unwrap()
+        .path();
+    let script = std::fs::read_to_string(day.join("runall.sh")).unwrap();
+    assert!(script.contains("senna predict"), "{script}");
+    assert!(script.contains("senna layout umap"), "{script}");
+    assert!(script.contains("--umap-min-dist 0.5"), "{script}");
+    // Unguarded: a replay redoes the layout with these flags even after an
+    // earlier layout of the method made its file.
+    assert!(
+        !script.contains("fit.umap.cell_coords.parquet ]"),
+        "{script}"
+    );
+    let run = project.join("fit2.senna.json");
+    assert_eq!(structured(&replies[3])["run"], json!(run));
+    assert!(run.exists());
+    assert!(script.contains("senna update"), "{script}");
+}

@@ -1,9 +1,7 @@
 //! Data-preparation helpers for `fit_layout` (tsne/phate):
 //! - Per-PB mean-feature accumulation and coverage-based tail pruning.
 //! - The run's cell projection and PB membership, written at training.
-//! - SVD preprocessing for dimensionality reduction.
 
-use legume_numeric::matrix::traits::RandomizedAlgs;
 use rayon::prelude::*;
 use senna::embed_common::*;
 
@@ -350,27 +348,6 @@ pub(crate) fn write_pb_tree(
         n_splits
     );
     Ok(path)
-}
-
-/// Apply SVD preprocessing: reduce matrix to top N components.
-/// Returns U * diag(S) where (U, S, V) = rsvd(mat, `n_components`).
-pub(super) fn apply_svd_preprocessing(mat: &Mat, n_components: usize) -> anyhow::Result<Mat> {
-    use anyhow::Context;
-
-    let (n_rows, n_cols) = (mat.nrows(), mat.ncols());
-    let n_components = n_components.min(n_rows).min(n_cols);
-
-    info!("Running randomized SVD: {n_rows} × {n_cols} → {n_components} components");
-    let (u, s, _v) = mat.rsvd(n_components).context("Randomized SVD failed")?;
-
-    let mut reduced = Mat::zeros(n_rows, n_components);
-    for i in 0..n_components {
-        let col = u.column(i) * s[i];
-        reduced.set_column(i, &col);
-    }
-
-    info!("SVD done, reduced to {n_components} dims");
-    Ok(reduced)
 }
 
 #[cfg(test)]

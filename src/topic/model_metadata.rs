@@ -161,9 +161,9 @@ pub struct TopicModelMetadata {
     /// Top-K shortlist size at encoder (`indexed_topic` only)
     #[serde(default)]
     pub enc_context_size: Option<usize>,
-    /// Mean training topic proportions θ̄ ∈ ℝ^K. Used at predict time as the
-    /// mixture weights for the training-implied gene marginal in
-    /// per-batch δ estimation. Falls back to uniform 1/K when absent.
+    /// Mean training topic proportions θ̄ ∈ ℝ^K: a record of the fit, and a
+    /// guard against a diverged one (`populate_theta_mean_and_save` refuses
+    /// a non-finite mean). Predict no longer reads it; absent in older models.
     #[serde(default)]
     pub theta_mean: Option<Vec<f32>>,
     /// Number of cells the model was trained on. Model provenance, and the running
@@ -260,7 +260,7 @@ fn coarsening_path(prefix: &str) -> String {
 /// On-disk shape of `{prefix}.coarsening.json`.
 ///
 /// It used to be a bare [`FeatureCoarsening`] — the finest level only, which is
-/// all `predict` and `eval_topic` ever need. Warm start needs the *whole*
+/// all `predict` ever needs. Warm start needs the *whole*
 /// ladder: each decoder level has its own grouping, and resuming with a
 /// different one silently mis-keys that level's weights. The file therefore now
 /// holds every level, and the bare form is still accepted so runs written
