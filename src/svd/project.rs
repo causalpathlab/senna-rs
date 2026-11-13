@@ -52,30 +52,55 @@ pub(crate) fn column_sum_norm(model: &str) -> f32 {
     }
 }
 
-/// Say so when an svd model carries a batch correction this path cannot replay.
+/// The per-batch fold the query's counts are divided by before they are
+/// projected, `[D_train, batches]`: the run's trained δ for a batch it was
+/// trained on, ones for any other, and all ones when `adjust` is off.
+/// `None` only for a run trained without a δ.
 ///
-/// Training divides each column by `mu_residual`, a per-PSEUDOBULK-group
-/// residual, before fitting the dictionary. That matrix is never written to
-/// disk — `{model}.delta.parquet` holds the per-BATCH `delta`, a different
-/// object — and a new cell has no training pseudobulk membership to index it
-/// by even if it were. So the correction cannot be reproduced from the run's
-/// outputs, and cells are projected without it: consistent with each other,
-/// but not with the space the dictionary was fitted in.
-pub(crate) fn warn_if_batch_corrected(model: &str, batch_flag_given: bool) {
-    if std::path::Path::new(&format!("{model}.delta.parquet")).is_file() {
-        log::warn!(
-            "{model}: this svd run was fitted with a batch correction, which the query-side \
-             projection cannot replay (the per-pseudobulk residual it used is not persisted). \
-             Cells are projected without it, so residual batch structure survives into the \
-             scores."
-        );
+/// Training divided each column by its pseudobulk group's own fold, which is
+/// not saved and which a new cell has no group to index. The trained per-
+/// batch δ is the batch-level part of that fold, and it goes through the
+/// same division ([`super::nystrom_preprocess_columns`]). The division also
+/// rescales each column (`λ = Σx/Σδ`), so a run trained with it divides
+/// every query cell, by ones where nothing is known, or the same cells
+/// would be projected differently depending on what else was loaded.
+///
+/// `require_known` refuses a held-out batch the run was not trained on.
+pub(crate) fn batch_fold(
+    model: &str,
+    train_genes: &[Box<str>],
+    data: &SparseIoVec,
+    adjust: bool,
+    require_known: bool,
+) -> anyhow::Result<Option<Mat>> {
+    if !crate::predict::null::model_has_null(model) {
+        return Ok(None);
     }
-    if batch_flag_given {
-        log::warn!(
-            "--batch-files has no effect on an svd model: the projection is per cell against \
-             a frozen dictionary, with no per-batch term to estimate"
-        );
+    let ones = || Mat::from_element(train_genes.len(), data.num_batches().max(1), 1.0);
+    if !adjust {
+        return Ok(Some(ones()));
     }
+    let Some(by_batch) = crate::predict::delta::trained_delta_by_batch(model, train_genes, data)?
+    else {
+        return Ok(Some(ones()));
+    };
+    let unknown = by_batch.unknown();
+    anyhow::ensure!(
+        !require_known || unknown.is_empty(),
+        "--scoring-delta train: held-out batches the model was not trained on: {}",
+        unknown.join(", ")
+    );
+    let n_known = by_batch.known.iter().filter(|k| **k).count();
+    info!(
+        "{model}: {n_known} of {} held-out batches divided by their trained δ before projection{}",
+        by_batch.known.len(),
+        if unknown.is_empty() {
+            String::new()
+        } else {
+            format!(" (by ones: {})", unknown.join(", "))
+        }
+    );
+    Ok(Some(by_batch.delta))
 }
 
 struct SvdProjParam<'a> {
@@ -83,6 +108,8 @@ struct SvdProjParam<'a> {
     /// data row → dictionary row, by name.
     remap: &'a [Option<usize>],
     column_sum_norm: f32,
+    /// `[D_train, batches]`, see [`batch_fold`].
+    fold: Option<&'a Mat>,
 }
 
 /// `[N, K]` projection of every column of `data` onto the dictionary:
@@ -123,11 +150,15 @@ pub(crate) fn projection_remap(
 /// The transform lives HERE and only here, so a caller that has the block's
 /// CSC in hand (and wants to do something else with it) reuses the same
 /// arithmetic instead of streaming the data a second time.
+///
+/// `fold` is the per-batch divisor with the batch of each column of the
+/// block; both come or neither does.
 pub(crate) fn project_block(
     csc_in: &nalgebra_sparse::CscMatrix<f32>,
     remap: &[Option<usize>],
     u_dk: &Mat,
     column_sum_norm: f32,
+    fold: Option<(&Mat, &[usize])>,
 ) -> Mat {
     let d_train = u_dk.nrows();
     // Remap onto the training gene axis, staying sparse for the reasons on
@@ -142,19 +173,33 @@ pub(crate) fn project_block(
         }
     }
     let mut x_dn = nalgebra_sparse::CscMatrix::from(&coo);
-    super::nystrom_preprocess_columns(&mut x_dn, column_sum_norm, None);
+    super::nystrom_preprocess_columns(&mut x_dn, column_sum_norm, fold);
     (x_dn.transpose() * u_dk).transpose()
+}
+
+/// A frozen dictionary and how a column is brought to it.
+pub(crate) struct Dictionary<'a> {
+    pub train_genes: &'a [Box<str>],
+    pub u_dk: &'a Mat,
+    pub column_sum_norm: f32,
+    /// `[D_train, batches]`, see [`batch_fold`]; `None` projects the counts
+    /// as they are.
+    pub fold: Option<&'a Mat>,
 }
 
 pub(crate) fn project_onto_dictionary(
     data: &SparseIoVec,
-    train_genes: &[Box<str>],
-    u_dk: &Mat,
-    column_sum_norm: f32,
+    dict: &Dictionary<'_>,
     opts: &QueryNameOpts,
     block_size: Option<usize>,
     what: &str,
 ) -> anyhow::Result<Mat> {
+    let Dictionary {
+        train_genes,
+        u_dk,
+        column_sum_norm,
+        fold,
+    } = *dict;
     let remap = projection_remap(data, train_genes, opts, what)?;
 
     let n = data.num_columns();
@@ -163,6 +208,7 @@ pub(crate) fn project_onto_dictionary(
         u_dk,
         remap: &remap.new_to_train,
         column_sum_norm,
+        fold,
     };
     let mut proj_kn = Mat::zeros(k, n);
     data.visit_columns_by_block(&proj_visitor, &param, &mut proj_kn, block_size)?;
@@ -177,7 +223,14 @@ fn proj_visitor(
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
     let csc_in = data.read_columns_csc(lb..ub)?;
-    let chunk = project_block(&csc_in, param.remap, param.u_dk, param.column_sum_norm);
+    let batches = param.fold.map(|_| data.get_batch_membership(lb..ub));
+    let chunk = project_block(
+        &csc_in,
+        param.remap,
+        param.u_dk,
+        param.column_sum_norm,
+        param.fold.zip(batches.as_deref()),
+    );
     let mut proj_kn = arc_proj_kn.lock().expect("lock proj in svd projection");
     proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
     Ok(())

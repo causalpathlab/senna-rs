@@ -445,3 +445,27 @@ fn diagnostics_guard_and_wiring() {
     assert!(rhat > 1.05, "split-R̂ missed a drifting chain: {rhat:.3}");
     assert!(ess > 0.0, "ESS should be positive, got {ess}");
 }
+
+// Bar: the batches of a run's reference cells are the lines of EVERY batch
+// file, in data-file order, and must cover the cells exactly.
+#[test]
+fn reference_batches_are_read_from_every_batch_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, body: &str| -> Box<str> {
+        let p = dir.path().join(name);
+        std::fs::write(&p, body).unwrap();
+        p.to_string_lossy().into_owned().into()
+    };
+    let files = [write("a.txt", "s1\ns1\n"), write("b.txt", "s2\n")];
+    let labels = super::archetypes::recorded_batches(&files, 3)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        labels,
+        ["s1".into(), "s1".into(), "s2".into()] as [Box<str>; 3]
+    );
+    assert!(super::archetypes::recorded_batches(&files, 4).is_err());
+    assert!(super::archetypes::recorded_batches(&[], 3)
+        .unwrap()
+        .is_none());
+}

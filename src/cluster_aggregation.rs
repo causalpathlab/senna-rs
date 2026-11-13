@@ -23,7 +23,7 @@ pub fn accumulate_gene_sum(
     m: usize,
     block_size: usize,
 ) -> anyhow::Result<Vec<f64>> {
-    let mut out = accumulate_gene_sum_multi(data_vec, &[(labels, k)], m, block_size)?;
+    let mut out = accumulate_gene_sum_multi(data_vec, &[(labels, k)], m, block_size, None)?;
     Ok(out.pop().expect("one grouping in, one out"))
 }
 
@@ -45,8 +45,13 @@ pub fn accumulate_gene_sum_pair(
         let sum_a = accumulate_gene_sum(data_vec, labels_a, k_a, m, block_size)?;
         return Ok((sum_a, vec![0.0; k_b * m]));
     }
-    let mut out =
-        accumulate_gene_sum_multi(data_vec, &[(labels_a, k_a), (labels_b, k_b)], m, block_size)?;
+    let mut out = accumulate_gene_sum_multi(
+        data_vec,
+        &[(labels_a, k_a), (labels_b, k_b)],
+        m,
+        block_size,
+        None,
+    )?;
     let sum_b = out.pop().expect("two groupings in, two out");
     let sum_a = out.pop().expect("two groupings in, two out");
     Ok((sum_a, sum_b))
@@ -59,11 +64,16 @@ pub fn accumulate_gene_sum_pair(
 /// over archetype granularities) must not re-stream the matrix per partition.
 /// Each grouping is `(labels, k)`; cells whose label is outside `0..k` are
 /// skipped, which is how callers park cells they mean to exclude.
+///
+/// With `fold` (`[m, columns]` and each cell's column), a cell's count of
+/// gene `g` is divided by `fold[g, column]` as it is added: the per-batch
+/// fold of that cell's batch, so the sums are of batch-adjusted counts.
 pub fn accumulate_gene_sum_multi(
     data_vec: &SparseIoVec,
     groupings: &[(&[usize], usize)],
     m: usize,
     block_size: usize,
+    fold: Option<CellFold<'_>>,
 ) -> anyhow::Result<Vec<Vec<f64>>> {
     anyhow::ensure!(!groupings.is_empty(), "no groupings to accumulate");
     let n = groupings[0].0.len();
@@ -109,7 +119,7 @@ pub fn accumulate_gene_sum_multi(
                 .map(|&(_, k)| vec![0.0f64; k * m])
                 .collect();
             for &(lb, ub) in chunk {
-                add_block_gene_sum(&mut acc, data_vec, groupings, lb, ub, m)?;
+                add_block_gene_sum(&mut acc, data_vec, groupings, (lb, ub), m, fold)?;
             }
             anyhow::Ok(acc)
         })
@@ -135,14 +145,17 @@ pub fn accumulate_gene_sum_multi(
 /// cheap next to holding one full group-sum tensor per worker.
 const ACCUMULATOR_BUDGET_BYTES: usize = 1 << 30;
 
+/// A per-batch gene fold `[genes, columns]` and each cell's column of it.
+pub type CellFold<'a> = (&'a Mat, &'a [u32]);
+
 /// Add one column block into an existing per-grouping accumulator.
 fn add_block_gene_sum(
     sums: &mut [Vec<f64>],
     data_vec: &SparseIoVec,
     groupings: &[(&[usize], usize)],
-    lb: usize,
-    ub: usize,
+    (lb, ub): (usize, usize),
     m: usize,
+    fold: Option<CellFold<'_>>,
 ) -> anyhow::Result<()> {
     let csc = data_vec.read_columns_csc(lb..ub)?;
     for j in 0..csc.ncols() {
@@ -157,8 +170,18 @@ fn add_block_gene_sum(
                 continue;
             }
             let row = &mut sum[kk * m..(kk + 1) * m];
-            for (&g, &v) in rows.iter().zip(vals.iter()) {
-                row[g] += f64::from(v);
+            match fold {
+                Some((delta, cols)) => {
+                    let d = delta.column(cols[global] as usize);
+                    for (&g, &v) in rows.iter().zip(vals.iter()) {
+                        row[g] += f64::from(v / d[g]);
+                    }
+                }
+                None => {
+                    for (&g, &v) in rows.iter().zip(vals.iter()) {
+                        row[g] += f64::from(v);
+                    }
+                }
             }
         }
     }
@@ -203,4 +226,46 @@ pub fn weighted_mean_profile(
             }
         });
     out
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+
+    // Bar: with a fold, a cell's counts are divided by its batch's per-gene
+    // fold as they are summed; without one the sums are the raw counts.
+    #[test]
+    fn gene_sums_divide_each_cell_by_its_batch_fold() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("x.zarr");
+        // Two genes × three cells, all in one group; cell 2 is in batch 1.
+        let triplets: Vec<(u64, u64, f32)> = vec![
+            (0, 0, 2.0),
+            (1, 0, 4.0),
+            (0, 1, 6.0),
+            (0, 2, 9.0),
+            (1, 2, 5.0),
+        ];
+        let mut b = create_sparse_from_triplets(
+            &triplets,
+            (2, 3, triplets.len()),
+            Some(path.to_str().unwrap()),
+            Some(&SparseIoBackend::Zarr),
+        )?;
+        b.register_row_names_vec(&["g0".into(), "g1".into()]);
+        b.register_column_names_vec(&["c0".into(), "c1".into(), "c2".into()]);
+        let mut data = SparseIoVec::new();
+        data.push(std::sync::Arc::from(b), None)?;
+        let labels = [0usize, 0, 0];
+        let raw = accumulate_gene_sum_multi(&data, &[(&labels, 1)], 2, 2, None)?;
+        assert_eq!(raw[0], [17.0, 9.0]);
+        // Batch 0 has no fold; batch 1 reads gene 0 three times too high.
+        let delta = Mat::from_row_slice(2, 2, &[1.0, 3.0, 1.0, 1.0]);
+        let cols = [0u32, 0, 1];
+        let adjusted =
+            accumulate_gene_sum_multi(&data, &[(&labels, 1)], 2, 2, Some((&delta, &cols)))?;
+        assert_eq!(adjusted[0], [11.0, 9.0]);
+        Ok(())
+    }
 }

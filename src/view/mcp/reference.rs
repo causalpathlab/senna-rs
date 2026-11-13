@@ -114,10 +114,11 @@ pub(super) fn specs() -> Vec<ToolSpec> {
              {data} --model {model} -o {out}`: each cell is placed in the model's latent and \
              pools the counts of its nearest reference cells (the model's own training cells \
              unless reference names another run). Writes {out}.imputed.parquet (new cells × \
-             reference features), returned. Batches adjust only the query's latent (batch_files, \
-             two or more batches); the imputed values are the neighbours' raw reference counts \
-             and carry their batch effects and depths. An out whose table exists is not run \
-             again.",
+             reference features), returned. When the reference run estimated a per-batch \
+             delta and its cells' batches are its training batches, each imputed row is divided \
+             by that delta mixed by the batch shares of the neighbours it pooled, so the values \
+             are batch-adjusted (args --raw-imputed keeps them as pooled); they still carry the \
+             neighbours' depths. An out whose table exists is not run again.",
             json!({
                 "type": "object",
                 "properties": {
@@ -140,10 +141,11 @@ pub(super) fn specs() -> Vec<ToolSpec> {
              as `senna deconvolve --from {from} --bulk {bulk} -o {out}` (a Gibbs sampler over \
              measured archetype profiles). Writes {out}.fractions.tsv (returned as fractions; \
              mRNA shares, not cell shares), {out}.fractions_ci.tsv, {out}.abundance.tsv, \
-             {out}.residual.tsv and per-type expression. No batch effect is modelled: \
-             reference profiles are raw sums with batches ignored, and nothing absorbs a \
-             bulk-versus-single-cell platform shift. An out whose fractions exist is not run \
-             again.",
+             {out}.residual.tsv and per-type expression. When the run estimated a per-batch \
+             gene fold and recorded its batch files, reference profiles are summed from counts \
+             divided by each cell's batch fold (args --raw-profiles keeps raw sums); nothing \
+             absorbs a bulk-versus-single-cell platform shift. An out whose fractions exist is \
+             not run again.",
             json!({
                 "type": "object",
                 "properties": {

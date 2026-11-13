@@ -579,7 +579,7 @@ pub(crate) struct TrainedByBatch {
 }
 
 impl TrainedByBatch {
-    fn unknown(&self) -> Vec<&str> {
+    pub(crate) fn unknown(&self) -> Vec<&str> {
         let named = self.names.iter().zip(&self.known);
         named.filter(|(_, k)| !**k).map(|(n, _)| &**n).collect()
     }
@@ -590,13 +590,22 @@ pub(crate) fn trained_delta_by_batch(
     training_genes: &[Box<str>],
     data_vec: &SparseIoVec,
 ) -> anyhow::Result<Option<TrainedByBatch>> {
-    let Some((trained_names, trained_db)) = load_trained_delta(model, training_genes)? else {
-        return Ok(None);
-    };
     let names = data_vec.batch_names().unwrap_or_default();
+    trained_delta_for_names(model, training_genes, names)
+}
+
+/// [`trained_delta_by_batch`] for batches given by name.
+fn trained_delta_for_names(
+    model: &str,
+    training_genes: &[Box<str>],
+    names: Vec<Box<str>>,
+) -> anyhow::Result<Option<TrainedByBatch>> {
     if names.is_empty() {
         return Ok(None);
     }
+    let Some((trained_names, trained_db)) = load_trained_delta(model, training_genes)? else {
+        return Ok(None);
+    };
     let mut delta = Mat::from_element(trained_db.nrows(), names.len(), 1.0);
     let mut known = vec![false; names.len()];
     for (b, name) in names.iter().enumerate() {
@@ -630,8 +639,7 @@ pub(crate) fn trained_delta_of_batches(
     let unknown = by_batch.unknown();
     if !unknown.is_empty() {
         info!(
-            "{model}: held-out batches it was not trained on ({}), so the encoder's null is \
-             estimated from the held-out cells",
+            "{model}: no trained δ for held-out batches {}",
             unknown.join(", ")
         );
         return Ok(None);
@@ -673,6 +681,44 @@ pub(crate) fn projection_fold(
         }
     );
     Ok(Some(by_batch.delta))
+}
+
+/// The trained fold of cells known only by their batch labels (one per
+/// cell): `[genes, distinct labels]` and each cell's column, with ones for a
+/// label the model was not trained on. `None` when no label is a training
+/// batch. What a reference's own cells are adjusted by, where no loaded data
+/// set carries their batches.
+pub(crate) fn fold_by_labels(
+    model: &str,
+    genes: &[Box<str>],
+    labels: &[Box<str>],
+) -> anyhow::Result<Option<(Mat, Vec<u32>)>> {
+    if labels.is_empty() {
+        return Ok(None);
+    }
+    let mut names: Vec<Box<str>> = Vec::new();
+    let mut at: rustc_hash::FxHashMap<&str, u32> = rustc_hash::FxHashMap::default();
+    let cols: Vec<u32> = labels
+        .iter()
+        .map(|l| {
+            *at.entry(&**l).or_insert_with(|| {
+                names.push(l.clone());
+                names.len() as u32 - 1
+            })
+        })
+        .collect();
+    let Some(by_batch) = trained_delta_for_names(model, genes, names)? else {
+        return Ok(None);
+    };
+    let n_known = by_batch.known.iter().filter(|k| **k).count();
+    if n_known == 0 {
+        return Ok(None);
+    }
+    info!(
+        "{model}: the cells of {n_known} of {} batches are divided by their trained δ",
+        by_batch.known.len()
+    );
+    Ok(Some((by_batch.delta, cols)))
 }
 
 /// What [`scoring_delta`] reads.

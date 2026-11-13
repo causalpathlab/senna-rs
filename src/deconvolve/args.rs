@@ -183,6 +183,18 @@ pub struct DeconvolveArgs {
     pub sc_data: Vec<Box<str>>,
 
     #[arg(
+        long,
+        help = "Measure the profiles from raw counts, not divided by the run's per-batch fold",
+        long_help = "By default, when the --from run estimated a per-batch gene fold\n\
+                     ({run}.batch_gene_fold.parquet) and recorded its batch files, each\n\
+                     reference cell's counts are divided by its batch's fold before the\n\
+                     archetype profiles are summed, so the profiles are batch-adjusted.\n\
+                     This measures them from the raw counts instead. --sc-data counts,\n\
+                     which have no recorded batches, are always summed raw."
+    )]
+    pub raw_profiles: bool,
+
+    #[arg(
         long = "annotation",
         help = "Cell x celltype annotation parquet; defaults to the one named in `--from`",
         long_help = "Soft per-cell annotation, cells x cell types, with a leading name column.\n\
@@ -268,6 +280,8 @@ pub struct SamplerConfig {
 /// Plain (non-clap) archetype-construction settings.
 pub struct ArchetypeConfig<'a> {
     pub sc_data: &'a [Box<str>],
+    /// Sum raw counts, not counts divided by the run's per-batch fold.
+    pub raw_profiles: bool,
     pub annotation: Option<&'a str>,
     pub min_cells: usize,
     pub shrink: f32,
@@ -297,6 +311,7 @@ impl DeconvolveArgs {
     pub fn archetype_config(&self) -> ArchetypeConfig<'_> {
         ArchetypeConfig {
             sc_data: &self.sc_data,
+            raw_profiles: self.raw_profiles,
             annotation: self.annotation.as_deref(),
             min_cells: self.archetype_min_cells,
             shrink: self.archetype_shrink,

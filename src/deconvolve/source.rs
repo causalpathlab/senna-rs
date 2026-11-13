@@ -43,6 +43,10 @@ pub struct EmbeddingSource {
     /// Count matrices the source run was trained on — the archetype profile
     /// source when `--sc-data` is not given.
     pub data_files: Vec<Box<str>>,
+    /// The batch files the source run recorded for `data_files`, if any.
+    pub batch_files: Vec<Box<str>>,
+    /// The source run's prefix, where its per-batch gene fold is.
+    pub prefix: String,
     /// Cell annotation recorded by the manifest, if any.
     pub annotation_path: Option<String>,
 }
@@ -97,6 +101,8 @@ impl EmbeddingSource {
             .iter()
             .map(|f| resolve(f).into_boxed_str())
             .collect();
+        built.batch_files = manifest.data_batches(&dir);
+        built.prefix = run_manifest::derive_out_prefix(from);
         built.annotation_path = manifest.annotate.annotation.as_deref().map(resolve);
         Ok(built)
     }
@@ -128,6 +134,8 @@ impl EmbeddingSource {
             kind,
             cell_embedding_paths: Vec::new(),
             data_files: Vec::new(),
+            batch_files: Vec::new(),
+            prefix: String::new(),
             annotation_path: None,
         })
     }

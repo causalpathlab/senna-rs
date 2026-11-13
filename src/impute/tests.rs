@@ -29,6 +29,7 @@ fn base_args(model: Box<str>, out: Box<str>) -> ImputeArgs {
         reference_data: None,
         reference_batch_files: None,
         batch_files: None,
+        raw_imputed: false,
         knn: 5,
         knn_temperature: 1.0,
         minibatch_size: 100,
@@ -197,18 +198,24 @@ fn svd_projection_is_keyed_by_gene_name_not_row_order() -> anyhow::Result<()> {
 
     let proj_aligned = crate::svd::project::project_onto_dictionary(
         &aligned,
-        &train_genes,
-        &u_dk,
-        1e4,
+        &crate::svd::project::Dictionary {
+            train_genes: &train_genes,
+            u_dk: &u_dk,
+            column_sum_norm: 1e4,
+            fold: None,
+        },
         &crate::topic::eval::QueryNameOpts::default(),
         None,
         "test",
     )?;
     let proj_permuted = crate::svd::project::project_onto_dictionary(
         &permuted,
-        &train_genes,
-        &u_dk,
-        1e4,
+        &crate::svd::project::Dictionary {
+            train_genes: &train_genes,
+            u_dk: &u_dk,
+            column_sum_norm: 1e4,
+            fold: None,
+        },
         &crate::topic::eval::QueryNameOpts::default(),
         None,
         "test",
@@ -229,9 +236,12 @@ fn svd_projection_refuses_a_query_sharing_no_gene() -> anyhow::Result<()> {
     let query = make_backend(&dir, "query.zarr", &["x", "y"], &[(0, 0, 1.0)], 1)?;
     assert!(crate::svd::project::project_onto_dictionary(
         &query,
-        &train_genes,
-        &u_dk,
-        1e4,
+        &crate::svd::project::Dictionary {
+            train_genes: &train_genes,
+            u_dk: &u_dk,
+            column_sum_norm: 1e4,
+            fold: None
+        },
         &crate::topic::eval::QueryNameOpts::default(),
         None,
         "test"
@@ -281,4 +291,47 @@ fn simba_shares_bges_matching_plan() {
         matching_plan(RunKind::Simba).unwrap(),
         matching_plan(RunKind::Bge).unwrap()
     );
+}
+
+// Bar: each reference cell's counts are divided by its own batch's trained
+// δ as they are pooled. A query cell midway between a cell of batch A (δ = 3
+// on g0) and one of batch B (δ = 1) pools half of each: g0 is
+// 0.5·6/3 + 0.5·2 = 2 where the raw pool gives 4, and g1 is left alone. With
+// δ = 1 everywhere the pool is exactly `retrieval_impute`'s.
+#[test]
+fn imputed_counts_pool_each_neighbour_divided_by_its_delta() -> anyhow::Result<()> {
+    use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("ref.zarr");
+    let triplets: Vec<(u64, u64, f32)> = vec![(0, 0, 6.0), (1, 0, 2.0), (0, 1, 2.0), (1, 1, 2.0)];
+    let mut b = create_sparse_from_triplets(
+        &triplets,
+        (2, 2, triplets.len()),
+        Some(path.to_str().unwrap()),
+        Some(&SparseIoBackend::Zarr),
+    )?;
+    b.register_row_names_vec(&["g0".into(), "g1".into()]);
+    b.register_column_names_vec(&["a".into(), "b".into()]);
+    let mut ref_data = SparseIoVec::new();
+    ref_data.push(std::sync::Arc::from(b), None)?;
+    let theta_ref = Mat::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+    let theta_new = Mat::from_row_slice(1, 2, &[0.5, 0.5]);
+    let cfg = RetrievalImputeConfig {
+        knn: 2,
+        temperature: 1.0,
+        chunk: 64,
+    };
+    let fold = (
+        Mat::from_row_slice(2, 2, &[3.0, 1.0, 1.0, 1.0]),
+        vec![0u32, 1],
+    );
+    let adjusted = pool_divided(&theta_new, &theta_ref, &ref_data, &cfg, &fold)?;
+    assert!((adjusted[(0, 0)] - 2.0).abs() < 1e-4, "{adjusted}");
+    assert!((adjusted[(0, 1)] - 2.0).abs() < 1e-4, "{adjusted}");
+    let ones = (Mat::from_element(2, 2, 1.0), vec![0u32, 1]);
+    let unit = pool_divided(&theta_new, &theta_ref, &ref_data, &cfg, &ones)?;
+    let raw = retrieval_impute(&theta_new, &theta_ref, &ref_data, &cfg)?;
+    assert!((&unit - &raw).abs().max() < 1e-5, "{unit} vs {raw}");
+    assert!((raw[(0, 0)] - 4.0).abs() < 1e-4, "{raw}");
+    Ok(())
 }

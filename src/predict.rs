@@ -724,7 +724,6 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
              (svd is scored on the correlations and a Gaussian log1p llik)"
         );
     }
-    crate::svd::project::warn_if_batch_corrected(&args.model, args.batch_files.is_some());
 
     let (training_genes, u_dk) = load_dictionary(&args.model)?;
     let column_sum_norm = crate::svd::project::column_sum_norm(&args.model);
@@ -734,13 +733,25 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: args.data_files.to_vec(),
+            batch_files: args.batch_files.clone(),
             preload: args.preload_data,
             feature_kind: qopts.loader_kind.clone(),
             ..Default::default()
         },
         &training_genes,
     )?)?;
-    let data_vec = loaded.data;
+    let mut data_vec = loaded.data;
+    data_vec.register_batch_membership(&loaded.batch);
+    // Counts of a batch the run was trained on are divided by its trained δ
+    // before they are projected; with `--scoring-delta none` by ones, which
+    // keeps the division's rescaling that training applied.
+    let fold = crate::svd::project::batch_fold(
+        &args.model,
+        &training_genes,
+        &data_vec,
+        args.scoring_delta != delta::ScoringDeltaMode::None,
+        args.scoring_delta == delta::ScoringDeltaMode::Train,
+    )?;
     // The projection sees the caller's query-axis rules, INCLUDING
     // `--ablate-features`: without that the latent is fitted on the genes it
     // is about to be scored on, which is a reconstruction, not a prediction.
@@ -781,11 +792,13 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
         // it. Projecting up front and re-reading to score doubled the pass
         // over the backend.
         let csc = data_vec.read_columns_csc(lb..ub)?;
+        let batches = fold.as_ref().map(|_| data_vec.get_batch_membership(lb..ub));
         let z_block = crate::svd::project::project_block(
             &csc,
             &proj_remap.new_to_train,
             &u_dk,
             column_sum_norm,
+            fold.as_ref().zip(batches.as_deref()),
         )
         .transpose();
         z_nk.rows_range_mut(lb..ub).copy_from(&z_block);
@@ -795,6 +808,11 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
         let block: Vec<CellScore> = (0..csc.ncols())
             .into_par_iter()
             .map(|j| {
+                // The cell's fold, when the projection divided by one.
+                let fold_j = fold
+                    .as_ref()
+                    .zip(batches.as_ref())
+                    .map(|(f, b)| f.column(b[j]));
                 // Observed counts on the model's gene axis.
                 let mut obs_full = vec![0f32; d_train];
                 let col = csc.col(j);
@@ -809,13 +827,24 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
                 }
 
                 // The training chain's own per-cell view: L2-normalise to the
-                // recorded scale, then log1p. This is the space svd fits in,
-                // and `u·z` reconstructs its STANDARDISED form.
+                // recorded scale, divide by the fold the projection divided
+                // by (as `nystrom_preprocess_columns` does), then log1p. This
+                // is the space svd fits in, and `u·z` reconstructs its
+                // STANDARDISED form.
                 let l2 = obs_full.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-8);
-                let obs_log1p: Vec<f32> = obs_full
-                    .iter()
-                    .map(|v| (v / l2 * column_sum_norm).ln_1p())
-                    .collect();
+                let mut view: Vec<f32> =
+                    obs_full.iter().map(|v| v / l2 * column_sum_norm).collect();
+                if let Some(d) = fold_j.as_ref() {
+                    let nz: Vec<usize> = (0..d_train).filter(|&g| view[g] > 0.0).collect();
+                    let mut vals: Vec<f32> = nz.iter().map(|&g| view[g]).collect();
+                    legume_numeric::matrix::dmatrix_util::adjust_by_poisson_ratio(&mut vals, |k| {
+                        d[nz[k]]
+                    });
+                    for (&g, v) in nz.iter().zip(vals) {
+                        view[g] = v;
+                    }
+                }
+                let obs_log1p: Vec<f32> = view.iter().map(|v| v.ln_1p()).collect();
                 // Mean/sd over the stored (non-zero) entries, matching how the
                 // sparse standardisation was computed at training time.
                 let nz: Vec<f32> = obs_log1p
@@ -838,7 +867,11 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
                     // the profile's sum infinite, and `rate_to_counts` divides
                     // by that sum — zeroing the whole cell and turning both
                     // correlations into NaN. `ln(f32::MAX)` is ~88.
-                    pred_counts[slot] = pred_log1p.min(80.0).exp_m1().max(0.0);
+                    // Back on the observed counts' scale: the reconstruction is
+                    // of the batch-adjusted profile, so the batch's δ is put
+                    // back before it is compared with the raw counts.
+                    let refold = fold_j.as_ref().map_or(1.0, |d| d[g]);
+                    pred_counts[slot] = pred_log1p.min(80.0).exp_m1().max(0.0) * refold;
                     obs_eval[slot] = obs_full[g];
                     let r = f64::from(obs_log1p[g] - pred_log1p);
                     sq_resid += r * r;
