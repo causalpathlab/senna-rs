@@ -166,7 +166,8 @@ pub struct PredictArgs {
                      train     the trained δ only; every held-out batch must be a training batch\n\
                      crossfit  each batch's cells are dealt to --scoring-folds folds, and a\n\
                      \x20         fold is scored under the δ fitted on the batch's other folds\n\
-                     none      no δ: the batch-free rate θβ\n\
+                     none      no δ: the batch-free rate θβ (and a bge run projects the\n\
+                     \x20         counts as they are, not divided by its trained fold)\n\
                      heldout   δ fitted on the very cells it scores. In-sample (genes × batches\n\
                      \x20         free parameters), so the score is optimistic; kept for comparison\n\
                      \n\
@@ -529,6 +530,21 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Without -b each data file is a batch named by the file, and a name
+    // that matches a training batch takes that batch's trained δ. Right for a
+    // training file predicted back; wrong for an unrelated file of the same
+    // name, which nothing here can tell apart.
+    if args.batch_files.is_none()
+        && args.scoring_delta != delta::ScoringDeltaMode::None
+        && delta::has_trained_delta(&senna::run_manifest::derive_out_prefix(&args.model))
+    {
+        log::warn!(
+            "no --batch-files: each data file is its own batch, named by the file. A file \
+             named like a training batch is adjusted by that batch's trained δ; pass -b to \
+             say which batch the cells belong to"
+        );
+    }
+
     match kind {
         // bge and simba: a frozen gene table, projected onto per cell (see
         // `BgeEmbedding`).
@@ -603,14 +619,21 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
     }
 
     let model = crate::bge::score::BgeEmbedding::open(&args.model)?;
+    // `--model` may name the run's manifest; its tables sit under the prefix.
+    let prefix = senna::run_manifest::derive_out_prefix(&args.model);
+    // `--scoring-delta none` is the run with no batch term anywhere: the
+    // counts are projected as they are, too.
+    let batches = (args.scoring_delta != delta::ScoringDeltaMode::None).then_some(
+        crate::bge::score::QueryBatches {
+            files: args.batch_files.as_deref(),
+            model: &prefix,
+        },
+    );
     let qopts = args.query_name_opts()?;
     let fit = model.score_with_init(
         crate::bge::score::QueryRead {
             files: &args.data_files,
-            batches: Some(crate::bge::score::QueryBatches {
-                files: args.batch_files.as_deref(),
-                model: &args.model,
-            }),
+            batches,
             preload: args.preload_data,
             block: args.minibatch_size,
         },
@@ -630,6 +653,7 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
     let rho_dh = Mat::from_row_slice(model.gene_names.len(), model.h, &model.rho);
     let scoring = embedding_scoring_delta(EmbeddingScore {
         args,
+        model: &prefix,
         training_genes: &model.gene_names,
         data_vec: &fit.data_vec,
         rho_dh: &rho_dh,
@@ -965,6 +989,8 @@ fn build_remap(
 /// What an embedding family (vae, bge, simba) hands the scoring δ.
 struct EmbeddingScore<'a> {
     args: &'a PredictArgs,
+    /// The run's prefix, where its trained δ is.
+    model: &'a str,
     /// The model's feature axis, which `rho_dh` and `b_feat` live on.
     training_genes: &'a [Box<str>],
     data_vec: &'a SparseIoVec,
@@ -984,7 +1010,7 @@ fn embedding_scoring_delta(e: EmbeddingScore<'_>) -> anyhow::Result<Option<delta
     )?;
     delta::scoring_delta(&delta::ScoringDeltaArgs {
         spec: e.args.scoring_spec(),
-        model: &e.args.model,
+        model: e.model,
         training_genes: e.training_genes,
         data_vec: e.data_vec,
         theta_nk: e.theta_nh,
@@ -1890,6 +1916,7 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
     let scoring = match s.recon.as_ref() {
         Some((rho_dh, b_feat)) => embedding_scoring_delta(EmbeddingScore {
             args,
+            model: &args.model,
             training_genes: &training_genes,
             data_vec: &s.data_vec,
             rho_dh,
