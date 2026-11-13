@@ -122,28 +122,24 @@ fn the_scoring_delta_is_the_one_asked_for() {
     assert_eq!(plain_auto, plain_none);
 }
 
-// Bar: the masked family takes its scoring δ the same way: the in-sample δ
-// scores above the cross-fitted one, and `auto` on training batches is the
-// trained δ.
-#[test]
-fn a_masked_fit_is_scored_under_the_delta_asked_for() {
+/// The held-out score of one fit under each way of getting δ.
+struct Modes {
+    train: f32,
+    auto: f32,
+    in_sample: f32,
+    crossfit: f32,
+    none: f32,
+}
+
+/// Fit with `fit_argv` (data, batches and `-o model` are added) and score the
+/// same cells under every mode.
+fn modes(family: &str, fit: impl Fn(&[&str]), fit_argv: &[&str]) -> Modes {
     let dir = tempfile::tempdir().unwrap();
     let (data, batches) = planted_batched_zarr(dir.path(), 240, 2);
     let at = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
     let model = at("model");
-    let argv = [
-        data.as_str(),
-        "-b",
-        &batches,
-        "-o",
-        &model,
-        "-t",
-        "3",
-        "-i",
-        "20",
-    ];
-    let argv = [&argv[..], &["--minibatch-size", "60", "--seed", "7"]].concat();
-    crate::masked_topic::fit_masked_topic_model(&parse(&argv)).unwrap();
+    let argv = [data.as_str(), "-b", &batches, "-o", &model];
+    fit(&[&argv[..], fit_argv].concat());
     let predict = |mode: &str| -> f32 {
         let out = at(mode);
         let argv = [data.as_str(), "--model", &model, "-o", &out, "-b", &batches];
@@ -151,9 +147,111 @@ fn a_masked_fit_is_scored_under_the_delta_asked_for() {
         predict_model(&parse::<PredictArgs>(&argv)).unwrap();
         mean_of(&out, "eval_llik_per_count")
     };
-    let (in_sample, crossfit) = (predict("heldout"), predict("crossfit"));
-    let (train, auto) = (predict("train"), predict("auto"));
-    eprintln!("masked: train {train:.4}, in-sample {in_sample:.4}, cross-fitted {crossfit:.4}");
-    assert!(in_sample > crossfit, "{in_sample} vs {crossfit}");
-    assert_eq!(train, auto);
+    let m = Modes {
+        train: predict("train"),
+        auto: predict("auto"),
+        in_sample: predict("heldout"),
+        crossfit: predict("crossfit"),
+        none: predict("none"),
+    };
+    eprintln!(
+        "{family}: train {:.4}, in-sample {:.4}, cross-fitted {:.4}, none {:.4}",
+        m.train, m.in_sample, m.crossfit, m.none
+    );
+    m
+}
+
+// Bar: every family that predicts a rate takes its scoring δ the same way.
+// `auto` on training batches is the trained δ; the in-sample δ scores above
+// the cross-fitted one; and a δ moves the score, so it is applied.
+fn check_modes(family: &str, m: &Modes) {
+    assert_eq!(m.train, m.auto, "{family}: auto is the trained δ");
+    assert!(
+        m.in_sample > m.crossfit,
+        "{family}: in-sample {} vs cross-fitted {}",
+        m.in_sample,
+        m.crossfit
+    );
+    for (name, v) in [("trained", m.train), ("cross-fitted", m.crossfit)] {
+        assert!(
+            (v - m.none).abs() > 1e-4,
+            "{family}: the {name} δ did not move the score ({v} vs {})",
+            m.none
+        );
+    }
+}
+
+const TOPIC_FIT: [&str; 8] = [
+    "-t",
+    "3",
+    "-i",
+    "20",
+    "--minibatch-size",
+    "60",
+    "--seed",
+    "7",
+];
+
+#[test]
+fn a_masked_fit_is_scored_under_the_delta_asked_for() {
+    let fit = |argv: &[&str]| crate::masked_topic::fit_masked_topic_model(&parse(argv)).unwrap();
+    check_modes("masked", &modes("masked", fit, &TOPIC_FIT));
+}
+
+#[test]
+fn a_vae_fit_is_scored_under_the_delta_asked_for() {
+    let fit = |argv: &[&str]| crate::vae::fit_vae_model(&parse(argv)).unwrap();
+    check_modes("vae", &modes("vae", fit, &TOPIC_FIT));
+}
+
+#[test]
+fn a_bge_fit_is_scored_under_the_delta_asked_for() {
+    let fit = |argv: &[&str]| crate::bge::fit_bge(&parse(argv)).unwrap();
+    let argv = ["--epochs", "2", "--skip-etm", "--no-emit-pb-reference"];
+    let m = modes("bge", fit, &[&argv[..], &["--embedding-dim", "4"]].concat());
+    check_modes("bge", &m);
+}
+
+// Bar: a bge run divides each batch's training counts by a per-batch gene
+// fold; predict divides the held-out counts of those batches by the same
+// fold before projecting them, so the two batches of one group land closer
+// together than when the batches are not given.
+#[test]
+fn a_bge_projection_adjusts_cells_by_the_trained_fold() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = 240;
+    let (data, batches) = planted_batched_zarr(dir.path(), n, 2);
+    let at = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    let model = at("model");
+    let argv = [data.as_str(), "-b", &batches, "-o", &model, "--epochs", "2"];
+    let more = [
+        "--skip-etm",
+        "--no-emit-pb-reference",
+        "--embedding-dim",
+        "4",
+    ];
+    crate::bge::fit_bge(&parse(&[&argv[..], &more[..]].concat())).unwrap();
+    // Mean distance between the two batches' mean latent, within a group.
+    let batch_gap = |out: &str, b: Option<&str>| -> f32 {
+        let out = at(out);
+        let mut argv = vec![data.as_str(), "--model", &model, "-o", &out];
+        if let Some(b) = b {
+            argv.extend_from_slice(&["-b", b]);
+        }
+        predict_model(&parse::<PredictArgs>(&argv)).unwrap();
+        let z = crate::fit_cli::latent(&out);
+        let mean_of = |g: usize, b: usize| {
+            let rows: Vec<usize> = (0..n)
+                .filter(|c| usize::from(*c >= n / 2) == g && c % 2 == b)
+                .collect();
+            z.select_rows(&rows).row_sum() / rows.len() as f32
+        };
+        ((mean_of(0, 0) - mean_of(0, 1)).norm() + (mean_of(1, 0) - mean_of(1, 1)).norm()) / 2.0
+    };
+    let (with, without) = (
+        batch_gap("with", Some(&batches)),
+        batch_gap("without", None),
+    );
+    eprintln!("bge: batch gap with the trained fold {with:.4}, without {without:.4}");
+    assert!(with < without, "with {with}, without {without}");
 }

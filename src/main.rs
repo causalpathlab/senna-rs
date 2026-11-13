@@ -598,24 +598,28 @@ enum Commands {
                       \n\
                       Dense and indexed models are auto-dispatched via model.json.\n\
                       Gene-set misalignment is handled by flexible name matching.\n\
-                      The encoder's null is built as training built it: the held-out\n\
-                      cells are collapsed with the model's own settings, and each cell\n\
-                      reads its pseudobulk's fold (--adj-method residual) or its batch's\n\
-                      delta (batch). A model trained without batches gets none.\n\
+                      A model trained without batches gets no batch adjustment.\n\
 \n\
                       BATCH EFFECTS. Two things read the batches (-b), separately:\n\
-                      \x20 the latent    the encoder gets a null rebuilt from the held-out cells\n\
-                      \x20               themselves. It needs two or more held-out batches; with one\n\
-                      \x20               batch (or no -b) the encoder gets none. The trained delta\n\
-                      \x20               is not used here.\n\
+                      \x20 the latent    a model fitted with --adj-method batch reads the TRAINED\n\
+                      \x20               delta when every held-out batch is named like a training\n\
+                      \x20               batch; one batch is enough. Otherwise (a residual fit, a\n\
+                      \x20               new batch, or an older batch fit, whose encoder trained on\n\
+                      \x20               the pseudobulk fold) the encoder\n\
+                      \x20               gets a null rebuilt from the held-out cells themselves,\n\
+                      \x20               which needs two or more held-out batches; with one batch\n\
+                      \x20               (or no -b) it gets none.\n\
                       \x20 the score     --scoring-delta, default `auto`: the trained delta\n\
                       \x20               ({model}.delta.parquet) for a held-out batch named like a\n\
                       \x20               training batch; a cross-fitted delta for other batches when\n\
                       \x20               there are two or more; none for a model trained without\n\
                       \x20               batches. A count is never scored under a delta it helped\n\
                       \x20               fit, and the null takes the same batch term.\n\
-                      The score's delta is for topic and masked models; vae, bge, simba and svd\n\
-                      are scored with no delta.\n\
+                      The score's delta applies to topic, masked, vae, bge and simba models.\n\
+                      A bge run also divides the counts of a training batch by its trained\n\
+                      per-batch gene fold before projecting them. A simba run saves no\n\
+                      fold, so it takes a delta only with --scoring-delta crossfit. An svd\n\
+                      run is scored on log counts with no batch term.\n\
                       \n\
                       Latent modes are encoder-only (the default), encoder+refine,\n\
                       and decoder-only.\n\

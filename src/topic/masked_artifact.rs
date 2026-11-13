@@ -179,6 +179,7 @@ mod tests {
             num_levels: 1,
             level_decoder_dims: vec![4],
             adj_method: "residual".into(),
+            batch_null_in_training: false,
             has_coarsening: false,
             embedding_dim: Some(4),
             enc_context_size,

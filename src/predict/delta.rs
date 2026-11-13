@@ -98,13 +98,59 @@ pub(crate) fn nb_dispersion(
     }
 }
 
+/// How a family turns a cell's latent into its rate over the model's genes.
+#[derive(Clone, Copy)]
+pub(crate) enum RateModel<'a> {
+    /// `exp(β)·θ`: `exp_beta_dk` is `[D_train, K]` with columns summing to 1
+    /// and `θ` a row of proportions, so the rate is normalised as it is.
+    Topic { exp_beta_dk: &'a Mat },
+    /// `exp(b + ρ·θ)` normalised over genes (vae, bge, simba).
+    Embedding { rho_dh: &'a Mat, b_feat: &'a [f32] },
+}
+
+impl RateModel<'_> {
+    fn n_genes(&self) -> usize {
+        match self {
+            Self::Topic { exp_beta_dk } => exp_beta_dk.nrows(),
+            Self::Embedding { rho_dh, .. } => rho_dh.nrows(),
+        }
+    }
+
+    /// `[D_train, n]`, each cell's rate summing to 1 over genes.
+    fn rate(&self, theta: nalgebra::DMatrixView<'_, f32>) -> Mat {
+        match self {
+            Self::Topic { exp_beta_dk } => *exp_beta_dk * theta.transpose(),
+            Self::Embedding { rho_dh, b_feat } => {
+                let mut rate =
+                    crate::topic::predict_eval::embedding_rate(rho_dh, b_feat, &theta.into_owned());
+                for mut col in rate.column_iter_mut() {
+                    let z = col.sum().max(1e-12);
+                    col /= z;
+                }
+                rate
+            }
+        }
+    }
+}
+
 /// What every block reads.
 struct DeltaInputs<'a> {
     theta_nk: &'a Mat,
     gene_remap: Option<&'a GeneRemap>,
-    /// `exp(β)`, `[D_train, K]`.
-    exp_beta_dk: &'a Mat,
+    rate: RateModel<'a>,
     phi: Option<&'a [f32]>,
+}
+
+impl<'a> DeltaInputs<'a> {
+    /// `exp(β)` when the predicted sum can be kept as `Σ lib·θ` (`[K, G]`)
+    /// and turned into genes once at the end: a topic rate with no φ. Any
+    /// other case sums the predicted rate gene by gene.
+    fn linear(&self) -> Option<&'a Mat> {
+        match (self.rate, self.phi) {
+            (RateModel::Topic { exp_beta_dk }, None) => Some(exp_beta_dk),
+            _ => None,
+        }
+    }
 }
 
 /// Running sums over blocks, one column per group of cells. `obs` is
@@ -133,12 +179,8 @@ impl Fitted {
 
 impl Acc {
     fn zeros(inp: &DeltaInputs<'_>, n_groups: usize) -> Self {
-        let d_train = inp.exp_beta_dk.nrows();
-        let pred_rows = if inp.phi.is_some() {
-            d_train
-        } else {
-            inp.exp_beta_dk.ncols()
-        };
+        let d_train = inp.rate.n_genes();
+        let pred_rows = inp.linear().map_or(d_train, Mat::ncols);
         Self {
             obs: Mat::zeros(d_train, n_groups),
             pred: Mat::zeros(pred_rows, n_groups),
@@ -156,10 +198,9 @@ impl Acc {
     }
 
     fn finish(self, inp: &DeltaInputs<'_>) -> Fitted {
-        let pb_pred = if inp.phi.is_some() {
-            self.pred
-        } else {
-            inp.exp_beta_dk * &self.pred
+        let pb_pred = match inp.linear() {
+            Some(exp_beta_dk) => exp_beta_dk * &self.pred,
+            None => self.pred,
         };
         Fitted {
             sums: DeltaSums {
@@ -181,12 +222,12 @@ fn accumulate(
     theta: nalgebra::DMatrixView<'_, f32>,
     group_ids: &[Option<usize>],
 ) {
-    let d_train = inp.exp_beta_dk.nrows();
+    let d_train = inp.rate.n_genes();
     let to_train = |row: usize| match inp.gene_remap {
         Some(r) => r.new_to_train[row],
         None => Some(row),
     };
-    let pred_dn = inp.phi.map(|_| inp.exp_beta_dk * theta.transpose());
+    let pred_dn = inp.linear().is_none().then(|| inp.rate.rate(theta));
     for (j, (col, &b)) in csc.col_iter().zip(group_ids).enumerate() {
         let Some(b) = b else { continue };
         let lib_j: f32 = col.values().iter().sum();
@@ -206,11 +247,12 @@ fn accumulate(
                     let m = mu(d);
                     acc.pred[(d, b)] += nb_fisher_weight(inp.phi, m, d) * m;
                 }
-                let raw = acc.raw.as_mut().expect("raw sums are kept under NB");
                 for (&row, &x) in col.row_indices().iter().zip(col.values()) {
                     if let Some(d) = to_train(row) {
                         acc.obs[(d, b)] += nb_fisher_weight(inp.phi, mu(d), d) * x;
-                        raw[(d, b)] += x;
+                        if let Some(raw) = acc.raw.as_mut() {
+                            raw[(d, b)] += x;
+                        }
                     }
                 }
             }
@@ -402,7 +444,7 @@ fn load_trained_delta(
     training_genes: &[Box<str>],
 ) -> anyhow::Result<Option<(Vec<Box<str>>, Mat)>> {
     if !crate::predict::null::model_has_null(model) {
-        return Ok(None);
+        return load_batch_gene_fold(model, training_genes);
     }
     let path = format!("{model}.delta.parquet");
     let (strs, nums) =
@@ -455,20 +497,113 @@ fn load_trained_delta(
     Ok(Some((names, delta)))
 }
 
+/// The trained δ of a `senna bge` run, from `{model}.batch_gene_fold.parquet`
+/// (`log δ`, features × batches), on the axis `training_genes`; `None` when
+/// the run wrote none.
+fn load_batch_gene_fold(
+    model: &str,
+    training_genes: &[Box<str>],
+) -> anyhow::Result<Option<(Vec<Box<str>>, Mat)>> {
+    use legume_numeric::matrix::traits::IoOps;
+    let path = format!("{model}.batch_gene_fold.parquet");
+    if !std::path::Path::new(&path).is_file() {
+        return Ok(None);
+    }
+    let table = Mat::from_parquet_with_row_names(&path, Some(0))?;
+    let row_of: rustc_hash::FxHashMap<&str, usize> = table
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (&**g, i))
+        .collect();
+    let mut delta = Mat::from_element(training_genes.len(), table.cols.len(), 1.0);
+    let mut missing = 0usize;
+    for (d, g) in training_genes.iter().enumerate() {
+        match row_of.get(&**g) {
+            Some(&i) => {
+                for b in 0..table.cols.len() {
+                    let v = table.mat[(i, b)].exp();
+                    if v.is_finite() {
+                        delta[(d, b)] = v.clamp(DELTA_CLAMP_MIN, DELTA_CLAMP_MAX);
+                    }
+                }
+            }
+            None => missing += 1,
+        }
+    }
+    anyhow::ensure!(
+        missing < training_genes.len(),
+        "{path}: none of its features is named like a feature of the model, so the trained δ \
+         cannot be read; use --scoring-delta crossfit or none"
+    );
+    if missing > 0 {
+        info!("{path}: no trained δ for {missing} of the model's features; they take δ = 1");
+    }
+    Ok(Some((table.cols, delta)))
+}
+
+/// The trained δ of the held-out batches, `[D_train, held-out batches]` in
+/// the query's own batch order, when the model has a trained δ and EVERY
+/// held-out batch is named like a training batch; `None` otherwise (the
+/// unknown ones are logged). Nothing is fitted on the held-out cells, so one
+/// batch is enough.
+///
+/// What anything that adjusts the held-out cells BEFORE placing them reads:
+/// the encoder's null, and the fold a projection divides the counts by.
+pub(crate) fn trained_delta_of_batches(
+    model: &str,
+    training_genes: &[Box<str>],
+    data_vec: &SparseIoVec,
+) -> anyhow::Result<Option<Mat>> {
+    let Some((trained_names, trained_db)) = load_trained_delta(model, training_genes)? else {
+        return Ok(None);
+    };
+    let names = data_vec.batch_names().unwrap_or_default();
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let cols: Vec<Option<usize>> = names
+        .iter()
+        .map(|n| trained_names.iter().position(|t| t == n))
+        .collect();
+    let unknown: Vec<&str> = names
+        .iter()
+        .zip(&cols)
+        .filter(|(_, c)| c.is_none())
+        .map(|(n, _)| &**n)
+        .collect();
+    if !unknown.is_empty() {
+        info!(
+            "{model}: held-out batches it was not trained on ({}), so the cells are not \
+             adjusted by the trained δ before they are placed",
+            unknown.join(", ")
+        );
+        return Ok(None);
+    }
+    let cols: Vec<usize> = cols.into_iter().flatten().collect();
+    info!(
+        "{model}: the trained δ of {} held-out batches adjusts the cells before they are placed",
+        cols.len()
+    );
+    Ok(Some(trained_db.select_columns(&cols)))
+}
+
 /// What [`scoring_delta`] reads.
 pub(crate) struct ScoringDeltaArgs<'a> {
     pub spec: ScoringSpec,
     pub model: &'a str,
-    /// The model's gene axis, which `beta_dk` and δ live on.
+    /// The model's gene axis, which the rate and δ live on.
     pub training_genes: &'a [Box<str>],
     pub data_vec: &'a SparseIoVec,
-    /// The cells' proportions `[N, K]`, rows summing to 1.
+    /// The cells' latent `[N, K]`.
     pub theta_nk: &'a Mat,
     /// Query rows onto the training axis, WITHOUT any ablation: δ is a rate
     /// multiplier on the scored counts, so it reads the genes the encoder
     /// was not shown as well.
     pub gene_remap: Option<&'a GeneRemap>,
-    pub beta_dk: &'a Mat,
+    /// The latent's rate over genes; `theta_nk` is whatever latent it reads
+    /// (proportions for a topic rate, the embedding for the others).
+    pub rate: RateModel<'a>,
     pub phi: Option<&'a [f32]>,
     /// Cells per block (`None` = the default for the row count); this pass
     /// keeps no block statistics, so it need not match the encoder's.
@@ -671,18 +806,17 @@ pub(crate) fn scoring_delta(a: &ScoringDeltaArgs<'_>) -> anyhow::Result<Option<S
     let batches = a.data_vec.get_batch_membership(0..n_cells);
     let group = assign_groups(&batches, &layout);
 
-    let d_train = a.beta_dk.nrows();
+    let d_train = a.rate.n_genes();
     let mut delta = Mat::from_element(d_train, n_groups, 1.0);
     let mut batch_delta = Mat::from_element(d_train, n_batches, 1.0);
     let mut fit_obs = Mat::zeros(d_train, n_groups);
     let mut fitted = vec![false; n_groups];
 
     if any_fitted {
-        let exp_beta_dk = a.beta_dk.map(f32::exp);
         let inp = DeltaInputs {
             theta_nk: a.theta_nk,
             gene_remap: a.gene_remap,
-            exp_beta_dk: &exp_beta_dk,
+            rate: a.rate,
             phi: a.phi,
         };
         let block_size = a.block_size.unwrap_or_else(|| {
@@ -846,7 +980,9 @@ mod tests {
         let inp = DeltaInputs {
             theta_nk,
             gene_remap: remap,
-            exp_beta_dk: &exp_beta_dk,
+            rate: RateModel::Topic {
+                exp_beta_dk: &exp_beta_dk,
+            },
             phi,
         };
         let n = csc.ncols();
@@ -1029,7 +1165,9 @@ mod tests {
         let inp = DeltaInputs {
             theta_nk: &theta,
             gene_remap: None,
-            exp_beta_dk: &exp_beta,
+            rate: RateModel::Topic {
+                exp_beta_dk: &exp_beta,
+            },
             phi,
         };
         let plans = vec![BatchPlan::Fitted; n_batches];

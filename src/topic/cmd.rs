@@ -212,8 +212,13 @@ pub struct TopicArgs {
         value_enum,
         default_value = "residual",
         help = "Batch adjustment (batch|residual)",
-        long_help = "batch    — subtract per-batch pseudobulk mean.\n\
-                     residual — divide by fitted delta per pseudobulk group."
+        long_help = "batch    — divide by the per-batch delta: one fold per gene per batch.\n\
+                     \x20          The encoder trains on it and reads it at inference, and\n\
+                     \x20          `senna predict` reads the trained delta for a batch the\n\
+                     \x20          model was trained on, one held-out batch included.\n\
+                     residual — divide by each pseudobulk group's own fold (finer than a\n\
+                     \x20          batch; `senna predict` re-estimates it from the held-out\n\
+                     \x20          cells, which takes two or more held-out batches)."
     )]
     pub(crate) adj_method: AdjMethod,
 
@@ -555,6 +560,15 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // here, held alive for the entire fit via the outer scope.
     let anchor_tensors = anchor_prior.per_level_device_tensors(&level_coarsenings, &dev)?;
 
+    // Under `--adj-method batch` the encoder trains on the δ it reads at
+    // inference, mixed by each pseudobulk's batch shares.
+    let batch_nulls = crate::topic::common::batch_level_nulls(
+        &args.adj_method,
+        &collapsed_levels,
+        cell_to_pb_per_level.as_deref(),
+        &data_vec,
+    )?;
+
     let ctx = PipelineCtx {
         level_decoder_dims: &level_decoder_dims,
         n_topics,
@@ -577,6 +591,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         stop: &stop,
         anchor_prior: Some(&anchor_prior),
         anchor_prior_per_level: Some(&anchor_tensors),
+        batch_nulls: batch_nulls.as_deref(),
         feature_stats: FeatureStats {
             mean: &feature_mean,
             mean_full: &feature_mean_full,
@@ -773,6 +788,8 @@ struct PipelineCtx<'a> {
     anchor_prior: Option<&'a crate::topic::anchor_prior::AnchorPrior>,
     /// Per-level `[D_l, K]` anchor tensors pre-built on `dev`.
     anchor_prior_per_level: Option<&'a [candle_core::Tensor]>,
+    /// The encoder's training null per level under `--adj-method batch`.
+    batch_nulls: Option<&'a [Mat]>,
     /// Per-feature statistics computed once, threaded through every
     /// stage that needs them (encoder construction, decoder Fisher
     /// weighting, model save).
@@ -883,6 +900,7 @@ where
         stop: ctx.stop,
         anchor_prior_per_level: ctx.anchor_prior_per_level,
         anchor_penalty: ctx.args.anchor_penalty,
+        batch_nulls: ctx.batch_nulls,
     };
     let scores = train_mixed(
         ctx.collapsed_levels,
@@ -902,6 +920,7 @@ where
         let (mixed, batch, _) = crate::topic::common::sample_collapsed_data(
             ctx.finest_collapsed,
             crate::topic::common::posterior_seed(ctx.args.seed, finest),
+            ctx.batch_nulls.map(|n| &n[finest]),
         )?;
         let enc_nd = if let Some(fc) = enc_fc {
             fc.aggregate_columns_nd(&mixed)
@@ -1068,6 +1087,7 @@ where
         num_levels: ctx.level_decoder_dims.len(),
         level_decoder_dims: ctx.level_decoder_dims.to_vec(),
         adj_method: ctx.args.adj_method.as_str().into(),
+        batch_null_in_training: ctx.batch_nulls.is_some(),
         has_coarsening: ctx.finest_coarsening.is_some(),
         embedding_dim: None,
         enc_context_size: None,
@@ -1196,6 +1216,7 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
         stop: ctx.stop,
         anchor_prior_per_level: None,
         anchor_penalty: 0.0,
+        batch_nulls: ctx.batch_nulls,
     };
 
     if ctx.anchor_prior.is_some() {

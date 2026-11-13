@@ -27,6 +27,9 @@ pub(crate) struct TrainConfig<'a> {
     pub anchor_prior_per_level: Option<&'a [Tensor]>,
     /// Cross-entropy penalty strength λ applied per minibatch.
     pub anchor_penalty: f32,
+    /// The encoder's null per level under `--adj-method batch`
+    /// (`common::batch_level_nulls`); `None` trains on `μ_residual`.
+    pub batch_nulls: Option<&'a [Mat]>,
 }
 
 /// Build the legume_numeric::candle-side `TrainConfig` from the senna-side bundle.
@@ -71,6 +74,7 @@ where
         level_coarsenings,
         enc_coarsening,
         config.args.seed,
+        config.batch_nulls,
     )?;
     let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()
@@ -115,6 +119,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
         level_coarsenings,
         enc_coarsening,
         config.args.seed,
+        config.batch_nulls,
     )?;
     let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()
