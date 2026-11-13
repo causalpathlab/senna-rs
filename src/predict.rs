@@ -93,8 +93,10 @@ pub struct PredictArgs {
     #[arg(
         long,
         required = true,
-        help = "Trained model prefix (output of `senna topic` / `masked-topic` -o)",
-        long_help = "Loads:\n  \
+        value_parser = parse_model_prefix,
+        help = "Trained model prefix (`-o` of the training run), or its `.senna.json` manifest",
+        long_help = "The training run's `-o` prefix, or its `{model}.senna.json` /\n\
+                     `{model}.model.json` file, which reads as that prefix. Loads:\n  \
                      {model}.dictionary.parquet      gene × topic dictionary\n  \
                      {model}.model.json              model architecture metadata\n  \
                      {model}.safetensors             encoder + decoder weights\n  \
@@ -486,6 +488,20 @@ impl PredictArgs {
     }
 }
 
+/// `--model` names the training run's `-o` prefix. Its manifest
+/// (`{prefix}.senna.json`) or metadata (`{prefix}.model.json`) is the file a
+/// user tab-completes to, so either reads as the prefix it sits under.
+pub(crate) fn parse_model_prefix(s: &str) -> Result<Box<str>, String> {
+    let prefix = s
+        .strip_suffix(".senna.json")
+        .or_else(|| s.strip_suffix(".model.json"))
+        .unwrap_or(s);
+    if prefix.is_empty() {
+        return Err(format!("{s}: no model prefix before the suffix"));
+    }
+    Ok(prefix.into())
+}
+
 pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
@@ -536,7 +552,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     // name, which nothing here can tell apart.
     if args.batch_files.is_none()
         && args.scoring_delta != delta::ScoringDeltaMode::None
-        && delta::has_trained_delta(&senna::run_manifest::derive_out_prefix(&args.model))
+        && delta::has_trained_delta(&args.model)
     {
         log::warn!(
             "no --batch-files: each data file is its own batch, named by the file. A file \
@@ -619,14 +635,12 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
     }
 
     let model = crate::bge::score::BgeEmbedding::open(&args.model)?;
-    // `--model` may name the run's manifest; its tables sit under the prefix.
-    let prefix = senna::run_manifest::derive_out_prefix(&args.model);
     // `--scoring-delta none` is the run with no batch term anywhere: the
     // counts are projected as they are, too.
     let batches = (args.scoring_delta != delta::ScoringDeltaMode::None).then_some(
         crate::bge::score::QueryBatches {
             files: args.batch_files.as_deref(),
-            model: &prefix,
+            model: &args.model,
         },
     );
     let qopts = args.query_name_opts()?;
@@ -653,7 +667,7 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
     let rho_dh = Mat::from_row_slice(model.gene_names.len(), model.h, &model.rho);
     let scoring = embedding_scoring_delta(EmbeddingScore {
         args,
-        model: &prefix,
+        model: &args.model,
         training_genes: &model.gene_names,
         data_vec: &fit.data_vec,
         rho_dh: &rho_dh,

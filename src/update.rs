@@ -115,7 +115,8 @@ pub struct UpdateArgs {
     #[arg(
         long,
         required = true,
-        help = "Parent model prefix to continue training from",
+        value_parser = crate::predict::parse_model_prefix,
+        help = "Parent model prefix to continue training from, or its `.senna.json` manifest",
         long_help = "A run prefix written by `senna topic / masked-topic / masked-sbp /\n\
                      masked-vae / vae / svd / bge / simba`."
     )]
