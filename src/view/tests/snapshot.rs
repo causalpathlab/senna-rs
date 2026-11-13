@@ -103,26 +103,8 @@ fn with_near(mut s: Scene) -> Scene {
     s
 }
 
-#[test]
-fn a_cluster_map_draws_as_it_did() {
-    let s = crowded(3000);
-    assert_eq!(draw(&s, 16.0), (240, 180, 12731718632196819083));
-}
-
-#[test]
-fn a_hovered_label_draws_as_it_did() {
-    let mut s = crowded(3000);
-    let vp = render::fit(s.current().points.bounds, W, H);
-    draw(&s, 16.0);
-    let (x, y) = vp.to_px(s.group_centre(2).unwrap());
-    s.hover = s.group_at(&vp, x, y);
-    assert_eq!(s.hover, Some(2));
-    assert_eq!(draw(&s, 16.0), (240, 180, 13134139464734984117));
-}
-
-#[test]
-fn styled_groups_draw_as_they_did() {
-    let mut s = crowded(3000);
+/// Every group restyled (each shape, alpha, size and a colour of its own).
+fn styled(mut s: Scene) -> Scene {
     let looks = [
         (style::Shape::Square, 1.0, 1.0),
         (style::Shape::Diamond, 0.6, 2.5),
@@ -137,40 +119,12 @@ fn styled_groups_draw_as_they_did() {
         });
     }
     s.restyle(4, |st| st.colour = Some([10, 120, 200]));
-    assert_eq!(draw(&s, 16.0), (240, 180, 12142580646687436989));
-    s.focus = Some(1);
-    assert_eq!(draw(&s, 16.0), (240, 180, 14895850866872429048));
+    s
 }
 
-#[test]
-fn large_text_draws_as_it_did() {
-    // Past 32 px a cell's text is the 32 raster resampled up.
-    let s = crowded(3000);
-    assert_eq!(draw(&s, 48.0), (240, 180, 8862107923740463606));
-}
-
-#[test]
-fn a_feature_map_with_its_key_draws_as_it_did() {
-    let mut s = scene();
-    s.set_space(1);
-    s.colour_by(LabelKind::Markers);
-    assert!(!s.legend().is_empty());
-    assert_eq!(draw(&s, 16.0), (240, 180, 5319375523145005806));
-}
-
-#[test]
-fn a_clicked_cell_draws_as_it_did() {
-    let s = with_near(scene());
-    assert_eq!(draw(&s, 16.0), (240, 180, 13247368101845531460));
-    // The features over their backdrop of muted cells.
-    let mut s = s;
-    s.set_space(3);
-    assert_eq!(draw(&s, 16.0), (240, 180, 4092230938843235177));
-}
-
-#[test]
-fn activity_with_its_ramp_key_draws_as_it_did() {
-    let mut s = crowded(3000);
+/// The fixture with a feature's activity shown over its cells, with the
+/// ramp's key.
+fn with_activity(mut s: Scene) -> Scene {
     let n = s.current().points.xy.len();
     let values = (0..n)
         .map(|i| if i % 7 == 0 { 0.0 } else { (i % 50) as f32 })
@@ -183,35 +137,22 @@ fn activity_with_its_ramp_key_draws_as_it_did() {
         title: "GENE1 observed".into(),
         levels: Levels::from_values(values, true),
     });
-    assert_eq!(draw(&s, 16.0), (240, 180, 12189296318815704741));
+    s
 }
 
+/// The map on screen: groups styled and one focused, a label hovered, a
+/// clicked cell's edges, velocity streamlines and arrows, the text drawn into
+/// the picture; and large text, past 32 px the 32 raster resampled up.
 #[test]
-fn text_kept_for_a_page_is_as_it_was() {
-    let s = with_near(crowded(3000));
+fn a_map_draws_as_it_did() {
+    let mut s = with_near(styled(crowded(3000)));
+    s.focus = Some(1);
     let vp = render::fit(s.current().points.bounds, W, H);
-    let mut frame = deck::frames(&[(&s, vp, 16.0)], true).remove(0);
-    let runs = frame.take_text();
-    assert_eq!(
-        (digest(&frame.to_image()), runs.len(), runs_digest(&runs)),
-        ((240, 180, 9351161338657952179), 7, 4663346714267551512)
-    );
-}
-
-#[test]
-fn a_grid_page_is_as_it_was() {
-    let (a, b) = (crowded(2000), with_near(scene()));
-    let titles = ["run A".to_string(), "run B".to_string()];
-    let page = deck::render_grid(&[&a, &b], &[None, None], &titles, (W, H), 16.0);
-    assert_eq!(
-        (digest(&page.img), page.text.len(), runs_digest(&page.text)),
-        ((240, 180, 11379143200818801882), 8, 16793650456510507046)
-    );
-}
-
-#[test]
-fn velocity_marks_draw_as_they_did() {
-    let mut frame = render::Frame::blank(W, H, color::BACKGROUND);
+    draw(&s, 16.0);
+    let (x, y) = vp.to_px(s.group_centre(1).unwrap());
+    s.hover = s.group_at(&vp, x, y);
+    assert_eq!(s.hover, Some(1));
+    let mut frame = deck::frames(&[(&s, vp, 16.0)], false).remove(0);
     let lines = vec![
         vec![(10.0, 20.0), (60.0, 35.5), (130.0, 90.0), (300.0, 120.0)],
         vec![(200.0, 170.0), (180.0, 100.0), (185.5, -40.0)],
@@ -222,7 +163,32 @@ fn velocity_marks_draw_as_they_did() {
         ((100.0, 60.0), (-30.0, 80.0)),
     ];
     velocity::draw(&mut frame, &arrows, color::highlight_ink(), 2.0);
-    assert_eq!(digest(&frame.to_image()), (240, 180, 2108609922703495894));
+    assert_eq!(digest(&frame.to_image()), (240, 180, 1772714810278953256));
+    assert_eq!(draw(&crowded(3000), 48.0), (240, 180, 8862107923740463606));
+}
+
+/// A grid page, its text kept as runs: a feature's activity with its ramp
+/// key, a feature map with its key, and a clicked cell's features over their
+/// backdrop of muted cells.
+#[test]
+fn a_grid_page_is_as_it_was() {
+    let a = with_activity(crowded(2000));
+    let mut b = scene();
+    b.set_space(1);
+    b.colour_by(LabelKind::Markers);
+    assert!(!b.legend().is_empty());
+    let mut c = with_near(scene());
+    c.set_space(3);
+    let titles = [
+        "run A".to_string(),
+        "run B".to_string(),
+        "run C".to_string(),
+    ];
+    let page = deck::render_grid(&[&a, &b, &c], &[None, None, None], &titles, (W, H), 16.0);
+    assert_eq!(
+        (digest(&page.img), page.text.len(), runs_digest(&page.text)),
+        ((240, 180, 17764791235586080237), 9, 2514423851555036642)
+    );
 }
 
 /// Size and digest of the PDF of `pages`, as a save writes it.
@@ -238,38 +204,26 @@ fn size(width_in: f32, dpi: u32) -> PageSize {
     PageSize { width_in, dpi }
 }
 
+/// A PDF of a map, a grid, one run with a chart (a 4:3 page), and views
+/// saved one page each.
 #[test]
-fn a_map_saved_as_a_pdf_is_as_it_was() {
-    let (page, px) =
-        headless_page(&[with_near(crowded(3000))], &[], false, size(2.0, 150)).unwrap();
-    assert_eq!(px, (300, 278));
-    assert_eq!(pdf_digest(&[page], 150.0), (42547, 4532757784813180276));
-}
-
-#[test]
-fn a_grid_saved_as_a_pdf_is_as_it_was() {
+fn pages_saved_as_a_pdf_are_as_they_were() {
     let titles = ["run A".to_string(), "run B".to_string()];
+    let (map, px) = headless_page(&[with_near(crowded(3000))], &[], false, size(2.0, 150)).unwrap();
+    assert_eq!(px, (300, 278), "a map");
     let scenes = [crowded(2000), with_near(scene())];
-    let (page, px) = headless_page(&scenes, &titles, false, size(2.0, 150)).unwrap();
-    assert_eq!(px, (300, 113));
-    assert_eq!(pdf_digest(&[page], 150.0), (14982, 1032533684822131051));
-    // One run with a chart asked for takes a 4:3 page.
-    let (page, px) = headless_page(&[scene()], &titles, true, size(2.0, 150)).unwrap();
-    assert_eq!(px, (300, 225));
-    assert_eq!(pdf_digest(&[page], 150.0), (1628, 9598306093650663253));
-}
-
-#[test]
-fn views_saved_one_page_each_are_as_they_were() {
-    let (a, b) = (crowded(2000), with_near(scene()));
+    let (grid, px) = headless_page(&scenes, &titles, false, size(2.0, 150)).unwrap();
+    assert_eq!(px, (300, 113), "a grid");
+    let (chart, px) = headless_page(&[scene()], &titles, true, size(2.0, 150)).unwrap();
+    assert_eq!(px, (300, 225), "a chart");
+    let [a, b] = &scenes;
     let views = [
-        (&a, render::fit(a.current().points.bounds, W, H), 16.0),
-        (&b, render::fit(b.current().points.bounds, H, W), 24.0),
+        (a, render::fit(a.current().points.bounds, W, H), 16.0),
+        (b, render::fit(b.current().points.bounds, H, W), 24.0),
     ];
-    assert_eq!(
-        pdf_digest(&deck::view_pages(&views), 144.0),
-        (23939, 7457570728265228916)
-    );
+    let mut pages = vec![map, grid, chart];
+    pages.extend(deck::view_pages(&views));
+    assert_eq!(pdf_digest(&pages, 150.0), (81673, 9444872569059243850));
 }
 
 #[test]

@@ -14,39 +14,34 @@ fn words_are_quoted_only_when_the_shell_would_split_them() {
 }
 
 #[test]
-fn paths_are_made_relative_to_the_script() {
-    let r = |p: &str, b: &str| relative(Path::new(p), Path::new(b));
-    assert_eq!(
-        r("/w/data/d.zarr", "/w/out"),
-        PathBuf::from("../data/d.zarr")
-    );
-    assert_eq!(r("/w/out/d.zarr", "/w/out"), PathBuf::from("d.zarr"));
-    assert_eq!(r("/w", "/w"), PathBuf::from("."));
-}
-
-#[test]
-fn a_dotdot_in_the_out_folder_is_resolved_first() {
-    let r = |p: &str, b: &str| relative(Path::new(p), Path::new(b));
-    // The out folder /a/b/../res is /a/res: the data is one up and over.
-    assert_eq!(
-        r("/a/b/d.zarr", "/a/b/../res"),
-        PathBuf::from("../b/d.zarr")
-    );
-    assert_eq!(r("/a/b/../b/d.zarr", "/a/b"), PathBuf::from("d.zarr"));
+fn paths_are_made_relative_to_the_script_unless_far_away() {
+    for (label, path, base, want) in [
+        ("over", "/w/data/d.zarr", "/w/out", "../data/d.zarr"),
+        ("within", "/w/out/d.zarr", "/w/out", "d.zarr"),
+        ("itself", "/w", "/w", "."),
+        // The out folder /a/b/../res is /a/res: the data is one up and over.
+        (
+            "a dotdot in the out",
+            "/a/b/d.zarr",
+            "/a/b/../res",
+            "../b/d.zarr",
+        ),
+        ("a dotdot in the data", "/a/b/../b/d.zarr", "/a/b", "d.zarr"),
+        ("two up", "/w/x/y/d.zarr", "/w/a/b", "../../x/y/d.zarr"),
+        (
+            "far away: whole",
+            "/u/data/d.zarr",
+            "/t/a/b/c",
+            "/u/data/d.zarr",
+        ),
+    ] {
+        assert_eq!(
+            relative(Path::new(path), Path::new(base)),
+            PathBuf::from(want),
+            "{label}"
+        );
+    }
     assert_eq!(resolved(Path::new("/a/./b/../c")), PathBuf::from("/a/c"));
-}
-
-#[test]
-fn far_away_data_is_written_whole() {
-    let r = |p: &str, b: &str| relative(Path::new(p), Path::new(b));
-    assert_eq!(
-        r("/w/x/y/d.zarr", "/w/a/b"),
-        PathBuf::from("../../x/y/d.zarr")
-    );
-    assert_eq!(
-        r("/u/data/d.zarr", "/t/a/b/c"),
-        PathBuf::from("/u/data/d.zarr")
-    );
 }
 
 #[test]

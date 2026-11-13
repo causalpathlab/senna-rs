@@ -40,30 +40,21 @@ fn a_field_along_x_draws_arrows_along_x() {
     );
 }
 
-/// A cell the field does not hold has no displacement.
-#[test]
-fn a_cell_without_a_velocity_does_not_move() {
-    let names: Vec<Box<str>> = ["a", "b", "c"].map(Into::into).to_vec();
-    let z = Mat::from_fn(3, 2, |i, d| (i * 2 + d) as f32);
-    let v = Mat::from_fn(2, 2, |_, d| d as f32);
-    let field = Field::new(&names, &z, &names[..2], &v).unwrap();
-    let points = Points::new(names, vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]);
-    let moved = field.embed(&points);
-    assert!(moved[2][0].is_nan());
-}
-
-/// A cell whose velocity is not finite (a time model could not place it)
-/// is left out of the field as if it had none, and its neighbours' moves
+/// A cell the field does not hold, or whose velocity is not finite (a time
+/// model could not place it), has no displacement; its neighbours' moves
 /// stay finite.
 #[test]
-fn a_cell_with_a_nan_velocity_is_left_out() {
-    let names: Vec<Box<str>> = ["a", "b", "c", "d"].map(Into::into).to_vec();
-    let z = Mat::from_fn(4, 2, |i, d| (i * 2 + d) as f32);
+fn a_cell_without_a_finite_velocity_does_not_move() {
+    let names: Vec<Box<str>> = ["a", "b", "c", "d", "e"].map(Into::into).to_vec();
+    let z = Mat::from_fn(5, 2, |i, d| (i * 2 + d) as f32);
+    // Cell c's velocity is NaN; cell e has none.
     let v = Mat::from_fn(4, 2, |i, d| if i == 2 { f32::NAN } else { d as f32 });
-    let field = Field::new(&names, &z, &names, &v).unwrap();
-    let points = Points::new(names, vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]]);
-    let moved = field.embed(&points);
-    assert!(moved[2][0].is_nan());
+    let field = Field::new(&names, &z, &names[..4], &v).unwrap();
+    let xy = (0..5).map(|i| [i as f32, 0.0]).collect();
+    let moved = field.embed(&Points::new(names, xy));
+    for (label, i) in [("a NaN velocity", 2), ("no velocity", 4)] {
+        assert!(moved[i][0].is_nan(), "{label}: {:?}", moved[i]);
+    }
     for i in [0, 1, 3] {
         assert!(
             moved[i].iter().all(|x| x.is_finite()),

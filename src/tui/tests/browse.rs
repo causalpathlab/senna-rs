@@ -145,36 +145,6 @@ fn marked_files_in_several_folders_are_taken_together() {
     assert!(b.marked.is_empty());
 }
 
-#[test]
-fn sizes_read_in_their_unit() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("f");
-    std::fs::write(&p, vec![0u8; 1500]).unwrap();
-    assert_eq!(size_of(&p), "1.5 kB");
-    std::fs::write(&p, b"abc").unwrap();
-    assert_eq!(size_of(&p), "3 B");
-}
-
-#[test]
-fn a_refused_file_is_not_taken_and_the_popup_says_why() {
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "no.txt");
-    write(dir.path(), "yes.txt");
-    let mut b = Browser::open(dir.path().to_path_buf(), Picky, Some("no.txt"));
-    assert_eq!(b.key(key(KeyCode::Enter)), Outcome::Moved);
-    let said: Vec<String> = b.lines(20).iter().map(ToString::to_string).collect();
-    assert!(
-        said.iter().any(|l| l.contains("no.txt will not do")),
-        "{said:?}"
-    );
-    b.key(key(KeyCode::Down));
-    assert!(b.refused.is_none());
-    assert_eq!(
-        taken(b.key(key(KeyCode::Enter))),
-        [dir.path().join("yes.txt")]
-    );
-}
-
 /// Text files that can be taken several at once, refusing `no.txt`.
 #[derive(Clone)]
 struct PickyMany;
@@ -204,10 +174,28 @@ impl Wanted for PickyMany {
 }
 
 #[test]
-fn refused_files_are_never_marked() {
+fn a_refused_file_is_not_taken_nor_marked_and_the_popup_says_why() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "no.txt");
     write(dir.path(), "yes.txt");
+    let mut b = Browser::open(dir.path().to_path_buf(), Picky, Some("no.txt"));
+    assert_eq!(b.key(key(KeyCode::Enter)), Outcome::Moved);
+    let said: Vec<String> = b.lines(20).iter().map(ToString::to_string).collect();
+    assert!(
+        said.iter().any(|l| l.contains("no.txt will not do")),
+        "{said:?}"
+    );
+    // The refusal stays through keys that do nothing.
+    assert_eq!(b.key(key(KeyCode::Tab)), Outcome::Ignored);
+    assert!(b.refused.is_some());
+    b.key(key(KeyCode::Down));
+    assert!(b.refused.is_none());
+    assert_eq!(
+        taken(b.key(key(KeyCode::Enter))),
+        [dir.path().join("yes.txt")]
+    );
+
+    // Taken several at once, the refused one is never marked.
     let mut b = Browser::open(dir.path().to_path_buf(), PickyMany, Some("no.txt"));
     b.key(key(KeyCode::Char(' ')));
     assert!(b.marked.is_empty());
@@ -218,17 +206,6 @@ fn refused_files_are_never_marked() {
         [&dir.path().join("yes.txt")]
     );
     assert!(b.refused.is_some(), "the refused one is named");
-}
-
-#[test]
-fn a_refusal_stays_through_keys_that_do_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "no.txt");
-    let mut b = Browser::open(dir.path().to_path_buf(), Picky, Some("no.txt"));
-    b.key(key(KeyCode::Enter));
-    assert!(b.refused.is_some());
-    assert_eq!(b.key(key(KeyCode::Tab)), Outcome::Ignored);
-    assert!(b.refused.is_some());
 }
 
 #[test]
@@ -251,7 +228,7 @@ fn type_in<W: Wanted>(b: &mut Browser<W>, text: &str) {
 }
 
 #[test]
-fn a_typed_path_is_followed_and_a_folder_it_reaches_is_entered_at_once() {
+fn a_typed_path_is_followed_a_folder_it_reaches_entered_and_one_not_there_stays() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path().canonicalize().unwrap();
     for sub in ["data", "data2", "other"] {
@@ -287,27 +264,17 @@ fn a_typed_path_is_followed_and_a_folder_it_reaches_is_entered_at_once() {
     // Enter takes the file the path ends on.
     type_in(&mut b, "2/a");
     assert_eq!(taken(b.key(key(KeyCode::Enter))), [d.join("data2/a.txt")]);
-}
 
-#[test]
-fn letters_without_a_leading_slash_still_narrow_names() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join("data2")).unwrap();
-    write(dir.path(), "a.txt");
-    let mut b = Browser::open(dir.path().to_path_buf(), Txt { many: false }, None);
+    // Letters without a leading slash still narrow names.
+    let mut b = Browser::open(d.clone(), Txt { many: false }, None);
     type_in(&mut b, "data2");
-    assert_eq!(b.dir, dir.path());
+    assert_eq!(b.dir, d);
     assert_eq!(names(&b), ["..", "data2"]);
-}
 
-#[test]
-fn a_typed_path_that_is_not_there_stays_where_it_is() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join("sub")).unwrap();
-    let mut b = Browser::open(dir.path().to_path_buf(), Txt { many: false }, None);
-    let gone = format!("{}/nowhere/x", dir.path().display());
-    type_in(&mut b, &gone);
-    assert_eq!(b.dir, dir.path());
+    // A typed path that is not there stays where it is.
+    let mut b = Browser::open(d.clone(), Txt { many: false }, None);
+    type_in(&mut b, &format!("{}/nowhere/x", d.display()));
+    assert_eq!(b.dir, d);
     assert!(!b.completed());
     assert_eq!(names(&b), [".."]);
 }

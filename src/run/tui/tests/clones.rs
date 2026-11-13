@@ -11,7 +11,7 @@ fn table() -> CloneTable {
 }
 
 #[test]
-fn clones_and_donors_are_counted() {
+fn clones_and_donors_are_counted_and_no_clone_says_so() {
     let s = of(&table());
     assert_eq!(s.cells, 5);
     assert_eq!(s.in_clones(), 3);
@@ -38,10 +38,7 @@ fn clones_and_donors_are_counted() {
     assert_eq!(two.p_malig, None);
     let text = s.lines().join("\n");
     assert!(text.starts_with("5 cells: 2 mix freely, 3 (60%) in 2 donor-private clones"));
-}
 
-#[test]
-fn no_clone_says_so() {
     let mut t = table();
     t.stratum = vec![0; 5];
     let s = of(&t);

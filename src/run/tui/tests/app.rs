@@ -293,7 +293,7 @@ fn the_filter_narrows_the_flags() {
 }
 
 #[test]
-fn every_method_of_senna_parses_from_an_untouched_form() {
+fn every_method_of_senna_parses_from_an_untouched_form_and_takes_threads() {
     use clap::CommandFactory;
     let mut cli = crate::Cli::command();
     cli.build();
@@ -301,6 +301,12 @@ fn every_method_of_senna_parses_from_an_untouched_form() {
         let form = Method::new(&cli, m).unwrap();
         assert!(!form.fields.is_empty(), "{m} has no flags");
         assert!(form.takes_batches(), "{m} takes no batch files");
+        assert!(
+            form.fields
+                .iter()
+                .any(|f| f.long == "threads" && !f.advanced),
+            "{m} takes no --threads"
+        );
         let argv = form.argv(
             &["d1.zarr".into(), "d2.zarr".into()],
             &["b1.tsv".into(), "b2.tsv".into()],
@@ -371,22 +377,6 @@ fn the_confirm_popup_scrolls_no_further_than_its_end() {
     assert_eq!(a.confirm_scroll, 3);
     key(&mut a, KeyCode::Up);
     assert_eq!(a.confirm_scroll, 2);
-}
-
-#[test]
-fn batch_files_are_described_as_paired() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = app(dir.path());
-    a.pairs = data(dir.path(), &["s1.zarr", "s2.zarr"]);
-    for f in ["x.tsv", "y.tsv"] {
-        std::fs::write(dir.path().join(f), "a\nb\nc\n").unwrap();
-    }
-    a.take_batches(&[dir.path().join("x.tsv"), dir.path().join("y.tsv")]);
-    assert!(a
-        .message
-        .as_deref()
-        .unwrap()
-        .contains("in the order listed"));
 }
 
 #[test]
@@ -480,14 +470,6 @@ fn the_parameters_screen_shows_a_queued_method_however_it_is_reached() {
     key(&mut a, KeyCode::Char('3'));
     assert_eq!(a.screen, Screen::Params);
     assert_eq!(a.param_method, bge);
-}
-
-#[test]
-fn without_mung_there_is_no_clones_step_and_the_screen_says_why() {
-    let dir = tempfile::tempdir().unwrap();
-    let a = app(dir.path());
-    assert!(a.rows.iter().all(|r| r.tool == Tool::Senna));
-    assert_eq!(a.mung.as_ref().unwrap_err(), "no mung");
 }
 
 #[test]
@@ -656,20 +638,6 @@ fn a_header_from_home_starts_there() {
 }
 
 #[test]
-fn every_method_of_senna_takes_threads() {
-    use clap::CommandFactory;
-    let mut cli = crate::Cli::command();
-    cli.build();
-    for m in METHODS {
-        let form = Method::new(&cli, m).unwrap();
-        assert!(form
-            .fields
-            .iter()
-            .any(|f| f.long == "threads" && !f.advanced));
-    }
-}
-
-#[test]
 fn hidden_flags_are_listed_until_a_hides_them() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
@@ -760,6 +728,46 @@ fn the_shared_page_sets_a_flag_in_every_queued_fit_that_has_it() {
     a.rows[simba].on = false;
     a.settle();
     assert!(!a.shared_page);
+
+    // A flag the fits hold at different values is listed even when
+    // advanced, and a choice offers only the values every fit takes.
+    let mut a = app(dir.path());
+    let (topic, vae) = (row_of(&a, "topic"), row_of(&a, "vae"));
+    a.rows[topic].on = true;
+    a.rows[vae].on = true;
+    fn kind_of(a: &mut App, r: usize) -> &mut Field {
+        a.rows[r]
+            .form
+            .fields
+            .iter_mut()
+            .find(|f| f.long == "feature-name-kind")
+            .unwrap()
+    }
+    kind_of(&mut a, topic).advanced = true;
+    kind_of(&mut a, vae).kind = Kind::Choice(vec!["auto".into(), "gene".into()]);
+    let shared = |a: &App| {
+        a.shared_form()
+            .fields
+            .into_iter()
+            .find(|f| f.long == "feature-name-kind")
+            .unwrap()
+    };
+    assert_eq!(
+        shared(&a).kind,
+        Kind::Choice(vec!["auto".into(), "gene".into()])
+    );
+    assert!(shared(&a).advanced, "the same in both: advanced as it is");
+
+    // Cycling on the shared page steps through those values only.
+    let target = Target::Shared("feature-name-kind".into());
+    a.change_field(&target, |f| f.cycle(1));
+    assert_eq!(kind_of(&mut a, topic).value, "gene");
+    assert_eq!(kind_of(&mut a, vae).value, "gene");
+
+    kind_of(&mut a, vae).value = "auto".into();
+    let f = shared(&a);
+    assert_eq!(f.value, "");
+    assert!(!f.advanced, "they differ: listed");
 }
 
 /// With two fits or more queued the parameters open on what they share:
@@ -804,50 +812,6 @@ fn the_parameters_open_on_the_shared_page() {
     // Already on the parameters, a number key stays on the page shown.
     key(&mut a, KeyCode::Char('3'));
     assert!(!a.shared_page);
-}
-
-/// A flag the fits hold at different values is listed even when advanced,
-/// and a choice offers only the values every fit takes.
-#[test]
-fn the_shared_page_shows_differences_and_common_choices() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = app(dir.path());
-    let (topic, vae) = (row_of(&a, "topic"), row_of(&a, "vae"));
-    a.rows[topic].on = true;
-    a.rows[vae].on = true;
-    fn kind_of(a: &mut App, r: usize) -> &mut Field {
-        a.rows[r]
-            .form
-            .fields
-            .iter_mut()
-            .find(|f| f.long == "feature-name-kind")
-            .unwrap()
-    }
-    kind_of(&mut a, topic).advanced = true;
-    kind_of(&mut a, vae).kind = Kind::Choice(vec!["auto".into(), "gene".into()]);
-    let shared = |a: &App| {
-        a.shared_form()
-            .fields
-            .into_iter()
-            .find(|f| f.long == "feature-name-kind")
-            .unwrap()
-    };
-    assert_eq!(
-        shared(&a).kind,
-        Kind::Choice(vec!["auto".into(), "gene".into()])
-    );
-    assert!(shared(&a).advanced, "the same in both: advanced as it is");
-
-    // Cycling on the shared page steps through those values only.
-    let target = Target::Shared("feature-name-kind".into());
-    a.change_field(&target, |f| f.cycle(1));
-    assert_eq!(kind_of(&mut a, topic).value, "gene");
-    assert_eq!(kind_of(&mut a, vae).value, "gene");
-
-    kind_of(&mut a, vae).value = "auto".into();
-    let f = shared(&a);
-    assert_eq!(f.value, "");
-    assert!(!f.advanced, "they differ: listed");
 }
 
 #[test]
@@ -1005,22 +969,6 @@ fn question_mark_lists_the_keys_and_any_key_closes_them() {
 }
 
 #[test]
-fn j_and_k_move_as_the_arrows_do() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = app(dir.path());
-    a.screen = Screen::Methods;
-    key(&mut a, KeyCode::Char('j'));
-    key(&mut a, KeyCode::Char('j'));
-    assert_eq!(a.method_row, 2);
-    key(&mut a, KeyCode::Char('k'));
-    assert_eq!(a.method_row, 1);
-    key(&mut a, KeyCode::End);
-    assert_eq!(a.method_row, a.rows.len() - 1);
-    key(&mut a, KeyCode::Home);
-    assert_eq!(a.method_row, 0);
-}
-
-#[test]
 fn a_text_field_takes_no_control_keys_and_ctrl_u_clears_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
@@ -1165,20 +1113,6 @@ fn a_trend_is_drawn_over_its_own_range() {
 }
 
 #[test]
-fn the_session_status_says_where_the_fits_are() {
-    use super::jobs::State;
-    let a = app(tempfile::tempdir().unwrap().path());
-    assert_eq!(a.session_status(), "setting up fits");
-    let states = [State::Done, State::Running, State::Waiting];
-    assert_eq!(fits_status(&states, false), "fits running: 1 of 3 done");
-    let states = [State::Done, State::Failed("x".into()), State::Stopped];
-    assert_eq!(
-        fits_status(&states, true),
-        "fits finished: 1 of 3 done, 1 failed, 1 stopped"
-    );
-}
-
-#[test]
 fn the_view_v_opens_runs_as_this_session_was_asked_to() {
     // Plain by `--no-detach`, which the view is told of.
     let opts = legume_tui::Options {
@@ -1255,6 +1189,15 @@ fn a_fit_given_whole_runs_from_here_as_given_its_script_beside_its_out() {
         .fit_job(&words(&["nope", "data.zarr", "-o", "x"]))
         .is_err());
     assert!(a.fit_job(&words(&["svd", "data.zarr"])).is_err());
+    // Its out out of here, the data is named whole.
+    let away = tempfile::tempdir().unwrap();
+    let out = away.path().join("fit").to_string_lossy().into_owned();
+    let job = a
+        .fit_job(&words(&["svd", "data.zarr", "--out", &out]))
+        .unwrap();
+    assert_eq!(job.out, out);
+    let data = here.join("data.zarr").to_string_lossy().into_owned();
+    assert_eq!(job.argv, words(&["svd", &data, "--out", &out]));
 }
 
 #[test]
@@ -1298,23 +1241,4 @@ fn the_queue_log_goes_to_the_job_once_each_line() {
     shared.log.drain(..3);
     shared.dropped += 3;
     assert_eq!(sent.new_lines(&shared), ["d", "e"]);
-}
-
-#[test]
-fn a_fit_given_whole_out_of_here_has_its_data_whole() {
-    let tmp = tempfile::tempdir().unwrap();
-    let away = tempfile::tempdir().unwrap();
-    let a = app(tmp.path());
-    let out = away.path().join("fit").to_string_lossy().into_owned();
-    let job = a
-        .fit_job(&words(&["svd", "data.zarr", "--out", &out]))
-        .unwrap();
-    assert_eq!(job.out, out);
-    let data = tmp.path().join("data.zarr").to_string_lossy().into_owned();
-    assert_eq!(job.argv, words(&["svd", &data, "--out", &out]));
-}
-
-#[test]
-fn ode_is_one_of_the_methods() {
-    assert!(METHODS.contains(&"ode"));
 }

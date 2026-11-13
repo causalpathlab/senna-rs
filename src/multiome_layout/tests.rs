@@ -25,22 +25,21 @@ fn plain(n: usize) -> ReadSharedRowsArgs {
 }
 
 /// A single-modality run records nothing, and the replay is then exactly the
-/// loader's own defaults — applying it to a load must change nothing.
+/// loader's own defaults — applying it to a load must change nothing. A
+/// record replays its alignment and both suffixes, keeping the caller's own
+/// settings; one group needs no barcode tag (replaying one would rename every
+/// cell).
 #[test]
-fn no_record_replays_as_the_plain_load() {
+fn a_recorded_layout_replays_onto_the_load() {
     let out = recorded_layout(None, 4).unwrap().apply(plain(4)).unwrap();
-    assert_eq!(out.column_alignment, ColumnAlignment::Disjoint);
-    assert!(out.feature_kind.is_none());
-    assert!(out.per_file_feature_suffix.is_none());
-    assert!(out.per_file_barcode_suffix.is_none());
-}
+    assert_eq!(out.column_alignment, ColumnAlignment::Disjoint, "no record");
+    assert!(out.feature_kind.is_none(), "no record");
+    assert!(out.per_file_feature_suffix.is_none(), "no record");
+    assert!(out.per_file_barcode_suffix.is_none(), "no record");
 
-#[test]
-fn recorded_layout_replays_alignment_and_both_suffixes() {
-    let out = recorded_layout(Some(&citeseq_record()), 4)
-        .unwrap()
-        .apply(plain(4))
-        .unwrap();
+    let l = recorded_layout(Some(&citeseq_record()), 4).unwrap();
+    assert!(l.is_multiome());
+    let out = l.apply(plain(4)).unwrap();
     assert_eq!(out.column_alignment, ColumnAlignment::Union);
     assert!(matches!(out.feature_kind, Some(FeatureNameKind::Mixed)));
     assert_eq!(
@@ -50,11 +49,8 @@ fn recorded_layout_replays_alignment_and_both_suffixes() {
     let bs = out.per_file_barcode_suffix.unwrap();
     assert_eq!(bs[0].as_deref(), Some("S1"));
     assert_eq!(bs[3].as_deref(), Some("S2"));
-}
+    assert!(out.preload, "caller's own settings must survive");
 
-/// One group needs no barcode tag; replaying one would rename every cell.
-#[test]
-fn untagged_record_replays_without_barcode_suffixes() {
     let r = RunMultiome {
         modality: strings(&["rna", "atac"]),
         group: strings(&["g0", "g0"]),
@@ -64,8 +60,8 @@ fn untagged_record_replays_without_barcode_suffixes() {
         .unwrap()
         .apply(plain(2))
         .unwrap();
-    assert_eq!(out.column_alignment, ColumnAlignment::Union);
-    assert!(out.per_file_barcode_suffix.is_none());
+    assert_eq!(out.column_alignment, ColumnAlignment::Union, "untagged");
+    assert!(out.per_file_barcode_suffix.is_none(), "untagged");
 }
 
 /// The record is positional. A caller that swapped the file list would
@@ -149,20 +145,33 @@ fn two_query_modalities_cannot_claim_one_trained_block() {
     assert!(err.contains("scRNA"), "{err}");
 }
 
-/// A trained run with no `/modality` rows is single-modality; a query is then
-/// loaded the plain way even if its own files look multi-modal.
-#[test]
-fn a_single_modality_model_takes_no_query_layout() {
-    let trained = boxed(&["GENEG", "GENEQ", "GENEO"]);
-    assert!(trained_modalities(&trained).is_empty());
-}
-
+/// The trained modalities are read off the row names. A trained run with no
+/// `/modality` rows is single-modality, and so is a partially-tagged one: a
+/// query must not be routed down the multiome path on the strength of one
+/// stray separator, and is loaded the plain way even if its own files look
+/// multi-modal.
 #[test]
 fn trained_modalities_are_read_off_the_row_names() {
-    let trained = boxed(&["GENEG/scRNA", "ADT-GENEF/scADT", "GENEQ/scRNA"]);
-    let mut m = trained_modalities(&trained);
-    m.sort();
-    assert_eq!(m, boxed(&["scADT", "scRNA"]));
+    for (label, rows, want) in [
+        ("untagged", &["GENEG", "GENEQ", "GENEO"][..], &[][..]),
+        (
+            "tagged",
+            &["GENEG/scRNA", "ADT-GENEF/scADT", "GENEQ/scRNA"],
+            &["scADT", "scRNA"],
+        ),
+        ("partially tagged", &["A/B", "GENEG", "GENEO"], &[]),
+        ("two untagged", &["GENEG", "GENEO"], &[]),
+        ("empty", &[], &[]),
+        (
+            "every row tagged",
+            &["GENEG/scRNA", "ADT-GENEF/scADT"],
+            &["scADT", "scRNA"],
+        ),
+    ] {
+        let mut m = trained_modalities(&boxed(rows));
+        m.sort();
+        assert_eq!(m, boxed(want), "{label}");
+    }
 }
 
 /// The plain load must pass through `apply` untouched — every
@@ -186,29 +195,6 @@ fn apply_is_a_no_op_for_a_plain_load() {
     assert!(out.preload);
 }
 
-#[test]
-fn apply_stamps_a_multiome_layout_and_keeps_the_rest() {
-    let l = recorded_layout(Some(&citeseq_record()), 4).unwrap();
-    assert!(l.is_multiome());
-    let out = l.apply(plain(4)).unwrap();
-    assert_eq!(out.per_file_feature_suffix.unwrap().len(), 4);
-    assert!(out.preload, "caller's own settings must survive");
-}
-
-/// Same rule on the model side: a partially-tagged trained axis is a
-/// single-modality model, not a multiome one, so a query must not be routed
-/// down the multiome path on the strength of one stray separator.
-#[test]
-fn a_partially_tagged_model_axis_is_single_modality() {
-    assert!(trained_modalities(&boxed(&["A/B", "GENEG", "GENEO"])).is_empty());
-    assert!(trained_modalities(&boxed(&["GENEG", "GENEO"])).is_empty());
-    assert!(trained_modalities(&boxed(&[])).is_empty());
-    assert_eq!(
-        trained_modalities(&boxed(&["GENEG/scRNA", "ADT-GENEF/scADT"])).len(),
-        2
-    );
-}
-
 /// faba rows are `{gene}/{modality}/{channel}` — two separators, and the
 /// trailing field is a splice channel, not a modality. Reading that as
 /// multiome would re-scope such a model's whole feature axis on query.
@@ -221,44 +207,53 @@ fn a_splice_axis_is_not_a_multiome_model() {
         .is_none());
 }
 
-/// A caller's own feature-name rule survives a plain load — `apply` must not
-/// reach into a field the layout has no business setting.
-#[test]
-fn a_plain_load_keeps_the_callers_feature_kind() {
-    let mut base = plain(2);
-    base.feature_kind = Some(FeatureNameKind::Gene { delim: '_' });
-    let out = ReloadLayout::default().apply(base).unwrap();
-    assert!(matches!(
-        out.feature_kind,
-        Some(FeatureNameKind::Gene { delim: '_' })
-    ));
-}
-
 /// A multiome axis carries gene names and chrX:s-e loci together, so only
 /// `Mixed` can canonicalize it. An explicit rule there is refused rather than
 /// silently overridden — the override would be invisible and would break the
-/// axis match against the dictionary.
+/// axis match against the dictionary. `Mixed` passed explicitly agrees, and a
+/// plain load keeps the caller's own rule.
 #[test]
-fn an_explicit_feature_kind_on_a_multiome_axis_is_refused() {
-    let l = recorded_layout(Some(&citeseq_record()), 4).unwrap();
-    let mut base = plain(4);
-    base.feature_kind = Some(FeatureNameKind::Gene { delim: '_' });
-    // `ReadSharedRowsArgs` is not Debug, so `unwrap_err` is unavailable.
-    let err = match l.apply(base) {
-        Err(e) => e.to_string(),
-        Ok(_) => panic!("an explicit feature kind must be refused on a multiome axis"),
-    };
-    assert!(err.contains("Gene"), "{err}");
-    assert!(err.contains("scRNA") && err.contains("scADT"), "{err}");
-}
-
-/// Passing `Mixed` explicitly agrees with what the layout needs, so it loads.
-#[test]
-fn an_explicit_mixed_kind_is_accepted_on_a_multiome_axis() {
-    let l = recorded_layout(Some(&citeseq_record()), 4).unwrap();
-    let mut base = plain(4);
-    base.feature_kind = Some(FeatureNameKind::Mixed);
-    assert!(l.apply(base).is_ok());
+fn an_explicit_feature_kind_is_kept_unless_a_multiome_axis_refuses_it() {
+    let gene = FeatureNameKind::Gene { delim: '_' };
+    for (label, multiome, kind, refused) in [
+        (
+            "a plain load keeps the caller's rule",
+            false,
+            gene.clone(),
+            false,
+        ),
+        ("a gene rule on a multiome axis", true, gene, true),
+        (
+            "mixed on a multiome axis",
+            true,
+            FeatureNameKind::Mixed,
+            false,
+        ),
+    ] {
+        let l = if multiome {
+            recorded_layout(Some(&citeseq_record()), 4).unwrap()
+        } else {
+            ReloadLayout::default()
+        };
+        let mut base = plain(4);
+        base.feature_kind = Some(kind.clone());
+        // `ReadSharedRowsArgs` is not Debug, so `unwrap_err` is unavailable.
+        match l.apply(base) {
+            Ok(out) => {
+                assert!(!refused, "{label}: must be refused");
+                assert_eq!(out.feature_kind, Some(kind), "{label}");
+            }
+            Err(e) => {
+                let err = e.to_string();
+                assert!(refused, "{label}: {err}");
+                assert!(err.contains("Gene"), "{label}: {err}");
+                assert!(
+                    err.contains("scRNA") && err.contains("scADT"),
+                    "{label}: {err}"
+                );
+            }
+        }
+    }
 }
 
 /// Trained rows carry the loader's canonical names, query rows their raw

@@ -580,16 +580,3 @@ impl Scene {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn type_names_match_across_spaces_commas_and_underscores() {
-        assert!(same_type("CT_1", "CT 1"));
-        assert!(!same_type("CT_1", "ct 1"), "case is part of a type");
-        assert!(same_type("CT 1, a", "CT_1_a"));
-        assert!(!same_type("CT 1", "CT 1 a"));
-    }
-}

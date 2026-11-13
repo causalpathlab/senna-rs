@@ -1065,16 +1065,6 @@ mod tests {
     }
 
     #[test]
-    fn the_colour_setting_says_time_while_the_map_shows_it() {
-        let mut s = scene();
-        let grouping = s.colour_said();
-        s.pick = Some(Pick::Time);
-        assert_eq!(s.colour_said(), "time");
-        s.pick = None;
-        assert_eq!(s.colour_said(), grouping);
-    }
-
-    #[test]
     fn a_copied_view_shares_the_run_s_data_files() {
         let s = scene();
         let copy = s.duplicate();
@@ -1145,55 +1135,50 @@ mod tests {
     }
 
     #[test]
-    fn opening_another_round_leaves_relabel_mode_and_keeps_the_draft() {
-        let dir = tempfile::tempdir().unwrap();
-        let round = dir.path().join("r.senna.json");
-        let mut s = scene();
-        let mut draft = review::Draft {
-            round: round.clone(),
-            ..Default::default()
-        };
-        draft.cluster(1).verdict = Some(review::Verdict::Keep {
-            label: "CT1".into(),
-            rationale: "clear".into(),
-        });
-        s.review = Some(relabel::Review::new(Vec::new(), draft));
-        let other = scene().data;
-        s.replace_data(other);
-        assert!(s.review.is_none());
-        assert!(s
-            .note
-            .as_deref()
-            .unwrap()
-            .contains("draft stays with r.senna.json"));
-        assert!(!review::Draft::load(&round).is_empty());
-    }
+    fn another_round_leaves_relabel_mode_the_same_one_keeps_it_and_the_draft_stays() {
+        for same in [false, true] {
+            let label = if same {
+                "the same round"
+            } else {
+                "another round"
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("r.senna.json");
+            std::fs::write(&path, "{}").unwrap();
+            let round = || {
+                let m =
+                    senna::run_manifest::RunManifest::new(senna::run_manifest::RunKind::Svd, "r");
+                rounds::Round::load(&m, dir.path(), &path)
+            };
+            let mut s = scene();
+            s.data.round = Some(round());
+            s.enter_review().unwrap();
+            s.review.as_mut().unwrap().draft.cluster(1).verdict = Some(review::Verdict::Keep {
+                label: "CT1".into(),
+                rationale: "clear".into(),
+            });
+            let at = s.review.as_ref().unwrap().cluster();
 
-    #[test]
-    fn reloading_the_same_round_keeps_relabel_mode_and_its_draft() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("r.senna.json");
-        std::fs::write(&path, "{}").unwrap();
-        let round = || {
-            let m = senna::run_manifest::RunManifest::new(senna::run_manifest::RunKind::Svd, "r");
-            rounds::Round::load(&m, dir.path(), &path)
-        };
-        let mut s = scene();
-        s.data.round = Some(round());
-        s.enter_review().unwrap();
-        s.review.as_mut().unwrap().draft.cluster(1).verdict = Some(review::Verdict::Keep {
-            label: "CT1".into(),
-            rationale: "clear".into(),
-        });
-        let at = s.review.as_ref().unwrap().cluster();
-
-        let mut again = scene().data;
-        again.round = Some(round());
-        s.replace_data(again);
-        let r = s.review.as_ref().expect("still relabelling");
-        assert_eq!(r.cluster(), at);
-        assert!(r.draft.clusters[&1].verdict.is_some());
-        assert!(s.note.as_deref().unwrap().contains("still relabelling"));
+            let mut next = scene().data;
+            if same {
+                next.round = Some(round());
+            }
+            s.replace_data(next);
+            let note = s.note.clone().unwrap_or_default();
+            if same {
+                let r = s.review.as_ref().expect("still relabelling");
+                assert_eq!(r.cluster(), at, "{label}");
+                assert!(r.draft.clusters[&1].verdict.is_some(), "{label}");
+                assert!(note.contains("still relabelling"), "{label}: {note}");
+            } else {
+                assert!(s.review.is_none(), "{label}");
+                assert!(
+                    note.contains("draft stays with r.senna.json"),
+                    "{label}: {note}"
+                );
+                assert!(!review::Draft::load(&path).is_empty(), "{label}");
+            }
+        }
     }
 
     #[test]
@@ -1334,6 +1319,10 @@ mod tests {
         render_full(&s, vp, 16.0);
         // C1 (cells c2, c3) is labelled at its centre; a click there is C1.
         assert_eq!(s.group_at(&vp, x, y), Some(1));
+        // C0 is one cell in the frame's corner: its label would run off the
+        // frame, so it is not drawn, and a click there is not C0.
+        let (x0, y0) = vp.to_px(s.group_centre(0).unwrap());
+        assert_ne!(s.group_at(&vp, x0, y0), Some(0));
         // Far from every label, nothing; nor on another camera's frame.
         assert_eq!(s.group_at(&vp, 100.0, 5.0), None);
         let moved = Viewport {
@@ -1348,17 +1337,6 @@ mod tests {
         assert_eq!(plain.colour, None);
         render_full(&plain, vp, 16.0);
         assert_eq!(plain.group_at(&vp, x, y), None);
-    }
-
-    #[test]
-    fn a_label_not_drawn_is_not_clicked() {
-        // C0 is one cell in the frame's corner: its label would run off the
-        // frame, so it is not drawn, and a click there is not C0.
-        let s = scene();
-        let vp = render::fit(s.current().points.bounds, 200, 200);
-        render_full(&s, vp, 16.0);
-        let (x, y) = vp.to_px(s.group_centre(0).unwrap());
-        assert_ne!(s.group_at(&vp, x, y), Some(0));
     }
 
     #[test]

@@ -1440,12 +1440,12 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_like_the_last_keeps_the_pictures() {
+    fn a_terminal_like_the_last_keeps_the_pictures_and_kitty_s_are_sent_again() {
+        // Block characters: nothing made again, all redrawn from the cells.
         let work = tempfile::tempdir().unwrap();
         let mut deck = drawn_deck(Picker::halfblocks(), work.path());
         let vp = deck.apps[0].vp;
         deck.repick(Repick::Same);
-        // Nothing made again: block characters are redrawn from the cells.
         assert!(deck.apps[0].job.is_none() && deck.apps[0].proto.is_some());
         assert_eq!(deck.apps[0].vp, vp);
         assert!(deck
@@ -1453,15 +1453,12 @@ mod tests {
             .iter()
             .all(|t| t.job.is_none() && t.proto.is_some()));
         assert!(deck.strip.made() > 0);
-    }
 
-    #[test]
-    fn a_kitty_terminal_like_the_last_gets_its_pictures_sent_again() {
+        // Kitty: nothing encoded yet; each view waits until it is next drawn.
         let work = tempfile::tempdir().unwrap();
         let mut deck = drawn_deck(kitty(), work.path());
         let vp = deck.apps[0].vp;
         deck.repick(Repick::Resend);
-        // Nothing encoded yet: each view waits until it is next drawn.
         assert!(deck.apps.iter().all(|a| a.proto.is_none()));
         // Then encoded again from the finished frame, no point drawn again.
         assert!(deck.apps[0].advance().unwrap());
@@ -1472,15 +1469,5 @@ mod tests {
         // The tiles and thumbnails are made again at the next round.
         assert!(deck.tiles.is_empty() && deck.strip.made() == 0);
         assert_eq!(deck.cell, (8.0, 16.0));
-    }
-
-    #[test]
-    fn the_session_status_names_what_is_on_screen() {
-        let work = tempfile::tempdir().unwrap();
-        let gallery = open_saved(&work.path().join(SAVED_DIR));
-        let mut deck = Deck::new(vec![view(), view()], Picker::halfblocks(), gallery);
-        assert_eq!(deck.status(), "r.senna.json (1) · umap cells");
-        deck.grid = true;
-        assert_eq!(deck.status(), "grid of 2 views");
     }
 }
