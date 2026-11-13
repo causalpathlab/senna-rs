@@ -38,6 +38,9 @@ use senna::embed_common::*;
 /// model predicts high.
 pub const DELTA_CLAMP_MIN: f32 = 0.01;
 pub const DELTA_CLAMP_MAX: f32 = 100.0;
+/// Floor on a trained δ as it is read back: the one training divided by, so
+/// what adjusts held-out cells is what adjusted the training cells.
+const TRAINED_DELTA_FLOOR: f32 = 1e-6;
 /// Floor on the predicted denominator in the obs/pred ratio, avoiding
 /// division by zero for genes that no topic produces.
 pub const DELTA_PRED_EPS: f32 = 1e-10;
@@ -230,7 +233,18 @@ fn accumulate(
     let pred_dn = inp.linear().is_none().then(|| inp.rate.rate(theta));
     for (j, (col, &b)) in csc.col_iter().zip(group_ids).enumerate() {
         let Some(b) = b else { continue };
-        let lib_j: f32 = col.values().iter().sum();
+        // The cell's counts on the model's genes: the rate sums to 1 over
+        // those, so this is the total it spreads. The whole library would
+        // scale each cell's prediction by its share of unmapped counts, and
+        // where that share differs by cell state δ would pick it up gene by
+        // gene.
+        let lib_j: f32 = col
+            .row_indices()
+            .iter()
+            .zip(col.values())
+            .filter(|(&row, _)| to_train(row).is_some())
+            .map(|(_, &x)| x)
+            .sum();
         match pred_dn.as_ref() {
             None => {
                 let mut dst = acc.pred.column_mut(b);
@@ -291,9 +305,8 @@ pub(crate) const DEFAULT_SCORING_FOLDS: usize = 5;
 /// Pseudo-counts of the cross-fitted δ, `(obs + a·r) / (pred + a)` with `r`
 /// the fitting cells' overall observed-to-predicted ratio: δ is shrunk to
 /// the batch's own scale, so a gene the fitting folds never saw in a batch
-/// is not priced at the clamp on the fold that did see it. `r`, not 1,
-/// because the predicted sum spans the whole library and the observed one
-/// only the genes the model carries.
+/// is not priced at the clamp on the fold that did see it. `r` is 1 up to
+/// the NB weights, since both sums run over the model's genes.
 const CROSSFIT_PRIOR: f32 = 1.0;
 
 /// How one held-out batch gets its δ.
@@ -475,7 +488,7 @@ fn load_trained_delta(
         if let Some(&d) = gene_at.get(&**g) {
             let v = v as f32;
             if v.is_finite() && v > 0.0 {
-                delta[(d, batch_at[b])] = v.clamp(DELTA_CLAMP_MIN, DELTA_CLAMP_MAX);
+                delta[(d, batch_at[b])] = v.max(TRAINED_DELTA_FLOOR);
             }
             seen[d] = true;
         }
@@ -524,7 +537,7 @@ fn load_batch_gene_fold(
                 for b in 0..table.cols.len() {
                     let v = table.mat[(i, b)].exp();
                     if v.is_finite() {
-                        delta[(d, b)] = v.clamp(DELTA_CLAMP_MIN, DELTA_CLAMP_MAX);
+                        delta[(d, b)] = v.max(TRAINED_DELTA_FLOOR);
                     }
                 }
             }
@@ -536,25 +549,47 @@ fn load_batch_gene_fold(
         "{path}: none of its features is named like a feature of the model, so the trained δ \
          cannot be read; use --scoring-delta crossfit or none"
     );
-    if missing > 0 {
+    if 2 * missing > training_genes.len() {
+        log::warn!(
+            "{path}: no trained δ for {missing} of the model's {} features; they take δ = 1",
+            training_genes.len()
+        );
+    } else if missing > 0 {
         info!("{path}: no trained δ for {missing} of the model's features; they take δ = 1");
     }
     Ok(Some((table.cols, delta)))
 }
 
-/// The trained δ of the held-out batches, `[D_train, held-out batches]` in
-/// the query's own batch order, when the model has a trained δ and EVERY
-/// held-out batch is named like a training batch; `None` otherwise (the
-/// unknown ones are logged). Nothing is fitted on the held-out cells, so one
-/// batch is enough.
-///
-/// What anything that adjusts the held-out cells BEFORE placing them reads:
-/// the encoder's null, and the fold a projection divides the counts by.
-pub(crate) fn trained_delta_of_batches(
+/// Whether `model` (a run's prefix) saved a trained per-batch δ of either
+/// form: a collapse's `delta.parquet` or a bge run's gene fold.
+#[must_use]
+pub(crate) fn has_trained_delta(model: &str) -> bool {
+    crate::predict::null::model_has_null(model)
+        || std::path::Path::new(&format!("{model}.batch_gene_fold.parquet")).is_file()
+}
+
+/// The trained δ of each held-out batch, `[D_train, held-out batches]` in the
+/// query's own batch order, with a column of ones for a batch the model was
+/// not trained on, and which batches those are (`known`). `None` when the
+/// model has no trained δ or the query no batches.
+pub(crate) struct TrainedByBatch {
+    pub delta: Mat,
+    pub known: Vec<bool>,
+    names: Vec<Box<str>>,
+}
+
+impl TrainedByBatch {
+    fn unknown(&self) -> Vec<&str> {
+        let named = self.names.iter().zip(&self.known);
+        named.filter(|(_, k)| !**k).map(|(n, _)| &**n).collect()
+    }
+}
+
+pub(crate) fn trained_delta_by_batch(
     model: &str,
     training_genes: &[Box<str>],
     data_vec: &SparseIoVec,
-) -> anyhow::Result<Option<Mat>> {
+) -> anyhow::Result<Option<TrainedByBatch>> {
     let Some((trained_names, trained_db)) = load_trained_delta(model, training_genes)? else {
         return Ok(None);
     };
@@ -562,30 +597,82 @@ pub(crate) fn trained_delta_of_batches(
     if names.is_empty() {
         return Ok(None);
     }
-    let cols: Vec<Option<usize>> = names
-        .iter()
-        .map(|n| trained_names.iter().position(|t| t == n))
-        .collect();
-    let unknown: Vec<&str> = names
-        .iter()
-        .zip(&cols)
-        .filter(|(_, c)| c.is_none())
-        .map(|(n, _)| &**n)
-        .collect();
+    let mut delta = Mat::from_element(trained_db.nrows(), names.len(), 1.0);
+    let mut known = vec![false; names.len()];
+    for (b, name) in names.iter().enumerate() {
+        if let Some(c) = trained_names.iter().position(|t| t == name) {
+            delta.set_column(b, &trained_db.column(c));
+            known[b] = true;
+        }
+    }
+    Ok(Some(TrainedByBatch {
+        delta,
+        known,
+        names,
+    }))
+}
+
+/// [`trained_delta_by_batch`] when EVERY held-out batch is a training batch,
+/// `None` otherwise (the unknown ones are logged). Nothing is fitted on the
+/// held-out cells, so one batch is enough.
+///
+/// What the encoder's null reads: a null has to be on one footing for every
+/// cell of a block, so a query with an unknown batch gets the null rebuilt
+/// from its cells instead.
+pub(crate) fn trained_delta_of_batches(
+    model: &str,
+    training_genes: &[Box<str>],
+    data_vec: &SparseIoVec,
+) -> anyhow::Result<Option<Mat>> {
+    let Some(by_batch) = trained_delta_by_batch(model, training_genes, data_vec)? else {
+        return Ok(None);
+    };
+    let unknown = by_batch.unknown();
     if !unknown.is_empty() {
         info!(
-            "{model}: held-out batches it was not trained on ({}), so the cells are not \
-             adjusted by the trained δ before they are placed",
+            "{model}: held-out batches it was not trained on ({}), so the encoder's null is \
+             estimated from the held-out cells",
             unknown.join(", ")
         );
         return Ok(None);
     }
-    let cols: Vec<usize> = cols.into_iter().flatten().collect();
     info!(
-        "{model}: the trained δ of {} held-out batches adjusts the cells before they are placed",
-        cols.len()
+        "{model}: the encoder reads the trained δ of {} held-out batches",
+        by_batch.known.len()
     );
-    Ok(Some(trained_db.select_columns(&cols)))
+    Ok(Some(by_batch.delta))
+}
+
+/// The fold a projection divides each held-out cell's counts by, per batch:
+/// the trained δ for a training batch, ones for any other (those cells are
+/// placed unadjusted, and scored under a δ fitted for their batch). `None`
+/// when no held-out batch is a training batch.
+pub(crate) fn projection_fold(
+    model: &str,
+    training_genes: &[Box<str>],
+    data_vec: &SparseIoVec,
+) -> anyhow::Result<Option<Mat>> {
+    let Some(by_batch) = trained_delta_by_batch(model, training_genes, data_vec)? else {
+        return Ok(None);
+    };
+    let n_known = by_batch.known.iter().filter(|k| **k).count();
+    if n_known == 0 {
+        return Ok(None);
+    }
+    let unknown = by_batch.unknown();
+    info!(
+        "{model}: counts of {n_known} held-out batches are divided by their trained δ before \
+         projection{}",
+        if unknown.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; not trained on, so left as they are: {}",
+                unknown.join(", ")
+            )
+        }
+    );
+    Ok(Some(by_batch.delta))
 }
 
 /// What [`scoring_delta`] reads.
@@ -878,9 +965,14 @@ pub(crate) fn scoring_delta(a: &ScoringDeltaArgs<'_>) -> anyhow::Result<Option<S
     if let Some((_, trained_db)) = trained.as_ref() {
         for (b, plan) in plans.iter().enumerate() {
             if let BatchPlan::Trained(c) = *plan {
-                batch_delta.set_column(b, &trained_db.column(c));
+                // Clamped for the score, as a fitted δ is; what adjusts the
+                // cells before they are placed reads the trained values.
+                let col = trained_db
+                    .column(c)
+                    .map(|v| v.clamp(DELTA_CLAMP_MIN, DELTA_CLAMP_MAX));
+                batch_delta.set_column(b, &col);
                 for g in layout.columns(b) {
-                    delta.set_column(g, &trained_db.column(c));
+                    delta.set_column(g, &col);
                 }
             }
         }
@@ -955,7 +1047,8 @@ mod tests {
         };
         for j in 0..csc.ncols() {
             let b = batch_ids[j];
-            let lib: f32 = csc.col(j).values().iter().sum();
+            // The cell's counts on the model's genes.
+            let lib: f32 = x.column(j).sum();
             for d in 0..d_train {
                 let mu = lib * pred_dn[(d, j)];
                 let w = nb_fisher_weight(phi, mu, d);
@@ -1311,5 +1404,44 @@ mod tests {
         assert!((delta_ratio(0.0, 0.0, 1.0, 0.25) - 0.25).abs() < 1e-6);
         assert!((delta_ratio(25.0, 100.0, 1.0, 0.25) - 0.25).abs() < 1e-6);
         assert!((delta_ratio(3.0, 2.0, 0.0, 9.0) - 1.5).abs() < 1e-6);
+    }
+
+    // Bar: with no batch effect, cells that differ in how much of their
+    // library sits on genes the model lacks still give one δ for every gene.
+    // The predicted total is the cell's counts on the model's genes; under the
+    // whole library, each cell's prediction would be scaled by its unmapped
+    // share, and the genes of the cells with more of it would read a lower δ.
+    #[test]
+    fn unmapped_counts_do_not_bend_delta() {
+        // Two model genes; a third query row the model lacks. Cells 0-1 are
+        // all gene A with nothing unmapped, cells 2-3 all gene B with three
+        // quarters of their counts unmapped.
+        let exp_beta = Mat::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+        let theta = Mat::from_row_slice(4, 2, &[1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0]);
+        let mut coo = nalgebra_sparse::CooMatrix::new(3, 4);
+        for j in 0..2 {
+            coo.push(0, j, 8.0);
+        }
+        for j in 2..4 {
+            coo.push(1, j, 2.0);
+            coo.push(2, j, 6.0);
+        }
+        let csc = CscMatrix::from(&coo);
+        let query: Vec<Box<str>> = ["A", "B", "X"].map(Box::from).to_vec();
+        let train: Vec<Box<str>> = ["A", "B"].map(Box::from).to_vec();
+        let remap = build_gene_remap_with(&train, &query, &QueryNameOpts::default());
+        let inp = DeltaInputs {
+            theta_nk: &theta,
+            gene_remap: Some(&remap),
+            rate: RateModel::Topic {
+                exp_beta_dk: &exp_beta,
+            },
+            phi: None,
+        };
+        let mut acc = Acc::zeros(&inp, 1);
+        accumulate(&mut acc, &inp, &csc, theta.rows(0, 4), &[Some(0); 4]);
+        let delta = solve_delta_from_sums(&acc.finish(&inp).sums);
+        assert!((delta[(0, 0)] - 1.0).abs() < 1e-6, "{delta}");
+        assert!((delta[(1, 0)] - 1.0).abs() < 1e-6, "{delta}");
     }
 }

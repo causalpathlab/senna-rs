@@ -254,4 +254,25 @@ fn a_bge_projection_adjusts_cells_by_the_trained_fold() {
     );
     eprintln!("bge: batch gap with the trained fold {with:.4}, without {without:.4}");
     assert!(with < without, "with {with}, without {without}");
+
+    // One batch known, one the run never saw: the known batch's cells are
+    // still divided by its fold, so they land where they did when both were
+    // known; the adjustment is per batch, not all or nothing.
+    let mixed = at("mixed.batch.txt");
+    let labels: String = (0..n)
+        .map(|c| if c % 2 == 0 { "B0\n" } else { "NEW\n" })
+        .collect();
+    std::fs::write(&mixed, labels).unwrap();
+    let out = at("mixed");
+    let argv = [data.as_str(), "--model", &model, "-o", &out, "-b", &mixed];
+    predict_model(&parse::<PredictArgs>(&argv)).unwrap();
+    let b0: Vec<usize> = (0..n).step_by(2).collect();
+    let rows = |name: &str| crate::fit_cli::latent(&at(name)).select_rows(&b0);
+    let (got, known, raw) = (rows("mixed"), rows("with"), rows("without"));
+    let (to_known, to_raw) = ((&got - &known).norm(), (&got - &raw).norm());
+    eprintln!("bge: mixed batches, B0 cells to adjusted {to_known:.4}, to unadjusted {to_raw:.4}");
+    assert!(
+        to_known < to_raw,
+        "to adjusted {to_known}, to unadjusted {to_raw}"
+    );
 }

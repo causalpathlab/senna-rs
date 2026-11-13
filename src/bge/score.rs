@@ -313,11 +313,7 @@ impl BgeEmbedding {
         let fold = match batches {
             Some(b) => {
                 data_vec.register_batch_membership(&loaded.batch);
-                crate::predict::delta::trained_delta_of_batches(
-                    b.model,
-                    &self.gene_names,
-                    &data_vec,
-                )?
+                crate::predict::delta::projection_fold(b.model, &self.gene_names, &data_vec)?
             }
             None => None,
         };
