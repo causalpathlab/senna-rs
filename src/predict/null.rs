@@ -209,10 +209,17 @@ pub(crate) fn encoder_null(
         .batch_names()
         .filter(|_| data_vec.num_batches() > 1)
     else {
+        // One held-out batch: no null can be rebuilt from the cells. A batch
+        // the model was trained on still has its trained δ, the batch-level
+        // part of what a residual fit's encoder trained under.
+        if let Some(null) = trained_batch_null(model, training_genes, data_vec, coarsening, dev)? {
+            info!("{model}: one held-out batch; the encoder reads its trained δ");
+            return Ok(Some(null));
+        }
         warn!(
-            "{model}: trained with batches, but the held-out cells come in one: no null. \
-             Pass one batch file per data file (-b) to give the encoder the null it trained \
-             with."
+            "{model}: trained with batches, but the held-out cells come in one batch with no \
+             trained δ: no null. Pass one batch file per data file (-b) to say which training \
+             batch the cells belong to."
         );
         return Ok(None);
     };
@@ -287,6 +294,18 @@ fn trained_null(
     if metadata.adj_method.as_ref() != "batch" || !metadata.batch_null_in_training {
         return Ok(None);
     }
+    trained_batch_null(model, training_genes, data_vec, coarsening, dev)
+}
+
+/// The trained δ of the held-out batches as an encoder null, `[held-out
+/// batches, D_enc]`, when every one of them is a training batch.
+fn trained_batch_null(
+    model: &str,
+    training_genes: &[Box<str>],
+    data_vec: &SparseIoVec,
+    coarsening: Option<&FeatureCoarsening>,
+    dev: &Device,
+) -> anyhow::Result<Option<EncoderNull>> {
     let Some(mut null_db) =
         crate::predict::delta::trained_delta_of_batches(model, training_genes, data_vec)?
     else {

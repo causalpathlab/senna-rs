@@ -275,7 +275,10 @@ pub(super) fn specs() -> Vec<ToolSpec> {
              or more batches. The score of a topic, masked, vae, bge or simba run takes a \
              delta as scoring_delta says; by default the trained one for a training batch and \
              a cross-fitted one for other batches, never one fitted on the counts it scores, \
-             and the null takes the same batch term. An svd run is scored with no delta. An out with a prediction is not written over: its \
+             and the null takes the same batch term. An svd run divides the counts of a \
+             training batch by its trained delta before projecting them; its log-count score \
+             takes no delta. A residual fit given one held-out batch reads that batch's \
+             trained delta. An out with a prediction is not written over: its \
              summary is returned instead, so a background prediction's is read by calling \
              again with its out.",
             json!({

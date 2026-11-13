@@ -58,6 +58,9 @@ struct ArchetypeInputs {
     /// of tiny blocks for a handful of real many-to-one collapses.
     panel_to_sc: GeneMap,
     n_sc_genes: usize,
+    /// The source run's per-batch gene fold on the single-cell rows and each
+    /// cell's column of it, when the profiles are batch-adjusted.
+    fold: Option<(Mat, Vec<u32>)>,
     /// Column names of the count matrix, carried for the membership output.
     cell_names: Vec<Box<str>>,
 }
@@ -121,6 +124,7 @@ pub fn build_all(
         &groupings,
         inputs.n_sc_genes,
         BLOCK_SIZE,
+        inputs.fold.as_ref().map(|(d, c)| (d, c.as_slice())),
     )?;
 
     let references: Vec<Reference> = partitions
@@ -137,6 +141,81 @@ pub fn build_all(
         per_chain: partitions,
     };
     Ok((references, membership))
+}
+
+/// The per-batch gene fold the reference cells' counts are divided by, or
+/// `None` for raw profiles: asked for; or the counts are `--sc-data`, whose
+/// cells have no recorded batches; or the run recorded no batch files, or
+/// estimated no fold, or none of the cells' batches is one it was trained
+/// on.
+///
+/// The batches are read from the run's own batch files, every one of them in
+/// data-file order, and must cover the `n_cells` count columns exactly.
+fn profile_fold(
+    cfg: &ArchetypeConfig<'_>,
+    src: &EmbeddingSource,
+    sc_genes: &[Box<str>],
+    n_cells: usize,
+) -> Option<(Mat, Vec<u32>)> {
+    if cfg.raw_profiles || src.prefix.is_empty() {
+        return None;
+    }
+    if !cfg.sc_data.is_empty() {
+        info!("deconvolve archetypes: --sc-data cells have no recorded batches; raw profiles");
+        return None;
+    }
+    let labels = match recorded_batches(&src.batch_files, n_cells) {
+        Ok(Some(labels)) => labels,
+        Ok(None) => {
+            info!("deconvolve archetypes: the run recorded no batch files; raw profiles");
+            return None;
+        }
+        Err(e) => {
+            log::warn!("deconvolve archetypes: raw profiles ({e})");
+            return None;
+        }
+    };
+    match crate::predict::delta::fold_by_labels(&src.prefix, sc_genes, &labels) {
+        Ok(Some(fold)) => {
+            info!("deconvolve archetypes: profiles from batch-adjusted counts");
+            Some(fold)
+        }
+        Ok(None) => {
+            info!(
+                "deconvolve archetypes: {} has no per-batch fold for these cells' batches; \
+                 raw profiles",
+                src.prefix
+            );
+            None
+        }
+        Err(e) => {
+            log::warn!("deconvolve archetypes: raw profiles ({e})");
+            None
+        }
+    }
+}
+
+/// One batch label per count column, the lines of `batch_files` in order,
+/// or `None` with no batch files.
+pub(super) fn recorded_batches(
+    batch_files: &[Box<str>],
+    n_cells: usize,
+) -> Result<Option<Vec<Box<str>>>> {
+    if batch_files.is_empty() {
+        return Ok(None);
+    }
+    let mut labels: Vec<Box<str>> = Vec::with_capacity(n_cells);
+    for f in batch_files {
+        for line in legume_numeric::matrix::common_io::read_lines(f)? {
+            labels.push(line.to_string().into_boxed_str());
+        }
+    }
+    anyhow::ensure!(
+        labels.len() == n_cells,
+        "the run's batch files give {} labels for {n_cells} cells",
+        labels.len()
+    );
+    Ok(Some(labels))
 }
 
 impl ArchetypeInputs {
@@ -235,9 +314,11 @@ impl ArchetypeInputs {
         let sub = Mat::from_fn(rows.len(), h, |i, j| embedding.mat[(emb_rows[i], j)]);
         drop(embedding);
         let panel_to_sc = map_panel_genes(&sc_genes, genes)?;
+        let fold = profile_fold(cfg, src, &sc_genes, cell_names.len());
 
         Ok(Self {
             n_sc_genes: sc_genes.len(),
+            fold,
             cell_names,
             stack,
             annotation,

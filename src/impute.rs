@@ -88,7 +88,7 @@ pub struct ImputeArgs {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Per-file batch labels for the reference data (checked; not used by the imputation)"
+        help = "Per-file batch labels for the reference data [default: the ones its run recorded]"
     )]
     pub reference_batch_files: Option<Vec<Box<str>>>,
 
@@ -96,9 +96,21 @@ pub struct ImputeArgs {
         short,
         long,
         value_delimiter = ',',
-        help = "Per-file batch labels for --data-files (the query encoder's null; imputed values stay unadjusted)"
+        help = "Per-file batch labels for --data-files"
     )]
     pub batch_files: Option<Vec<Box<str>>>,
+
+    #[arg(
+        long,
+        help = "Write the imputed counts as pooled, not divided by the reference's per-batch δ",
+        long_help = "By default, when the reference run estimated a per-batch effect δ\n\
+                     ({run}.delta.parquet, or a bge run's batch_gene_fold) and the\n\
+                     reference cells' batches are its training batches, an imputed row\n\
+                     is divided by δ mixed by the batch shares of the neighbours it\n\
+                     pooled, Σ_b s_b·δ_gb: the imputed counts are batch-adjusted.\n\
+                     This writes the pooled reference counts as they are."
+    )]
+    pub raw_imputed: bool,
 
     #[arg(
         long,
@@ -176,9 +188,9 @@ enum MatchingPlan {
     CosineEmbedding,
     /// No reusable stored latent — the training whitening scale is not
     /// persisted — so BOTH sides are re-projected through the frozen
-    /// dictionary with the training-time transform. The batch correction
-    /// that transform applied at training is not recoverable either; see
-    /// [`warn_if_batch_corrected`].
+    /// dictionary with the training-time transform. Training divided each
+    /// cell by its pseudobulk group's fold, which is not saved; the trained
+    /// per-batch δ stands in for it (`svd::project::batch_fold`).
     DictionaryProjection,
 }
 
@@ -228,6 +240,12 @@ struct ReferenceSpec {
     /// recorded one. `None` for `--reference-data` given by hand: those files
     /// are the caller's, not the run's, so there is nothing to replay.
     multiome: Option<senna::multiome_layout::RunMultiome>,
+    /// Batch files of `data_files`: `--reference-batch-files`, else the ones
+    /// the reference run recorded for its own data.
+    batch_files: Option<Vec<Box<str>>>,
+    /// The reference run's prefix, where its trained δ is; `None` for
+    /// reference data given by hand with no run behind it.
+    prefix: Option<Box<str>>,
 }
 
 /// Resolve the reference from `--reference` / the model's own manifest,
@@ -261,6 +279,8 @@ fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<R
             // No manifest was consulted on this path, so there is no recorded
             // layout to replay; --reference-data files load plainly.
             multiome: None,
+            batch_files: args.reference_batch_files.clone(),
+            prefix: None,
         });
     }
 
@@ -330,15 +350,21 @@ fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<R
         Some(to_box(rel))
     };
 
-    let (data_files, multiome) = match args.reference_data.clone() {
-        Some(files) => (files, None),
+    let (data_files, multiome, recorded_batches) = match args.reference_data.clone() {
+        Some(files) => (files, None, None),
         None => {
             let files = manifest.data_inputs(&dir);
             anyhow::ensure!(
                 !files.is_empty(),
                 "reference run `{prefix}` records no data files; pass --reference-data"
             );
-            (files, manifest.data.multiome.clone())
+            let batches = manifest.data_batches(&dir);
+            // One batch file per data file, or under a multiome layout one
+            // file for the unified cells.
+            let one_per = batches.len() == files.len();
+            let unified = manifest.data.multiome.is_some() && batches.len() == 1;
+            let batches = (!batches.is_empty() && (one_per || unified)).then_some(batches);
+            (files, manifest.data.multiome.clone(), batches)
         }
     };
 
@@ -346,6 +372,8 @@ fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<R
         latent,
         data_files,
         multiome,
+        batch_files: args.reference_batch_files.clone().or(recorded_batches),
+        prefix: Some(run_manifest::derive_out_prefix(prefix).into()),
     })
 }
 
@@ -356,7 +384,9 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
     let plan = matching_plan(kind)?;
     let reference = resolve_reference(args, kind)?;
 
-    let open_reference = || -> anyhow::Result<SparseIoVec> {
+    // The reference counts with their batches registered, and the batch of
+    // each reference cell by name.
+    let open_reference = || -> anyhow::Result<(SparseIoVec, Vec<Box<str>>)> {
         info!(
             "Opening reference data ({} file(s))",
             reference.data_files.len()
@@ -367,44 +397,48 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
         )?;
         let loaded = read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
             data_files: reference.data_files.clone(),
-            batch_files: args.reference_batch_files.clone(),
+            batch_files: reference.batch_files.clone(),
             preload: args.preload_data,
             ..Default::default()
         })?)?;
-        Ok(loaded.data)
+        let mut data = loaded.data;
+        data.register_batch_membership(&loaded.batch);
+        Ok((data, loaded.batch))
     };
 
-    let (new_cell_names, theta_new, theta_ref, ref_data) = match plan {
+    let (new_cell_names, theta_new, theta_ref, (ref_data, ref_batches)) = match plan {
         // The dictionary projection consumes the reference counts itself.
         MatchingPlan::DictionaryProjection => {
-            let ref_data = open_reference()?;
-            let (names, theta_new, theta_ref) = svd_matching_latents(args, &ref_data)?;
-            (names, theta_new, theta_ref, ref_data)
+            let reference = open_reference()?;
+            let (names, theta_new, theta_ref) = svd_matching_latents(args, &reference.0)?;
+            (names, theta_new, theta_ref, reference)
         }
         // The predict families never touch the reference counts before the
         // retrieval step, so the (potentially preloaded, multi-GB) reference
         // opens only after predict has succeeded.
         _ => {
             let (names, theta_new, theta_ref) = predict_matching_latents(args, plan, &reference)?;
-            let ref_data = open_reference()?;
-            (names, theta_new, theta_ref, ref_data)
+            (names, theta_new, theta_ref, open_reference()?)
         }
     };
     let n_new = theta_new.nrows();
 
-    let imputed = retrieval_impute(
-        &theta_new,
-        &theta_ref,
-        &ref_data,
-        &RetrievalImputeConfig {
-            knn: args.knn,
-            temperature: args.knn_temperature,
-            chunk: args.minibatch_size,
-        },
-    )?;
-
+    let retrieval = RetrievalImputeConfig {
+        knn: args.knn,
+        temperature: args.knn_temperature,
+        chunk: args.minibatch_size,
+    };
     let g_ref = ref_data.num_rows();
     let ref_gene_names = ref_data.row_names()?;
+    let fold = if args.raw_imputed {
+        None
+    } else {
+        reference_fold(reference.prefix.as_deref(), &ref_gene_names, &ref_batches)
+    };
+    let imputed = match fold.as_ref() {
+        Some(fold) => pool_divided(&theta_new, &theta_ref, &ref_data, &retrieval, fold)?,
+        None => retrieval_impute(&theta_new, &theta_ref, &ref_data, &retrieval)?,
+    };
     let imputed_path = format!("{}.imputed.parquet", args.out);
     imputed.to_parquet_with_names(
         &imputed_path,
@@ -415,6 +449,125 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
     write_model_imputed_genes(args, &new_cell_names)?;
 
     Ok(())
+}
+
+/// The reference run's trained δ on the reference genes, and each reference
+/// cell's column of it, or `None` (logged) when it has none for these cells.
+fn reference_fold(
+    reference: Option<&str>,
+    ref_genes: &[Box<str>],
+    ref_batches: &[Box<str>],
+) -> Option<(Mat, Vec<u32>)> {
+    let reference = reference?;
+    match crate::predict::delta::fold_by_labels(reference, ref_genes, ref_batches) {
+        Ok(Some(fold)) => Some(fold),
+        Ok(None) => {
+            info!(
+                "{reference}: no trained δ for the reference cells' batches; imputed counts \
+                 are pooled as they are"
+            );
+            None
+        }
+        Err(e) => {
+            log::warn!("{reference}: imputed counts are pooled as they are ({e})");
+            None
+        }
+    }
+}
+
+/// [`retrieval_impute`] with each reference cell's counts divided by its
+/// batch's trained δ as they are pooled:
+/// `imputed[q,g] = Σ_k w_qk · x_gk / δ_{g, b(k)}`, batch-adjusted counts.
+///
+/// The neighbours and their weights are those `retrieval_impute` uses (the
+/// same index over the same latents, the same `exp(-d²/2τ²)` weights); the
+/// division is what it cannot take. Exact for any mix of batches among a
+/// row's neighbours, and one index build.
+fn pool_divided(
+    query_latent: &Mat,
+    ref_latent: &Mat,
+    ref_data: &SparseIoVec,
+    cfg: &RetrievalImputeConfig,
+    (delta, cols): &(Mat, Vec<u32>),
+) -> anyhow::Result<Mat> {
+    use legume_numeric::matrix::knn_match::{ColumnDict, SearchScratch};
+    use rayon::prelude::*;
+    let (n_query, n_ref, g_ref) = (
+        query_latent.nrows(),
+        ref_latent.nrows(),
+        ref_data.num_rows(),
+    );
+    anyhow::ensure!(
+        query_latent.ncols() == ref_latent.ncols(),
+        "latent dimension mismatch: query K={} vs reference K={}",
+        query_latent.ncols(),
+        ref_latent.ncols()
+    );
+    anyhow::ensure!(
+        ref_data.num_columns() == n_ref && cols.len() == n_ref,
+        "reference data has {} cells, its latent {n_ref}, its batch labels {}",
+        ref_data.num_columns(),
+        cols.len()
+    );
+    let live: Vec<usize> = (0..n_ref)
+        .filter(|&i| ref_latent.row(i).iter().any(|&x| x != 0.0))
+        .collect();
+    anyhow::ensure!(!live.is_empty(), "every reference latent row is zero");
+    let k_dim = ref_latent.ncols();
+    let dict = ColumnDict::<u32>::from_dmatrix(
+        Mat::from_fn(k_dim, live.len(), |r, c| ref_latent[(live[c], r)]),
+        live.iter().map(|&i| i as u32).collect(),
+    );
+    let knn = cfg.knn.min(live.len());
+    let tau2 = 2.0 * cfg.temperature.max(1e-6).powi(2);
+    // Per query: its neighbours and their weights.
+    let neighbours: Vec<Vec<(u32, f32)>> = (0..n_query)
+        .into_par_iter()
+        .map_init(SearchScratch::default, |scratch, i| {
+            let q: Vec<f32> = query_latent.row(i).iter().copied().collect();
+            if q.iter().all(|&x| x == 0.0) {
+                return Ok(Vec::new());
+            }
+            let (ids, dist) = dict.search_by_query_data_reuse(&q, knn, scratch)?;
+            let logits: Vec<f32> = dist.iter().map(|d| -d * d / tau2).collect();
+            let top = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let w: Vec<f32> = logits.iter().map(|l| (l - top).exp()).collect();
+            let z = w.iter().sum::<f32>().max(1e-12);
+            Ok(ids.into_iter().zip(w).map(|(c, w)| (c, w / z)).collect())
+        })
+        .collect::<anyhow::Result<_>>()?;
+    // Reference cell → (query, weight), so each reference column is read once.
+    let mut consumers: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_ref];
+    for (q, nbr) in neighbours.iter().enumerate() {
+        for &(c, w) in nbr {
+            consumers[c as usize].push((q as u32, w));
+        }
+    }
+    let mut imputed_t = Mat::zeros(g_ref, n_query);
+    let chunk = cfg.chunk.max(64);
+    for (lb, ub) in create_jobs(n_ref, 0, Some(chunk)) {
+        if consumers[lb..ub].iter().all(Vec::is_empty) {
+            continue;
+        }
+        let csc = ref_data.read_columns_csc(lb..ub)?;
+        for c_local in 0..csc.ncols() {
+            let cell = lb + c_local;
+            let d = delta.column(cols[cell] as usize);
+            let col = csc.col(c_local);
+            for &(q, w) in &consumers[cell] {
+                let mut out = imputed_t.column_mut(q as usize);
+                for (&g, &v) in col.row_indices().iter().zip(col.values()) {
+                    out[g] += w * v / d[g];
+                }
+            }
+        }
+    }
+    info!(
+        "Imputed counts pooled from reference counts divided by their batch's trained δ \
+         ({} batches)",
+        delta.ncols()
+    );
+    Ok(imputed_t.transpose())
 }
 
 //////////////////////////////////////////
@@ -524,11 +677,6 @@ fn svd_matching_latents(
 ) -> anyhow::Result<(Vec<Box<str>>, Mat, Mat)> {
     let (train_genes, u_dk) = crate::topic::model_metadata::load_dictionary(&args.model)?;
     let column_sum_norm = crate::svd::project::column_sum_norm(&args.model);
-    crate::svd::project::warn_if_batch_corrected(
-        &args.model,
-        args.batch_files.is_some() || args.reference_batch_files.is_some(),
-    );
-
     info!("Loading new data for the dictionary projection");
     let new_loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
@@ -539,26 +687,36 @@ fn svd_matching_latents(
         },
         &train_genes,
     )?)?;
-    let new_data: SparseIoVec = new_loaded.data;
+    let mut new_data: SparseIoVec = new_loaded.data;
+    new_data.register_batch_membership(&new_loaded.batch);
     let new_cell_names = new_data.column_names()?;
+    // Both sides are divided by the model's trained per-batch δ before they
+    // are projected, each cell by its own batch's.
+    let fold_of = |data: &SparseIoVec| {
+        crate::svd::project::batch_fold(&args.model, &train_genes, data, true, false)
+    };
+    let (fold_new, fold_ref) = (fold_of(&new_data)?, fold_of(ref_data)?);
 
     let mut theta_new = crate::svd::project::project_onto_dictionary(
         &new_data,
-        &train_genes,
-        &u_dk,
-        column_sum_norm,
-        // impute exposes no query-axis flags; the defaults reproduce the
-        // exact-then-flexible matching `predict` uses at `--feature-name-kind
-        // exact`, and nothing is hidden.
+        &crate::svd::project::Dictionary {
+            train_genes: &train_genes,
+            u_dk: &u_dk,
+            column_sum_norm,
+            fold: fold_new.as_ref(),
+        },
         &crate::topic::eval::QueryNameOpts::default(),
         args.block_size,
         "query",
     )?;
     let mut theta_ref = crate::svd::project::project_onto_dictionary(
         ref_data,
-        &train_genes,
-        &u_dk,
-        column_sum_norm,
+        &crate::svd::project::Dictionary {
+            train_genes: &train_genes,
+            u_dk: &u_dk,
+            column_sum_norm,
+            fold: fold_ref.as_ref(),
+        },
         &crate::topic::eval::QueryNameOpts::default(),
         args.block_size,
         "reference",

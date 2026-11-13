@@ -39,9 +39,12 @@ fn hidden_features_are_withheld_from_the_projection() -> anyhow::Result<()> {
 
     let plain = project_onto_dictionary(
         &data,
-        &train,
-        &u_dk,
-        1e4,
+        &crate::svd::project::Dictionary {
+            train_genes: &train,
+            u_dk: &u_dk,
+            column_sum_norm: 1e4,
+            fold: None,
+        },
         &QueryNameOpts::default(),
         None,
         "plain",
@@ -56,7 +59,18 @@ fn hidden_features_are_withheld_from_the_projection() -> anyhow::Result<()> {
         )),
         ..Default::default()
     };
-    let ablated = project_onto_dictionary(&data, &train, &u_dk, 1e4, &hiding, None, "ablated")?;
+    let ablated = project_onto_dictionary(
+        &data,
+        &crate::svd::project::Dictionary {
+            train_genes: &train,
+            u_dk: &u_dk,
+            column_sum_norm: 1e4,
+            fold: None,
+        },
+        &hiding,
+        None,
+        "ablated",
+    )?;
 
     assert_eq!(plain.shape(), ablated.shape());
     let moved = (&plain - &ablated).norm();
@@ -79,14 +93,38 @@ fn the_callers_coverage_floor_is_enforced() -> anyhow::Result<()> {
     let u_dk = Mat::from_row_slice(4, 2, &[1.0, 0.0, 0.0, 1.0, 0.7, 0.3, 0.2, 0.8]);
 
     let lenient = QueryNameOpts::default();
-    assert!(project_onto_dictionary(&data, &train, &u_dk, 1e4, &lenient, None, "ok").is_ok());
+    assert!(project_onto_dictionary(
+        &data,
+        &crate::svd::project::Dictionary {
+            train_genes: &train,
+            u_dk: &u_dk,
+            column_sum_norm: 1e4,
+            fold: None
+        },
+        &lenient,
+        None,
+        "ok"
+    )
+    .is_ok());
 
     let strict = QueryNameOpts {
         min_overlap: 0.9,
         ..Default::default()
     };
     assert!(
-        project_onto_dictionary(&data, &train, &u_dk, 1e4, &strict, None, "strict").is_err(),
+        project_onto_dictionary(
+            &data,
+            &crate::svd::project::Dictionary {
+                train_genes: &train,
+                u_dk: &u_dk,
+                column_sum_norm: 1e4,
+                fold: None
+            },
+            &strict,
+            None,
+            "strict"
+        )
+        .is_err(),
         "a 90% floor must refuse a query carrying one of four model genes"
     );
     Ok(())

@@ -603,12 +603,11 @@ enum Commands {
                       BATCH EFFECTS. Two things read the batches (-b), separately:\n\
                       \x20 the latent    a model fitted with --adj-method batch reads the TRAINED\n\
                       \x20               delta when every held-out batch is named like a training\n\
-                      \x20               batch; one batch is enough. Otherwise (a residual fit, a\n\
-                      \x20               new batch, or an older batch fit, whose encoder trained on\n\
-                      \x20               the pseudobulk fold) the encoder\n\
+                      \x20               batch; one batch is enough. A residual fit (the default)\n\
                       \x20               gets a null rebuilt from the held-out cells themselves,\n\
                       \x20               which needs two or more held-out batches; with one batch\n\
-                      \x20               (or no -b) it gets none.\n\
+                      \x20               it reads that batch's trained delta when it is a training\n\
+                      \x20               batch, and gets none otherwise (or with no -b).\n\
                       \x20 the score     --scoring-delta, default `auto`: the trained delta\n\
                       \x20               ({model}.delta.parquet) for a held-out batch named like a\n\
                       \x20               training batch; a cross-fitted delta for other batches when\n\
@@ -619,7 +618,9 @@ enum Commands {
                       A bge run also divides the counts of a training batch by its trained\n\
                       per-batch gene fold before projecting them. A simba run saves no\n\
                       fold, so it takes a delta only with --scoring-delta crossfit. An svd\n\
-                      run is scored on log counts with no batch term.\n\
+                      run divides the counts of a training batch by its trained delta before\n\
+                      projecting them, the batch-level part of the per-pseudobulk fold it\n\
+                      trained with; its score, on log counts, takes no delta.\n\
                       \n\
                       Latent modes are encoder-only (the default), encoder+refine,\n\
                       and decoder-only.\n\
@@ -757,14 +758,15 @@ enum Commands {
                       Pass --reference (or the explicit --reference-* flags)\n\
                       to impute against a different reference.\n\
                       \n\
-                      BATCH EFFECTS. Only the matching latent is batch-adjusted, and\n\
-                      only on the query side: with -b and two or more query batches the\n\
-                      encoder gets a null rebuilt from the query (as in `senna predict`);\n\
-                      an svd model is projected with no batch term. The imputed values\n\
-                      are NOT adjusted: they are weighted sums of the neighbours' raw\n\
-                      reference counts, so they carry those cells' batch effects and\n\
-                      depths, not the query's. No delta is divided out or put back.\n\
-                      --reference-batch-files is checked and otherwise unused.\n\
+                      BATCH EFFECTS. When the reference run estimated a per-batch delta\n\
+                      and the reference cells' batches are its training batches (the\n\
+                      ones it recorded, or --reference-batch-files):\n\
+                      \x20 the latent    the query is placed as `senna predict` places it; an\n\
+                      \x20               svd model divides both sides by the trained delta first\n\
+                      \x20 the values    each imputed row is divided by the delta mixed by the\n\
+                      \x20               batch shares of the neighbours it pooled, so the imputed\n\
+                      \x20               counts are batch-adjusted (--raw-imputed keeps them as\n\
+                      \x20               pooled). They still carry the neighbours' depths.\n\
                       \n\
                       Writes {out}.imputed.parquet (N_new × n_ref_features)."
     )]
@@ -828,11 +830,12 @@ enum Commands {
                       Reported fractions are mRNA shares, not cell shares, and their\n\
                       range is compressed. See senna/docs/deconvolve.md for the limits.\n\
                       \n\
-                      BATCH EFFECTS. None are modelled. Archetype profiles are raw\n\
-                      count sums over the reference cells with their batches ignored\n\
-                      (no delta is divided out), and the likelihood has no per-gene\n\
-                      factor between the bulk and the single-cell reference, so a\n\
-                      platform or cohort shift goes into the fractions."
+                      BATCH EFFECTS. When the --from run estimated a per-batch gene fold\n\
+                      and recorded its batch files, each reference cell's counts are\n\
+                      divided by its batch's fold before the archetype profiles are\n\
+                      summed (--raw-profiles keeps raw sums). The likelihood still has\n\
+                      no per-gene factor between the bulk and the single-cell reference,\n\
+                      so a platform or cohort shift goes into the fractions."
     )]
     Deconvolve(DeconvolveArgs),
 

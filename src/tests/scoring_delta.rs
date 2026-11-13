@@ -165,7 +165,14 @@ fn modes(family: &str, fit: impl Fn(&[&str]), fit_argv: &[&str]) -> Modes {
 // `auto` on training batches is the trained δ; the in-sample δ scores above
 // the cross-fitted one; and a δ moves the score, so it is applied.
 fn check_modes(family: &str, m: &Modes) {
-    assert_eq!(m.train, m.auto, "{family}: auto is the trained δ");
+    // Not bit-equal: two predicts of one model differ in the last digits
+    // when block sums are added in thread order.
+    assert!(
+        (m.train - m.auto).abs() < 1e-4,
+        "{family}: auto is the trained δ ({} vs {})",
+        m.auto,
+        m.train
+    );
     assert!(
         m.in_sample > m.crossfit,
         "{family}: in-sample {} vs cross-fitted {}",
@@ -274,5 +281,67 @@ fn a_bge_projection_adjusts_cells_by_the_trained_fold() {
     assert!(
         to_known < to_raw,
         "to adjusted {to_known}, to unadjusted {to_raw}"
+    );
+}
+
+// Bar: an svd run's query cells are divided by the trained per-batch δ before
+// they are projected, so the two batches of one group land closer together
+// than when the batches are not given.
+#[test]
+fn an_svd_projection_adjusts_cells_by_the_trained_delta() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = 240;
+    let (data, batches) = planted_batched_zarr(dir.path(), n, 2);
+    let at = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    let model = at("model");
+    let argv = [data.as_str(), "-b", &batches, "-o", &model, "-t", "3"];
+    crate::svd::fit_svd(&parse(&argv)).unwrap();
+    let batch_gap = |out: &str, b: Option<&str>| -> f32 {
+        let out = at(out);
+        let mut argv = vec![data.as_str(), "--model", &model, "-o", &out];
+        if let Some(b) = b {
+            argv.extend_from_slice(&["-b", b]);
+        }
+        predict_model(&parse::<PredictArgs>(&argv)).unwrap();
+        let z = crate::fit_cli::latent(&out);
+        let mean_of = |g: usize, b: usize| {
+            let rows: Vec<usize> = (0..n)
+                .filter(|c| usize::from(*c >= n / 2) == g && c % 2 == b)
+                .collect();
+            z.select_rows(&rows).row_sum() / rows.len() as f32
+        };
+        ((mean_of(0, 0) - mean_of(0, 1)).norm() + (mean_of(1, 0) - mean_of(1, 1)).norm()) / 2.0
+    };
+    let (with, without) = (
+        batch_gap("with", Some(&batches)),
+        batch_gap("without", None),
+    );
+    eprintln!("svd: batch gap with the trained δ {with:.4}, without {without:.4}");
+    assert!(with < without, "with {with}, without {without}");
+
+    // Cells of a batch the run never saw are placed the same way whether
+    // they come alone or beside cells of a training batch: both divide them
+    // by ones, so what else is loaded does not move them.
+    let write = |name: &str, label: &dyn Fn(usize) -> &'static str| {
+        let path = at(name);
+        let labels: String = (0..n).map(|c| format!("{}\n", label(c))).collect();
+        std::fs::write(&path, labels).unwrap();
+        path
+    };
+    let alone = write("alone.txt", &|_| "NEW");
+    let beside = write("beside.txt", &|c| if c % 2 == 0 { "B0" } else { "NEW" });
+    let odd: Vec<usize> = (1..n).step_by(2).collect();
+    let latent_of = |out: &str, b: &str| {
+        let out = at(out);
+        let argv = [data.as_str(), "--model", &model, "-o", &out, "-b", b];
+        predict_model(&parse::<PredictArgs>(&argv)).unwrap();
+        crate::fit_cli::latent(&out).select_rows(&odd)
+    };
+    let gap = (latent_of("alone", &alone) - latent_of("beside", &beside))
+        .abs()
+        .max();
+    assert!(
+        gap < 1e-5,
+        "unseen-batch cells moved by {gap} with a training batch beside them"
     );
 }
