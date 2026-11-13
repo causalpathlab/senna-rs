@@ -888,7 +888,7 @@ enum Commands {
                       labels as text) and exits.\n\
                       \n\
                       {}",
-            session_help(None, "`senna view` with no -f")
+            session_help(None, "`senna view` with no manifest")
         )
     )]
     View(view::ViewArgs),

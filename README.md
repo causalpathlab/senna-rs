@@ -85,7 +85,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > the user can watch with `senna attach`. `run_predict` places new cells in a
 > trained model's latent, `run_update` continues a trained model over new data,
 > and `run_layout` lays a run out again with chosen settings, umap's min_dist
-> and spread among them. `view_open` opens a run (or a lupin round) and computes a missing layout or clustering first. `view_map`
+> and spread among them. `view_open` opens a run (or a lupin round) and computes a missing layout or clustering first; in a terminal the same run opens with `senna view {run}.senna.json`. `view_map`
 > draws the map with its legend; its arguments stay set until changed, so pass
 > only what changes. `view_markers` lists what sets a group apart, `view_cell`
 > names a point and its groups, and `view_export` writes figures. World

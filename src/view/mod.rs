@@ -40,12 +40,20 @@ pub use legume_tui::graphics::Graphics;
 #[derive(Args, Debug)]
 pub struct ViewArgs {
     #[arg(
+        value_name = "MANIFEST",
+        help = "Run manifest(s) (`{out}.senna.json`), as `senna view run.senna.json`; the same \
+                as -f"
+    )]
+    pub manifests: Vec<Box<str>>,
+
+    #[arg(
         long,
         short = 'f',
         num_args = 1..,
         help = "Run manifest(s) (`{out}.senna.json`); several open side by side (w shows the grid). \
                 Omitted: browse to one",
-        long_help = "Run manifest(s) (`{out}.senna.json`).\n\
+        long_help = "Run manifest(s) (`{out}.senna.json`), also taken without the flag:\n\
+                     `senna view run.senna.json`.\n\
                      Omitted, the view opens a file browser on the current directory\n\
                      to choose one (not with --pdf or --relabel).\n\
                      Every layout under `manifest.layout.methods` is available,\n\
@@ -629,23 +637,30 @@ fn prepare_run(args: &ViewArgs, from: &str, run_step: &RunStep) -> anyhow::Resul
     Ok(())
 }
 
+impl ViewArgs {
+    /// The manifests named, bare ones first and then those after `-f`.
+    #[must_use]
+    pub fn runs(&self) -> Vec<Box<str>> {
+        self.manifests.iter().chain(&self.from).cloned().collect()
+    }
+}
+
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
+    let named = args.runs();
     // A PDF or --relabel prints and exits; the rest is on screen.
     if args.export.pdf.is_some() || args.relabel {
         anyhow::ensure!(
-            !args.from.is_empty(),
-            "--pdf and --relabel need the run: pass -f <run>.senna.json"
+            !named.is_empty(),
+            "--pdf and --relabel need the run: pass <run>.senna.json"
         );
-        return off_screen(args, &args.from);
+        return off_screen(args, &named);
     }
     // On screen, the session first. Hosted, this process only relays the
     // terminal from here on, and the program the host starts reads the
     // runs; with none named, live views are offered before a new one.
     let watching = args.watch.is_some();
-    let session = crate::tui::TOOL.session(
-        "view",
-        &args.session.options(watching || !args.from.is_empty()),
-    )?;
+    let session =
+        crate::tui::TOOL.session("view", &args.session.options(watching || !named.is_empty()))?;
     let picked: Vec<Box<str>>;
     let mut agent = None;
     let from: &[Box<str>] = if let Some(which) = &args.watch {
@@ -656,14 +671,14 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         agent = Some(followed);
         picked = vec![shown.to_string_lossy().into()];
         &picked
-    } else if args.from.is_empty() {
+    } else if named.is_empty() {
         let Some(path) = tui::pick_run(&session)? else {
             return Ok(());
         };
         picked = vec![crate::tui::shown(&path).into()];
         &picked
     } else {
-        &args.from
+        &named
     };
     let mut scenes = read_scenes(args, from, Some(&session))?;
     start_charts(args, &mut scenes);
@@ -948,6 +963,7 @@ mod tests {
             ],
         };
         let args = ViewArgs {
+            manifests: Vec::new(),
             from: vec!["r.senna.json".into()],
             method: None,
             colour_by: None,

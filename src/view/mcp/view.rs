@@ -173,14 +173,14 @@ struct ExportArgs {
     overwrite: bool,
 }
 
-/// The view's arguments as `senna view -f {run}` would take them.
+/// The view's arguments as `senna view {run}` would take them.
 fn view_args(run: &str, map: Option<&str>) -> Result<ViewArgs> {
     #[derive(clap::Parser)]
     struct Argv {
         #[command(flatten)]
         view: ViewArgs,
     }
-    let mut argv = vec!["view", "-f", run];
+    let mut argv = vec!["view", run];
     if let Some(m) = map {
         argv.extend(["--method", m]);
     }
@@ -800,7 +800,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "Open a run and summarize it: its maps (layout × points), its groupings, \
              whether it has cell times and a velocity field, and the view shown with its \
              groups' colours. A layout or clustering the run lacks \
-             is computed first. Opening another run closes the one open.",
+             is computed first. Opening another run closes the one open. The user opens the \
+             same run in a terminal with `senna view {run}.senna.json`.",
             json!({
                 "type": "object",
                 "properties": {

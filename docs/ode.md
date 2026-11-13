@@ -11,7 +11,7 @@ mode; every cell is read out at the mode. It builds on cell2fate (Aivazidis et a
 senna ode tracks.zarr -o out                     # two lineages, each on its own time
 senna ode tracks.zarr -o out --lineages 1        # one trajectory
 senna ode tracks.zarr -o out --trunk             # lineages on a shared trunk, one clock
-senna view -f out.senna.json                     # y: time, v: velocity field
+senna view out.senna.json                        # y: time, v: velocity field
 ```
 
 The input is a two-track count backend: rows `{gene}/count/spliced` and
