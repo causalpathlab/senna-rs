@@ -51,10 +51,10 @@ slow-tests = []
 
 [dependencies]
 mimalloc = "0.1"
-data-beans = { version = "0.10", default-features = false, features = ["aux", "alg"] }
+data-beans = { version = "0.11", default-features = false, features = ["aux", "alg"] }
 legume-numeric = { version = "0.9.8", features = ["matrix", "param", "candle", "mcmc"] }
 genomic-data = { version = "0.6", package = "legume-genomic-types" }
-graph-embedding-util = { version = "0.10", package = "legume-graph-embedding" }
+graph-embedding-util = { version = "0.11", package = "legume-graph-embedding" }
 hsblock = { version = "0.2", package = "hsblock-rs" }
 enrichment = { version = "0.5", package = "legume-enrichment" }
 
