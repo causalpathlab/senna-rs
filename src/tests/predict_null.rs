@@ -15,7 +15,9 @@ const N: usize = 240;
 /// that needs it. Tests only read it: each writes its predictions into a
 /// temp dir of its own.
 pub(crate) struct Planted {
-    _dir: tempfile::TempDir,
+    /// The temp dir of a one-off fit, removed when the fit is dropped; `None`
+    /// for a shared fit, which lives in a static and is never dropped.
+    _dir: Option<tempfile::TempDir>,
     pub data: String,
     pub batches: String,
     pub model: String,
@@ -37,41 +39,58 @@ pub(crate) const TOPIC_FIT: [&str; 8] = [
 /// batches and `-o model`.
 pub(crate) fn fit_planted(fit: impl FnOnce(&[&str]), extra: &[&str]) -> Planted {
     let dir = tempfile::tempdir().unwrap();
-    let (data, batches) = planted_batched_zarr(dir.path(), N, 2);
-    let model = dir.path().join("model").to_string_lossy().into_owned();
+    let mut planted = fit_in(dir.path(), fit, extra);
+    planted._dir = Some(dir);
+    planted
+}
+
+fn fit_in(dir: &std::path::Path, fit: impl FnOnce(&[&str]), extra: &[&str]) -> Planted {
+    let (data, batches) = planted_batched_zarr(dir, N, 2);
+    let model = dir.join("model").to_string_lossy().into_owned();
     let argv = [data.as_str(), "-b", &batches, "-o", &model];
     fit(&[&argv[..], extra].concat());
     Planted {
-        _dir: dir,
+        _dir: None,
         data,
         batches,
         model,
     }
 }
 
+/// A shared fit lives in a static, which is never dropped, so it cannot sit in
+/// a temp dir: it would be left behind after every run. It goes in one fixed
+/// folder per family under `target/`, emptied and refitted on each run.
 fn shared<A: clap::Args>(
     cell: &'static OnceLock<Planted>,
+    family: &str,
     fit: fn(&A) -> anyhow::Result<()>,
 ) -> &'static Planted {
-    cell.get_or_init(|| fit_planted(|argv| fit(&parse::<A>(argv)).unwrap(), &TOPIC_FIT))
+    cell.get_or_init(|| {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-shared-fits")
+            .join(family);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        fit_in(&dir, |argv| fit(&parse::<A>(argv)).unwrap(), &TOPIC_FIT)
+    })
 }
 
 /// The default (residual) topic fit with [`TOPIC_FIT`], shared.
 pub(crate) fn residual_topic() -> &'static Planted {
     static FIT: OnceLock<Planted> = OnceLock::new();
-    shared(&FIT, crate::fit_topic_model)
+    shared(&FIT, "topic", crate::fit_topic_model)
 }
 
 /// The default (residual) vae fit with [`TOPIC_FIT`], shared.
 pub(crate) fn residual_vae() -> &'static Planted {
     static FIT: OnceLock<Planted> = OnceLock::new();
-    shared(&FIT, crate::vae::fit_vae_model)
+    shared(&FIT, "vae", crate::vae::fit_vae_model)
 }
 
 /// The default (residual) masked fit with [`TOPIC_FIT`], shared.
 pub(crate) fn residual_masked() -> &'static Planted {
     static FIT: OnceLock<Planted> = OnceLock::new();
-    shared(&FIT, crate::masked_topic::fit_masked_topic_model)
+    shared(&FIT, "masked", crate::masked_topic::fit_masked_topic_model)
 }
 
 /// Each row of a latent as proportions (softmax), whatever its scale.
