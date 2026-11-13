@@ -59,7 +59,6 @@ mod impute;
 mod joint_topic;
 mod logging;
 mod masked_topic;
-#[cfg_attr(not(test), allow(dead_code))]
 mod ode_mixture;
 mod pbg_train_args;
 #[cfg(test)]

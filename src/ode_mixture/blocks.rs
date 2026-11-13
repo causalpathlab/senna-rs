@@ -179,6 +179,7 @@ impl GenePrior {
 
     /// The prior's log density in the gene's coordinates: at `θ` with the
     /// link's log-Jacobian.
+    #[cfg(test)]
     pub(super) fn linked_log_density(&self, v: &[f64]) -> f64 {
         self.log_density(&self.unlink(v)) + self.log_jacobian(v)
     }

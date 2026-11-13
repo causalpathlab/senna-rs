@@ -16,5 +16,4 @@ mod model;
 mod output;
 mod readout;
 mod refine;
-mod scale;
 mod sim;

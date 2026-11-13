@@ -90,46 +90,55 @@ fn hiding_matches_case_insensitively_like_the_remap_does() {
     assert_eq!(out.new_to_train, vec![None, Some(1), None]);
 }
 
-/// The gene lists are contractually one file shared across arms, and the arms
-/// do not all spell their axes the same way: a model trained under the
-/// canonical rule has bare symbols where a list keyed on the raw backend rows
-/// has `ENSG..._SYMBOL`. The list must hide the same genes either way.
+/// How a hide list's names land on the model's axis, one row per case:
+/// - `raw list onto a canonical axis`: the gene lists are contractually one
+///   file shared across arms, and the arms do not all spell their axes the
+///   same way: a model trained under the canonical rule has bare symbols
+///   where a list keyed on the raw backend rows has `ENSG..._SYMBOL`. The
+///   list must hide the same genes either way;
+/// - `symbol list onto a raw axis`: the same, the other way round;
+/// - `an exact hit does not widen`: when the list spells names exactly as the
+///   axis does, the exact matches are the whole answer: the canonical rule
+///   must not widen a hit onto a second row that merely shares a suffix.
 #[test]
-fn hiding_bridges_raw_list_names_onto_a_canonical_axis() {
-    let genes = names(&["genev", "genet", "genek"]);
-    let out = build_remap(
-        &genes,
-        &genes,
-        &opts_hiding(&["ENSG00000000010_GENEV", "ENSG00000000110_GENEK"], 0.0),
-    )
-    .expect("raw names must resolve onto the canonical axis")
-    .expect("hiding always yields a remap");
-    assert_eq!(out.new_to_train, vec![None, Some(1), None]);
-}
-
-#[test]
-fn hiding_bridges_symbol_list_names_onto_a_raw_axis() {
-    let genes = names(&[
-        "ENSG00000000010_GENEV",
-        "ENSG00000000020_GENET",
-        "ENSG00000000110_GENEK",
-    ]);
-    let out = build_remap(&genes, &genes, &opts_hiding(&["GENEV", "GENEK"], 0.0))
-        .expect("symbols must resolve onto the raw axis")
-        .expect("hiding always yields a remap");
-    assert_eq!(out.new_to_train, vec![None, Some(1), None]);
-}
-
-/// When the list spells names exactly as the axis does, the exact matches are
-/// the whole answer: the canonical rule must not widen a hit onto a second row
-/// that merely shares a suffix.
-#[test]
-fn an_exact_hit_does_not_widen_to_suffix_sharing_rows() {
-    let genes = names(&["gene_0", "other_0", "gene_1"]);
-    let out = build_remap(&genes, &genes, &opts_hiding(&["gene_0"], 0.0))
-        .expect("remap")
-        .expect("hiding always yields a remap");
-    assert_eq!(out.new_to_train, vec![None, Some(1), Some(2)]);
+fn hiding_bridges_spellings_but_an_exact_hit_does_not_widen() {
+    type Case = (
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+        Vec<Option<usize>>,
+    );
+    let cases: [Case; 3] = [
+        (
+            "raw list onto a canonical axis",
+            &["genev", "genet", "genek"],
+            &["ENSG00000000010_GENEV", "ENSG00000000110_GENEK"],
+            vec![None, Some(1), None],
+        ),
+        (
+            "symbol list onto a raw axis",
+            &[
+                "ENSG00000000010_GENEV",
+                "ENSG00000000020_GENET",
+                "ENSG00000000110_GENEK",
+            ],
+            &["GENEV", "GENEK"],
+            vec![None, Some(1), None],
+        ),
+        (
+            "an exact hit does not widen",
+            &["gene_0", "other_0", "gene_1"],
+            &["gene_0"],
+            vec![None, Some(1), Some(2)],
+        ),
+    ];
+    for (label, axis, hide, want) in cases {
+        let genes = names(axis);
+        let out = build_remap(&genes, &genes, &opts_hiding(hide, 0.0))
+            .unwrap_or_else(|e| panic!("{label}: {e}"))
+            .expect("hiding always yields a remap");
+        assert_eq!(out.new_to_train, want, "{label}");
+    }
 }
 
 /// The scoring cap exists for one reason: a dense block's working set must not
@@ -164,56 +173,48 @@ mod block_concurrency {
             )
     }
 
+    /// The cap at a stated machine size, one row per claim:
+    /// - `whole-transcriptome dense`: 58k-gene dense blocks must not run wide
+    ///   open, yet the cap always admits at least one block;
+    /// - `coarsened`: what a dense topic model actually scores on after
+    ///   coarsening gets the full thread count, i.e. the cap changes nothing;
+    /// - `chunked vs dense`: the gene-chunked vae scorer holds the encoder
+    ///   input plus one slice, so the same 58k-gene query that pins the dense
+    ///   path to a handful of blocks gets an order of magnitude more once the
+    ///   likelihood stops materialising `[N, D]`. The budget still applies —
+    ///   it is a memory bound, not a dense-path special case;
+    /// - `chunked on a 32-thread box`: a tripwire on the per-block cost of
+    ///   chunked scoring: at the default budget a 32-thread box runs it wide
+    ///   open. Growing `SCORE_GENE_CHUNK` or the chain's tensor count past
+    ///   that point is a decision, not a drift;
+    /// - `absurd block`: still admits one.
     #[test]
-    fn a_whole_transcriptome_dense_block_is_capped_well_below_the_thread_count() {
-        let conc = block_concurrency(whole_transcriptome_dense(), BUDGET, THREADS);
-        assert!(
-            conc <= 8,
-            "58k-gene dense blocks must not run wide open; got {conc}"
-        );
-        assert!(conc >= 1, "the cap must always admit at least one block");
-    }
-
-    #[test]
-    fn a_coarsened_block_is_not_throttled() {
-        // What a dense topic model actually scores on after coarsening: the
-        // cap must return the full thread count, i.e. change nothing.
-        assert_eq!(
-            block_concurrency(dense_bytes(500, 2_000, NB_CHAIN_TENSORS), BUDGET, THREADS),
-            THREADS
-        );
-    }
-
-    /// The gene-chunked vae scorer holds the encoder input plus one slice, so
-    /// the same 58k-gene query that pins the dense path to a handful of blocks
-    /// must get an order of magnitude more once the likelihood stops
-    /// materialising `[N, D]`. The budget still applies — it is a memory bound,
-    /// not a dense-path special case — so "not throttled" is stated at the
-    /// thread count where it is true.
-    #[test]
-    fn the_chunked_vae_path_is_far_less_throttled_at_the_same_width() {
-        let chunked = block_concurrency(whole_transcriptome_chunked(), BUDGET, THREADS);
+    fn the_cap_bites_on_dense_whole_transcriptome_blocks_only() {
         let dense = block_concurrency(whole_transcriptome_dense(), BUDGET, THREADS);
         assert!(
-            chunked >= 4 * dense && chunked >= 32,
-            "chunked {chunked} vs dense {dense} blocks at {THREADS} threads"
+            (1..=8).contains(&dense),
+            "whole-transcriptome dense: got {dense}"
         );
-    }
-
-    /// Tripwire on the per-block cost of chunked scoring: at the default
-    /// budget a 32-thread box runs it wide open. Growing `SCORE_GENE_CHUNK` or
-    /// the chain's tensor count past that point is a decision, not a drift.
-    #[test]
-    fn the_chunked_vae_path_runs_wide_open_on_a_32_thread_box() {
+        assert_eq!(
+            block_concurrency(dense_bytes(500, 2_000, NB_CHAIN_TENSORS), BUDGET, THREADS),
+            THREADS,
+            "coarsened"
+        );
+        let chunked = block_concurrency(whole_transcriptome_chunked(), BUDGET, THREADS);
+        assert!(
+            chunked >= 4 * dense && chunked >= 32,
+            "chunked vs dense: chunked {chunked} vs dense {dense} blocks at {THREADS} threads"
+        );
         assert_eq!(
             block_concurrency(whole_transcriptome_chunked(), BUDGET, 32),
-            32
+            32,
+            "chunked on a 32-thread box"
         );
-    }
-
-    #[test]
-    fn an_absurd_block_still_admits_one() {
-        assert_eq!(block_concurrency(usize::MAX, BUDGET, THREADS), 1);
+        assert_eq!(
+            block_concurrency(usize::MAX, BUDGET, THREADS),
+            1,
+            "absurd block"
+        );
     }
 
     /// A CUDA device is one stream and one cuBLAS handle; blocks driven at it
@@ -249,43 +250,45 @@ fn parse(argv: &[&str]) -> Result<PredictArgs, clap::Error> {
         .map(|c| c.args)
 }
 
-#[test]
-fn bulk_alone_parses_with_no_data_files() {
-    let a = parse(&["--model", "m", "-o", "p", "--bulk", "counts.parquet"]).expect("parses");
-    assert!(a.data_files.is_empty());
-    assert_eq!(a.bulk, vec![Box::from("counts.parquet")]);
-    assert_eq!(
-        a.bulk_table.bulk_orientation,
-        senna::embed_common::OrientationArg::Auto
-    );
-}
-
-#[test]
-fn a_data_file_alone_still_parses() {
-    let a = parse(&["held.zarr", "--model", "m", "-o", "p"]).expect("parses");
-    assert_eq!(a.data_files, vec![Box::from("held.zarr")]);
-    assert!(a.bulk.is_empty());
-}
-
-/// Both at once is a contradiction to refuse at the command line, not a
+/// `--bulk` and data files are alternatives, one row per case: either alone
+/// parses (bulk with no data files, orientation `auto`), and both at once or
+/// neither is refused at the command line — a contradiction to refuse, not a
 /// precedence rule to remember.
 #[test]
-fn bulk_and_a_data_file_together_are_refused() {
-    assert!(parse(&[
-        "held.zarr",
-        "--model",
-        "m",
-        "-o",
-        "p",
-        "--bulk",
-        "c.parquet"
-    ])
-    .is_err());
-}
-
-#[test]
-fn neither_bulk_nor_a_data_file_is_refused() {
-    assert!(parse(&["--model", "m", "-o", "p"]).is_err());
+fn bulk_or_a_data_file_but_not_both_or_neither() {
+    let a =
+        parse(&["--model", "m", "-o", "p", "--bulk", "counts.parquet"]).expect("bulk alone parses");
+    assert!(a.data_files.is_empty(), "bulk alone");
+    assert_eq!(a.bulk, vec![Box::from("counts.parquet")], "bulk alone");
+    assert_eq!(
+        a.bulk_table.bulk_orientation,
+        senna::embed_common::OrientationArg::Auto,
+        "bulk alone"
+    );
+    let a = parse(&["held.zarr", "--model", "m", "-o", "p"]).expect("a data file alone parses");
+    assert_eq!(
+        a.data_files,
+        vec![Box::from("held.zarr")],
+        "data file alone"
+    );
+    assert!(a.bulk.is_empty(), "data file alone");
+    for (label, argv) in [
+        (
+            "both",
+            &[
+                "held.zarr",
+                "--model",
+                "m",
+                "-o",
+                "p",
+                "--bulk",
+                "c.parquet",
+            ][..],
+        ),
+        ("neither", &["--model", "m", "-o", "p"]),
+    ] {
+        assert!(parse(argv).is_err(), "{label} must be refused");
+    }
 }
 
 #[test]

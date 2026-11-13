@@ -156,6 +156,7 @@ fn scores_of(reads: &Reads, h: usize) -> DMatrix<f64> {
 }
 
 /// Every pseudobulk's start lineage and its order within it on `[0, 1]`.
+#[cfg(test)]
 pub fn start_order(reads: &Reads, lineages: usize, h: usize) -> (Vec<usize>, Vec<f64>) {
     order_of(&scores_of(reads, h), lineages)
 }
@@ -247,6 +248,7 @@ fn farthest(d: &[f64]) -> usize {
 /// Starts for `lineages` on a shared trunk, one per end of the tree taken
 /// as the root (`lineages + 1` ends); none with one lineage, too few
 /// pseudobulks, or the graph falling apart.
+#[cfg(test)]
 pub fn tree_starts(reads: &Reads, h: usize, lineages: usize) -> Vec<Places> {
     tree_places(&scores_of(reads, h), lineages)
 }
@@ -257,6 +259,7 @@ pub fn tree_starts(reads: &Reads, h: usize, lineages: usize) -> Vec<Places> {
 /// ends farthest from it (and from one another). A stem in the middle of a
 /// tree is no end of it, so no end taken as the root finds it; `None` as
 /// [`tree_starts`] is empty, with no root, or when fewer branch.
+#[cfg(test)]
 pub fn tree_start_from_roots(
     reads: &Reads,
     h: usize,

@@ -50,6 +50,7 @@ pub fn branch_ramp(n: usize, tb: f64, kappa: f64) -> Vec<f64> {
 /// [`Params::positions`]: the nodes and `sub − 1` between each two), a
 /// column per gene.
 pub struct Levels {
+    #[cfg(test)]
     pub lineages: usize,
     pub points: usize,
     pub genes: usize,
@@ -105,6 +106,7 @@ impl Params {
     }
 
     /// The time of lineage `l`'s position `k`.
+    #[cfg(test)]
     pub fn time_at(&self, l: usize, k: usize) -> f64 {
         self.phase_at(k) * self.t_len[l]
     }
@@ -164,6 +166,7 @@ impl Params {
             .collect();
         let rows = lineages * points;
         Levels {
+            #[cfg(test)]
             lineages,
             points,
             genes,

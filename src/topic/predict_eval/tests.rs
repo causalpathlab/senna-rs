@@ -180,44 +180,49 @@ mod eval_features_naming {
         p.to_string_lossy().into_owned()
     }
 
+    /// One row per spelling: raw names on a canonical axis, symbols on a raw
+    /// axis, and an exact hit winning over a suffix-sharing row.
     #[test]
-    fn raw_names_resolve_on_a_canonical_axis() {
+    fn the_list_resolves_across_spellings_and_exact_hits_win() {
         let dir = tempfile::tempdir().unwrap();
-        let path = list_file(
-            dir.path(),
-            &["ENSG00000000110_GENEK", "ENSG00000000010_GENEV"],
+        type Case = (
+            &'static str,
+            &'static [&'static str],
+            &'static [&'static str],
+            Vec<usize>,
         );
-        let axis = names(&["genev", "genet", "genek"]);
-        assert_eq!(
-            resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(),
-            vec![2, 0]
-        );
-    }
-
-    #[test]
-    fn symbols_resolve_on_a_raw_axis() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = list_file(dir.path(), &["GENEK", "GENEV"]);
-        let axis = names(&[
-            "ENSG00000000010_GENEV",
-            "ENSG00000000020_GENET",
-            "ENSG00000000110_GENEK",
-        ]);
-        assert_eq!(
-            resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(),
-            vec![2, 0]
-        );
-    }
-
-    #[test]
-    fn an_exact_hit_wins_over_a_suffix_sharing_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = list_file(dir.path(), &["gene_0"]);
-        let axis = names(&["other_0", "gene_0"]);
-        assert_eq!(
-            resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(),
-            vec![1]
-        );
+        let cases: [Case; 3] = [
+            (
+                "raw names on a canonical axis",
+                &["ENSG00000000110_GENEK", "ENSG00000000010_GENEV"],
+                &["genev", "genet", "genek"],
+                vec![2, 0],
+            ),
+            (
+                "symbols on a raw axis",
+                &["GENEK", "GENEV"],
+                &[
+                    "ENSG00000000010_GENEV",
+                    "ENSG00000000020_GENET",
+                    "ENSG00000000110_GENEK",
+                ],
+                vec![2, 0],
+            ),
+            (
+                "an exact hit wins over a suffix-sharing row",
+                &["gene_0"],
+                &["other_0", "gene_0"],
+                vec![1],
+            ),
+        ];
+        for (label, list, axis, want) in cases {
+            let path = list_file(dir.path(), list);
+            assert_eq!(
+                resolve_eval_genes(Some(&path), &names(axis), "--eval-features").unwrap(),
+                want,
+                "{label}"
+            );
+        }
     }
 
     /// A list on a foreign axis is refused, and the message shows both

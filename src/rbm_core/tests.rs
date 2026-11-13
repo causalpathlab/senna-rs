@@ -1,6 +1,9 @@
 use super::*;
 use rand::SeedableRng;
 
+/// Every draw keeps the depth; over many draws the counts follow the shares,
+/// and a category with no share (the shares summing a little under one, the
+/// last ones empty) is never drawn.
 #[test]
 fn multinomial_keeps_the_depth_and_the_shares() {
     let mut rng = StdRng::seed_from_u64(1);
@@ -18,6 +21,14 @@ fn multinomial_keeps_the_depth_and_the_shares() {
     for (t, &pi) in total.iter().zip(&p) {
         assert!((t / (10.0 * reps as f64) - f64::from(pi)).abs() < 0.01);
     }
+
+    let p = [0.6f32 - 1e-6, 0.4 - 1e-6, 0.0, 0.0];
+    let mut out = [0f32; 4];
+    for _ in 0..2000 {
+        multinomial(20, &p, &mut out, &mut rng);
+        assert_eq!(out.iter().sum::<f32>(), 20.0);
+        assert_eq!(out[2] + out[3], 0.0, "no share, no draw: {out:?}");
+    }
 }
 
 #[test]
@@ -33,18 +44,5 @@ fn blocked_cumsum_matches_the_plain_one() {
         for (g, w) in got.iter().flatten().zip(want.iter().flatten()) {
             assert!((g - w).abs() < 1e-5, "F = {f}: {g} vs {w}");
         }
-    }
-}
-
-#[test]
-fn multinomial_never_draws_a_category_with_no_share() {
-    let mut rng = StdRng::seed_from_u64(9);
-    // Shares that sum a little under one, the last ones empty.
-    let p = [0.6f32 - 1e-6, 0.4 - 1e-6, 0.0, 0.0];
-    let mut out = [0f32; 4];
-    for _ in 0..2000 {
-        multinomial(20, &p, &mut out, &mut rng);
-        assert_eq!(out.iter().sum::<f32>(), 20.0);
-        assert_eq!(out[2] + out[3], 0.0, "{out:?}");
     }
 }

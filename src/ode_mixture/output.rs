@@ -31,6 +31,7 @@ fn expression(reads: &[f64]) -> Vec<f64> {
 
 impl MapBasis {
     /// On the leading `k` components of rows `x` (`[P × G]` reads).
+    #[cfg(test)]
     pub fn new(x: &DMatrix<f64>, k: usize) -> anyhow::Result<Self> {
         Self::weighted(x, &vec![1.0; x.nrows()], k)
     }

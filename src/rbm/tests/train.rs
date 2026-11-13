@@ -249,47 +249,6 @@ fn tied_symbols_hold_one_row_per_name() {
 }
 
 #[test]
-#[ignore = "diagnostic"]
-fn diagnostic_every_kind() {
-    let dev = Device::Cpu;
-    for hidden in [
-        Hidden::Bernoulli,
-        Hidden::Binomial { trials: 3 },
-        Hidden::Poisson { max: 6 },
-    ] {
-        for (d, lr, l2) in [(20.0, 0.01, 1e-2), (20.0, 0.02, 1e-2), (20.0, 0.005, 1e-2)] {
-            let mut out = Vec::new();
-            for seed in 0..5u64 {
-                let s = sim(&names(30, &[]), 60, 10 + seed);
-                let row: Vec<u32> = (0..s.blocks.features() as u32).collect();
-                let w = Weights::new(&row, 8, 6, 1, None, seed, &dev).unwrap();
-                let cfg = TrainConfig {
-                    lr,
-                    embedding_l2: l2,
-                    seed,
-                    ..config(150)
-                };
-                let fitted = fit(&[s.level()], &s.blocks, w, hidden, vec![d], &cfg, &dev).unwrap();
-                let z = latent(&fitted, &s.blocks, &s.cells);
-                let wn = fitted
-                    .weights
-                    .w(&s.blocks.ranges)
-                    .unwrap()
-                    .sqr()
-                    .unwrap()
-                    .sum_all()
-                    .unwrap()
-                    .to_scalar::<f32>()
-                    .unwrap()
-                    .sqrt();
-                out.push(format!("{:.2}/|W|{wn:.0}", centroid_accuracy(&z, &s.label)));
-            }
-            eprintln!("{hidden:?} D {d} lr {lr} l2 {l2}: {}", out.join("  "));
-        }
-    }
-}
-
-#[test]
 fn modules_and_the_sparsity_target_keep_every_unit_in_use() {
     let s = sim(&names(30, &[]), 60, 7);
     let dev = Device::Cpu;

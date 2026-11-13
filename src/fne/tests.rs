@@ -769,15 +769,25 @@ fn fne_takes_every_side_information_source_at_once_and_exports_the_text() {
     assert!(fit_fne(&bad).is_err());
 }
 
-/// Freezing to an earlier run's table: the matched gene rows come out of a
-/// second run exactly as the first run wrote them, at the first run's H even
-/// with `--embedding-dim auto`, while the other nodes still train.
+/// A second run against an earlier run's table, one first run shared by
+/// every row:
+/// - `--freeze-feature-embedding`: the matched gene rows come out exactly as
+///   the first run wrote them, at the first run's H even with
+///   `--embedding-dim auto`, while the other nodes still train;
+/// - `--lora-feature-embedding`: the matched gene rows are the first run's
+///   plus a shared residual of the given rank, at the first run's H, while
+///   the other nodes train freely; the manifest records the flag and knobs;
+/// - a source table wider than the graph (either flag): the rows no node
+///   matched — a gene the graph lacks and a term — come out after the
+///   graph's own rows, unchanged, and the types table keeps the graph's own
+///   node types.
 #[test]
-fn fne_pins_gene_rows_to_an_earlier_runs_feature_embedding() {
+fn fne_pins_anchors_and_carries_an_earlier_runs_feature_embedding() {
+    use crate::feature_preset::test_support::{assert_carried, widen, EXTRA};
     let dir = tempfile::tempdir().unwrap();
     let (ppi, typed) = planted_inputs(dir.path());
-    let first = dir.path().join("first").to_string_lossy().into_owned();
-    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    let first = path("first");
     let common = [
         "--batch-size",
         "16",
@@ -788,125 +798,56 @@ fn fne_pins_gene_rows_to_an_earlier_runs_feature_embedding() {
         "--eval-fraction",
         "0",
     ];
-    let mut argv = vec![
-        "fne",
-        &ppi,
-        "--edges",
-        &typed,
-        "--embedding-dim",
-        "6",
-        "-i",
-        "3",
-    ];
-    argv.extend_from_slice(&common);
-    argv.extend_from_slice(&["-o", &first]);
-    let a: FneArgs = parse_args(&argv);
-    fit_fne(&a).unwrap();
-    let mut argv = vec![
-        "fne",
-        &ppi,
-        "--edges",
-        &typed,
-        "--freeze-feature-embedding",
-        &first,
-        "--embedding-dim",
-        "auto",
-        "-i",
-        "5",
-        "--seed",
-        "7",
-    ];
-    argv.extend_from_slice(&common);
-    argv.extend_from_slice(&["-o", &second]);
-    let b: FneArgs = parse_args(&argv);
-    fit_fne(&b).unwrap();
-
+    let fne = |extra: &[&str], out: &str| {
+        let mut argv = vec!["fne", &ppi, "--edges", &typed];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&common);
+        argv.extend_from_slice(&["-o", out]);
+        let args: FneArgs = parse_args(&argv);
+        fit_fne(&args).unwrap();
+    };
+    fne(&["--embedding-dim", "6", "-i", "3"], &first);
     let e1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
-    let e2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
-    assert_eq!(e2.mat.ncols(), 6, "H taken from the table");
     let row = |e: &legume_numeric::matrix::traits::MatWithNames<Mat>, name: &str| -> Vec<f32> {
         let i = e.rows.iter().position(|r| r.as_ref() == name).unwrap();
         e.mat.row(i).iter().copied().collect()
     };
+    let recorded = |out: &str| -> serde_json::Value {
+        let m: RunManifest =
+            serde_json::from_str(&std::fs::read_to_string(format!("{out}.senna.json")).unwrap())
+                .unwrap();
+        m.train_args.unwrap().args
+    };
+    let second = |flag: &str, out: &str, extra: &[&str]| {
+        let mut argv = vec![flag, &first];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["--embedding-dim", "auto", "-i", "5", "--seed", "7"]);
+        fne(&argv, out);
+        Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap()
+    };
+
+    // pins
+    let pinned = path("pinned");
+    let e2 = second("--freeze-feature-embedding", &pinned, &[]);
+    assert_eq!(e2.mat.ncols(), 6, "pins: H taken from the table");
     for g in 0..10 {
         let name = format!("G{g}");
-        assert_eq!(row(&e1, &name), row(&e2, &name), "{name} is pinned");
+        assert_eq!(row(&e1, &name), row(&e2, &name), "pins: {name} is pinned");
     }
-    assert_ne!(row(&e1, "CT0"), row(&e2, "CT0"), "a cell type still trains");
-    let m: RunManifest =
-        serde_json::from_str(&std::fs::read_to_string(format!("{second}.senna.json")).unwrap())
-            .unwrap();
-    let recorded = &m.train_args.as_ref().unwrap().args;
+    assert_ne!(row(&e1, "CT0"), row(&e2, "CT0"), "pins: a cell type trains");
     assert_eq!(
-        recorded["freeze_feature_embedding"].as_str(),
+        recorded(&pinned)["freeze_feature_embedding"].as_str(),
         Some(first.as_str())
     );
-}
 
-/// `--lora-feature-embedding`: the matched gene rows come out of a second run
-/// as the first run's rows plus a shared residual of the given rank, at the
-/// first run's H, while the other nodes train freely; the manifest records
-/// the flag and its knobs.
-#[test]
-fn fne_anchors_gene_rows_with_a_low_rank_residual() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ppi, typed) = planted_inputs(dir.path());
-    let first = dir.path().join("first").to_string_lossy().into_owned();
-    let second = dir.path().join("second").to_string_lossy().into_owned();
-    let common = [
-        "--batch-size",
-        "16",
-        "--num-batch-negs",
-        "4",
-        "--num-uniform-negs",
-        "4",
-        "--eval-fraction",
-        "0",
-    ];
-    let mut argv = vec![
-        "fne",
-        &ppi,
-        "--edges",
-        &typed,
-        "--embedding-dim",
-        "6",
-        "-i",
-        "3",
-    ];
-    argv.extend_from_slice(&common);
-    argv.extend_from_slice(&["-o", &first]);
-    let a: FneArgs = parse_args(&argv);
-    fit_fne(&a).unwrap();
-    let mut argv = vec![
-        "fne",
-        &ppi,
-        "--edges",
-        &typed,
+    // anchors
+    let anchored = path("anchored");
+    let e2 = second(
         "--lora-feature-embedding",
-        &first,
-        "--lora-rank",
-        "1",
-        "--lora-lr-ratio",
-        "4",
-        "--embedding-dim",
-        "auto",
-        "-i",
-        "5",
-        "--seed",
-        "7",
-    ];
-    argv.extend_from_slice(&common);
-    argv.extend_from_slice(&["-o", &second]);
-    let b: FneArgs = parse_args(&argv);
-    fit_fne(&b).unwrap();
-
-    let e1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
-    let e2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
-    assert_eq!(e2.mat.ncols(), 6, "H taken from the table");
-    let row = |e: &legume_numeric::matrix::traits::MatWithNames<Mat>, name: &str| -> Vec<f32> {
-        let i = e.rows.iter().position(|r| r.as_ref() == name).unwrap();
-        e.mat.row(i).iter().copied().collect()
-    };
+        &anchored,
+        &["--lora-rank", "1", "--lora-lr-ratio", "4"],
+    );
+    assert_eq!(e2.mat.ncols(), 6, "anchors: H taken from the table");
     let mut resid = Mat::zeros(10, 6);
     for g in 0..10 {
         let name = format!("G{g}");
@@ -916,68 +857,30 @@ fn fne_anchors_gene_rows_with_a_low_rank_residual() {
         }
     }
     let sv = resid.singular_values();
-    assert!(sv[0] > 1e-6, "the residual never moved");
-    assert!(sv[1] <= 1e-4 * sv[0], "the residual is not rank 1: {sv}");
-    assert_ne!(row(&e1, "CT0"), row(&e2, "CT0"), "a cell type still trains");
-    let m: RunManifest =
-        serde_json::from_str(&std::fs::read_to_string(format!("{second}.senna.json")).unwrap())
-            .unwrap();
-    let recorded = &m.train_args.as_ref().unwrap().args;
+    assert!(sv[0] > 1e-6, "anchors: the residual never moved");
+    assert!(sv[1] <= 1e-4 * sv[0], "anchors: residual not rank 1: {sv}");
+    assert_ne!(
+        row(&e1, "CT0"),
+        row(&e2, "CT0"),
+        "anchors: a cell type trains"
+    );
+    let args = recorded(&anchored);
     assert_eq!(
-        recorded["lora_feature_embedding"].as_str(),
+        args["lora_feature_embedding"].as_str(),
         Some(first.as_str())
     );
-    assert_eq!(recorded["lora_rank"].as_u64(), Some(1));
-}
+    assert_eq!(args["lora_rank"].as_u64(), Some(1));
 
-/// A source table wider than the graph: the rows no node matched — a gene
-/// the graph lacks and a term — come out after the graph's own rows,
-/// unchanged, and the types table keeps the graph's own node types.
-#[test]
-fn fne_carries_the_unmatched_rows_of_a_pinned_table_through() {
-    use crate::feature_preset::test_support::{assert_carried, widen, EXTRA};
-    let dir = tempfile::tempdir().unwrap();
-    let (ppi, typed) = planted_inputs(dir.path());
-    let first = dir.path().join("first").to_string_lossy().into_owned();
-    let plus = dir.path().join("plus").to_string_lossy().into_owned();
-    let second = dir.path().join("second").to_string_lossy().into_owned();
-    let common = [
-        "--batch-size",
-        "16",
-        "--num-batch-negs",
-        "4",
-        "--num-uniform-negs",
-        "4",
-        "--eval-fraction",
-        "0",
-        "-i",
-        "2",
-    ];
-    let mut argv = vec!["fne", &ppi, "--edges", &typed, "--embedding-dim", "6"];
-    argv.extend_from_slice(&common);
-    argv.extend_from_slice(&["-o", &first]);
-    fit_fne(&parse_args(&argv)).unwrap();
+    // carries, under either flag
+    let plus = path("plus");
     let extra = widen(&format!("{first}.feature_embedding.parquet"), &plus);
-
     for mode in ["--freeze-feature-embedding", "--lora-feature-embedding"] {
-        let out = format!("{second}-{}", &mode[2..6]);
-        let mut argv = vec![
-            "fne",
-            &ppi,
-            "--edges",
-            &typed,
-            mode,
-            &plus,
-            "--embedding-dim",
-            "auto",
-        ];
+        let out = path(&format!("carried-{}", &mode[2..6]));
+        let mut argv = vec![mode, plus.as_str(), "--embedding-dim", "auto", "-i", "2"];
         if mode.starts_with("--lora") {
             argv.extend_from_slice(&["--lora-rank", "1"]);
         }
-        argv.extend_from_slice(&common);
-        argv.extend_from_slice(&["-o", &out]);
-        fit_fne(&parse_args(&argv)).unwrap();
-        let e1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+        fne(&argv, &out);
         let rho = format!("{out}.feature_embedding.parquet");
         assert_carried(&out, &rho, e1.rows.len(), &extra);
         let types = data_beans::aux::feature_types::read_feature_types(&out)
@@ -987,12 +890,16 @@ fn fne_carries_the_unmatched_rows_of_a_pinned_table_through() {
         assert_eq!(
             ct0.1.as_ref(),
             "cell_type",
-            "the graph's own types are kept"
+            "{mode}: the graph's own types are kept"
         );
         // The source's own CT0 / GO:0 rows are superseded by this run's: one row each.
         let e2 = Mat::from_parquet(&rho).unwrap();
         for n in ["CT0", "GO:0", EXTRA[0].0] {
-            assert_eq!(e2.rows.iter().filter(|r| r.as_ref() == n).count(), 1, "{n}");
+            assert_eq!(
+                e2.rows.iter().filter(|r| r.as_ref() == n).count(),
+                1,
+                "{mode}: {n}"
+            );
         }
     }
 }

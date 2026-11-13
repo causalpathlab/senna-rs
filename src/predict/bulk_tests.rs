@@ -51,44 +51,22 @@ fn open_vec(path: &str) -> SparseIoVec {
 }
 
 /// The backend is reopened BY PATH, after the writer that built it is gone —
-/// exactly how the predict paths will see it.
-#[test]
-fn a_dense_table_round_trips_through_the_temp_backend() {
-    let dir = tempfile::tempdir().unwrap();
-    let (genes, samples, mat) = fixture();
-    let f = write_parquet(&dir, "bulk.parquet", &genes, &samples, &mat);
-    let bulk = materialize(&[f], &genes, &BulkTableOpts::default()).expect("materialize");
-    assert_eq!(bulk.paths().len(), 1);
-
-    let v = open_vec(&bulk.paths()[0]);
-    assert_eq!(v.num_rows(), 3);
-    assert_eq!(v.num_columns(), 2);
-    assert_eq!(v.row_names().unwrap(), genes);
-    assert_eq!(v.column_names().unwrap(), samples);
-
-    let csc = read_all(&v);
-    let mut seen = 0;
-    for (j, col) in csc.col_iter().enumerate() {
-        for (&i, &val) in col.row_indices().iter().zip(col.values()) {
-            assert_eq!(val.to_bits(), mat[(i, j)].to_bits(), "gene {i} sample {j}");
-            seen += 1;
-        }
-    }
-    assert_eq!(
-        seen, 5,
-        "five non-zeros; the exact zero is dropped, nothing else"
-    );
-}
-
-/// The long way: the same matrix as triplets, the route `data-beans from-mtx`
-/// takes. Both backends must read back identically.
+/// exactly how the predict paths will see it — with the table's names, and
+/// against the long way: the same matrix as triplets (the exact zero
+/// dropped), the route `data-beans from-mtx` takes. Both backends must read
+/// back identically.
 #[test]
 fn the_temp_backend_equals_one_built_from_triplets() {
     let dir = tempfile::tempdir().unwrap();
     let (genes, samples, mat) = fixture();
     let f = write_parquet(&dir, "bulk.parquet", &genes, &samples, &mat);
     let bulk = materialize(&[f], &genes, &BulkTableOpts::default()).expect("materialize");
-    let via_bulk = read_all(&open_vec(&bulk.paths()[0]));
+    assert_eq!(bulk.paths().len(), 1);
+    let reopened = open_vec(&bulk.paths()[0]);
+    assert_eq!((reopened.num_rows(), reopened.num_columns()), (3, 2));
+    assert_eq!(reopened.row_names().unwrap(), genes);
+    assert_eq!(reopened.column_names().unwrap(), samples);
+    let via_bulk = read_all(&reopened);
 
     let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
     for i in 0..3 {

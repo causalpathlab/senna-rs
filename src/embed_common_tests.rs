@@ -3,50 +3,52 @@
 use super::{latent_sharpness, Mat};
 use legume_numeric::matrix::traits::IoOps;
 
+/// The effective topic count and mean max weight, one row per case:
+/// - `flat`: k effective topics, max weight 1/k;
+/// - `one-hot`: one effective topic, max weight 1;
+/// - `renormalized`: rows are renormalized, so unnormalized weights and
+///   proportions agree;
+/// - `empty`: NaN, not zero;
+/// - `non-finite`: a diverged latent must report NaN, not `+inf`. `f32::max`
+///   drops a NaN operand, so the guarded row sum has to check finiteness
+///   explicitly.
 #[test]
-fn a_flat_latent_has_k_effective_topics() {
+fn latent_sharpness_is_the_effective_topic_count_and_mean_max_weight() {
     let k = 8;
-    let theta = Mat::from_element(10, k, 1.0 / k as f32);
-    let (eff, mx) = latent_sharpness(&theta);
-    assert!((eff - k as f32).abs() < 1e-3, "effective topics {eff}");
-    assert!((mx - 1.0 / k as f32).abs() < 1e-6, "max weight {mx}");
-}
-
-#[test]
-fn a_one_hot_latent_has_one_effective_topic() {
-    let k = 8;
-    let mut theta = Mat::zeros(10, k);
+    let mut one_hot = Mat::zeros(10, k);
     for i in 0..10 {
-        theta[(i, i % k)] = 1.0;
+        one_hot[(i, i % k)] = 1.0;
     }
-    let (eff, mx) = latent_sharpness(&theta);
-    assert!((eff - 1.0).abs() < 1e-6, "effective topics {eff}");
-    assert!((mx - 1.0).abs() < 1e-6, "max weight {mx}");
-}
-
-/// Rows are renormalized, so unnormalized weights and proportions agree.
-#[test]
-fn rows_are_renormalized_before_the_entropy() {
-    let theta = Mat::from_row_slice(2, 3, &[0.2, 0.3, 0.5, 0.2, 0.3, 0.5]);
-    let scaled = &theta * 7.0;
-    assert_eq!(latent_sharpness(&theta), latent_sharpness(&scaled));
-}
-
-#[test]
-fn an_empty_latent_is_nan_not_zero() {
-    let (eff, mx) = latent_sharpness(&Mat::zeros(0, 4));
-    assert!(eff.is_nan() && mx.is_nan());
-}
-
-/// A diverged latent must report NaN, not `+inf`. `f32::max` drops a NaN operand,
-/// so the guarded row sum has to check finiteness explicitly.
-#[test]
-fn a_non_finite_latent_is_nan_not_infinity() {
-    let mut theta = Mat::from_element(3, 4, 0.25);
-    theta[(1, 2)] = f32::NAN;
-    let (eff, mx) = latent_sharpness(&theta);
-    assert!(eff.is_nan(), "effective topics was {eff}");
-    assert!(mx.is_nan(), "mean max theta was {mx}");
+    let proportions = Mat::from_row_slice(2, 3, &[0.2, 0.3, 0.5, 0.2, 0.3, 0.5]);
+    let mut diverged = Mat::from_element(3, 4, 0.25);
+    diverged[(1, 2)] = f32::NAN;
+    let cases = [
+        (
+            "flat",
+            Mat::from_element(10, k, 1.0 / k as f32),
+            (k as f32, 1.0 / k as f32),
+        ),
+        ("one-hot", one_hot, (1.0, 1.0)),
+        (
+            "renormalized",
+            &proportions * 7.0,
+            latent_sharpness(&proportions),
+        ),
+        ("empty", Mat::zeros(0, 4), (f32::NAN, f32::NAN)),
+        ("non-finite", diverged, (f32::NAN, f32::NAN)),
+    ];
+    let near = |got: f32, want: f32, tol: f32| {
+        if want.is_nan() {
+            got.is_nan()
+        } else {
+            (got - want).abs() < tol
+        }
+    };
+    for (label, theta, (want_eff, want_mx)) in cases {
+        let (eff, mx) = latent_sharpness(&theta);
+        assert!(near(eff, want_eff, 1e-3), "{label}: effective topics {eff}");
+        assert!(near(mx, want_mx, 1e-6), "{label}: max weight {mx}");
+    }
 }
 
 #[test]
@@ -143,82 +145,73 @@ fn model_genes() -> Vec<Box<str>> {
     labels(&["GENES", "GENEJ", "GENEO", "GENEQ", "GENEM"])
 }
 
+/// How a bulk table's axes are read against the model's genes, one row per
+/// case (`Err` holds what the message must name):
+/// - genes on rows is genes × samples, genes on columns samples × genes;
+/// - the bridge is the shared canonicalizer, not string equality: an
+///   `ENSG…_SYMBOL` axis must be recognised as genes against a bare-symbol
+///   model, on either axis;
+/// - a forced orientation wins over the evidence;
+/// - nothing matching is a naming failure, and the error has to show what the
+///   file holds (both axes and the model) so the user can see why;
+/// - sample IDs that are themselves gene symbols make both axes score: an
+///   ambiguity to report, naming the override, never a coin flip.
 #[test]
-fn genes_on_rows_is_genes_by_samples() {
-    let rows = labels(&["GENES", "GENEJ", "GENEO", "NOTINMODEL"]);
-    let cols = labels(&["s0", "s1"]);
-    let o = super::resolve_orientation(&rows, &cols, &model_genes(), None).expect("resolve");
-    assert_eq!(o, super::Orientation::GenesBySamples);
-}
-
-#[test]
-fn genes_on_columns_is_samples_by_genes() {
-    let rows = labels(&["s0", "s1"]);
-    let cols = labels(&["GENES", "GENEJ", "GENEO", "NOTINMODEL"]);
-    let o = super::resolve_orientation(&rows, &cols, &model_genes(), None).expect("resolve");
-    assert_eq!(o, super::Orientation::SamplesByGenes);
-}
-
-/// The bridge is the shared canonicalizer, not string equality: an
-/// `ENSG…_SYMBOL` axis must be recognised as genes against a bare-symbol model,
-/// on either axis.
-#[test]
-fn orientation_sees_through_the_naming_convention() {
+fn orientation_follows_the_axis_holding_the_models_genes() {
+    use super::Orientation::{GenesBySamples, SamplesByGenes};
+    let genes = labels(&["GENES", "GENEJ", "GENEO", "NOTINMODEL"]);
     let ensg = labels(&[
         "ENSG00000000130_GENES",
         "ENSG00000000140_GENEJ",
         "ENSG00000000120_GENEO",
     ]);
+    let three = labels(&["GENES", "GENEJ", "GENEO"]);
     let samples = labels(&["s0", "s1"]);
-    let m = model_genes();
-    assert_eq!(
-        super::resolve_orientation(&ensg, &samples, &m, None).unwrap(),
-        super::Orientation::GenesBySamples
-    );
-    assert_eq!(
-        super::resolve_orientation(&samples, &ensg, &m, None).unwrap(),
-        super::Orientation::SamplesByGenes
-    );
-}
-
-/// Nothing matching is a naming failure, and the error has to show what the
-/// file holds so the user can see why, not just that it failed.
-#[test]
-fn no_axis_matching_the_model_shows_both_axes_and_the_model() {
-    let rows = labels(&["r0", "r1"]);
-    let cols = labels(&["c0", "c1"]);
-    let err = super::resolve_orientation(&rows, &cols, &model_genes(), None)
-        .expect_err("must fail")
-        .to_string();
-    assert!(err.contains("r0"), "{err}");
-    assert!(err.contains("c0"), "{err}");
-    assert!(err.contains("GENES"), "{err}");
-}
-
-/// Sample IDs that are themselves gene symbols make both axes score; that is
-/// an ambiguity to report, never a coin flip to resolve.
-#[test]
-fn both_axes_matching_is_an_error_naming_the_override() {
-    let rows = labels(&["GENES", "GENEJ", "GENEO"]);
-    let cols = labels(&["GENEQ", "GENEM"]);
-    let err = super::resolve_orientation(&rows, &cols, &model_genes(), None)
-        .expect_err("must fail")
-        .to_string();
-    assert!(err.contains("--bulk-orientation"), "{err}");
-}
-
-#[test]
-fn a_forced_orientation_wins_over_the_evidence() {
-    let rows = labels(&["GENES", "GENEJ", "GENEO"]);
-    let cols = labels(&["s0", "s1"]);
-    let o = super::resolve_orientation(
-        &rows,
-        &cols,
-        &model_genes(),
-        Some(super::Orientation::SamplesByGenes),
-    )
-    .expect("forced never errors on evidence");
-    assert_eq!(o, super::Orientation::SamplesByGenes);
+    let cases = [
+        ("genes on rows", &genes, &samples, None, Ok(GenesBySamples)),
+        (
+            "genes on columns",
+            &samples,
+            &genes,
+            None,
+            Ok(SamplesByGenes),
+        ),
+        ("ENSG on rows", &ensg, &samples, None, Ok(GenesBySamples)),
+        ("ENSG on columns", &samples, &ensg, None, Ok(SamplesByGenes)),
+        (
+            "forced",
+            &three,
+            &samples,
+            Some(SamplesByGenes),
+            Ok(SamplesByGenes),
+        ),
+        (
+            "no axis matching",
+            &labels(&["r0", "r1"]),
+            &labels(&["c0", "c1"]),
+            None,
+            Err(&["r0", "c0", "GENES"][..]),
+        ),
+        (
+            "both axes matching",
+            &three,
+            &labels(&["GENEQ", "GENEM"]),
+            None,
+            Err(&["--bulk-orientation"][..]),
+        ),
+    ];
+    for (label, rows, cols, forced, want) in cases {
+        let got = super::resolve_orientation(rows, cols, &model_genes(), forced);
+        match want {
+            Ok(o) => assert_eq!(got.expect(label), o, "{label}"),
+            Err(needles) => {
+                let err = got.expect_err(label).to_string();
+                for n in needles {
+                    assert!(err.contains(n), "{label}: {err}");
+                }
+            }
+        }
+    }
 }
 
 /// `oriented` is the only place a table is ever turned; genes end on rows.

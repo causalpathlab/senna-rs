@@ -18,9 +18,9 @@
 //! kinetics because the levels are smooth in time and the jitter is not;
 //! a drift smooth in time is not.
 
+use super::model::Levels;
 #[cfg(test)]
 use super::model::LOG_CLAMP;
-use super::model::{clamped_exp, Levels};
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
@@ -38,6 +38,7 @@ pub struct Reads {
 
 impl Reads {
     /// From row-major `[P × G]` reads.
+    #[cfg(test)]
     pub fn new(u: &[f64], s: &[f64], p: usize, g: usize) -> Self {
         Self::from_matrices(
             DMatrix::from_row_slice(p, g, u),
@@ -71,18 +72,20 @@ impl Reads {
 
     /// Every pseudobulk's best depth `λ_p = N_p / Z` at its row `rows[p]`,
     /// on both tracks.
+    #[cfg(test)]
     pub fn depths(&self, rows: &[usize], lv: &Levels) -> Vec<Depth> {
         self.jittered_depths(rows, lv, &vec![0.0; rows.len()])
     }
 
     /// Every pseudobulk's best depths at its row `rows[p]` with its jitter
     /// `omega[p]`: `λ_p = N_p / (e^{ω_p} Z_u + Z_s)`, `[e^{ω_p} λ_p, λ_p]`.
+    #[cfg(test)]
     pub fn jittered_depths(&self, rows: &[usize], lv: &Levels, omega: &[f64]) -> Vec<Depth> {
         rows.iter()
             .zip(omega)
             .enumerate()
             .map(|(p, (&r, &w))| {
-                let e = clamped_exp(w);
+                let e = super::model::clamped_exp(w);
                 let lambda = self.total[p] / (e * lv.u.row(r).sum() + lv.s.row(r).sum());
                 [e * lambda, lambda]
             })

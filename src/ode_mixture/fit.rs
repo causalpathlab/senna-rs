@@ -503,6 +503,7 @@ impl Fit {
 
     /// Every pseudobulk's posterior over lineages `[P][L]` and its mean
     /// time on its lineages, `[P]` (lineage time, `k T_ℓ/(n − 1)`).
+    #[cfg(test)]
     pub fn posterior(&self, reads: &DeviceReads) -> Result<(Vec<Vec<f64>>, Vec<f64>)> {
         let (l, n) = (self.dims.0, self.positions());
         let (u, s) = self.levels()?;
