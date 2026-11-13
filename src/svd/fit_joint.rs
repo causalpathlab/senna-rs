@@ -327,7 +327,6 @@ fn do_nystrom_proj(
     })
 }
 
-#[allow(dead_code)]
 struct NystromParam<'a> {
     basis_dk: &'a Mat,
     delta_dp: Option<&'a Mat>,

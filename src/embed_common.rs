@@ -1,16 +1,9 @@
-#![allow(dead_code)]
 
 pub use log::info;
 pub use std::sync::{Arc, Mutex};
 
-pub const DEFAULT_KNN: usize = 10;
-pub const DEFAULT_OPT_ITER: usize = 100;
-
 pub type Mat = nalgebra::DMatrix<f32>;
 pub type DVec = nalgebra::DVector<f32>;
-pub type CscMat = nalgebra_sparse::CscMatrix<f32>;
-
-pub type SparseData = dyn SparseIo<IndexIter = Vec<usize>>;
 
 pub use data_beans::qc_lib::{QcArgs, QcConfig};
 pub use data_beans::sparse_data_visitors::*;
@@ -41,35 +34,6 @@ pub use data_beans::alg::random_projection::*;
 /// recover the integer ID from the column name alone, surviving column
 /// reordering, schema audits, and partial subsetting.
 pub use legume_numeric::matrix::dense_mat_io::axis_id_names;
-
-/// Inverse of [`axis_id_names`]. Accepts the explicit `{prefix}{c}` form
-/// and the legacy bare-integer fallback (legume_numeric::matrix's default column
-/// names) so older parquets still load.
-#[must_use]
-pub fn parse_axis_id(name: &str, prefix: &str) -> Option<i64> {
-    if let Some(rest) = name.strip_prefix(prefix) {
-        if let Ok(c) = rest.parse::<i64>() {
-            return Some(c);
-        }
-    }
-    name.parse::<i64>().ok()
-}
-
-/// Map every column to its axis ID via [`parse_axis_id`]. Returns `None`
-/// if any column doesn't carry an ID — caller can then fall back to a
-/// positional check.
-#[must_use]
-pub fn try_parse_axis_ids(cols: &[Box<str>], prefix: &str) -> Option<Vec<i64>> {
-    cols.iter().map(|c| parse_axis_id(c, prefix)).collect()
-}
-
-/// [`try_parse_axis_ids`] with the positional fallback every plot uses: a
-/// table whose columns carry no `{prefix}{c}` IDs (an embedding's `h0..`,
-/// or arbitrary names) is numbered `0..n` in column order.
-#[must_use]
-pub fn axis_ids_or_positions(cols: &[Box<str>], prefix: &str) -> Vec<i64> {
-    try_parse_axis_ids(cols, prefix).unwrap_or_else(|| (0..cols.len() as i64).collect())
-}
 
 /// Clap-declared defaults for an `Args` struct — see
 /// [`legume_numeric::matrix::clap_defaults`]. Re-exported because senna's arg structs name
@@ -114,30 +78,6 @@ impl ComputeDevice {
             ComputeDevice::Cuda => candle_core::Device::new_cuda(device_no)?,
             ComputeDevice::Metal => candle_core::Device::new_metal(device_no)?,
         })
-    }
-}
-
-/// NCE training objective for a feature/cell embedding (maps to
-/// [`graph_embedding_util::loss::NceObjective`]).
-#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[clap(rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
-pub enum NceObjectiveArg {
-    /// Per-pair logistic (SGNS): each (positive, negative) pair decided
-    /// independently — bge's historical loss, byte-identical runs.
-    Logistic,
-    /// Sampled-softmax / InfoNCE: the negatives compete with the positive in one
-    /// softmax; sharpens separation on dense count data.
-    Softmax,
-}
-
-impl NceObjectiveArg {
-    #[must_use]
-    pub fn to_ge(&self) -> graph_embedding_util::loss::NceObjective {
-        match self {
-            NceObjectiveArg::Logistic => graph_embedding_util::loss::NceObjective::Logistic,
-            NceObjectiveArg::Softmax => graph_embedding_util::loss::NceObjective::Softmax,
-        }
     }
 }
 
@@ -320,19 +260,6 @@ pub fn read_labeled_mat(file_path: &str, header: HeaderArg) -> anyhow::Result<Ma
             Mat::read_data(file_path, &BULK_DELIMS, header_row, Some(0), None, None)?
         }
     })
-}
-
-/// Apply topic smoothing in log-space: exp → mix with uniform → log.
-pub fn smooth_topics(
-    log_z_nk: candle_core::Tensor,
-    alpha: f64,
-) -> candle_core::Result<candle_core::Tensor> {
-    if alpha > 0.0 {
-        let kk = log_z_nk.dim(1)? as f64;
-        ((log_z_nk.exp()? * (1.0 - alpha))? + alpha / kk)?.log()
-    } else {
-        Ok(log_z_nk)
-    }
 }
 
 /// Output container for bulk data aligned to a reference gene list
