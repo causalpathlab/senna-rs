@@ -27,7 +27,6 @@ pub fn accumulate_gene_sum(
     Ok(out.pop().expect("one grouping in, one out"))
 }
 
-
 /// Accumulate any number of independent groupings in one pass over the columns.
 ///
 /// Reading the columns is the expensive part — it is the raw matrix off disk —
@@ -158,7 +157,6 @@ fn add_block_gene_sum(
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod fold_tests {
