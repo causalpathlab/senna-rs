@@ -405,3 +405,11 @@ fn the_scoring_remap_keeps_the_hidden_features() {
         .expect("remap")
         .is_none());
 }
+
+#[test]
+fn model_reads_as_a_prefix_or_its_manifest() {
+    for given in ["out/run", "out/run.senna.json", "out/run.model.json"] {
+        assert_eq!(&*parse_model_prefix(given).unwrap(), "out/run", "{given}");
+    }
+    assert!(parse_model_prefix(".senna.json").is_err());
+}

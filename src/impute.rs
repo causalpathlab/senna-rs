@@ -47,7 +47,9 @@ pub struct ImputeArgs {
     #[arg(
         long,
         required = true,
-        help = "Trained model prefix (topic family, masked family, vae, bge, simba, or svd run)"
+        value_parser = crate::predict::parse_model_prefix,
+        help = "Trained model prefix (topic family, masked family, vae, bge, simba, or svd run), \
+                or its `.senna.json` manifest"
     )]
     pub model: Box<str>,
 
