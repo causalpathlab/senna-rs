@@ -53,7 +53,19 @@ fn a_target_named_skips_the_resume_picker() {
         panic!("view")
     };
     assert_eq!(v.session.session.as_deref(), Some("x"));
-    assert!(v.session.options(!v.from.is_empty()).target);
+    assert!(v.session.options(!v.runs().is_empty()).target);
+    // A manifest is taken bare, as well as after -f; bare ones come first.
+    let Commands::View(v) = parse(&["senna", "view", "a.json", "-f", "b.json"]) else {
+        panic!("view")
+    };
+    assert_eq!(
+        v.runs(),
+        ["a.json".into(), "b.json".into()] as [Box<str>; 2]
+    );
+    let Commands::View(v) = parse(&["senna", "view"]) else {
+        panic!("view")
+    };
+    assert!(v.runs().is_empty());
 }
 
 /// The long help of `name`, as `senna <name> --help` prints it.
@@ -84,7 +96,7 @@ fn the_session_help_is_the_shared_text_said_as_senna_says_it() {
     }
     let view = flat(&long_help("view"));
     assert!(
-        view.contains("`senna view` with no -f offers the live sessions"),
+        view.contains("`senna view` with no manifest offers the live sessions"),
         "{view}"
     );
     assert!(view.contains("`?` shows the keys in effect."), "{view}");
