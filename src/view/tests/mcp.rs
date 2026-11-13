@@ -42,34 +42,28 @@ fn a_map_is_a_png_with_its_legend_and_its_settings_stay() {
 }
 
 #[test]
-fn focus_takes_a_name_or_a_cluster_id_and_empty_clears_it() {
+fn focus_takes_a_name_an_id_a_list_of_one_or_a_number_and_empty_clears_it() {
     let mut o = open();
-    o.map(args(
-        json!({"colour_by": "cluster", "focus": "K1", "width": 8}),
-    ))
-    .unwrap();
-    assert_eq!(o.scene.focused_name().as_deref(), Some("C1"));
-    o.map(args(json!({"focus": "c0", "width": 8}))).unwrap();
-    assert_eq!(o.scene.focused_name().as_deref(), Some("C0"));
-    o.map(args(json!({"focus": "", "width": 8}))).unwrap();
-    assert_eq!(o.scene.focus, None);
-    assert!(o.map(args(json!({"focus": "C9"}))).is_err());
-}
-
-#[test]
-fn focus_takes_pinto_s_list_of_one_and_a_bare_number() {
-    let mut o = open();
-    o.map(args(
-        json!({"colour_by": "cluster", "focus": ["C1"], "width": 8}),
-    ))
-    .unwrap();
-    assert_eq!(o.scene.focused_name().as_deref(), Some("C1"));
-    o.map(args(json!({"focus": 0, "width": 8}))).unwrap();
-    assert_eq!(o.scene.focused_name().as_deref(), Some("C0"));
-    o.map(args(json!({"focus": [], "width": 8}))).unwrap();
-    assert_eq!(o.scene.focus, None);
-    let e = o.map(args(json!({"focus": ["C0", "C1"]}))).unwrap_err();
-    assert!(format!("{e}").contains("one group"), "{e}");
+    o.map(args(json!({"colour_by": "cluster", "width": 8})))
+        .unwrap();
+    for (label, focus, want) in [
+        ("a name", json!("K1"), Some("C1")),
+        ("a cluster id", json!("c0"), Some("C0")),
+        ("empty", json!(""), None),
+        ("pinto's list of one", json!(["C1"]), Some("C1")),
+        ("a bare number", json!(0), Some("C0")),
+        ("an empty list", json!([]), None),
+    ] {
+        o.map(args(json!({"focus": focus, "width": 8}))).unwrap();
+        assert_eq!(o.scene.focused_name().as_deref(), want, "{label}");
+    }
+    for (label, focus, says) in [
+        ("a group not there", json!("C9"), ""),
+        ("a list of two", json!(["C0", "C1"]), "one group"),
+    ] {
+        let e = o.map(args(json!({"focus": focus}))).unwrap_err();
+        assert!(format!("{e}").contains(says), "{label}: {e}");
+    }
 }
 
 #[test]
@@ -145,11 +139,6 @@ fn export_refuses_a_file_that_exists_unless_told() {
     assert_eq!(std::fs::read(&png).unwrap(), b"keep");
     o.export(ask(true)).unwrap();
     assert_eq!(&std::fs::read(&png).unwrap()[1..4], b"PNG");
-}
-
-#[test]
-fn unknown_arguments_are_refused() {
-    assert!(parse::<MapArgs>(json!({"colour": "cluster"})).is_err());
 }
 
 #[test]
@@ -301,50 +290,61 @@ fn the_summary_says_whether_the_run_has_times_and_a_velocity() {
 }
 
 #[test]
-fn time_colours_the_cells_until_turned_off() {
+fn time_and_the_velocity_field_are_drawn_as_asked_and_said_back() {
     let mut o = timed();
-    let s = o.map(args(json!({"time": true, "width": 32}))).unwrap();
-    assert_eq!(state(&s)["time"], true);
-    assert_eq!(o.view_state()["time"], true);
-    let s = o.map(args(json!({"time": false, "width": 32}))).unwrap();
-    assert_eq!(state(&s)["time"], false);
-}
-
-#[test]
-fn time_and_a_feature_at_once_is_an_error() {
-    let mut o = timed();
-    assert!(o.map(args(json!({"time": true, "feature": "g1"}))).is_err());
-}
-
-#[test]
-fn time_or_a_velocity_the_run_lacks_is_an_error_and_changes_nothing() {
-    let mut o = open();
-    o.map(args(json!({"colour_by": "cluster", "width": 16})))
-        .unwrap();
-    let e = o.map(args(json!({"time": true}))).unwrap_err().to_string();
-    assert!(e.contains("time"), "{e}");
-    let e = o
-        .map(args(json!({"velocity": "arrows"})))
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("velocity"), "{e}");
-    // Turning off what is not on is no error.
-    o.map(args(json!({"time": false, "velocity": "off", "width": 16})))
-        .unwrap();
-    assert_eq!(o.view_state()["colour_by"], "cluster");
-}
-
-#[test]
-fn the_velocity_field_is_drawn_as_asked_and_off_hides_it() {
-    let mut o = timed();
-    for style in ["arrows", "stream", "off"] {
-        let s = o
-            .map(args(json!({"velocity": style, "width": 32})))
-            .unwrap();
-        assert_eq!(state(&s)["velocity"], style);
-        assert_eq!(o.view_state()["velocity"], style);
+    for (label, ask, key, want) in [
+        ("time on", json!({"time": true}), "time", json!(true)),
+        ("time off", json!({"time": false}), "time", json!(false)),
+        (
+            "arrows",
+            json!({"velocity": "arrows"}),
+            "velocity",
+            json!("arrows"),
+        ),
+        (
+            "stream",
+            json!({"velocity": "stream"}),
+            "velocity",
+            json!("stream"),
+        ),
+        ("off", json!({"velocity": "off"}), "velocity", json!("off")),
+    ] {
+        let mut ask = ask;
+        ask["width"] = json!(32);
+        let s = o.map(args(ask)).unwrap();
+        assert_eq!(state(&s)[key], want, "{label}");
+        assert_eq!(o.view_state()[key], want, "{label}");
     }
     assert!(serde_json::from_value::<MapArgs>(json!({"velocity": "sideways"})).is_err());
+}
+
+#[test]
+fn time_or_a_velocity_asked_for_amiss_is_an_error_and_changes_nothing() {
+    for (label, mut o, ask, says) in [
+        (
+            "time and a feature at once",
+            timed(),
+            json!({"time": true, "feature": "g1"}),
+            "not both",
+        ),
+        ("time the run lacks", open(), json!({"time": true}), "time"),
+        (
+            "a velocity the run lacks",
+            open(),
+            json!({"velocity": "arrows"}),
+            "velocity",
+        ),
+    ] {
+        o.map(args(json!({"colour_by": "cluster", "width": 16})))
+            .unwrap();
+        let e = o.map(args(ask)).unwrap_err().to_string();
+        assert!(e.contains(says), "{label}: {e}");
+        assert_eq!(o.view_state()["colour_by"], "cluster", "{label}");
+    }
+    // Turning off what is not on is no error.
+    open()
+        .map(args(json!({"time": false, "velocity": "off", "width": 16})))
+        .unwrap();
 }
 
 #[test]

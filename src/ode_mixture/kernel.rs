@@ -11,7 +11,9 @@
 //! carried whitened, `z = C η`, `η ~ N(0, I)`, `C` the Cholesky factor.
 
 use nalgebra::{DMatrix, DVector};
+#[cfg(test)]
 use rand::Rng;
+#[cfg(test)]
 use rand_distr::{Distribution, StandardNormal};
 
 /// Added to the diagonal: a smooth kernel on a fine grid is near singular.
@@ -63,6 +65,7 @@ impl GridPrior {
     }
 
     /// `z = C η`.
+    #[cfg(test)]
     pub fn colour(&self, eta: &DVector<f64>) -> DVector<f64> {
         &self.chol * eta
     }
@@ -89,6 +92,7 @@ impl GridPrior {
     }
 
     /// One draw of the path.
+    #[cfg(test)]
     pub fn draw(&self, rng: &mut impl Rng) -> DVector<f64> {
         let eta = DVector::from_fn(self.chol.nrows(), |_, _| StandardNormal.sample(rng));
         self.colour(&eta)

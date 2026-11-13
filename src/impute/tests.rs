@@ -270,17 +270,11 @@ fn model_imputed_columns_keep_only_initialized_genes_by_name() {
     assert_eq!(m[(0, 1)], 1.0); // U2, cell 0
     assert_eq!(m[(1, 0)], 6.0);
     assert_eq!(m[(1, 1)], 4.0);
-}
 
-/// No initialized gene → an empty table, not an error.
-#[test]
-fn model_imputed_columns_are_empty_without_initialized_genes() {
-    let al_genes: Vec<Box<str>> = ["A"].iter().map(|s| (*s).into()).collect();
-    let al_status: Vec<Box<str>> = ["matched"].iter().map(|s| (*s).into()).collect();
-    let (names, m) = model_imputed_columns(&al_genes, &al_status, &[], &Mat::zeros(2, 0));
+    // No initialized gene → an empty table, not an error.
+    let (names, m) = model_imputed_columns(&al_genes[..1], &al_status[..1], &[], &Mat::zeros(2, 0));
     assert!(names.is_empty());
-    assert_eq!(m.nrows(), 2);
-    assert_eq!(m.ncols(), 0);
+    assert_eq!((m.nrows(), m.ncols()), (2, 0));
 }
 
 /// A simba run projects through the bge path, so it matches by cosine in

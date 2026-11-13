@@ -56,7 +56,6 @@ legume-numeric = { version = "0.9.8", features = ["matrix", "param", "candle", "
 genomic-data = { version = "0.6", package = "legume-genomic-types" }
 graph-embedding-util = { version = "0.11", package = "legume-graph-embedding" }
 hsblock = { version = "0.2", package = "hsblock-rs" }
-enrichment = { version = "0.5", package = "legume-enrichment" }
 
 anyhow = "1.0"
 base64 = { version = "0.22", optional = true }
@@ -71,9 +70,7 @@ legume-tui = { version = "0.3", optional = true, features = ["map", "map-display
 # background fit in a session of `senna run` a person can attach to.
 legume-mcp = { version = "0.4", optional = true, features = ["sessions", "clap"] }
 clap = { version = "4.5.20", features = ["derive"] }
-num_cpus = "1.16.0"
 rayon = "1.10.0"
-tempfile = "3.2"
 rand = "0.10.1"
 rand_distr = "0.6"
 nalgebra = "0.34"
@@ -81,7 +78,6 @@ nalgebra = "0.34"
 matrixmultiply = { version = "0.3", features = ["threading"] }
 nalgebra-sparse = "0.11"
 
-special = "0.13"
 indicatif = { version = "^0.18", features = ["rayon"] }
 log = "0.4"
 dashmap = { version = "6.1.0", features = ["rayon"] }
@@ -91,6 +87,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [dev-dependencies]
+tempfile = "3.2"
 # The crate's harness, driving `senna run` and `senna view` through
 # pseudo-terminals in tests/detach_session.rs.
 legume-tui = { version = "0.3", default-features = false, features = ["testing"] }

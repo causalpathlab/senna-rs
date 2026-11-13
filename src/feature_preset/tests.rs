@@ -57,23 +57,29 @@ fn gene_rows_match_the_axis_by_canonical_name_and_other_types_are_left_out() {
     assert_eq!(f.rows, vec![0.5, 1.0, 1.5, -1.0, -0.5, 0.0]);
 }
 
+/// Without a types table every source row is a gene: each is a candidate,
+/// and the carried rows are typed `gene`.
 #[test]
-fn without_a_types_table_every_row_is_a_candidate() {
+fn an_untyped_source_is_all_genes() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), false);
+    let kind = ge::FeatureNameKind::Gene { delim: '_' };
     let axis: Vec<Box<str>> = ["apoptosis", "ENSG3_GENEU"]
         .iter()
         .map(|s| Box::from(*s))
         .collect();
-    let f = load_preset_genes(
-        &prefix,
-        PresetMode::Freeze,
-        &axis,
-        &ge::FeatureNameKind::Gene { delim: '_' },
-    )
-    .unwrap()
-    .0;
-    assert_eq!(f.ids, vec![0, 1]);
+    let f = load_preset_genes(&prefix, PresetMode::Freeze, &axis, &kind)
+        .unwrap()
+        .0;
+    assert_eq!(f.ids, vec![0, 1], "every row a candidate");
+    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_GENEU")];
+    let (_, carried) = load_preset_genes(&prefix, PresetMode::Freeze, &axis, &kind).unwrap();
+    let c = carried.unwrap();
+    assert_eq!(c.names.len(), 3);
+    assert!(
+        c.types.iter().all(|t| t.as_ref() == "gene"),
+        "carried as genes"
+    );
 }
 
 #[test]
@@ -197,25 +203,6 @@ fn the_unused_rows_are_carried_under_a_pinning_mode_only() {
     assert!(carried.is_none());
 }
 
-/// Without a types table every source row is a gene, so the carried rows are
-/// typed `gene`.
-#[test]
-fn carried_rows_of_an_untyped_source_are_genes() {
-    let dir = tempfile::tempdir().unwrap();
-    let prefix = write_fne_like(dir.path(), false);
-    let axis: Vec<Box<str>> = vec![Box::from("ENSG3_GENEU")];
-    let (_, carried) = load_preset_genes(
-        &prefix,
-        PresetMode::Freeze,
-        &axis,
-        &ge::FeatureNameKind::Gene { delim: '_' },
-    )
-    .unwrap();
-    let c = carried.unwrap();
-    assert_eq!(c.names.len(), 3);
-    assert!(c.types.iter().all(|t| t.as_ref() == "gene"));
-}
-
 /// The flag may name the run's table or its manifest instead of its prefix,
 /// as `senna run`'s picker fills it: the types table is still found.
 #[test]
@@ -256,7 +243,7 @@ fn carried_fixture() -> CarriedRows {
 
 /// Appending keeps the run's rows first, its row axis and column names, and
 /// writes a types table over every row: the run's rows `gene` when it wrote
-/// no types of its own.
+/// no types of its own, and its own types when it did.
 #[test]
 fn appending_writes_the_full_table_and_types_every_row() {
     let dir = tempfile::tempdir().unwrap();
@@ -285,13 +272,9 @@ fn appending_writes_the_full_table_and_types_every_row() {
         .unwrap();
     let types: Vec<&str> = types.iter().map(|(_, t)| t.as_ref()).collect();
     assert_eq!(types, ["gene", "gene", "gene", "term"]);
-}
 
-/// A run that wrote its own types (fne) keeps them for its rows.
-#[test]
-fn appending_keeps_the_run_s_own_types() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("run").to_string_lossy().into_owned();
+    // A run that wrote its own types (fne) keeps them for its rows.
+    let out = dir.path().join("fne").to_string_lossy().into_owned();
     write_run_table(&out, "feature_embedding.parquet", "feature", &["A", "CT0"]);
     write_feature_types(
         &out,
@@ -504,61 +487,46 @@ fn write_table(dir: &std::path::Path, names: &[&str]) -> String {
     prefix
 }
 
-/// A plain gene table on an axis of count tracks: both tracks of a gene
-/// take the gene's row.
+/// A plain gene table on an axis of count tracks gives both tracks of a gene
+/// the gene's row; a table of tracks matches track for track; and, being
+/// permissive, a gene spelt in another case still finds its row.
 #[test]
-fn track_rows_take_their_genes_row_from_a_plain_table() {
-    let dir = tempfile::tempdir().unwrap();
-    let prefix = write_table(dir.path(), &["GENE1", "GENE2"]);
-    let axis: Vec<Box<str>> = [
-        "ENSG1_GENE2/count/spliced",
-        "ENSG1_GENE2/count/unspliced",
-        "ENSG3_GENE3/count/spliced",
-    ]
-    .iter()
-    .map(|s| Box::from(*s))
-    .collect();
+fn gene_and_track_rows_find_their_rows_in_the_table() {
     let kind = ge::FeatureNameKind::Gene { delim: '_' };
-    let f = load_preset_genes(&prefix, PresetMode::Init, &axis, &kind)
-        .unwrap()
-        .0;
-    assert_eq!(f.ids, vec![0, 1]);
-    assert_eq!(f.rows, vec![1.0, 1.0, 1.0, 1.0], "GENE2's row twice");
-}
-
-/// A table of tracks matches tracks by their full names.
-#[test]
-fn a_table_of_tracks_matches_track_for_track() {
-    let dir = tempfile::tempdir().unwrap();
-    let prefix = write_table(
-        dir.path(),
-        &["GENE1/count/spliced", "GENE1/count/unspliced"],
-    );
-    let axis: Vec<Box<str>> = ["GENE1/count/unspliced", "GENE1/count/spliced"]
-        .iter()
-        .map(|s| Box::from(*s))
-        .collect();
-    let kind = ge::FeatureNameKind::Gene { delim: '_' };
-    let f = load_preset_genes(&prefix, PresetMode::Init, &axis, &kind)
-        .unwrap()
-        .0;
-    assert_eq!(f.ids, vec![0, 1]);
-    assert_eq!(f.rows, vec![1.0, 1.0, 0.0, 0.0], "each track its own row");
-}
-
-/// Permissive: a gene spelt in another case still finds its row.
-#[test]
-fn a_gene_spelt_in_another_case_finds_its_row() {
-    let dir = tempfile::tempdir().unwrap();
-    let prefix = write_table(dir.path(), &["Gene1", "Gene2"]);
-    let axis: Vec<Box<str>> = ["ENSG2_GENE2", "ENSG1_GENE1/count/spliced"]
-        .iter()
-        .map(|s| Box::from(*s))
-        .collect();
-    let kind = ge::FeatureNameKind::Gene { delim: '_' };
-    let f = load_preset_genes(&prefix, PresetMode::Init, &axis, &kind)
-        .unwrap()
-        .0;
-    assert_eq!(f.ids, vec![0, 1]);
-    assert_eq!(f.rows, vec![1.0, 1.0, 0.0, 0.0]);
+    for (label, table, axis, ids, rows) in [
+        (
+            "GENE2's row twice",
+            &["GENE1", "GENE2"][..],
+            &[
+                "ENSG1_GENE2/count/spliced",
+                "ENSG1_GENE2/count/unspliced",
+                "ENSG3_GENE3/count/spliced",
+            ][..],
+            [0, 1],
+            [1.0, 1.0, 1.0, 1.0],
+        ),
+        (
+            "each track its own row",
+            &["GENE1/count/spliced", "GENE1/count/unspliced"],
+            &["GENE1/count/unspliced", "GENE1/count/spliced"],
+            [0, 1],
+            [1.0, 1.0, 0.0, 0.0],
+        ),
+        (
+            "another case",
+            &["Gene1", "Gene2"],
+            &["ENSG2_GENE2", "ENSG1_GENE1/count/spliced"],
+            [0, 1],
+            [1.0, 1.0, 0.0, 0.0],
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = write_table(dir.path(), table);
+        let axis: Vec<Box<str>> = axis.iter().map(|s| Box::from(*s)).collect();
+        let f = load_preset_genes(&prefix, PresetMode::Init, &axis, &kind)
+            .unwrap()
+            .0;
+        assert_eq!(f.ids, ids, "{label}");
+        assert_eq!(f.rows, rows, "{label}");
+    }
 }

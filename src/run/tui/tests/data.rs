@@ -16,53 +16,51 @@ fn some(v: &[Option<&str>]) -> Vec<Option<PathBuf>> {
 }
 
 #[test]
-fn batch_files_pair_by_name_whatever_their_order() {
-    let data = paths(&["d/s1.zarr.zip", "d/s2.zarr.zip"]);
-    let got = assign(&data, &paths(&["d/s2_batch.tsv", "d/s1_batch.tsv"]));
-    assert_eq!(
-        got,
+fn batch_files_pair_by_name_and_in_order_only_when_nothing_matches() {
+    for (label, data, labels, want, paired) in [
         (
-            some(&[Some("d/s1_batch.tsv"), Some("d/s2_batch.tsv")]),
-            Paired::ByName(2)
-        )
-    );
-}
-
-#[test]
-fn names_alike_only_in_their_start_are_not_crossed() {
-    // Data listed lib2 first: a shared `lib` start must not decide.
-    let data = paths(&["lib2.zarr", "lib1.zarr"]);
-    let got = assign(&data, &paths(&["lib_batch_1.txt", "lib_batch_2.txt"]));
-    assert_eq!(
-        got,
+            "by name, whatever their order",
+            &["d/s1.zarr.zip", "d/s2.zarr.zip"][..],
+            &["d/s2_batch.tsv", "d/s1_batch.tsv"][..],
+            &[Some("d/s1_batch.tsv"), Some("d/s2_batch.tsv")][..],
+            Paired::ByName(2),
+        ),
         (
-            some(&[Some("lib_batch_2.txt"), Some("lib_batch_1.txt")]),
-            Paired::ByName(2)
-        )
-    );
-}
-
-#[test]
-fn a_number_that_runs_on_is_another_sample() {
-    let data = paths(&["s1.zarr", "s2.zarr"]);
-    let got = assign(&data, &paths(&["s10_batch.tsv", "s2_batch.tsv"]));
-    assert_eq!(
-        got,
-        (some(&[None, Some("s2_batch.tsv")]), Paired::Partly(1))
-    );
-}
-
-#[test]
-fn unrelated_names_go_in_order_only_when_nothing_matches() {
-    let data = paths(&["a.zarr", "b.zarr"]);
-    assert_eq!(
-        assign(&data, &paths(&["x.tsv", "y.tsv"])),
-        (some(&[Some("x.tsv"), Some("y.tsv")]), Paired::InOrder)
-    );
-    assert_eq!(
-        assign(&data, &paths(&["x.tsv"])),
-        (some(&[None, None]), Paired::Partly(0))
-    );
+            // Data listed lib2 first: a shared `lib` start must not decide.
+            "names alike only in their start are not crossed",
+            &["lib2.zarr", "lib1.zarr"],
+            &["lib_batch_1.txt", "lib_batch_2.txt"],
+            &[Some("lib_batch_2.txt"), Some("lib_batch_1.txt")],
+            Paired::ByName(2),
+        ),
+        (
+            "a number that runs on is another sample",
+            &["s1.zarr", "s2.zarr"],
+            &["s10_batch.tsv", "s2_batch.tsv"],
+            &[None, Some("s2_batch.tsv")],
+            Paired::Partly(1),
+        ),
+        (
+            "unrelated names go in order",
+            &["a.zarr", "b.zarr"],
+            &["x.tsv", "y.tsv"],
+            &[Some("x.tsv"), Some("y.tsv")],
+            Paired::InOrder,
+        ),
+        (
+            "unrelated and too few: none",
+            &["a.zarr", "b.zarr"],
+            &["x.tsv"],
+            &[None, None],
+            Paired::Partly(0),
+        ),
+    ] {
+        assert_eq!(
+            assign(&paths(data), &paths(labels)),
+            (some(want), paired),
+            "{label}"
+        );
+    }
 }
 
 #[test]

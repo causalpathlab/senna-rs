@@ -210,7 +210,3 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
     ]
 }
-
-#[cfg(test)]
-#[path = "../tests/mcp_fit.rs"]
-mod tests;

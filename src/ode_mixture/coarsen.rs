@@ -107,6 +107,7 @@ pub fn coarse_reads(fc: &FeatureCoarsening, reads: &Reads) -> Reads {
 
 /// Every group as one gene: its first gene's rates and embedding, its
 /// baseline `log Σ_{g∈K} e^{b_g}`.
+#[cfg(test)]
 pub fn coarse_params(fc: &FeatureCoarsening, params: &Params) -> Params {
     let first: Vec<usize> = fc.coarse_to_fine.iter().map(|genes| genes[0]).collect();
     let base = fc

@@ -24,27 +24,34 @@ fn adj_method_is_listed_in_help() {
     );
 }
 
-/// The masked objective is the regularizer; `masked-vae` no longer weighs a KL.
-mod no_kl {
-    use super::{Cli, MaskedTopicArgs};
-    use clap::Parser;
-    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
-
-    #[test]
-    fn kl_weight_is_not_a_flag_any_more() {
-        let r = Cli::try_parse_from([
-            "senna-masked-vae",
-            "d.zarr",
-            "-o",
-            "out",
-            "--kl-weight",
-            "0.1",
-        ]);
+/// Retired flags are rejected, not silently ignored: accepting one would let
+/// a user believe they had changed the model.
+/// - `--kl-weight`: the masked objective is the regularizer, no KL is weighed;
+/// - `--context-size`: the encoder reads every gene, there is no window;
+/// - the four query-decoder flags: the head is not wired into a command.
+#[test]
+fn retired_flags_are_not_flags_any_more() {
+    for flag in [
+        &["--kl-weight", "0.1"][..],
+        &["--context-size", "1000"],
+        &["--query-decoder"],
+        &["--query-rank", "32"],
+        &["--query-extra", "64"],
+        &["--query-penalty", "1.0"],
+    ] {
+        let mut argv = vec!["senna-masked-vae", "d.zarr", "-o", "out"];
+        argv.extend_from_slice(flag);
         assert!(
-            r.is_err(),
-            "--kl-weight must be rejected, not silently ignored"
+            Cli::try_parse_from(argv).is_err(),
+            "{flag:?} must be rejected, not silently ignored"
         );
     }
+}
+
+/// The masked objective is the regularizer; `masked-vae` no longer weighs a KL.
+mod no_kl {
+    use super::MaskedTopicArgs;
+    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
 
     #[test]
     fn a_fit_recorded_with_a_kl_weight_still_replays() {
@@ -71,24 +78,6 @@ mod window_free {
         let mut argv = vec!["senna-masked-vae", "d.zarr", "-o", "out"];
         argv.extend_from_slice(extra);
         Cli::try_parse_from(argv).expect("parses").args
-    }
-
-    /// `--context-size` is not a flag any more. Silently accepting it would let
-    /// a user believe they had changed what the encoder reads.
-    #[test]
-    fn context_size_is_not_a_flag_any_more() {
-        let r = Cli::try_parse_from([
-            "senna-masked-vae",
-            "d.zarr",
-            "-o",
-            "out",
-            "--context-size",
-            "1000",
-        ]);
-        assert!(
-            r.is_err(),
-            "--context-size must be rejected, not silently ignored"
-        );
     }
 
     /// An old run manifest still carries `context_size`, and `senna update` has
@@ -144,28 +133,8 @@ mod window_free {
 /// The query decoder is not wired into the masked family any more. The library
 /// module stays (for re-wiring later), but nothing reaches it from a command.
 mod query_unwired {
-    use super::{Cli, MaskedTopicArgs};
-    use clap::Parser;
+    use super::MaskedTopicArgs;
     use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
-
-    /// None of the four flags is a flag any more. Silently accepting one would
-    /// let a user believe they had turned a head on.
-    #[test]
-    fn the_query_flags_are_not_flags_any_more() {
-        for flag in [
-            vec!["--query-decoder"],
-            vec!["--query-rank", "32"],
-            vec!["--query-extra", "64"],
-            vec!["--query-penalty", "1.0"],
-        ] {
-            let mut argv = vec!["senna-masked-vae", "d.zarr", "-o", "out"];
-            argv.extend_from_slice(&flag);
-            assert!(
-                Cli::try_parse_from(argv).is_err(),
-                "{flag:?} must be rejected, not silently ignored"
-            );
-        }
-    }
 
     /// An old run manifest carries all four, and `senna update` has to be able
     /// to replay it. The values no longer apply; the record must still

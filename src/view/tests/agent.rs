@@ -140,6 +140,14 @@ fn changing_the_view_by_hand_pauses_following_and_w_resumes_it() {
 
     app.handle(key('c'));
     assert!(!app.agent.as_ref().unwrap().following());
+    // W brings back the agent's view even when it did not change.
+    let mine = app.scene.colour;
+    app.handle(key('W'));
+    tick(&mut app);
+    assert_ne!(app.scene.colour, mine);
+    assert_eq!(app.scene.focused_name().as_deref(), Some("C1"));
+
+    app.handle(key('c'));
     let mine = app.scene.colour;
     server.show(view("cluster", "C0", None));
     tick(&mut app);
@@ -217,20 +225,6 @@ fn the_pane_lists_the_newest_calls_even_paused_and_says_when_it_ended() {
     tick(&mut app);
     assert_eq!(app.agent.as_ref().unwrap().rows()[0], "agent · ended");
     assert!(app.side_lines().unwrap()[0].starts_with("agent"));
-}
-
-#[test]
-fn w_brings_back_the_agent_s_view_even_when_it_did_not_change() {
-    let server = Server::new();
-    server.show(view("cluster", "C1", None));
-    let mut app = watching(&server);
-    tick(&mut app);
-    app.handle(key('c'));
-    let mine = app.scene.colour;
-    app.handle(key('W'));
-    tick(&mut app);
-    assert_ne!(app.scene.colour, mine);
-    assert_eq!(app.scene.focused_name().as_deref(), Some("C1"));
 }
 
 #[test]

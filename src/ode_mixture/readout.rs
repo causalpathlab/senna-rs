@@ -35,7 +35,9 @@ pub struct CellReadout {
     pub time_hi: Vec<f64>,
     /// `[C × G]` the posterior mean velocities, `dū/dt` and `ds̄/dt`
     /// ([`Params::velocities`]), in the levels' units.
+    #[cfg(test)]
     pub velocity_u: DMatrix<f64>,
+    #[cfg(test)]
     pub velocity_s: DMatrix<f64>,
     /// `[C × G]` the posterior mean of `d log(ū + s̄)/dt`, every gene's
     /// relative rate of change on both tracks.
@@ -145,7 +147,9 @@ pub fn read_cells(cells: &Reads, mode: &Mode) -> CellReadout {
                 }
             })
             .collect(),
+        #[cfg(test)]
         velocity_u: nan_rows(du.transpose() * &post),
+        #[cfg(test)]
         velocity_s: nan_rows(ds.transpose() * &post),
         velocity_log: nan_rows(dlog.transpose() * &post),
     }

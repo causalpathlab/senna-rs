@@ -32,45 +32,52 @@ fn tolerant_alignment_refuses_an_ambiguous_repeat() {
     assert_eq!(tolerant_align(&names(&["c2"]), &extra).unwrap(), vec![0]);
 }
 
-#[test]
-fn rank_counts_the_strictly_closer_points() {
-    let sorted = [0.5, 1.0, 1.0, 2.0];
-    assert_eq!(rank_of(&sorted, 0.5), 1);
-    assert_eq!(rank_of(&sorted, 1.0), 2);
-    assert_eq!(rank_of(&sorted, 2.0), 4);
-}
-
-/// Four points on a line, 0 1 2 10: the pair (0, 3) is far from both ends.
+/// Four points on a line, 0 1 2 10: the pair (0, 3) is far from both ends. A
+/// point's rank is the count of strictly closer points (ties share a rank),
+/// a pair's rank the smaller directional one, and a pair with a pseudobulk
+/// without cells has none.
 #[test]
 fn pair_rank_is_the_smaller_directional_rank() {
+    let sorted = [0.5, 1.0, 1.0, 2.0];
+    assert_eq!(
+        [0.5, 1.0, 2.0].map(|x| rank_of(&sorted, x)),
+        [1, 2, 4],
+        "rank counts the strictly closer points"
+    );
     let view = line_view(&[0.0, 1.0, 2.0, 10.0], &[true; 4]);
     // (2,3): 3 is 2's third neighbour, but 2 is 3's first.
     assert_eq!(view.pair_ranks(&[(0, 1), (2, 3), (0, 3)]), vec![1, 1, 3]);
-}
-
-#[test]
-fn pair_rank_is_unknown_without_cells() {
     let view = line_view(&[0.0, 1.0, 2.0], &[true, false, true]);
-    assert_eq!(view.pair_ranks(&[(0, 1), (0, 2)]), vec![u32::MAX, 1]);
+    assert_eq!(
+        view.pair_ranks(&[(0, 1), (0, 2)]),
+        vec![u32::MAX, 1],
+        "unknown without cells"
+    );
 }
 
+/// Each point's nearest, one row per case; a pseudobulk without cells is
+/// skipped, and indices stay those of the level.
 #[test]
 fn top_k_pairs_are_each_points_nearest() {
-    let view = line_view(&[0.0, 1.0, 2.0, 10.0], &[true; 4]);
-    let mut p = view.top_k_pairs(1);
-    p.sort_unstable();
-    p.dedup();
-    assert_eq!(p, vec![(0, 1), (1, 2), (2, 3)]);
-}
-
-/// A pseudobulk without cells is skipped, and indices stay those of the level.
-#[test]
-fn top_k_pairs_skip_pseudobulks_without_cells() {
-    let view = line_view(&[0.0, 99.0, 1.0, 5.0], &[true, false, true, true]);
-    let mut p = view.top_k_pairs(1);
-    p.sort_unstable();
-    p.dedup();
-    assert_eq!(p, vec![(0, 2), (2, 3)]);
+    for (label, x, valid, want) in [
+        (
+            "all with cells",
+            [0.0, 1.0, 2.0, 10.0],
+            [true; 4],
+            vec![(0, 1), (1, 2), (2, 3)],
+        ),
+        (
+            "one without cells",
+            [0.0, 99.0, 1.0, 5.0],
+            [true, false, true, true],
+            vec![(0, 2), (2, 3)],
+        ),
+    ] {
+        let mut p = line_view(&x, &valid).top_k_pairs(1);
+        p.sort_unstable();
+        p.dedup();
+        assert_eq!(p, want, "{label}");
+    }
 }
 
 #[test]
@@ -116,23 +123,17 @@ fn parameters_are_checked() {
 
 // ---- Consensus ------------------------------------------------------------------
 
+/// A model is answered by its committee only: its own rank never votes. The
+/// answer is the median (the middle pair averaged) of the committee's known
+/// ranks.
 #[test]
-fn known_ranks_skip_unknown_and_sort() {
+fn the_answer_is_the_committees_median() {
     let ranks = vec![vec![9], vec![u32::MAX], vec![3], vec![5]];
     assert_eq!(known_ranks(&ranks, &[0, 1, 2, 3], 0), vec![3, 5, 9]);
     assert_eq!(known_ranks(&ranks, &[1, 3], 0), vec![5]);
-}
-
-#[test]
-fn median_averages_the_middle_pair() {
     assert_eq!(median(&[3, 5, 9]), Some(5.0));
     assert_eq!(median(&[3, 9]), Some(6.0));
     assert_eq!(median(&[]), None);
-}
-
-/// A model is answered by its committee only: its own rank never votes.
-#[test]
-fn the_answer_is_the_committees_median() {
     let ranks = vec![vec![1, 5], vec![60, u32::MAX], vec![70, 9], vec![10, 11]];
     assert_eq!(answers(&ranks, &[1, 2]), vec![Some(65.0), Some(9.0)]);
     assert_eq!(answers(&ranks, &[1, 2, 3]), vec![Some(60.0), Some(10.0)]);
@@ -162,43 +163,46 @@ fn merges_of(ranks: &[Vec<u32>], model: usize) -> Vec<bool> {
     merges(&ranks[model], &answers(ranks, &others), B)
 }
 
-/// Two identical models never disagree, so neither merges anything.
+/// The merge rule, one row per case, every model's merges against the rest:
+/// - `agreeing`: two identical models never disagree, so neither merges;
+/// - `near vs far`: a model merges a pair it keeps near while the others
+///   hold it far. Holding far what the others keep near is not a critique:
+///   that model is usually right;
+/// - `majority`: with three models the majority decides, only the lone
+///   model merges;
+/// - `without cells`: a model without cells does not merge.
+///
+/// The report card, the merge rate, is merges over near pairs.
 #[test]
-fn agreeing_models_do_not_merge() {
-    let ranks = vec![vec![1, 2, 60], vec![1, 2, 60]];
-    assert_eq!(merges_of(&ranks, 0), vec![false; 3]);
-    assert_eq!(near_count(&ranks[0], B), 2);
-}
-
-/// A model merges a pair it keeps near while the others hold it far. Holding
-/// far what the others keep near is not a critique: that model is usually right.
-#[test]
-fn only_keeping_near_what_the_others_hold_far_is_a_merge() {
-    let ranks = vec![vec![3, 50], vec![60, 2]];
-    assert_eq!(merges_of(&ranks, 0), vec![true, false]);
-    assert_eq!(merges_of(&ranks, 1), vec![false, true]);
-}
-
-/// With three models the majority decides: only the lone model merges.
-#[test]
-fn the_majority_does_not_merge() {
-    let ranks = vec![vec![3], vec![60], vec![70]];
-    assert_eq!(merges_of(&ranks, 0), vec![true]);
-    assert_eq!(merges_of(&ranks, 1), vec![false]);
-    assert_eq!(merges_of(&ranks, 2), vec![false]);
-}
-
-#[test]
-fn a_model_without_cells_does_not_merge() {
-    let ranks = vec![vec![u32::MAX], vec![2]];
-    assert_eq!(merges_of(&ranks, 0), vec![false]);
-    assert_eq!(merges_of(&ranks, 1), vec![false]);
-}
-
-/// The report card: how often a pair the model keeps near is one the others
-/// hold far.
-#[test]
-fn merge_rate_is_merges_over_near_pairs() {
+fn a_model_merges_only_what_it_keeps_near_and_the_others_hold_far() {
+    let cases = [
+        (
+            "agreeing",
+            vec![vec![1, 2, 60], vec![1, 2, 60]],
+            vec![vec![false; 3], vec![false; 3]],
+        ),
+        (
+            "near vs far",
+            vec![vec![3, 50], vec![60, 2]],
+            vec![vec![true, false], vec![false, true]],
+        ),
+        (
+            "majority",
+            vec![vec![3], vec![60], vec![70]],
+            vec![vec![true], vec![false], vec![false]],
+        ),
+        (
+            "without cells",
+            vec![vec![u32::MAX], vec![2]],
+            vec![vec![false], vec![false]],
+        ),
+    ];
+    for (label, ranks, want) in cases {
+        for (model, want) in want.iter().enumerate() {
+            assert_eq!(&merges_of(&ranks, model), want, "{label}: model {model}");
+        }
+    }
+    assert_eq!(near_count(&[1, 2, 60], B), 2);
     assert!((merge_rate(5, 20) - 0.25).abs() < 1e-6);
     assert!(merge_rate(0, 0).is_nan());
 }

@@ -43,6 +43,7 @@ pub fn step(u0: f64, s0: f64, alpha: f64, beta: f64, gamma: f64, delta: f64) -> 
 /// One gene's unspliced and spliced levels at every grid point, the grid
 /// step `h`, transcription `alpha[k]` over step `k` (the last value only
 /// sets nothing past the end), from steady state `α_0/β`, `α_0/γ`.
+#[cfg(test)]
 pub fn trajectory(alpha: &[f64], beta: f64, gamma: f64, h: f64) -> (Vec<f64>, Vec<f64>) {
     fine_trajectory(alpha, beta, gamma, h, 1)
 }

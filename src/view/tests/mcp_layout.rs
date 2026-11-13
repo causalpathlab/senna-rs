@@ -113,6 +113,12 @@ fn a_layout_senna_would_refuse_is_refused_before_it_runs() {
             "--umap-min-dist",
         ),
         (umap(json!({"args": ["--no-such-flag"]})), "--no-such-flag"),
+        // A method senna lacks for its points.
+        (json!({"run": "r.senna.json", "method": "pca"}), ""),
+        (
+            json!({"run": "r.senna.json", "method": "tsne", "target": "features"}),
+            "umap, phate",
+        ),
     ] {
         let e = format!("{:#}", layout(bad.clone()).unwrap_err());
         assert!(e.contains(said), "{bad}: {e}");
@@ -122,12 +128,4 @@ fn a_layout_senna_would_refuse_is_refused_before_it_runs() {
         json!({"spread": 2.0, "args": ["--umap-min-dist=1.5"]})
     ))
     .is_ok());
-}
-
-#[test]
-fn a_layout_method_senna_lacks_for_its_points_is_refused() {
-    assert!(layout(json!({"run": "r.senna.json", "method": "pca"})).is_err());
-    let e =
-        layout(json!({"run": "r.senna.json", "method": "tsne", "target": "features"})).unwrap_err();
-    assert!(format!("{e:#}").contains("umap, phate"), "{e:#}");
 }

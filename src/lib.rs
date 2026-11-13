@@ -22,6 +22,5 @@ pub mod marker_support;
 pub mod multiome_layout;
 pub mod output_helpers;
 pub mod pb_reference;
-pub mod principal_graph;
 pub mod run_manifest;
 pub mod senna_input;

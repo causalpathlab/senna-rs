@@ -262,6 +262,46 @@ fn simba_writes_bge_shaped_artifacts_and_a_manifest_downstream_commands_can_open
     assert_eq!(m.kind.cell_space(), CellSpace::Embedding);
     let geometry = m.outputs.geometry_latent().expect("an embedding table");
     assert!(geometry.ends_with("cell_embedding.parquet"), "{geometry}");
+
+    // `BgeEmbedding::open`: the simba gene table is a bge-shaped frozen side
+    // with no gene bias (a pure dot product), so the reader supplies zeros;
+    // the manifest path works as well as the prefix.
+    let model = crate::bge::score::BgeEmbedding::open(&out).expect("opens a simba run");
+    assert_eq!(model.h, 8);
+    assert_eq!(model.gene_names, genes.rows);
+    assert_eq!(model.b_feat.len(), 20);
+    assert!(model.b_feat.iter().all(|&b| b == 0.0), "no gene bias");
+    assert!(model.modules.is_none());
+    let via_manifest = crate::bge::score::BgeEmbedding::open(&format!("{out}.senna.json")).unwrap();
+    assert_eq!(via_manifest.gene_names, model.gene_names);
+
+    // The zero-bias default is simba's alone: a bge manifest over this run's
+    // gene table but without its bias table is still refused, because there
+    // the bias is half the model.
+    let bgeish = dir.path().join("bgeish").to_string_lossy().into_owned();
+    let mut bm = RunManifest::new(RunKind::Bge, &bgeish);
+    bm.outputs.feature_embedding = Some("run.feature_embedding.parquet".into());
+    bm.save(Path::new(&format!("{bgeish}.senna.json"))).unwrap();
+    let err = match crate::bge::score::BgeEmbedding::open(&bgeish) {
+        Ok(_) => panic!("a bge run without its bias must not open"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("feature_bias"), "{err}");
+
+    // `predict --bulk`: the gene axis a bulk table is oriented against is the
+    // simba gene table.
+    let axis = crate::predict::bulk::model_gene_axis(RunKind::Simba, &out).unwrap();
+    assert_eq!(axis, genes.rows);
+
+    // `deconvolve` takes only the gene axis, the width and the cell embedding
+    // from its source, all of which a simba run has.
+    let src = crate::deconvolve::source::EmbeddingSource::load(&format!("{out}.senna.json"))
+        .expect("a simba run is a deconvolve source");
+    assert_eq!(src.kind, RunKind::Simba);
+    assert_eq!(src.h, 8);
+    assert_eq!(src.feature_names.len(), 20);
+    assert_eq!(src.cell_embedding_paths.len(), 1);
+    assert!(src.cell_embedding_paths[0].ends_with("run.cell_embedding.parquet"));
 }
 
 //////////////////////////////////////////////////////////////////
@@ -304,41 +344,6 @@ fn mean_paired_cosine(a: &Mat, b: &Mat) -> f32 {
     stacked.view_mut((n, 0), (n, a.ncols())).copy_from(b);
     let c = cosines(&stacked);
     (0..n).map(|i| c[(i, n + i)]).sum::<f32>() / n as f32
-}
-
-/// The simba gene table is a bge-shaped frozen side with no gene bias: the
-/// score is a pure dot product, so the reader supplies zeros.
-#[test]
-fn bge_embedding_opens_a_simba_run_with_a_zero_gene_bias() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_data, out) = fast_run(dir.path());
-    let model = crate::bge::score::BgeEmbedding::open(&out).expect("opens a simba run");
-    assert_eq!(model.h, 8);
-    let genes = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
-    assert_eq!(model.gene_names, genes.rows);
-    assert_eq!(model.b_feat.len(), 20);
-    assert!(model.b_feat.iter().all(|&b| b == 0.0), "no gene bias");
-    assert!(model.modules.is_none());
-    // The manifest path works as well as the prefix.
-    let via_manifest = crate::bge::score::BgeEmbedding::open(&format!("{out}.senna.json")).unwrap();
-    assert_eq!(via_manifest.gene_names, model.gene_names);
-}
-
-/// The zero-bias default is simba's alone: a bge run whose bias table is
-/// missing is still refused, because there the bias is half the model.
-#[test]
-fn open_still_refuses_a_bge_run_without_its_bias() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_data, _out) = fast_run(dir.path());
-    let bgeish = dir.path().join("bgeish").to_string_lossy().into_owned();
-    let mut m = RunManifest::new(RunKind::Bge, &bgeish);
-    m.outputs.feature_embedding = Some("run.feature_embedding.parquet".into());
-    m.save(Path::new(&format!("{bgeish}.senna.json"))).unwrap();
-    let err = match crate::bge::score::BgeEmbedding::open(&bgeish) {
-        Ok(_) => panic!("a bge run without its bias must not open"),
-        Err(e) => e,
-    };
-    assert!(err.to_string().contains("feature_bias"), "{err}");
 }
 
 /// `predict` places new cells against the frozen gene table and lands the
@@ -449,16 +454,6 @@ fn impute_on_a_simba_run_recovers_each_groups_marker_block() {
     assert!(block_mean(20..40, 10..20) > block_mean(20..40, 0..10));
 }
 
-/// `predict --bulk` orients a table against the simba gene table.
-#[test]
-fn bulk_gene_axis_is_the_simba_gene_table() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_data, out) = fast_run(dir.path());
-    let axis = crate::predict::bulk::model_gene_axis(RunKind::Simba, &out).unwrap();
-    let genes = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
-    assert_eq!(axis, genes.rows);
-}
-
 /// `update` re-fits a simba run on the union of the recorded and the new
 /// data with the recorded configuration (no checkpoint, so not a warm start).
 #[test]
@@ -490,129 +485,78 @@ fn update_refits_a_simba_run_on_the_union() {
     );
 }
 
-/// `deconvolve` takes only the gene axis, the width and the cell embedding
-/// from its source, all of which a simba run has.
+/// A second simba run against an earlier run's gene table, one first run
+/// shared by every row:
+/// - `--freeze-feature-embedding`: the gene table is the first run's, row for
+///   row, while the cells still train;
+/// - `--lora-feature-embedding`: the gene table is the first run's plus a
+///   residual of the given rank that did move, at the first run's H, while
+///   the cells still train;
+/// - a pinned table wider than the data: its unmatched rows come out after
+///   the data's genes, unchanged, with a types table over every row, and the
+///   co-embed stays on the data's genes (a view onto the cells).
 #[test]
-fn deconvolve_source_loads_a_simba_run() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_data, out) = fast_run(dir.path());
-    let src = crate::deconvolve::source::EmbeddingSource::load(&format!("{out}.senna.json"))
-        .expect("a simba run is a deconvolve source");
-    assert_eq!(src.kind, RunKind::Simba);
-    assert_eq!(src.h, 8);
-    assert_eq!(src.feature_names.len(), 20);
-    assert_eq!(src.cell_embedding_paths.len(), 1);
-    assert!(src.cell_embedding_paths[0].ends_with("run.cell_embedding.parquet"));
-}
-
-/// `--freeze-feature-embedding` on simba: the gene table of a second run is
-/// the first run's, row for row, while the cells still train.
-#[test]
-fn simba_pins_its_gene_table_to_an_earlier_run() {
-    let dir = tempfile::tempdir().unwrap();
-    let (data, first) = fast_run(dir.path());
-    let second = dir.path().join("second").to_string_lossy().into_owned();
-    let mut argv = vec![
-        data.as_str(),
-        "--out",
-        &second,
-        "--n-hvg",
-        "0",
-        "--no-qc",
-        "--freeze-feature-embedding",
-        &first,
-        "--embedding-dim",
-        "auto",
-        "--seed",
-        "9",
-    ];
-    argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
-    argv.extend_from_slice(&["--epochs", "4"]);
-    run(&argv);
-    let g1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
-    let g2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
-    assert_eq!(g1.rows, g2.rows);
-    assert_eq!(g1.mat, g2.mat, "the gene table is pinned");
-    let c1 = Mat::from_parquet(&format!("{first}.cell_embedding.parquet")).unwrap();
-    let c2 = Mat::from_parquet(&format!("{second}.cell_embedding.parquet")).unwrap();
-    assert_ne!(c1.mat, c2.mat, "cells train");
-}
-
-/// `--lora-feature-embedding` on simba: the second run's gene table is the
-/// first run's plus a residual of the given rank that did move, at the first
-/// run's H, while the cells still train.
-#[test]
-fn simba_anchors_its_gene_table_with_a_low_rank_residual() {
-    let dir = tempfile::tempdir().unwrap();
-    let (data, first) = fast_run(dir.path());
-    let second = dir.path().join("second").to_string_lossy().into_owned();
-    let mut argv = vec![
-        data.as_str(),
-        "--out",
-        &second,
-        "--n-hvg",
-        "0",
-        "--no-qc",
-        "--lora-feature-embedding",
-        &first,
-        "--lora-rank",
-        "1",
-        "--lora-lr-ratio",
-        "4",
-        "--embedding-dim",
-        "auto",
-        "--seed",
-        "9",
-    ];
-    argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
-    argv.extend_from_slice(&["--epochs", "4"]);
-    run(&argv);
-    let g1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
-    let g2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
-    assert_eq!(g1.rows, g2.rows);
-    assert_eq!(g1.mat.ncols(), g2.mat.ncols(), "H taken from the table");
-    let resid = &g2.mat - &g1.mat;
-    let sv = resid.singular_values();
-    assert!(sv[0] > 1e-6, "the residual never moved");
-    assert!(sv[1] <= 1e-4 * sv[0], "the residual is not rank 1: {sv}");
-    let c1 = Mat::from_parquet(&format!("{first}.cell_embedding.parquet")).unwrap();
-    let c2 = Mat::from_parquet(&format!("{second}.cell_embedding.parquet")).unwrap();
-    assert_ne!(c1.mat, c2.mat, "cells train");
-}
-
-/// A pinned table wider than the data: its unmatched rows come out after the
-/// data's genes, unchanged, with a types table over every row.
-#[test]
-fn simba_carries_the_unmatched_rows_of_a_pinned_table_through() {
+fn simba_pins_anchors_and_carries_an_earlier_gene_table() {
     use crate::feature_preset::test_support::{assert_carried, widen};
     let dir = tempfile::tempdir().unwrap();
     let (data, first) = fast_run(dir.path());
-    let plus = dir.path().join("plus").to_string_lossy().into_owned();
-    let second = dir.path().join("second").to_string_lossy().into_owned();
-    let extra = widen(&format!("{first}.feature_embedding.parquet"), &plus);
-    let mut argv = vec![
-        data.as_str(),
-        "--out",
-        &second,
-        "--n-hvg",
-        "0",
-        "--no-qc",
-        "--freeze-feature-embedding",
-        &plus,
-        "--embedding-dim",
-        "auto",
-    ];
-    argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
-    argv.extend_from_slice(&["--epochs", "2"]);
-    run(&argv);
     let g1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+    let c1 = Mat::from_parquet(&format!("{first}.cell_embedding.parquet")).unwrap();
+    let second_run = |name: &str, extra: &[&str], epochs: &str| {
+        let out = dir.path().join(name).to_string_lossy().into_owned();
+        let mut argv = vec![data.as_str(), "--out", &out, "--n-hvg", "0", "--no-qc"];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["--embedding-dim", "auto"]);
+        argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
+        argv.extend_from_slice(&["--epochs", epochs]);
+        run(&argv);
+        let g2 = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
+        let c2 = Mat::from_parquet(&format!("{out}.cell_embedding.parquet")).unwrap();
+        (out, g2, c2)
+    };
+
+    // pins
+    let (_, g2, c2) = second_run(
+        "pinned",
+        &["--freeze-feature-embedding", &first, "--seed", "9"],
+        "4",
+    );
+    assert_eq!(g1.rows, g2.rows, "pins");
+    assert_eq!(g1.mat, g2.mat, "pins: the gene table is pinned");
+    assert_ne!(c1.mat, c2.mat, "pins: cells train");
+
+    // anchors
+    let (_, g2, c2) = second_run(
+        "anchored",
+        &[
+            "--lora-feature-embedding",
+            &first,
+            "--lora-rank",
+            "1",
+            "--lora-lr-ratio",
+            "4",
+            "--seed",
+            "9",
+        ],
+        "4",
+    );
+    assert_eq!(g1.rows, g2.rows, "anchors");
+    assert_eq!(g1.mat.ncols(), g2.mat.ncols(), "anchors: H from the table");
+    let sv = (&g2.mat - &g1.mat).singular_values();
+    assert!(sv[0] > 1e-6, "anchors: the residual never moved");
+    assert!(sv[1] <= 1e-4 * sv[0], "anchors: residual not rank 1: {sv}");
+    assert_ne!(c1.mat, c2.mat, "anchors: cells train");
+
+    // carries
+    let plus = dir.path().join("plus").to_string_lossy().into_owned();
+    let extra = widen(&format!("{first}.feature_embedding.parquet"), &plus);
+    let (second, _, _) = second_run("carried", &["--freeze-feature-embedding", &plus], "2");
     assert_carried(
         &second,
         &format!("{second}.feature_embedding.parquet"),
         g1.rows.len(),
         &extra,
     );
-    // The co-embed stays on the data's genes: it is a view onto the cells.
     let co = Mat::from_parquet(&format!("{second}.feature_coembedding.parquet")).unwrap();
-    assert_eq!(co.rows, g1.rows);
+    assert_eq!(co.rows, g1.rows, "carries: the co-embed stays on the data");
 }

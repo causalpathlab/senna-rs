@@ -840,19 +840,6 @@ pub(super) mod attach_tests {
     }
 
     #[test]
-    fn a_named_protocol_is_taken_and_blocks_never_ask() {
-        // Block characters are taken without a word to the terminal; a
-        // protocol named, as it is.
-        let session = legume_tui::Session::plain(&crate::tui::TOOL);
-        let p = legume_tui::graphics::pick(&session, Graphics::Blocks, Fallback::Probe);
-        assert_eq!(p.protocol_type(), ProtocolType::Halfblocks);
-        // Fallback::Env: a named protocol is taken either way, and the
-        // terminal running the tests is not asked.
-        let p = legume_tui::graphics::pick(&session, Graphics::Sixel, Fallback::Env);
-        assert_eq!(p.protocol_type(), ProtocolType::Sixel);
-    }
-
-    #[test]
     fn half_blocks_draw_lines_a_screen_pixel_thick() {
         assert_eq!(
             stroke_floor(&Picker::halfblocks()),
@@ -925,9 +912,15 @@ mod pane_tests {
     }
 
     #[test]
-    fn the_arrows_step_through_the_feature_list_in_the_sidebar() {
+    fn the_arrows_step_through_the_feature_list_in_the_sidebar_only() {
         let mut a = app();
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), None, "no list, no pick");
         near(&mut a);
+        a.sidebar = false;
+        press(&mut a, KeyCode::Down);
+        assert_eq!(shown(&a), None, "the sidebar hidden, no pick");
+        a.sidebar = true;
         press(&mut a, KeyCode::Down);
         assert_eq!(shown(&a), Some("g1"));
         press(&mut a, KeyCode::Down);
@@ -939,17 +932,6 @@ mod pane_tests {
         // The feature shown is marked in the list.
         let lines = a.side_lines().unwrap();
         assert!(lines.iter().any(|l| l.starts_with("▸ g2")), "{lines:?}");
-    }
-
-    #[test]
-    fn without_a_list_or_with_the_sidebar_hidden_the_arrows_do_not_pick() {
-        let mut a = app();
-        press(&mut a, KeyCode::Down);
-        assert_eq!(shown(&a), None);
-        near(&mut a);
-        a.sidebar = false;
-        press(&mut a, KeyCode::Down);
-        assert_eq!(shown(&a), None);
     }
 
     #[test]

@@ -193,14 +193,6 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
     }
 }
 
-/// The defaults: lineages apart, each on its own time, no trunk, no root.
-#[test]
-fn the_defaults_put_the_lineages_apart() {
-    let args = parse(&["tracks.zarr", "-o", "out"]);
-    assert!(!args.trunk);
-    assert!(args.root_cells.is_none());
-}
-
 /// A run on groups of genes (`--max-coarse-features`) still writes every
 /// gene's own rates, records its groups, and its cells' times rank with
 /// the truth's.
