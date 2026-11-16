@@ -124,8 +124,8 @@ fn a_groups_log_likelihood_is_its_genes_up_to_a_constant() {
             z[0] += 0.2;
         }
     }
-    for k in 0..GROUPS {
-        for &g in &groups.coarse_to_fine[k] {
+    for (k, members) in groups.coarse_to_fine.iter().enumerate() {
+        for &g in members {
             moved.beta[g] *= 1.3;
             moved.gamma[g] *= 0.8;
             moved.rho[g][0] += 0.1;

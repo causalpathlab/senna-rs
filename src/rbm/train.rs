@@ -223,7 +223,7 @@ pub fn fit(
     let b = Var::from_tensor(&Tensor::from_vec(log_shares, (1, f), dev)?)?;
     let c = Var::zeros((1, k), DType::F32, dev)?;
     let mut lambda = hidden.mean(&c.as_tensor().detach())?;
-    // The centred reads of the finest level's training rows start the weights.
+    // The centred reads of the finest level's training rows set the hidden units' scale.
     let finest_rows = finest.expected(blocks, &depth);
     {
         let mu_host: Vec<f32> = mu.flatten_all()?.to_vec1()?;

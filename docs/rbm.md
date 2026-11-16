@@ -125,8 +125,7 @@ widely, most often with binomial or poisson units.
 
 ## Starting point
 
-`ρ` starts on the leading singular directions of the centred pseudobulk reads
-(module vectors at their members' mean), and every hidden unit on its own
+`ρ` starts random (module vectors too), and every hidden unit on its own
 orthogonal row of `α`, all scaled together so the units' inputs vary by one
 on average across pseudobulks; a unit aimed at a weak direction starts small
 rather than amplified onto noise. Factors started small and equal grow along
