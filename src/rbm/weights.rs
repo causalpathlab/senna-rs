@@ -23,6 +23,8 @@ use std::ops::Range;
 
 /// Scale of the initial weights.
 const INIT_SD: f64 = 0.01;
+/// Standard deviation of a fresh `ρ` entry.
+const FRESH_SD: f32 = 0.1;
 
 pub struct Weights {
     /// `[R × H]`
@@ -49,8 +51,6 @@ pub struct Modules {
     pub mu: Var,
     /// `[R × H]` every row's own residual.
     pub residual: Var,
-    /// Every row's starting module.
-    pub labels: Vec<u32>,
     /// While set, the membership is held at its start.
     frozen: Cell<bool>,
 }
@@ -92,7 +92,7 @@ impl Weights {
     ) -> anyhow::Result<Self> {
         let mut rng = StdRng::seed_from_u64(seed);
         let r = row.iter().copied().max().map_or(0, |m| m as usize + 1);
-        let mut rho = normal(r * h, 0.1, &mut rng);
+        let mut rho = normal(r * h, f64::from(FRESH_SD), &mut rng);
         let mut mask = vec![0f32; r];
         let mut lora_rank = None;
         let mut pinned = false;
@@ -106,6 +106,22 @@ impl Weights {
                 let dst = id as usize;
                 rho[dst * h..(dst + 1) * h].copy_from_slice(&g.rows[i * h..(i + 1) * h]);
                 mask[dst] = 1.0;
+            }
+            // Rows the table leaves out start at its rows' typical length, so
+            // the table does not set α's scale with the new rows near zero.
+            let held = g
+                .rows
+                .chunks(h)
+                .map(|row| row.iter().map(|v| v * v).sum::<f32>().sqrt())
+                .sum::<f32>()
+                / g.ids.len().max(1) as f32;
+            if held > 0.0 {
+                let lift = held / (FRESH_SD * (h as f32).sqrt());
+                for (row, &m) in rho.chunks_mut(h).zip(&mask) {
+                    if m == 0.0 {
+                        row.iter_mut().for_each(|v| *v *= lift);
+                    }
+                }
             }
             pinned = g.mode.pins();
             lora_rank = g.mode.lora().map(|s| s.rank);
@@ -186,7 +202,6 @@ impl Weights {
                 &dev,
             )?)?,
             residual: Var::zeros((r, h), DType::F32, &dev)?,
-            labels,
             frozen: Cell::new(false),
         });
         Ok(self)
@@ -221,11 +236,10 @@ impl Weights {
         Ok(total)
     }
 
-    /// Start from the data: the free rows of `ρ` on the leading singular
-    /// directions of the centred reads `x` `[P × F]` (a row of `ρ` shared by
-    /// several features takes their mean), every hidden unit on its own
-    /// orthogonal row of `α`, scaled together so the units' inputs vary by
-    /// one on average over the rows of `x`. Factors started small and equal grow along one direction
+    /// Start the hidden units from the data: every one on its own orthogonal
+    /// row of `α`, scaled together so the units' inputs vary by one on average
+    /// over the rows of `x`. `ρ` (or the module vectors) keeps its random
+    /// start. Factors started small and equal grow along one direction
     /// together, and every unit ends on it; this keeps them apart.
     pub fn start_from(
         &self,
@@ -233,76 +247,8 @@ impl Weights {
         ranges: &[Range<usize>],
         seed: u64,
     ) -> anyhow::Result<()> {
-        use legume_numeric::matrix::traits::*;
         let dev = self.rho.device().clone();
-        let (r, h) = self.rho.dims2()?;
-        let row: Vec<u32> = self.row.to_vec1()?;
-        let mask: Vec<f32> = match self.given.as_ref() {
-            Some((_, m)) => m.flatten_all()?.to_vec1()?,
-            None => vec![0.0; r],
-        };
-        if mask.contains(&0.0) {
-            let (u, _, _) = x.transpose().rsvd(h)?;
-            let mut rho = self.rho.as_tensor().to_vec2::<f32>()?;
-            let mut fresh = vec![vec![0f32; h]; r];
-            let mut count = vec![0f32; r];
-            for (f, &ri) in row.iter().enumerate() {
-                let ri = ri as usize;
-                for d in 0..u.ncols().min(h) {
-                    fresh[ri][d] += u[(f, d)];
-                }
-                count[ri] += 1.0;
-            }
-            // Rows a given table leaves out start at its rows' typical length,
-            // so the table does not set α's scale with the new rows near zero.
-            let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let mean_norm = |rows: &mut dyn Iterator<Item = f32>| {
-                let (s, n) = rows.fold((0f32, 0f32), |(s, n), x| (s + x, n + 1.0));
-                (n > 0.0).then(|| s / n)
-            };
-            for ri in 0..r {
-                if count[ri] > 0.0 {
-                    fresh[ri].iter_mut().for_each(|v| *v /= count[ri]);
-                }
-            }
-            let given_len =
-                mean_norm(&mut (0..r).filter(|&ri| mask[ri] > 0.0).map(|ri| norm(&rho[ri])));
-            let fresh_len = mean_norm(
-                &mut (0..r)
-                    .filter(|&ri| mask[ri] == 0.0 && count[ri] > 0.0)
-                    .map(|ri| norm(&fresh[ri])),
-            );
-            let lift = match (given_len, fresh_len) {
-                (Some(g), Some(f)) if f > 0.0 => g / f,
-                _ => 1.0,
-            };
-            for ri in 0..r {
-                if mask[ri] == 0.0 && count[ri] > 0.0 {
-                    rho[ri] = fresh[ri].iter().map(|v| v * lift).collect();
-                }
-            }
-            match self.modules.as_ref() {
-                // Every module vector at the mean of its members' rows.
-                Some(m) => {
-                    let n = m.mu.dim(0)?;
-                    let mut mu = vec![vec![0f32; h]; n];
-                    let mut size = vec![0f32; n];
-                    for (ri, &l) in m.labels.iter().enumerate() {
-                        for d in 0..h {
-                            mu[l as usize][d] += rho[ri][d];
-                        }
-                        size[l as usize] += 1.0;
-                    }
-                    for (row, &c) in mu.iter_mut().zip(&size) {
-                        row.iter_mut().for_each(|v| *v /= c.max(1.0));
-                    }
-                    m.mu.set(&Tensor::from_vec(mu.concat(), (n, h), &dev)?)?;
-                }
-                None => self
-                    .rho
-                    .set(&Tensor::from_vec(rho.concat(), (r, h), &dev)?)?,
-            }
-        }
+        let (_, h) = self.rho.dims2()?;
         let mut rng = StdRng::seed_from_u64(seed);
         for a in &self.alpha {
             let k = a.dim(0)?;

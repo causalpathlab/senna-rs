@@ -138,12 +138,8 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         // Component-axis bookkeeping for the output table, prefixed per chain so
         // pooled partitions stay distinguishable.
         let coords = reference.coords;
-        for m in 0..coords.nrows() {
-            comp_names.push(reference::comp_label(
-                n_chains,
-                chain,
-                &reference.comp_names[m],
-            ));
+        for (m, name) in reference.comp_names.iter().enumerate() {
+            comp_names.push(reference::comp_label(n_chains, chain, name));
             comp_coords.extend(coords.row(m).iter().copied());
         }
     }

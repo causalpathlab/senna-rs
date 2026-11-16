@@ -506,10 +506,15 @@ fn write_pb_embeddings(
     let mut level_col: Vec<i32> = Vec::with_capacity(n);
     let mut batch_col: Vec<Box<str>> = Vec::with_capacity(n);
     for (level, l) in levels.iter().enumerate() {
-        for i in 0..l.e_pb.nrows() {
+        assert_eq!(
+            l.batch.len(),
+            l.e_pb.nrows(),
+            "one batch label per pseudobulk"
+        );
+        for (i, &batch) in l.batch.iter().enumerate() {
             rows.push(format!("l{level}:pb{i}").into_boxed_str());
             level_col.push(level as i32);
-            batch_col.push(match l.batch[i] {
+            batch_col.push(match batch {
                 u32::MAX => Box::from(""),
                 b => batch_names[b as usize].clone(),
             });
