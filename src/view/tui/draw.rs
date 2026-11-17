@@ -55,12 +55,12 @@ impl App {
         let w = usize::from(status.width).saturating_sub(2);
         let mut lines = vec![Line::from(format!(" {first}"))];
         lines.extend(
-            crate::tui::wrap_keys(main, w)
+            legume_tui::text::wrap_keys(main, w)
                 .into_iter()
                 .map(|l| Line::from(format!(" {l}"))),
         );
         lines.extend(
-            crate::tui::wrap_keys(more, w)
+            legume_tui::text::wrap_keys(more, w)
                 .into_iter()
                 .map(|l| Line::from(Span::styled(format!(" {l}"), hint()))),
         );
@@ -187,8 +187,7 @@ impl App {
             CHROME.popup(f, map, lines, 72, At::Middle);
         }
 
-        let tall = usize::from(map.height).saturating_sub(2);
-        if let Some(lines) = self.modal.as_ref().and_then(|m| m.browser_lines(tall)) {
+        if let Some(lines) = self.modal.as_ref().and_then(|m| m.browser_lines(map, 100)) {
             CHROME.popup(f, map, lines, 100, At::Middle);
         }
 

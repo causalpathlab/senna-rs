@@ -83,7 +83,7 @@ impl App {
         }
         f.render_widget(Paragraph::new(footer), status);
         if let Some(b) = &self.browser {
-            let lines = b.lines(usize::from(area.height).saturating_sub(2));
+            let lines = crate::tui::style::browser_lines(b, area, 110);
             CHROME.popup(f, area, lines, 110, At::Middle);
         } else if self.confirm.is_some() {
             let rows = usize::from(area.height).saturating_sub(4);
@@ -248,7 +248,7 @@ impl App {
             }
             body.push(Line::from(Span::styled(format!(" {place}"), bold())));
             for (k, what) in keys {
-                for (i, l) in crate::tui::key_lines(3, &k, key_w, what, width)
+                for (i, l) in legume_tui::text::key_lines(3, &k, key_w, what, width)
                     .into_iter()
                     .enumerate()
                 {
@@ -339,7 +339,7 @@ impl App {
         ))];
         for text in [keys, everywhere] {
             lines.extend(
-                crate::tui::wrap_keys(&text, width)
+                legume_tui::text::wrap_keys(&text, width)
                     .into_iter()
                     .map(|l| Line::from(Span::styled(format!(" {l}"), hint()))),
             );
@@ -548,7 +548,7 @@ impl App {
             if r.tool == Tool::Mung {
                 // A note under the row, wrapped by word under its name.
                 let note = "runs first; once it is done you see its clones and choose whether the fits get --cnv-clones";
-                for l in crate::tui::wrap_words(note, w.saturating_sub(6)) {
+                for l in legume_tui::text::wrap_words(note, w.saturating_sub(6)) {
                     lines.push(Line::from(Span::styled(format!("      {l}"), hint())));
                 }
                 lines.push(Line::from(""));
@@ -902,7 +902,7 @@ impl App {
                     hint(),
                 ),
             ]));
-            let lines = super::script::command_lines(&p.job.command(), p.job.tool);
+            let lines = super::script::command_lines(&p.job.command(), &p.job.out, p.job.tool);
             let n = lines.len();
             body.extend(lines.into_iter().enumerate().map(|(k, l)| {
                 let indent = if k == 0 { "   " } else { "     " };

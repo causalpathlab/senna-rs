@@ -804,7 +804,7 @@ fn read_scenes(
         .as_deref()
         .is_some_and(|c| c.eq_ignore_ascii_case("batch"));
     let aside = session.is_some() && !wants_batch;
-    let mut data = crate::tui::busy::during_inline(&what, || {
+    let mut data = legume_tui::work::during_inline(&what, || {
         from.par_iter()
             .map(|f| Dataset::load(f))
             .collect::<anyhow::Result<Vec<_>>>()
@@ -1050,7 +1050,7 @@ mod tests {
         }));
         s.poll_loads();
         s.suggest();
-        assert_eq!(s.note.take().as_deref(), Some(crate::tui::LOADING));
+        assert_eq!(s.note.take().as_deref(), Some(legume_tui::work::LOADING));
         assert!(s.loading_line().is_some_and(|l| l.contains("model tables")));
         // Nothing new yet: nothing done again.
         assert!(!s.poll_loads());

@@ -5,8 +5,8 @@
 
 use super::browse::{Extra, Missing};
 use super::*;
-use crate::tui::browse::{Browser, Outcome};
 use crate::view::activity::Activity;
+use legume_tui::browse::{Browser, Outcome};
 use senna::run_manifest::{self, RunManifest};
 use std::path::{Path, PathBuf};
 

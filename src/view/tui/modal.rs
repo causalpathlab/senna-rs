@@ -3,7 +3,7 @@
 use super::browse::{Extra, Missing, Panels};
 use super::help::Context;
 use super::*;
-use crate::tui::browse::Browser;
+use legume_tui::browse::Browser;
 
 pub(super) enum Modal {
     /// Feature search: the query and its current matches.
@@ -53,12 +53,14 @@ impl Modal {
         })
     }
 
-    /// The file browser's popup, when this is one.
-    pub(super) fn browser_lines(&self, tall: usize) -> Option<Vec<Line<'static>>> {
+    /// The file browser's popup at most `max_w` wide over `area`, when
+    /// this is one.
+    pub(super) fn browser_lines(&self, area: Rect, max_w: u16) -> Option<Vec<Line<'static>>> {
+        use crate::tui::style::browser_lines;
         match self {
-            Modal::MarkersFile(b) => Some(b.lines(tall)),
-            Modal::DataFile(b, _) => Some(b.lines(tall)),
-            Modal::ExtraFile(b) => Some(b.lines(tall)),
+            Modal::MarkersFile(b) => Some(browser_lines(b, area, max_w)),
+            Modal::DataFile(b, _) => Some(browser_lines(b, area, max_w)),
+            Modal::ExtraFile(b) => Some(browser_lines(b, area, max_w)),
             Modal::Search(..) | Modal::Prompt(_) | Modal::Submit(_) | Modal::Recompute(..) => None,
         }
     }

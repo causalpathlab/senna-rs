@@ -126,6 +126,7 @@ fn changed_rows_reach_the_command_line_as_clap_takes_them() {
             "3,4",
             "--names",
             "a",
+            "--names",
             "b"
         ]
     );

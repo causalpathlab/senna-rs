@@ -35,7 +35,12 @@ impl App {
             // The page scrolls; esc, q or ? closes it, other keys do nothing.
             match k.code {
                 KeyCode::Esc | KeyCode::Char('q' | '?') => self.help = false,
-                _ => match crate::tui::list_move(&k, self.help_scroll, self.help_max.get() + 1) {
+                _ => match legume_tui::keys::list_move(
+                    &k,
+                    self.help_scroll,
+                    self.help_max.get() + 1,
+                    true,
+                ) {
                     Some(at) => self.help_scroll = at,
                     None => return false,
                 },
@@ -56,7 +61,7 @@ impl App {
             }
         }
         // With a feature list in the sidebar, the arrows go through it.
-        if crate::tui::list_delta(&k).is_some_and(|d| self.step_pane(d)) {
+        if legume_tui::keys::list_delta(&k, true).is_some_and(|d| self.step_pane(d)) {
             return true;
         }
         let step = |app: &App| app.vp.map_or(0.0, |v| 0.1 * v.w.min(v.h) as f32);
@@ -207,8 +212,10 @@ impl App {
             }
             // The cursor moves through the matches listed in the sidebar;
             // letters type into the query instead.
-            _ if !matches!(k.code, KeyCode::Char(_)) && crate::tui::list_delta(&k).is_some() => {
-                *at = crate::tui::list_move(&k, *at, last + 1).unwrap_or(*at);
+            _ if !matches!(k.code, KeyCode::Char(_))
+                && legume_tui::keys::list_delta(&k, true).is_some() =>
+            {
+                *at = legume_tui::keys::list_move(&k, *at, last + 1, true).unwrap_or(*at);
             }
             // Type, backspace, ctrl+u clears; other control keys type nothing.
             _ if crate::tui::edit_line(query, &k) => self.research(),
@@ -831,7 +838,11 @@ mod tests {
         let Some(m) = &a.modal else {
             panic!("no browser")
         };
-        assert!(matches!(m, Modal::ExtraFile(_)) && m.browser_lines(20).is_some());
+        assert!(
+            matches!(m, Modal::ExtraFile(_))
+                && m.browser_lines(ratatui::layout::Rect::new(0, 0, 100, 22), 100)
+                    .is_some()
+        );
         a.modal = None;
         press(&mut a, 'e');
         assert!(a.menu.is_some());

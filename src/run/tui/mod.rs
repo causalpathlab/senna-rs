@@ -16,12 +16,12 @@ mod jobs;
 mod script;
 mod share;
 
-use crate::tui::browse::{Browser, Outcome};
 use batches::Batch;
 use data::Pair;
 use data::Pick;
 use form::{Field, Kind, Method};
 use jobs::{Job, Keep, Queue, Tool, CLONES_FLAG};
+use legume_tui::browse::{Browser, Outcome};
 use legume_tui::Round;
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
@@ -616,7 +616,7 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q' | '?') => self.help = false,
                 _ => {
                     let n = self.help_max.get() + 1;
-                    if let Some(at) = crate::tui::list_move(&k, self.help_scroll, n) {
+                    if let Some(at) = legume_tui::keys::list_move(&k, self.help_scroll, n, true) {
                         self.help_scroll = at;
                     }
                 }
@@ -914,8 +914,8 @@ impl App {
                 self.relabel = None;
                 return;
             }
-            _ if crate::tui::list_delta(&k).is_some() => {
-                crate::tui::list_move(&k, at, n).unwrap_or(at)
+            _ if legume_tui::keys::list_delta(&k, true).is_some() => {
+                legume_tui::keys::list_move(&k, at, n, true).unwrap_or(at)
             }
             KeyCode::Enter if at < n => {
                 let now = match &self.pairs[row].batch {
@@ -949,7 +949,7 @@ impl App {
 
     fn data_key(&mut self, k: KeyEvent) {
         let last = self.pairs.len().saturating_sub(1);
-        if let Some(row) = crate::tui::list_move(&k, self.pair_row, self.pairs.len()) {
+        if let Some(row) = legume_tui::keys::list_move(&k, self.pair_row, self.pairs.len(), true) {
             self.pair_row = row;
             return;
         }
@@ -1003,7 +1003,7 @@ impl App {
     // ───────────── methods ─────────────
 
     fn methods_key(&mut self, k: KeyEvent) {
-        if let Some(row) = crate::tui::list_move(&k, self.method_row, self.rows.len()) {
+        if let Some(row) = legume_tui::keys::list_move(&k, self.method_row, self.rows.len(), true) {
             self.method_row = row;
             return;
         }
@@ -1255,7 +1255,9 @@ impl App {
     }
 
     fn params_key(&mut self, k: KeyEvent) {
-        if let Some(row) = crate::tui::list_move(&k, self.field_row, self.visible().len()) {
+        if let Some(row) =
+            legume_tui::keys::list_move(&k, self.field_row, self.visible().len(), true)
+        {
             self.field_row = row;
             return;
         }
@@ -1566,14 +1568,15 @@ impl App {
     fn confirm_key(&mut self, k: KeyEvent) {
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') => self.confirm = None,
-            _ if crate::tui::list_delta(&k).is_some() => {
+            _ if legume_tui::keys::list_delta(&k, true).is_some() => {
                 let n = self.confirm_max.get() + 1;
-                self.confirm_scroll = crate::tui::list_move(&k, self.confirm_scroll, n)
+                self.confirm_scroll = legume_tui::keys::list_move(&k, self.confirm_scroll, n, true)
                     .unwrap_or(self.confirm_scroll);
             }
             KeyCode::Char('c') => {
                 let text = self.copy_text();
-                self.message = Some(match copy(&text) {
+                let attached = legume_tui::current().is_none_or(legume_tui::Session::attached);
+                self.message = Some(match legume_tui::keys::copy(&text, attached) {
                     Ok(how) => format!("commands copied ({how})"),
                     Err(e) => format!("cannot copy: {e}"),
                 });
@@ -1826,30 +1829,6 @@ fn free_out(dir: &Path, method: &str) -> String {
         .map(|k| format!("{method}-{k}"))
         .find(|p| !taken(p))
         .unwrap_or_else(|| method.to_string())
-}
-
-/// Put `text` on the clipboard: `pbcopy` where there is one, else the
-/// terminal's OSC 52. Says which.
-fn copy(text: &str) -> anyhow::Result<&'static str> {
-    use std::io::Write;
-    if let Ok(mut c) = std::process::Command::new("pbcopy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
-        if let Some(mut stdin) = c.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
-        }
-        if c.wait()?.success() {
-            return Ok("pbcopy");
-        }
-    }
-    let mut out = std::io::stdout();
-    write!(out, "\x1b]52;c;{}\x07", {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD.encode(text)
-    })?;
-    out.flush()?;
-    Ok("terminal clipboard")
 }
 
 #[cfg(test)]

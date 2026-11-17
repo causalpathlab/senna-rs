@@ -31,12 +31,12 @@ use super::render::{self, Frame, Job, Viewport, FREE};
 use super::style::{swatches, Shape};
 use super::{Axis, Graphics, Pick, Scene};
 use crate::tui::style::{first_row, hint, page, rgb, selected, At, CHROME};
-use crate::tui::Pending;
 use legume_tui::graphics::Fallback;
 use legume_tui::map::display::{cell, fit_protocol, stroke_floor};
 use legume_tui::map::pointer::{
     EditKey, LabelEdit, MapAction, MapArea, Pointer, PointerOpts, EDIT_KEY,
 };
+use legume_tui::work::Pending;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -427,7 +427,7 @@ impl App {
     /// Show the feature `delta` rows from the one shown in the sidebar's
     /// list (the first or last when none is), stopping at its ends. Returns
     /// whether there was a list to step through.
-    pub(super) fn step_pane(&mut self, delta: i64) -> bool {
+    pub(super) fn step_pane(&mut self, delta: isize) -> bool {
         let list = self.pane_features();
         let Some(last) = list.len().checked_sub(1) else {
             return false;
@@ -437,7 +437,7 @@ impl App {
             _ => None,
         };
         let next = match at {
-            Some(i) => (i as i64).saturating_add(delta).clamp(0, last as i64) as usize,
+            Some(i) => legume_tui::keys::moved(i, delta, last),
             None if delta > 0 => 0,
             None => last,
         };
@@ -670,8 +670,8 @@ impl App {
     fn finish_zoom(&mut self) -> bool {
         let Some(result) = self
             .zooming
-            .as_ref()
-            .and_then(|z| z.done.poll("the layout worker stopped"))
+            .as_mut()
+            .and_then(|z| z.done.try_take("the layout worker stopped"))
         else {
             return false;
         };

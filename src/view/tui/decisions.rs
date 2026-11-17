@@ -54,8 +54,8 @@ impl App {
     pub(super) fn finish_relabel(&mut self) -> bool {
         let Some(reply) = self
             .relabeling
-            .as_ref()
-            .and_then(|r| r.done.poll("the lupin call stopped without an answer"))
+            .as_mut()
+            .and_then(|r| r.done.try_take("the lupin call stopped without an answer"))
         else {
             return false;
         };

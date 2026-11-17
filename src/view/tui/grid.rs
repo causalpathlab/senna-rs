@@ -10,8 +10,8 @@ use crate::view::deck;
 use legume_tui::gallery::strip::{self, Keymap, ProtocolPainter, Strip};
 use legume_tui::gallery::{Gallery, Policy};
 use legume_tui::graphics::Repick;
-use legume_tui::look::Look;
 use legume_tui::save::{Numbering, SaveDialog, SaveKey, SaveRequest, SaveTarget};
+use legume_tui::Look;
 use legume_tui::Round;
 use rayon::prelude::*;
 
@@ -756,10 +756,7 @@ pub(super) fn open_saved(dir: &std::path::Path) -> Gallery {
 
 /// The strip's look: the page's, with its rule as muted as the map's.
 fn strip_look() -> Look {
-    Look {
-        border: Style::default().fg(rgb(color::MUTED)),
-        ..Look::from(CHROME)
-    }
+    Look::from(CHROME).with_border(Style::default().fg(rgb(color::MUTED)))
 }
 
 impl Deck {

@@ -37,14 +37,6 @@ impl Tool {
         }
     }
 
-    /// The program as the script names it, overridable from the shell
-    /// (`$SENNA`, `$MUNG`).
-    #[must_use]
-    pub fn word(self) -> String {
-        let name = self.name();
-        format!("\"${{{}:-{name}}}\"", name.to_uppercase())
-    }
-
     /// What a finished run leaves at `{out}.`, and the script refuses to
     /// run over.
     #[must_use]

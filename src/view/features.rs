@@ -3,7 +3,7 @@
 
 use super::activity::{read_extra, ExtraFiles};
 use super::*;
-use crate::tui::LOADING;
+use legume_tui::work::LOADING;
 
 /// How many neighbours a click lists, in turn; the second by default.
 pub(crate) const NEAR_COUNTS: [usize; 5] = [6, 12, 20, 30, 50];
@@ -660,8 +660,7 @@ impl Scene {
     pub fn loading_line(&self) -> Option<String> {
         let busy = self.data.loads.busy();
         let (_, longest) = busy.first()?;
-        let frames = crate::tui::SPINNER;
-        let spin = frames[(longest.as_millis() / 100) as usize % frames.len()];
+        let spin = legume_tui::work::spinner_frame(*longest);
         let what: Vec<&str> = busy.iter().map(|(w, _)| *w).collect();
         Some(format!(
             "{spin} loading {}… {}s",
