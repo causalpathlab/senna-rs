@@ -43,9 +43,9 @@ pub(crate) fn own_group(command: &mut std::process::Command) -> &mut std::proces
     child_env().apply(command, legume_tui::Group::Own)
 }
 
-/// The key that runs what a screen set up, in both front ends: ctrl+r,
-/// which every terminal passes on as it is.
-pub(crate) const RUN_KEY: &str = "ctrl+r";
+/// The key that runs what a screen set up, in both front ends, and
+/// whether a key is it.
+pub(crate) use legume_tui::{is_run_key, RUN_KEY};
 
 /// The answer of work running on a worker thread.
 pub(crate) struct Pending<T>(pub(crate) std::sync::mpsc::Receiver<Result<T, String>>);
@@ -159,13 +159,6 @@ impl<T: Send + Sync + 'static> Loading<T> {
     }
 }
 
-/// Whether `k` is [`RUN_KEY`].
-#[must_use]
-pub(crate) fn is_run_key(k: &ratatui::crossterm::event::KeyEvent) -> bool {
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-    k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL)
-}
-
 /// The last component of `path`, or an empty string.
 #[must_use]
 pub fn name(path: &Path) -> String {
@@ -243,29 +236,6 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// Rows `text` takes word-wrapped to `width` columns, as ratatui wraps a
-/// paragraph: whole words to a row, a word wider than a row broken.
-#[must_use]
-pub fn wrapped_rows(text: &str, width: usize) -> usize {
-    let width = width.max(1);
-    let (mut rows, mut used) = (1, 0usize);
-    for word in text.split(' ') {
-        let n = word.chars().count();
-        let need = if used == 0 { n } else { used + 1 + n };
-        if need <= width {
-            used = need;
-        } else if n <= width {
-            rows += 1;
-            used = n;
-        } else {
-            // Broken across rows of its own.
-            rows += usize::from(used > 0) + (n - 1) / width;
-            used = n % width;
-        }
-    }
-    rows
-}
-
 /// A key and what it does, as lines of at most `width` columns: the key in
 /// a column `key_w` wide after `indent`, the words after it wrapped under
 /// themselves.
@@ -319,16 +289,7 @@ pub fn list_move(k: &ratatui::crossterm::event::KeyEvent, row: usize, len: usize
 }
 
 /// A path as shown: relative to the working directory when it is under it.
-#[must_use]
-pub fn shown(p: &Path) -> String {
-    std::env::current_dir()
-        .ok()
-        .and_then(|cwd| p.strip_prefix(cwd).ok().map(Path::to_path_buf))
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| p.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
+pub use legume_tui::browse::shown;
 
 #[cfg(test)]
 mod loading_tests {
@@ -390,16 +351,6 @@ mod session_tests {
 mod layout_tests {
     use super::*;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    #[test]
-    fn rows_count_as_words_wrap() {
-        assert_eq!(wrapped_rows("", 10), 1);
-        assert_eq!(wrapped_rows("aaaa bbbb", 9), 1);
-        // A word that does not fit the row goes whole to the next.
-        assert_eq!(wrapped_rows("aaaa bbbbb", 9), 2);
-        // Wider than a row: broken across rows.
-        assert_eq!(wrapped_rows("aaaaaaaaaaaaaaaaaaaa", 8), 3);
-    }
 
     #[test]
     fn hints_and_keys_wrap_whole() {

@@ -1342,7 +1342,7 @@ impl App {
                     }
                     (Kind::Choice(_), KeyCode::Left) => self.change_field(&t, |f| f.cycle(-1)),
                     (Kind::Choice(_), _) => self.change_field(&t, |f| f.cycle(1)),
-                    (Kind::Text, KeyCode::Enter) if x.takes_table() => {
+                    (Kind::Text, KeyCode::Enter) if form::takes_table(&x) => {
                         self.browse_for(self.target(i), Pick::Table);
                     }
                     (Kind::Text, KeyCode::Enter) => self.edit(self.target(i), x.value),

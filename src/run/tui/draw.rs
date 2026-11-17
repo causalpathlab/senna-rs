@@ -4,9 +4,10 @@
 use super::jobs::{State, Tool, CLONES_FLAG, TREND};
 use super::{batches, App, Batch, Kind, Screen, Target};
 use crate::tui::style::{
-    bold, first_row, hint, page, page_window, popup, rgb, scrolled, selected, At, MUTED, TEXT,
+    bold, first_row, hint, page, page_window, rgb, selected, At, CHROME, MUTED,
 };
 use legume_tui::child::Progress;
+use legume_tui::chrome::short;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -56,17 +57,6 @@ fn rule() -> Style {
     Style::default().fg(rgb(MUTED))
 }
 
-/// A line too long for `w` columns, cut with an ellipsis.
-fn fit(s: &str, w: usize) -> String {
-    if s.chars().count() <= w {
-        s.to_string()
-    } else {
-        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
-        t.push('…');
-        t
-    }
-}
-
 impl App {
     pub(super) fn draw(&self, f: &mut ratatui::Frame) {
         let area = f.area();
@@ -94,28 +84,21 @@ impl App {
         f.render_widget(Paragraph::new(footer), status);
         if let Some(b) = &self.browser {
             let lines = b.lines(usize::from(area.height).saturating_sub(2));
-            popup(f, area, lines, 110, At::Middle, TEXT);
+            CHROME.popup(f, area, lines, 110, At::Middle);
         } else if self.confirm.is_some() {
             let rows = usize::from(area.height).saturating_sub(4);
-            popup(f, area, self.confirm_lines(rows), 120, At::Middle, TEXT);
+            CHROME.popup(f, area, self.confirm_lines(rows), 120, At::Middle);
         } else if self.asking() {
             let rows = usize::from(area.height).saturating_sub(4);
-            popup(f, area, self.clones_lines(rows), 100, At::Middle, TEXT);
+            CHROME.popup(f, area, self.clones_lines(rows), 100, At::Middle);
         } else if let Some((row, at)) = self.relabel {
             let rows = usize::from(area.height).saturating_sub(10).max(3);
-            popup(
-                f,
-                area,
-                self.relabel_lines(row, at, rows),
-                90,
-                At::Middle,
-                TEXT,
-            );
+            CHROME.popup(f, area, self.relabel_lines(row, at, rows), 90, At::Middle);
         }
         if self.help {
             let rows = usize::from(area.height).saturating_sub(4);
             let width = usize::from(area.width.min(70)).saturating_sub(2);
-            popup(f, area, self.help_lines(rows, width), 70, At::Middle, TEXT);
+            CHROME.popup(f, area, self.help_lines(rows, width), 70, At::Middle);
         }
         if let Some(e) = &self.editor {
             let what = match &e.target {
@@ -162,7 +145,7 @@ impl App {
             } else {
                 lines.push(Line::from(Span::styled(" enter keep   esc cancel", hint())));
             }
-            popup(f, area, lines, 90, At::Middle, TEXT);
+            CHROME.popup(f, area, lines, 90, At::Middle);
         }
     }
 
@@ -333,7 +316,7 @@ impl App {
                 // What space, enter and the arrows do to the flag under the
                 // cursor, then the page's own keys.
                 let on = self.field().map(|i| self.page_form().fields[i].clone());
-                let change = match on.as_ref().map(|x| (&x.kind, x.takes_table())) {
+                let change = match on.as_ref().map(|x| (&x.kind, super::form::takes_table(x))) {
                     Some((Kind::Flag { .. }, _)) => "space / enter toggle",
                     Some((Kind::Choice(_), _)) => "← → / space choose",
                     Some((Kind::Text, true)) => "enter pick a table   e type",
@@ -408,7 +391,7 @@ impl App {
             };
             let text = format!(
                 " {:<name_w$}  {}  ·  {}",
-                fit(&self.shown(&p.data), name_w),
+                short(&self.shown(&p.data), name_w),
                 p.info,
                 batch
             );
@@ -417,7 +400,7 @@ impl App {
             } else {
                 Style::default()
             };
-            files.push(Line::from(Span::styled(fit(&text, w), style)));
+            files.push(Line::from(Span::styled(short(&text, w), style)));
         }
         let summary = batches::summary(&self.pairs);
         let mut tail = Vec::new();
@@ -437,7 +420,7 @@ impl App {
                     "  {name:<24} {cells:>8} cells  {files} file{}",
                     if files == 1 { "" } else { "s" }
                 );
-                tail.push(Line::from(Span::styled(fit(&text, w), hint())));
+                tail.push(Line::from(Span::styled(short(&text, w), hint())));
             }
         }
         // The batches take at most a third of the room; the files scroll
@@ -450,7 +433,7 @@ impl App {
             tail.push(Line::from(Span::styled(format!("  … {more} more"), hint())));
         }
         let room = height.saturating_sub(tail.len());
-        lines.extend(scrolled(files, self.pair_row, room));
+        lines.extend(CHROME.scrolled(files, self.pair_row, room));
         lines.extend(tail);
         f.render_widget(Paragraph::new(lines), area);
     }
@@ -531,7 +514,7 @@ impl App {
             .min(32);
         if let Err(why) = &self.mung {
             lines.push(Line::from(Span::styled(
-                fit(&format!(" mung clones (CNV clones first): {why}"), w),
+                short(&format!(" mung clones (CNV clones first): {why}"), w),
                 hint(),
             )));
         }
@@ -541,7 +524,7 @@ impl App {
                 " [{}] {:<13} --out {:<out_w$}{} {:<11} {}",
                 if r.on { "x" } else { " " },
                 r.label,
-                fit(&r.out, out_w),
+                short(&r.out, out_w),
                 // Typed by hand: the header leaves it be.
                 if r.typed { " ✎" } else { "  " },
                 if changed == 0 {
@@ -561,7 +544,7 @@ impl App {
             if i == self.method_row {
                 at = lines.len();
             }
-            lines.push(Line::from(Span::styled(fit(&text, w), style)));
+            lines.push(Line::from(Span::styled(short(&text, w), style)));
             if r.tool == Tool::Mung {
                 // A note under the row, wrapped by word under its name.
                 let note = "runs first; once it is done you see its clones and choose whether the fits get --cnv-clones";
@@ -574,7 +557,7 @@ impl App {
         // The heading stays; the rows scroll to keep the cursor in sight.
         let room = usize::from(area.height).saturating_sub(HEAD);
         let body = lines.split_off(HEAD.min(lines.len()));
-        lines.extend(scrolled(body, at.saturating_sub(HEAD), room));
+        lines.extend(CHROME.scrolled(body, at.saturating_sub(HEAD), room));
         f.render_widget(Paragraph::new(lines), area);
     }
 
@@ -659,12 +642,12 @@ impl App {
             } else if x.is_default() && self.filled_by_clones(x) {
                 "← mung clones".to_string()
             } else {
-                fit(&x.shown(), 28)
+                short(&x.shown(), 28)
             };
             let help = x.help.lines().next().unwrap_or_default().to_string();
             if row == self.field_row {
                 let text = format!("{flag} {value:<28}  {help}");
-                lines.push(Line::from(Span::styled(fit(&text, w), selected())));
+                lines.push(Line::from(Span::styled(short(&text, w), selected())));
             } else {
                 let vstyle = if x.is_default() && !differs {
                     hint()
@@ -677,7 +660,7 @@ impl App {
                     Span::raw(" "),
                     Span::styled(format!("{value:<28}"), vstyle),
                     Span::raw("  "),
-                    Span::styled(fit(&help, rest), hint()),
+                    Span::styled(short(&help, rest), hint()),
                 ]));
             }
         }
@@ -718,7 +701,7 @@ impl App {
                     hint(),
                 )));
             }
-            if x.takes_table() {
+            if super::form::takes_table(x) {
                 text.push(Line::from(Span::styled(
                     "enter picks an earlier run's feature table or manifest; e types a prefix",
                     hint(),
@@ -817,7 +800,7 @@ impl App {
             let name = format!(
                 " {:<13} {:<24} ",
                 j.method,
-                fit(&self.shown(&j.result()), 24)
+                short(&self.shown(&j.result()), 24)
             );
             let (said, style) = match state {
                 State::Waiting => ("waiting".to_string(), hint()),
@@ -833,7 +816,7 @@ impl App {
                 State::Stopped => ("stopped".to_string(), hint()),
             };
             lines.push(Line::from(Span::styled(
-                fit(&format!("{name}{said}"), w),
+                short(&format!("{name}{said}"), w),
                 style,
             )));
         }
@@ -852,7 +835,7 @@ impl App {
         )));
         lines.extend(
             log.iter()
-                .map(|l| Line::from(Span::styled(fit(l, w), hint()))),
+                .map(|l| Line::from(Span::styled(short(l, w), hint()))),
         );
         f.render_widget(Paragraph::new(lines), area);
     }

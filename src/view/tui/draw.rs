@@ -161,7 +161,7 @@ impl App {
         }
 
         if let Some((text, _)) = &self.toast {
-            toast(f, map, text);
+            CHROME.toast(f, map, text);
         }
 
         if let Some(Modal::Submit(decisions)) = &self.modal {
@@ -179,30 +179,23 @@ impl App {
                 " ctrl+r, S or enter submits   esc or q cancels",
                 hint(),
             )));
-            popup(f, map, lines, 76, At::Middle, color::TEXT);
+            CHROME.popup(f, map, lines, 76, At::Middle);
         }
 
         if let Some(Modal::Recompute(_, menu)) = &self.modal {
             let lines = App::recompute_lines(menu, &files::name(&self.from));
-            popup(f, map, lines, 72, At::Middle, color::TEXT);
+            CHROME.popup(f, map, lines, 72, At::Middle);
         }
 
         let tall = usize::from(map.height).saturating_sub(2);
         if let Some(lines) = self.modal.as_ref().and_then(|m| m.browser_lines(tall)) {
-            popup(f, map, lines, 100, At::Middle, color::TEXT);
+            CHROME.popup(f, map, lines, 100, At::Middle);
         }
 
         if self.help {
             let rows = usize::from(map.height).saturating_sub(2);
             let width = usize::from(map.width.min(96)).saturating_sub(2);
-            popup(
-                f,
-                map,
-                self.help_lines(rows, width),
-                96,
-                At::Middle,
-                color::TEXT,
-            );
+            CHROME.popup(f, map, self.help_lines(rows, width), 96, At::Middle);
         }
     }
 

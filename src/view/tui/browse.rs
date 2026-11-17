@@ -8,9 +8,10 @@
 //! recorded name is chosen to begin with.
 
 use super::*;
-use crate::tui::browse::{is_data, size_of, Browser, Header, Outcome, Wanted};
+use crate::tui::browse::{is_data, Browser, Header, Outcome, Wanted};
 use crate::view::rounds::label_key;
 use data_beans::utilities::name_matching::GeneIndex;
+use legume_tui::browse::size;
 use senna::run_manifest::RunManifest;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -206,7 +207,7 @@ impl Wanted for Extra {
     }
 
     fn file(&self, path: &Path, name: &str) -> Option<String> {
-        is_data(name).then(|| size_of(path))
+        is_data(name).then(|| size(path).unwrap_or_default())
     }
 
     fn store(&self, _path: &Path, _name: &str) -> Option<String> {
@@ -304,7 +305,7 @@ pub fn pick_run(session: &legume_tui::Session) -> anyhow::Result<Option<PathBuf>
             let area = f.area();
             f.render_widget(Block::default().style(page()), area);
             let lines = b.lines(usize::from(area.height).saturating_sub(2));
-            popup(f, area, lines, 110, At::Middle, color::TEXT);
+            CHROME.popup(f, area, lines, 110, At::Middle);
         })?;
         // A folder still being listed is shown once it is, the spinner
         // ticking meanwhile.

@@ -623,21 +623,6 @@ pub(crate) fn is_data(name: &str) -> bool {
     data_beans::hdf5_io::strip_backend_suffix(name) != name
 }
 
-/// A file's size, `12.3 MB`.
-pub(crate) fn size_of(path: &Path) -> String {
-    let bytes = std::fs::metadata(path).map_or(0, |m| m.len()) as f64;
-    let (v, unit) = [("kB", 1e3), ("MB", 1e6), ("GB", 1e9)]
-        .iter()
-        .rev()
-        .find(|(_, s)| bytes >= *s)
-        .map_or((bytes, "B"), |(u, s)| (bytes / s, *u));
-    if unit == "B" {
-        format!("{v:.0} B")
-    } else {
-        format!("{v:.1} {unit}")
-    }
-}
-
 /// Folders (not a `.zarr` store) and the wanted files, `..` first, folders
 /// before files, each group by name. Hidden entries are kept; `shown`
 /// lists them only on request.
