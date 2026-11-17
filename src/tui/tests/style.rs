@@ -1,5 +1,7 @@
 use super::*;
 
+const HINT: [u8; 3] = THEME.hint;
+
 /// WCAG contrast ratio between two sRGB colours.
 fn contrast(a: [u8; 3], b: [u8; 3]) -> f32 {
     let linear = |c: u8| {

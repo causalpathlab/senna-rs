@@ -30,7 +30,7 @@ use super::files::{self, modified, same_file};
 use super::render::{self, Frame, Job, Viewport, FREE};
 use super::style::{swatches, Shape};
 use super::{Axis, Graphics, Pick, Scene};
-use crate::tui::style::{first_row, hint, page, popup, rgb, selected, toast, At};
+use crate::tui::style::{first_row, hint, page, rgb, selected, At, CHROME};
 use crate::tui::Pending;
 use legume_tui::graphics::Fallback;
 use legume_tui::map::display::{cell, fit_protocol, stroke_floor};

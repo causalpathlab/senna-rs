@@ -8,26 +8,8 @@ use super::jobs::Tool;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// `word` as one shell word: as it is when nothing in it is special, else
-/// in single quotes.
-#[must_use]
-pub fn quote(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
-    if plain {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', r"'\''"))
-    }
-}
-
-/// A command line as one shell line.
-#[must_use]
-pub fn line(argv: &[String]) -> String {
-    argv.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")
-}
+/// A word or a whole command line as the shell reads it.
+pub use legume_tui::form::script::{line, quote};
 
 /// `path` absolute, resolved as the system resolves it (links where they
 /// are met, `..` after them), so two paths into one folder compare alike.

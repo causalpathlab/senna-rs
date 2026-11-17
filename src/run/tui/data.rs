@@ -1,7 +1,8 @@
 //! The data files a session embeds and the batch file of each.
 
 use super::batches::Batch;
-use crate::tui::browse::{is_data, size_of, Header, Wanted};
+use crate::tui::browse::{is_data, Header, Wanted};
+use legume_tui::browse::size;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
@@ -55,7 +56,7 @@ impl Wanted for Pick {
             }
             Pick::File => true,
         };
-        wanted.then(|| size_of(path))
+        wanted.then(|| size(path).unwrap_or_default())
     }
 
     fn store(&self, _path: &Path, _name: &str) -> Option<String> {

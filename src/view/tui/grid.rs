@@ -7,7 +7,6 @@
 
 use super::*;
 use crate::view::deck;
-use legume_tui::chrome::Chrome;
 use legume_tui::gallery::strip::{self, Keymap, ProtocolPainter, Strip};
 use legume_tui::gallery::{Gallery, Policy};
 use legume_tui::graphics::Repick;
@@ -282,7 +281,7 @@ impl Deck {
                     .draw(f, strip, &self.gallery, &strip_look(), &keys, now);
             }
             if let Some((d, t)) = &self.save {
-                d.render(f, f.area(), t, &Look::from(Chrome::themed(color::THEME)));
+                d.render(f, f.area(), t, &Look::from(CHROME));
             }
             if let Some(m) = &self.moving {
                 draw_move(f, m);
@@ -737,7 +736,7 @@ impl Deck {
         ];
         f.render_widget(Paragraph::new(lines).style(page), status);
         if let Some((text, _)) = &self.toast {
-            toast(f, f.area(), text);
+            CHROME.toast(f, f.area(), text);
         }
     }
 }
@@ -759,7 +758,7 @@ pub(super) fn open_saved(dir: &std::path::Path) -> Gallery {
 fn strip_look() -> Look {
     Look {
         border: Style::default().fg(rgb(color::MUTED)),
-        ..Look::from(Chrome::themed(color::THEME))
+        ..Look::from(CHROME)
     }
 }
 
@@ -949,7 +948,7 @@ fn draw_move(f: &mut ratatui::Frame, m: &MoveDialog) {
         },
         Line::from(" type the path (ctrl+u clears)   enter move   esc cancel"),
     ];
-    popup(f, f.area(), lines, 76, At::Middle, color::TEXT);
+    CHROME.popup(f, f.area(), lines, 76, At::Middle);
 }
 
 /// What a PDF takes in.

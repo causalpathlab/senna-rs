@@ -1,4 +1,5 @@
 use super::*;
+use legume_tui::browse::size;
 
 /// Text files, several at once when `many`; `.zarr` stores too.
 #[derive(Clone)]
@@ -44,7 +45,8 @@ impl Wanted for Txt {
     }
 
     fn file(&self, path: &Path, name: &str) -> Option<String> {
-        name.ends_with(".txt").then(|| size_of(path))
+        name.ends_with(".txt")
+            .then(|| size(path).unwrap_or_default())
     }
 
     fn store(&self, _path: &Path, _name: &str) -> Option<String> {
