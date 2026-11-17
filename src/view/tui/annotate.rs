@@ -3,9 +3,9 @@
 
 use super::browse::Panels;
 use super::*;
-use crate::tui::browse::{Browser, Outcome};
 use crate::view::decide;
 use data_beans::utilities::name_matching::GeneIndex;
+use legume_tui::browse::{Browser, Outcome};
 use std::path::{Path, PathBuf};
 
 impl App {

@@ -1,8 +1,9 @@
 //! The data files a session embeds and the batch file of each.
 
 use super::batches::Batch;
-use crate::tui::browse::{is_data, Header, Wanted};
+use crate::tui::is_data;
 use legume_tui::browse::size;
+use legume_tui::browse::{Header, Wanted};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
@@ -34,13 +35,7 @@ impl Wanted for Pick {
             ),
             Pick::File => ("A file for this flag", "files"),
         };
-        Header {
-            title: title.into(),
-            notes: Vec::new(),
-            what,
-            star: None,
-            verb: "take",
-        }
+        Header::new(title, what)
     }
 
     fn file(&self, path: &Path, name: &str) -> Option<String> {

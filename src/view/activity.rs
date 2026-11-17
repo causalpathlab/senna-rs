@@ -1337,7 +1337,7 @@ impl ExtraRead {
 }
 
 /// An extra data file, read once on a worker thread.
-pub(crate) type ExtraFiles = crate::tui::Loading<ExtraRead>;
+pub(crate) type ExtraFiles = legume_tui::work::Loading<ExtraRead>;
 
 /// What reading a run's data files gives: its observed counts, and each
 /// cell's batch when there is more than one.
@@ -1348,13 +1348,13 @@ pub(crate) struct RunRead {
 
 /// A run's data files, read once on a worker thread and shared by every
 /// view of the run.
-pub(crate) type RunFiles = crate::tui::Loading<RunRead>;
+pub(crate) type RunFiles = legume_tui::work::Loading<RunRead>;
 
 /// A run's model of expression, read once on a worker thread.
-pub(crate) type ModelTables = crate::tui::Loading<Expected>;
+pub(crate) type ModelTables = legume_tui::work::Loading<Expected>;
 
 /// A run's feature embedding, read once on a worker thread.
-pub(crate) type FeatureTables = crate::tui::Loading<super::features::FeatureEmbedding>;
+pub(crate) type FeatureTables = legume_tui::work::Loading<super::features::FeatureEmbedding>;
 
 /// A run's slow reads, each started once on a worker thread and shared by
 /// every view of the run: its data files, its model of expression, and
@@ -1372,7 +1372,7 @@ pub(crate) struct RunLoads {
 }
 
 /// The run's own counts' per-cell totals, kept in [`Observed`] once read.
-pub(crate) type CellTotals = crate::tui::Loading<()>;
+pub(crate) type CellTotals = legume_tui::work::Loading<()>;
 
 /// A totals read waiting on `files`, the run's data files.
 fn totals_of(files: &Arc<RunFiles>) -> Arc<CellTotals> {
@@ -2028,7 +2028,7 @@ mod tests {
         // unless the worker has already summed so small a file.
         let first = a.stat_levels(&Stat::Total, &[], Source::Observed, 0, &cells);
         if let Err(e) = &first {
-            assert_eq!(e, crate::tui::LOADING);
+            assert_eq!(e, legume_tui::work::LOADING);
         }
         assert!(loads.totals.get().is_ok());
         let total = a

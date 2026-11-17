@@ -148,8 +148,8 @@ impl App {
     pub(super) fn finish_recompute(&mut self) -> bool {
         let Some(result) = self
             .recomputing
-            .as_ref()
-            .and_then(|r| r.done.poll("senna stopped without an answer"))
+            .as_mut()
+            .and_then(|r| r.done.try_take("senna stopped without an answer"))
         else {
             return false;
         };
@@ -287,7 +287,7 @@ mod tests {
             show: None,
             progress: Default::default(),
             stopper: stopper.clone(),
-            done: Pending(rx),
+            done: Pending::new(rx),
         });
         (app, stopper, tx)
     }

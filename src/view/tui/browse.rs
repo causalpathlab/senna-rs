@@ -1,6 +1,6 @@
 //! What `senna view` browses for: marker panels for `lupin annotate`, runs
 //! to open, or a run's data file that is not where it was recorded. The
-//! browser itself is [`crate::tui::browse`].
+//! browser itself is `legume_tui::browse`.
 //!
 //! A marker panel shows how many of its genes the run has; the panel that
 //! covers the most is starred and chosen to begin with. A run shows its kind
@@ -8,10 +8,11 @@
 //! recorded name is chosen to begin with.
 
 use super::*;
-use crate::tui::browse::{is_data, Browser, Header, Outcome, Wanted};
+use crate::tui::is_data;
 use crate::view::rounds::label_key;
 use data_beans::utilities::name_matching::GeneIndex;
 use legume_tui::browse::size;
+use legume_tui::browse::{Browser, Header, Outcome, Wanted};
 use senna::run_manifest::RunManifest;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -47,17 +48,17 @@ impl Wanted for Panels {
     type About = Panel;
 
     fn header(&self) -> Header {
-        Header {
-            title: "Marker panel for lupin annotate".into(),
-            notes: vec![if self.go {
-                "with GO terms: lupin tests them on each cluster too (tab: without)".into()
-            } else {
-                "without GO terms (tab: test them on each cluster too)".into()
-            }],
-            what: "marker panels (gene, cell type per line)",
-            star: Some(" ★ covers the most of this run's genes"),
-            verb: "annotate",
-        }
+        Header::new(
+            "Marker panel for lupin annotate",
+            "marker panels (gene, cell type per line)",
+        )
+        .note(if self.go {
+            "with GO terms: lupin tests them on each cluster too (tab: without)"
+        } else {
+            "without GO terms (tab: test them on each cluster too)"
+        })
+        .star("covers the most of this run's genes")
+        .verb("annotate")
     }
 
     fn file(&self, path: &Path, _name: &str) -> Option<Panel> {
@@ -87,8 +88,8 @@ impl Wanted for Panels {
     }
 
     /// Annotation needs types to choose between.
-    fn refuse(&self, name: &str, p: &Panel) -> Option<String> {
-        (p.types < 2).then(|| format!("{name} names one cell type; lupin needs several"))
+    fn refuse(&self, name: &str, p: &Panel) -> Option<Cow<'static, str>> {
+        (p.types < 2).then(|| format!("{name} names one cell type; lupin needs several").into())
     }
 
     /// The panel with the most genes in this run; with no feature names,
@@ -114,13 +115,7 @@ impl Wanted for Runs {
     type About = String;
 
     fn header(&self) -> Header {
-        Header {
-            title: "Run to view".into(),
-            notes: Vec::new(),
-            what: "runs (*.senna.json)",
-            star: None,
-            verb: "open",
-        }
+        Header::new("Run to view", "runs (*.senna.json)").verb("open")
     }
 
     fn file(&self, path: &Path, name: &str) -> Option<String> {
@@ -148,20 +143,18 @@ impl Wanted for Missing {
     type About = ();
 
     fn header(&self) -> Header {
-        Header {
-            title: format!("Where is {}?", files::name(Path::new(&self.0))),
-            notes: vec![
-                format!(
-                    "the run's data is recorded at {}, which is not here;",
-                    self.0
-                ),
-                "the file chosen is written into the run's manifest".into(),
-                "looking from the folder senna view runs in (~ goes home)".into(),
-            ],
-            what: "data files (.zarr, .zarr.zip, .h5)",
-            star: Some(" ★ the recorded name"),
-            verb: "use it",
-        }
+        Header::new(
+            format!("Where is {}?", files::name(Path::new(&self.0))),
+            "data files (.zarr, .zarr.zip, .h5)",
+        )
+        .note(format!(
+            "the run's data is recorded at {}, which is not here;",
+            self.0
+        ))
+        .note("the file chosen is written into the run's manifest")
+        .note("looking from the folder senna view runs in (~ goes home)")
+        .star("the recorded name")
+        .verb("use it")
     }
 
     fn file(&self, _path: &Path, name: &str) -> Option<()> {
@@ -192,18 +185,14 @@ impl Wanted for Extra {
     type About = String;
 
     fn header(&self) -> Header {
-        Header {
-            title: "Open other data files".into(),
-            notes: vec![
-                "their cells are matched to the run's by name (or by barcode, @ tags aside);"
-                    .into(),
-                "several marked are read together, on the features they share;".into(),
-                "shown as the extra source (o), nothing written".into(),
-            ],
-            what: "data files (.zarr, .zarr.zip, .h5)",
-            star: None,
-            verb: "open it",
-        }
+        Header::new(
+            "Open other data files",
+            "data files (.zarr, .zarr.zip, .h5)",
+        )
+        .note("their cells are matched to the run's by name (or by barcode, @ tags aside);")
+        .note("several marked are read together, on the features they share;")
+        .note("shown as the extra source (o), nothing written")
+        .verb("open it")
     }
 
     fn file(&self, path: &Path, name: &str) -> Option<String> {
@@ -304,7 +293,7 @@ pub fn pick_run(session: &legume_tui::Session) -> anyhow::Result<Option<PathBuf>
         session.draw(&mut terminal, |f| {
             let area = f.area();
             f.render_widget(Block::default().style(page()), area);
-            let lines = b.lines(usize::from(area.height).saturating_sub(2));
+            let lines = crate::tui::style::browser_lines(&b, area, 110);
             CHROME.popup(f, area, lines, 110, At::Middle);
         })?;
         // A folder still being listed is shown once it is, the spinner
@@ -339,7 +328,7 @@ pub fn pick_run(session: &legume_tui::Session) -> anyhow::Result<Option<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::browse::{list_dir, Entry};
+    use legume_tui::browse::Entry;
 
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::write(dir.join(name), body).unwrap();
@@ -387,14 +376,13 @@ mod tests {
             genes: Some(std::sync::Arc::new(GeneIndex::build(&names))),
             go: false,
         };
-        let entries = list_dir(d, &want);
-        let listed: Vec<&str> = entries.iter().map(Entry::name).collect();
+        // `one.tsv` finds as many genes but names a single type.
+        let b = Browser::open(d, want, None);
+        let entries = b.shown();
+        let listed: Vec<&str> = entries.iter().map(|e| e.name()).collect();
+        assert_eq!(listed, ["..", "sub", "one.tsv", "small.tsv", "wide.csv"]);
         assert_eq!(
-            listed,
-            ["..", ".hidden", "sub", "one.tsv", "small.tsv", "wide.csv"]
-        );
-        assert_eq!(
-            entries[4],
+            *entries[3],
             Entry::File(
                 "small.tsv".into(),
                 Panel {
@@ -404,8 +392,6 @@ mod tests {
                 }
             )
         );
-        // `one.tsv` finds as many genes but names a single type.
-        let b = Browser::open(d.to_path_buf(), want, None);
         assert_eq!(b.current().map(Entry::name), Some("wide.csv"));
     }
 
@@ -418,7 +404,7 @@ mod tests {
         write(d, "other.tsv", "GENE1\tCT1\nGENE3\tCT2\n");
 
         let mut b = Browser::open(
-            d.to_path_buf(),
+            d,
             Panels {
                 genes: None,
                 go: false,
@@ -456,7 +442,7 @@ mod tests {
         write(d, "c.pinto.json", "{}");
         write(d, "markers.tsv", "GENE1\tCT1\nGENE3\tCT2\n");
 
-        let b = Browser::open(d.to_path_buf(), Runs, None);
+        let b = Browser::open(d, Runs, None);
         let names: Vec<&str> = b.shown().iter().map(|e| e.name()).collect();
         assert_eq!(names, ["..", "a.senna.json", "b.senna.json"]);
         assert_eq!(b.current().map(Entry::name), Some("b.senna.json"));
@@ -481,11 +467,7 @@ mod tests {
         ] {
             std::fs::write(d.join(f), b"").unwrap();
         }
-        let b = Browser::open(
-            d.to_path_buf(),
-            Missing("/elsewhere/a.zarr.zip".into()),
-            None,
-        );
+        let b = Browser::open(d, Missing("/elsewhere/a.zarr.zip".into()), None);
         let names: Vec<&str> = b.shown().iter().map(|e| e.name()).collect();
         assert_eq!(names, ["..", "sub", "a.zarr.zip", "b.h5", "rna.zarr"]);
         assert_eq!(b.current().map(Entry::name), Some("a.zarr.zip"));

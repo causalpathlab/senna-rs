@@ -1,5 +1,11 @@
 use super::*;
 
+/// The script for `argv` whose `--out` is `out`, as [`write`] writes it.
+fn text(argv: &[String], out: &str, tool: Tool) -> String {
+    let name = format!("{out}.cmd.sh");
+    legume_tui::form::script::text(&script(out, &name, tool), argv)
+}
+
 fn argv(v: &[&str]) -> Vec<String> {
     v.iter().map(ToString::to_string).collect()
 }

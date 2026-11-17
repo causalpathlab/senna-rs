@@ -346,7 +346,7 @@ impl App {
             .map(|&c| {
                 keys_of(c)
                     .iter()
-                    .map(|k| crate::tui::wrap_keys(k, w).len())
+                    .map(|k| legume_tui::text::wrap_keys(k, w).len())
                     .sum::<usize>()
             })
             .max()
@@ -419,7 +419,7 @@ impl App {
             body.push(Line::from(Span::styled(format!(" {title}"), bold)));
             for (k, v) in *keys {
                 body.extend(
-                    crate::tui::key_lines(3, k, 15, v, width)
+                    legume_tui::text::key_lines(3, k, 15, v, width)
                         .into_iter()
                         .map(Line::from),
                 );
@@ -431,7 +431,7 @@ impl App {
             body.push(Line::from(Span::styled(" Session", bold)));
             for (key, help) in keys {
                 body.extend(
-                    crate::tui::key_lines(3, &key, 15, &help, width)
+                    legume_tui::text::key_lines(3, &key, 15, &help, width)
                         .into_iter()
                         .map(Line::from),
                 );
