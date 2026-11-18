@@ -25,6 +25,6 @@ pub fn fit_layout_lle(args: &LayoutLleArgs) -> anyhow::Result<()> {
     // PB-level, as PHATE: the PBs' mean features, their neighbours in the
     // graph between them; cells then placed by Nyström.
     let prep = preprocess_layout_data(&args.common, &resolved)?;
-    let pb_coords = lle_layout_2d_on_graph(&prep.pb_kp.transpose(), &prep.pb_edges);
+    let pb_coords = lle_layout_2d_on_graph(&prep.pbs.pb_features.transpose(), &prep.pbs.pb_edges);
     finalize_viz(&args.common, &mut resolved, &prep, &pb_coords, "lle")
 }

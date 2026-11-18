@@ -5,8 +5,8 @@
 
 use crate::embed_common::*;
 use hsblock::{Hsblock, HsbmOptions};
-use legume_numeric::leiden::clustering::SimpleClustering;
-use legume_numeric::leiden::Clustering;
+use hsblock_leiden::leiden::clustering::SimpleClustering;
+use hsblock_leiden::leiden::{Clustering, Network};
 use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
 use legume_numeric::matrix::knn_graph::{KnnGraph, KnnGraphArgs};
 use legume_numeric::matrix::traits::MatOps;
@@ -21,6 +21,26 @@ pub enum ClusterMethod {
     Leiden,
     /// Hierarchical Stochastic Block Model (graph-based)
     Hsblock,
+}
+
+/// `graph` with edge weights `weights` as the leiden [`Network`] of the
+/// legume-numeric hsblock is built on, as `KnnGraph::to_leiden_network_with`
+/// builds it.
+fn hsblock_network(graph: &KnnGraph, weights: &[f32]) -> Network {
+    let n = graph.num_nodes();
+    let mut degree = vec![0.0f32; n];
+    let mut n_edges = vec![0usize; n];
+    for (&(i, j), &w) in graph.edges.iter().zip(weights) {
+        degree[i] += w;
+        degree[j] += w;
+        n_edges[i] += 1;
+        n_edges[j] += 1;
+    }
+    let mut network = Network::with_nodes(&degree, &n_edges);
+    for (&(i, j), &w) in graph.edges.iter().zip(weights) {
+        network.add_edge(i, j, w);
+    }
+    network
 }
 
 /// Clustering result
@@ -303,8 +323,8 @@ pub fn hsblock_clustering(
         mean_degree
     );
 
-    // Step 2: Convert to legume_numeric::leiden::Network (discard total edge weight; HSBM doesn't need it)
-    let (network, _total_edge_weight) = graph.to_leiden_network_with(&weights);
+    // Step 2: The leiden network hsblock takes, of its own legume-numeric.
+    let network = hsblock_network(&graph, &weights);
 
     // Step 3: Run HSBM
     let options = HsbmOptions {

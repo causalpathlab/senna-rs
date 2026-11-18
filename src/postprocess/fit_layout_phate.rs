@@ -28,7 +28,7 @@ pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
     // cells are then placed by Nyström.
     let prep = preprocess_layout_data(&args.common, &resolved)?;
     let pb_coords =
-        phate_layout_2d_on_graph(prep.pb_kp.ncols(), &prep.pb_edges, &(&args.phate).into());
+        phate_layout_2d_on_graph(prep.pbs.n_pb(), &prep.pbs.pb_edges, &(&args.phate).into());
 
     finalize_viz(&args.common, &mut resolved, &prep, &pb_coords, "phate")
 }

@@ -1,11 +1,11 @@
-//! Shared plumbing for `senna layout {tsne, phate, umap}`:
+//! Shared plumbing for `senna layout {tsne, phate, umap, ...}`:
 //! - CLI args shared by the layouts.
 //! - The cell table to lay out, from the run's own outputs: its latent (or
 //!   cell embedding), else its cached cell projection. The count data is
 //!   never read, so a run can be laid out where its data is not.
-//! - The cell kNN graph every layout reads; PBs coarsened from it (or
-//!   projection bits), the graph between them, tail pruning.
-//! - Cheap Nyström cell placement.
+//! - The run's PBs as legume's [`Coarsened`]: its cell kNN graph coarsened
+//!   (or, without a latent, projection bits with the tail pruned), and the
+//!   graph between them.
 //! - Shared output writer.
 //!
 //! Every layout subcommand delegates here for everything except the
@@ -15,9 +15,9 @@ use super::fit_layout_features::{
     place_features_on_cells, record_cell_layout, write_features_on_cells, FeatureSpace,
     LayoutTarget,
 };
-use super::viz_prep::{aggregate_features_by_group, select_pb_coverage};
-use crate::geometry::cell_layout::project_cells_nystrom;
+use super::viz_prep::select_pb_coverage;
 use data_beans::alg::random_projection::binary_sort_columns;
+use legume_numeric::matrix::layout::{coarsened, fuzzy_graph_of_columns, CoarsenArgs, Coarsened};
 use senna::embed_common::*;
 use senna::run_manifest::{self, LayoutEntry, RunManifest};
 use std::path::PathBuf;
@@ -132,11 +132,10 @@ pub struct LayoutCommonArgs {
         short = 'k',
         alias = "umap-knn",
         default_value_t = 15,
-        help = "Neighbours per cell, counting itself, in the cell kNN graph; and PBs a cell is placed by",
+        help = "Neighbours per cell, counting itself, in the cell kNN graph",
         long_help = "Neighbours per cell in the cell kNN graph every layout reads (counting\n\
-                     the cell itself, as uwot's n_neighbors): cell-level UMAP lays it out,\n\
-                     and the PB layouts coarsen and collapse it. Also how many nearest PBs\n\
-                     place each cell after a PB layout."
+                     the cell itself, as uwot's n_neighbors): the PB layouts coarsen and\n\
+                     collapse it. Also the neighbours of a --target features or --joint UMAP."
     )]
     pub knn: usize,
 
@@ -146,6 +145,17 @@ pub struct LayoutCommonArgs {
         help = "Alpha-decay kernel exponent for Nyström cell projection"
     )]
     pub kernel_alpha: f32,
+
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Nearest PBs that place each cell after a PB layout",
+        long_help = "How many nearest PBs (in the feature space) place each cell after a\n\
+                     PB layout, by an alpha-decay kernel over their layout coordinates.\n\
+                     Keep it small: a cell averaged over many PBs from two groups lands\n\
+                     between them, as a streak across the layout."
+    )]
+    pub place_knn: usize,
 
     #[arg(
         long,
@@ -178,8 +188,8 @@ pub struct LayoutCommonArgs {
     #[arg(
         long,
         default_value_t = 1000,
-        help = "PB count for the PB layouts (PHATE, t-SNE)",
-        long_help = "How many PBs the PB layouts (PHATE, t-SNE) lay out.\n\
+        help = "PB count for the PB layouts (UMAP, PHATE, t-SNE, ...)",
+        long_help = "How many PBs the PB layouts (UMAP, PHATE, t-SNE, ...) lay out.\n\
                      The cell kNN graph is coarsened by rounds of heavy-edge matching\n\
                      until this many groups remain: each round merges cells, then groups,\n\
                      with the neighbour they are most strongly linked to, so a PB never\n\
@@ -293,20 +303,16 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
     })
 }
 
-/// What PHATE and t-SNE lay out: the run's PBs, the graph between them, and
+/// What the PB layouts lay out: the run's PBs, the graph between them, and
 /// the cells to place by Nyström.
 pub(crate) struct PbLayoutPrep {
     pub cells: CellTable,
-    pub pb_size: Vec<usize>,
-    pub pb_membership_kept: Vec<usize>,
-    /// The graph between PBs: the cell graph collapsed onto them, each
-    /// pair's edge weights summed (`(a, b, w)`, `a < b`, sorted).
-    pub pb_edges: Vec<(usize, usize, f32)>,
-    /// `(dims × n_pb)` each PB's mean cell features.
-    pub pb_kp: Mat,
+    /// The PBs (`usize::MAX` for a cell in a pruned one), the cell graph
+    /// collapsed onto them, and their mean cell features.
+    pub pbs: Coarsened,
 }
 
-/// The run's cell table: what every layout lays out, UMAP cell by cell.
+/// The run's cell table: what every layout lays out.
 pub(crate) struct CellTable {
     /// Cell per column of `cells_kn`.
     pub names: Vec<Box<str>>,
@@ -398,10 +404,9 @@ fn read_cell_proj(args: &LayoutCommonArgs, path: &str) -> anyhow::Result<(Vec<Bo
     Ok((cell_names, proj_kn))
 }
 
-/// The PB layout for PHATE and t-SNE, whose O(n³) MDS / O(n²) repulsion
-/// cannot take every cell: the run's cell table (its latent, else its cell
-/// projection), its kNN graph ([`cell_graph`], the one cell-level UMAP lays
-/// out), the cells grouped into PBs, and the graph between the PBs.
+/// The PB layout for UMAP, PHATE, t-SNE and the graph layouts: the run's
+/// cell table (its latent, else its cell projection), the cells grouped
+/// into PBs on its kNN graph, and the graph between the PBs.
 ///
 /// With a latent the groups come from coarsening the cell graph (rounds of
 /// heavy-edge matching down to `--n-landmarks`), so a PB never spans a gap
@@ -411,107 +416,62 @@ pub(crate) fn preprocess_layout_data(
     resolved: &ResolvedViz,
 ) -> anyhow::Result<PbLayoutPrep> {
     let cells = cell_table(args, resolved)?;
-    let edges = cell_graph(
-        &cells.cells_kn.transpose(),
-        args.knn,
-        args.block_size.unwrap_or(1000),
-    )?;
     let n_cells = cells.cells_kn.ncols();
-    let (membership, coverage) = if resolved.manifest.outputs.geometry_latent().is_some() {
-        let target = args.n_landmarks.min(n_cells).max(1);
+    let block_size = args.block_size.unwrap_or(1000);
+    let pbs = if resolved.manifest.outputs.geometry_latent().is_some() {
+        let n_landmarks = args.n_landmarks.min(n_cells).max(1);
         info!(
-            "PBs: the cell graph coarsened to {target} (kind={})",
+            "PBs: the cell graph coarsened to {n_landmarks} (kind={})",
             resolved.manifest.kind
         );
         // Even groups, so no long tail to prune: the smallest are the ones
         // that could not merge, small populations of their own.
-        let membership =
-            legume_numeric::matrix::coarsen::coarsen(n_cells, &edges, target, args.seed);
-        (membership, 1.0)
+        coarsened(
+            &cells.cells_kn,
+            &CoarsenArgs {
+                knn: args.knn,
+                n_landmarks,
+                block_size,
+                seed: args.seed,
+            },
+        )?
     } else {
         info!("PBs: projection bits of the cell projection");
+        let edges = fuzzy_graph_of_columns(&cells.cells_kn, args.knn, block_size)?;
         let kk = args.sort_dim.min(cells.cells_kn.nrows()).min(n_cells);
         let membership = canonicalize_codes(&binary_sort_columns(&cells.cells_kn, kk)?);
-        (membership, args.pb_coverage)
+        Coarsened::from_membership(
+            &cells.cells_kn,
+            &edges,
+            prune_tail(&membership, args.pb_coverage),
+        )
     };
-    Ok(pseudobulks(cells, &edges, membership, coverage))
+    info!("PB graph: {} PBs, {} edges", pbs.n_pb(), pbs.pb_edges.len());
+    Ok(PbLayoutPrep { cells, pbs })
 }
 
-/// The run's cell kNN graph, the one every layout reads: the undirected
-/// fuzzy kNN of the rows of `rows` (cells × dims) as uwot builds it (`knn`
-/// counting each cell itself), one edge per pair (`i < j`) with its UMAP
-/// membership.
-pub(crate) fn cell_graph(
-    rows: &Mat,
-    knn: usize,
-    block_size: usize,
-) -> anyhow::Result<Vec<(usize, usize, f32)>> {
-    let n = rows.nrows();
-    info!("Cell kNN graph (n={n}, n_neighbors={knn}) ...");
-    let edges = legume_numeric::matrix::knn_graph::KnnGraph::fuzzy_edges_of_rows(
-        rows,
-        legume_numeric::matrix::knn_graph::KnnGraphArgs {
-            knn: others(knn),
-            block_size,
-            reciprocal: false,
-        },
-    )?;
-    info!(
-        "Cell kNN graph: {n} cells, {} edges (mean degree {:.1})",
-        edges.len(),
-        2.0 * edges.len() as f32 / n.max(1) as f32
-    );
-    Ok(edges)
-}
-
-/// The neighbours a point has besides itself, when `knn` counts the point
-/// as uwot's `n_neighbors` does.
-pub(crate) fn others(knn: usize) -> usize {
-    knn.saturating_sub(1).max(1)
-}
-
-/// PBs from a grouping of the cells (`membership_full`, ids `0..`): the
-/// long tail pruned to `coverage` of the cells (cells of a dropped PB get
-/// `usize::MAX`), each PB's mean features, and the cell graph `edges`
-/// collapsed onto the PBs.
-fn pseudobulks(
-    cells: CellTable,
-    edges: &[(usize, usize, f32)],
-    membership_full: Vec<usize>,
-    coverage: f32,
-) -> PbLayoutPrep {
-    let n_pb_full = membership_full.iter().max().map_or(0, |&g| g + 1);
-    let mut pb_size_full = vec![0usize; n_pb_full];
-    for &g in &membership_full {
-        pb_size_full[g] += 1;
+/// A grouping of the cells (`membership`, ids `0..`) with its long tail
+/// pruned to `coverage` of the cells: the kept groups renumbered `0..`,
+/// cells of a dropped one `usize::MAX`.
+fn prune_tail(membership: &[usize], coverage: f32) -> Vec<usize> {
+    let n_pb = membership.iter().max().map_or(0, |&g| g + 1);
+    let mut pb_size = vec![0usize; n_pb];
+    for &g in membership {
+        pb_size[g] += 1;
     }
-    let kept = select_pb_coverage(&pb_size_full, coverage);
-    let covered: usize = kept.iter().map(|&i| pb_size_full[i]).sum();
-    let total = membership_full.len();
+    let kept = select_pb_coverage(&pb_size, coverage);
+    let covered: usize = kept.iter().map(|&i| pb_size[i]).sum();
+    let total = membership.len();
     info!(
-        "Coverage filter: kept {} / {n_pb_full} PBs covering {covered} / {total} cells ({:.1}%)",
+        "Coverage filter: kept {} / {n_pb} PBs covering {covered} / {total} cells ({:.1}%)",
         kept.len(),
         100.0 * covered as f32 / total.max(1) as f32
     );
-    let mut old_to_new = vec![usize::MAX; n_pb_full];
+    let mut old_to_new = vec![usize::MAX; n_pb];
     for (new_i, &old_i) in kept.iter().enumerate() {
         old_to_new[old_i] = new_i;
     }
-    let pb_membership_kept: Vec<usize> = membership_full.iter().map(|&g| old_to_new[g]).collect();
-    let pb_size: Vec<usize> = kept.iter().map(|&i| pb_size_full[i]).collect();
-    let n_pb = kept.len();
-    let pb_kp = aggregate_features_by_group(&cells.cells_kn, &pb_membership_kept, n_pb);
-
-    // Edges of the dropped PBs' cells (`usize::MAX`) fall away.
-    let pb_edges = legume_numeric::matrix::coarsen::collapse(edges, &pb_membership_kept);
-    info!("PB graph: {n_pb} PBs, {} edges", pb_edges.len());
-    PbLayoutPrep {
-        cells,
-        pb_size,
-        pb_membership_kept,
-        pb_edges,
-        pb_kp,
-    }
+    membership.iter().map(|&g| old_to_new[g]).collect()
 }
 
 /// The per-cell table a layout runs on, from a run's geometry latent
@@ -655,20 +615,6 @@ pub(crate) fn load_cluster_assignments(
     Ok(clusters)
 }
 
-/// Cheap Nyström cell placement: each cell from its nearest PBs in the cell
-/// table's space.
-fn nystrom_cell_coords(args: &LayoutCommonArgs, prep: &PbLayoutPrep, pb_coords: &Mat) -> Mat {
-    let coords = project_cells_nystrom(
-        &prep.cells.cells_kn,
-        &prep.pb_kp,
-        pb_coords,
-        args.knn,
-        args.kernel_alpha,
-    );
-    info!("Placed cells by Nyström");
-    coords
-}
-
 /// Finish a PB layout: place cells by Nyström, write the PB and cell
 /// coordinates, and record them in the run's manifest.
 pub(crate) fn finalize_viz(
@@ -678,7 +624,13 @@ pub(crate) fn finalize_viz(
     pb_coords: &Mat,
     method: &str,
 ) -> anyhow::Result<()> {
-    let cell_coords = nystrom_cell_coords(args, prep, pb_coords);
+    let cell_coords = prep.pbs.place_cells(
+        &prep.cells.cells_kn,
+        pb_coords,
+        args.place_knn,
+        args.kernel_alpha,
+    );
+    info!("Placed cells by Nyström");
     write_viz_outputs_pb(args, resolved, prep, pb_coords, &cell_coords, method)
 }
 
@@ -708,7 +660,7 @@ fn write_viz_outputs_pb(
 
     // Diagnostic: not recorded in the manifest.
     let pb_feat_path = format!("{out}.pb_proj_mean.parquet");
-    let pb_features = prep.pb_kp.transpose();
+    let pb_features = prep.pbs.pb_features.transpose();
     let feat_col_names: Vec<Box<str>> = (0..pb_features.ncols())
         .map(|i| format!("p{i}").into_boxed_str())
         .collect();
@@ -719,10 +671,7 @@ fn write_viz_outputs_pb(
     )?;
 
     let cluster_ids = match &args.clusters {
-        Some(path) => Some(load_cluster_assignments(
-            path,
-            prep.pb_membership_kept.len(),
-        )?),
+        Some(path) => Some(load_cluster_assignments(path, prep.pbs.membership.len())?),
         None => None,
     };
 
@@ -732,7 +681,7 @@ fn write_viz_outputs_pb(
     for i in 0..n_cells {
         cell_out[(i, 0)] = cell_coords[(i, 0)];
         cell_out[(i, 1)] = cell_coords[(i, 1)];
-        let pb_id = prep.pb_membership_kept[i];
+        let pb_id = prep.pbs.membership[i];
         // NaN flags orphan cells (pb dropped by coverage filter); downstream
         // readers can mask with `is_nan` without collision against real IDs.
         cell_out[(i, 2)] = if pb_id == usize::MAX {
@@ -856,48 +805,15 @@ mod tests {
     use super::*;
     use senna::run_manifest::RunKind;
 
-    /// Two groups of cells, 200 each, in 5 dimensions; the first 200 cells
-    /// are one group.
-    fn two_groups() -> CellTable {
-        let n = 400;
-        let cells_kn = Mat::from_fn(5, n, |d, c| {
-            let wobble = ((c * 7 + d * 13) % 17) as f32 / 17.0 - 0.5;
-            let centre = if d == 0 && c >= 200 { 20.0 } else { 0.0 };
-            centre + wobble + 0.01 * (c % 200) as f32 * (d == 1) as u8 as f32
-        });
-        let names = (0..n).map(|c| format!("c{c}").into_boxed_str()).collect();
-        CellTable { names, cells_kn }
-    }
-
+    /// The tail pruned keeps the largest groups covering the share asked,
+    /// renumbered; cells of the rest are in none.
     #[test]
-    fn pseudobulks_are_the_cell_graph_coarsened() {
-        let cells = two_groups();
-        let mut edges = cell_graph(&cells.cells_kn.transpose(), 15, 256).unwrap();
-        // A few stray edges between the groups, as noisy graphs have.
-        edges.extend((0..10).map(|k| (k * 13, 200 + k * 17, 0.1)));
-        let membership = legume_numeric::matrix::coarsen::coarsen(400, &edges, 40, 1);
-        let prep = pseudobulks(cells, &edges, membership, 1.0);
-
-        // No PB spans both groups.
-        let n_pb = prep.pb_kp.ncols();
-        assert!(n_pb >= 40, "{n_pb} PBs");
-        for g in 0..n_pb {
-            let mine: Vec<usize> = (0..400)
-                .filter(|&c| prep.pb_membership_kept[c] == g)
-                .collect();
-            assert!(
-                mine.iter().all(|&c| (c < 200) == (mine[0] < 200)),
-                "PB {g} spans both"
-            );
-            // Its features are its cells' mean.
-            let mean = mine.iter().fold(nalgebra::DVector::zeros(5), |s, &c| {
-                s + prep.cells.cells_kn.column(c)
-            }) / mine.len() as f32;
-            assert!((prep.pb_kp.column(g) - mean).norm() < 1e-4);
-        }
-        // The PB graph is the cell graph collapsed.
-        let collapsed = legume_numeric::matrix::coarsen::collapse(&edges, &prep.pb_membership_kept);
-        assert_eq!(prep.pb_edges, collapsed);
+    fn the_tail_pruned_keeps_the_largest_groups() {
+        // Groups of 5, 1, 3 and 1 cells.
+        let membership = [0, 0, 0, 0, 0, 1, 2, 2, 2, 3];
+        let x = usize::MAX;
+        assert_eq!(prune_tail(&membership, 0.8), [0, 0, 0, 0, 0, x, 1, 1, 1, x]);
+        assert_eq!(prune_tail(&membership, 1.0), membership);
     }
 
     #[test]

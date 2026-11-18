@@ -1,58 +1,8 @@
-//! Data-preparation helpers for `fit_layout` (tsne/phate):
-//! - Per-PB mean-feature accumulation and coverage-based tail pruning.
+//! Data-preparation helpers for `fit_layout`:
+//! - Coverage-based tail pruning of projection-bit PBs.
 //! - The run's cell projection and PB membership, written at training.
 
-use rayon::prelude::*;
 use senna::embed_common::*;
-
-/// Accumulate the mean feature vector for each PB group.
-///
-/// `feat_kn` is `(k × n_cells)` (e.g. the random projection). Cells
-/// whose group is `usize::MAX` or ≥ `n_pb` are skipped. Returns
-/// `(k × n_pb)` column-major so it pairs directly with `proj_kn`.
-pub(super) fn aggregate_features_by_group(
-    feat_kn: &Mat,
-    pb_membership: &[usize],
-    n_pb: usize,
-) -> Mat {
-    let k = feat_kn.nrows();
-
-    // Bucket cell indices by PB in one O(n_cells) pass, then average
-    // each PB's cells in parallel (disjoint PB columns = no contention).
-    let mut cells_by_pb: Vec<Vec<usize>> = vec![Vec::new(); n_pb];
-    for (cell_idx, &g) in pb_membership.iter().enumerate() {
-        if g < n_pb {
-            cells_by_pb[g].push(cell_idx);
-        }
-    }
-
-    let cols: Vec<Vec<f32>> = cells_by_pb
-        .par_iter()
-        .map(|cells| {
-            if cells.is_empty() {
-                return vec![0.0f32; k];
-            }
-            let mut acc = vec![0.0f32; k];
-            for &c in cells {
-                let src = feat_kn.column(c);
-                for (a, v) in acc.iter_mut().zip(src.iter()) {
-                    *a += *v;
-                }
-            }
-            let inv = 1.0 / cells.len() as f32;
-            for v in &mut acc {
-                *v *= inv;
-            }
-            acc
-        })
-        .collect();
-
-    let mut out = Mat::zeros(k, n_pb);
-    for (p, col) in cols.iter().enumerate() {
-        out.column_mut(p).copy_from_slice(col);
-    }
-    out
-}
 
 /// Return the sorted list of PB indices whose cell counts, taken in
 /// descending size order, cumulatively cover at least `coverage` of the
