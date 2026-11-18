@@ -1,6 +1,6 @@
 [package]
 name = "senna-rs"
-version = "0.25.10"
+version = "0.25.13"
 edition = "2021"
 rust-version = "1.91"
 license = "MIT"
@@ -50,7 +50,7 @@ slow-tests = []
 [dependencies]
 mimalloc = "0.1"
 data-beans = { version = "0.13", default-features = false, features = ["aux", "alg"] }
-legume-numeric = { version = "0.10.8", features = ["matrix", "param", "candle", "mcmc"] }
+legume-numeric = { version = "0.10.9", features = ["matrix", "param", "candle", "mcmc"] }
 genomic-data = { version = "0.6", package = "legume-genomic-types" }
 graph-embedding-util = { version = "0.13", package = "legume-graph-embedding" }
 hsblock = { version = "0.2", package = "hsblock-rs" }
