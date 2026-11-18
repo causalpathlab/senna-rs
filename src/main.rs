@@ -840,11 +840,11 @@ enum Commands {
 
     // ─────────── 4. Layout ───────────
     #[command(
-        about = "2D layout of cells (umap, or phate / tsne / lle / stress / forceatlas2 / diffusion / radial / sugiyama over pseudobulks of the cell graph).",
+        about = "2D layout of cells (umap / phate / tsne / lle / stress / forceatlas2 / diffusion / radial / sugiyama over pseudobulks of the cell graph).",
         long_about = "Builds one kNN graph of the run's cells (its latent or cell projection).\n\
-                      umap lays the cells out on it directly. The others lay out\n\
-                      pseudobulks: the graph coarsened into groups of cells and collapsed\n\
-                      onto them; every cell is then placed via Nyström.\n\
+                      Every method lays out pseudobulks: the graph coarsened into groups\n\
+                      of cells and collapsed onto them; every cell is then placed via\n\
+                      Nyström.\n\
                       \n\
                       Each method writes `{out}.{method}.*.parquet` and is kept under\n\
                       `manifest.layout.methods`, so the methods sit side by side;\n\
@@ -1073,11 +1073,12 @@ enum LayoutCmd {
     )]
     Radial(LayoutRadialArgs),
     #[command(
-        about = "UMAP of cells over their fuzzy kNN graph.",
-        long_about = "UMAP layout of cells.\n\
+        about = "UMAP of pseudobulks on the graph between them (random init).",
+        long_about = "UMAP layout of pseudobulks.\n\
                       \n\
-                      The cells' fuzzy kNN graph (the one the pseudobulk layouts\n\
-                      coarsen) is laid out by SGD of attractive and repulsive forces."
+                      The graph between the pseudobulks (the cell kNN graph, coarsened\n\
+                      and collapsed onto them) is laid out by SGD of attractive and\n\
+                      repulsive forces. Cells are placed via Nyström."
     )]
     Umap(LayoutUmapArgs),
 }

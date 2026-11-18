@@ -1,5 +1,5 @@
 //! Geometric and numerical routines used across senna — dimensionality
-//! reduction (PHATE, t-SNE), pseudobulk similarity construction, and
+//! reduction (PHATE), pseudobulk similarity construction, and
 //! cell-level layout refinement. Pure functions on `nalgebra` matrices
 //! with no I/O and no CLI dependencies, so they can be consumed freely
 //! by `postprocess::*` (layout, annotate) and by training-time
@@ -7,4 +7,3 @@
 
 pub(crate) mod cell_layout;
 pub(crate) mod phate;
-pub(crate) mod tsne;

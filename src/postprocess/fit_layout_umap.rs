@@ -1,18 +1,22 @@
-//! `senna layout umap`: t-UMAP of every cell, as `uwot::tumap` does it, or
-//! UMAP's kernel when `--umap-min-dist` or `--umap-spread` is given. The
-//! run's cell table (latent, cell embedding or cell projection; see
-//! [`cell_table`]) gives a cell-cell fuzzy kNN graph, and SGD lays it out
-//! from a PCA(2) start. No landmarks, no Nyström: those are for PHATE and
-//! t-SNE, which cannot take every cell.
+//! `senna layout umap`: t-UMAP of the run's PBs, as t-SNE and PHATE lay
+//! them out, or UMAP's kernel when `--umap-min-dist` or `--umap-spread` is
+//! given. The graph between the PBs (the cell kNN graph, coarsened and
+//! collapsed) is laid out by SGD from a random start, and every cell is
+//! then placed by Nyström from its nearest PBs.
+//!
+//! `--target features` and `--joint` still lay out every point: the
+//! feature embedding's (or cells' and features') fuzzy kNN graph by SGD
+//! from a PCA(2) start.
 
 use super::fit_layout_common::{
-    cell_graph, cell_table, others, resolve_inputs, write_cell_layout, CellTable, LayoutCommonArgs,
-    ResolvedViz,
+    cell_table, finalize_viz, preprocess_layout_data, resolve_inputs, write_cell_layout, CellTable,
+    LayoutCommonArgs, ResolvedViz,
 };
 use super::fit_layout_features::{
     load_feature_layout_input, read_coembedding, write_feature_layout, LayoutTarget,
 };
 use legume_numeric::matrix::knn_graph::umap_memberships;
+use legume_numeric::matrix::layout::{fuzzy_graph_of_columns, umap_layout_2d_on_graph};
 use legume_numeric::matrix::pca::{init_2d_from_scores, pc_scores, random_init_2d};
 use legume_numeric::matrix::umap::Umap;
 use rayon::prelude::*;
@@ -76,7 +80,7 @@ pub struct LayoutUmapArgs {
     joint: bool,
 }
 
-/// PCA(2) initialization for the cell-level UMAP: project cells onto the top-2
+/// PCA(2) initialization for a point-level UMAP: project points onto the top-2
 /// principal components of the (Euclidean) embedding. Uniform-random init is
 /// uwot's *fallback*; its default is spectral/PCA, which seeds the global
 /// structure so SGD only has to refine it locally — random init leaves the
@@ -120,11 +124,11 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
              (bge, simba, resolve-embedding-space), not a `{kind}` run"
         );
     }
-    let prep = cell_table(&args.common, &resolved)?;
     if args.joint {
+        let prep = cell_table(&args.common, &resolved)?;
         fit_layout_joint(args, &params, &mut resolved, &prep)
     } else {
-        fit_cell_layout_umap(args, &params, &mut resolved, &prep)
+        fit_cell_layout_umap(args, &params, &mut resolved)
     }
 }
 
@@ -164,26 +168,27 @@ fn fit_layout_joint(
     )
 }
 
-/// Cell-level t-UMAP of the run's cell table. Output: only
-/// `cell_coords.parquet`, no `pb_coords`.
+/// t-UMAP of the run's PBs on the graph between them, then every cell
+/// placed by Nyström; written as the PB layouts write theirs.
 fn fit_cell_layout_umap(
     args: &LayoutUmapArgs,
     params: &TumapParams,
     resolved: &mut ResolvedViz,
-    prep: &CellTable,
 ) -> anyhow::Result<()> {
-    let n = prep.cells_kn.ncols();
-    info!("UMAP: {n} cells");
-
-    // PCA(2) init (uwot's `init = "pca"`; its default is spectral) so the
-    // global structure is seeded from the embedding rather than noise.
-    let cell_coords = tumap_on_columns(&prep.cells_kn, params)?;
-
-    write_cell_layout(&args.common, resolved, prep, &cell_coords, "umap", None)
+    let prep = preprocess_layout_data(&args.common, resolved)?;
+    let n = prep.pbs.n_pb();
+    let umap = params.umap(n);
+    info!(
+        "UMAP SGD on the PB graph: {n} PBs (epochs={}) ...",
+        umap.n_epochs
+    );
+    let pb_coords = umap_layout_2d_on_graph(n, &prep.pbs.pb_edges, &umap);
+    info!("UMAP done");
+    finalize_viz(&args.common, resolved, &prep, &pb_coords, "umap")
 }
 
 /// `--target features`: t-UMAP of the feature embedding on its own, over a
-/// cosine fuzzy kNN graph with a PCA(2) init. Same SGD as the direct cell path.
+/// cosine fuzzy kNN graph with a PCA(2) init. Same SGD as `--joint`.
 fn fit_feature_layout_umap(args: &LayoutUmapArgs, params: &TumapParams) -> anyhow::Result<()> {
     let mut input = load_feature_layout_input(&args.common)?;
     let coords = tumap_on_columns(&input.feat_kn, params)?;
@@ -221,6 +226,22 @@ impl Default for TumapParams {
             block_size: 1000,
             seed: 42,
             kernel: T_UMAP,
+        }
+    }
+}
+
+impl TumapParams {
+    /// The SGD for `n` points, with `epochs` unset uwot's rule: 500 up to
+    /// 10,000 points, else 200.
+    fn umap(&self, n: usize) -> Umap {
+        let (a, b) = self.kernel;
+        Umap {
+            n_epochs: self.epochs.unwrap_or(if n <= 10_000 { 500 } else { 200 }),
+            negative_sample_rate: self.negative_rate,
+            learning_rate: self.lr,
+            seed: self.seed,
+            a,
+            b,
         }
     }
 }
@@ -336,12 +357,11 @@ fn kernel_ab(min_dist: f32, spread: f32) -> (f32, f32) {
 }
 
 /// UMAP of the points given as columns of `feat_kn` (`dims × n`): their
-/// [`cell_graph`], the one the PB layouts coarsen, a PCA(2) start, then
-/// SGD. Returns `n × 2`.
+/// fuzzy kNN graph, as the PB layouts coarsen the cells', a PCA(2) start,
+/// then SGD. Returns `n × 2`.
 pub(crate) fn tumap_on_columns(feat_kn: &Mat, p: &TumapParams) -> anyhow::Result<Mat> {
-    let rows = feat_kn.transpose();
-    let edges = cell_graph(&rows, p.knn, p.block_size)?;
-    let mut coords = pca_init_2d(rows, p.seed);
+    let edges = fuzzy_graph_of_columns(feat_kn, p.knn, p.block_size)?;
+    let mut coords = pca_init_2d(feat_kn.transpose(), p.seed);
     run_cell_level_umap_in_place(&mut coords, &edges, p);
     Ok(coords)
 }
@@ -363,12 +383,12 @@ pub(crate) fn joint_tumap(
         "features have {} dims but cells {h}: not one shared space",
         features_kn.nrows()
     );
-    // Every point as a row: cells, then features.
-    let mut all = Mat::zeros(n + d, h);
-    all.rows_mut(0, n).tr_copy_from(cells_kn);
-    all.rows_mut(n, d).tr_copy_from(features_kn);
+    // Every point as a column: cells, then features.
+    let mut all = Mat::zeros(h, n + d);
+    all.columns_mut(0, n).copy_from(cells_kn);
+    all.columns_mut(n, d).copy_from(features_kn);
 
-    let mut edges = cell_graph(&all, p.knn, p.block_size)?;
+    let mut edges = fuzzy_graph_of_columns(&all, p.knn, p.block_size)?;
     edges.extend(feature_to_cell_edges(cells_kn, features_kn, p.knn)?);
     let edges = merge_fuzzy_edges(edges);
     info!(
@@ -376,7 +396,7 @@ pub(crate) fn joint_tumap(
         edges.len()
     );
 
-    let mut coords = pca_init_2d(all, p.seed);
+    let mut coords = pca_init_2d(all.transpose(), p.seed);
     run_cell_level_umap_in_place(&mut coords, &edges, p);
     Ok((
         coords.rows(0, n).into_owned(),
@@ -402,7 +422,8 @@ fn feature_to_cell_edges(
         .into_par_iter()
         .map_init(SearchScratch::default, |scratch, f| {
             let query: Vec<f32> = features_kn.column(f).iter().copied().collect();
-            let (cells, dists) = index.search_by_query_data_reuse(&query, others(knn), scratch)?;
+            let (cells, dists) =
+                index.search_by_query_data_reuse(&query, knn.saturating_sub(1).max(1), scratch)?;
             Ok(cells
                 .into_iter()
                 .zip(umap_memberships(&dists))
@@ -431,32 +452,21 @@ fn merge_fuzzy_edges(edges: Vec<(usize, usize, f32)>) -> Vec<(usize, usize, f32)
     out
 }
 
-/// Run cell-level UMAP SGD from `coords`, mutating them in place, with
-/// `p.kernel`'s `(a, b)`. `epochs` unset: uwot's rule, 500 up to 10,000 points, else 200.
+/// Point-level UMAP SGD from `coords`, mutating them in place, with
+/// `p.kernel`'s `(a, b)`.
 fn run_cell_level_umap_in_place(coords: &mut Mat, edges: &[(usize, usize, f32)], p: &TumapParams) {
     let n = coords.nrows();
-    let epochs = p.epochs.unwrap_or(if n <= 10_000 { 500 } else { 200 });
     let init_flat: Vec<f32> = (0..n)
         .flat_map(|i| [coords[(i, 0)], coords[(i, 1)]])
         .collect();
-
-    let (a, b) = p.kernel;
-    let umap = Umap {
-        n_epochs: epochs,
-        negative_sample_rate: p.negative_rate,
-        learning_rate: p.lr,
-        seed: p.seed,
-        a,
-        b,
-    };
-    info!("Cell-level UMAP SGD (epochs={epochs}) ...");
+    let umap = p.umap(n);
+    info!("Point-level UMAP SGD (epochs={}) ...", umap.n_epochs);
     let refined = umap.fit(edges, n, &init_flat);
-
     for i in 0..n {
         coords[(i, 0)] = refined[i * 2];
         coords[(i, 1)] = refined[i * 2 + 1];
     }
-    info!("Cell-level UMAP done");
+    info!("Point-level UMAP done");
 }
 
 #[cfg(test)]

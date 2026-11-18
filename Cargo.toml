@@ -49,11 +49,13 @@ slow-tests = []
 
 [dependencies]
 mimalloc = "0.1"
-data-beans = { version = "0.11", default-features = false, features = ["aux", "alg"] }
-legume-numeric = { version = "0.9.8", features = ["matrix", "param", "candle", "mcmc"] }
+data-beans = { version = "0.13", default-features = false, features = ["aux", "alg"] }
+legume-numeric = { version = "0.10.7", features = ["matrix", "param", "candle", "mcmc"] }
 genomic-data = { version = "0.6", package = "legume-genomic-types" }
-graph-embedding-util = { version = "0.11", package = "legume-graph-embedding" }
+graph-embedding-util = { version = "0.13", package = "legume-graph-embedding" }
 hsblock = { version = "0.2", package = "hsblock-rs" }
+# hsblock-rs 0.2 takes legume-numeric 0.9's leiden graph and clustering.
+hsblock-leiden = { version = "0.9.8", package = "legume-numeric", default-features = false }
 
 anyhow = "1.0"
 ratatui = { version = "0.30", optional = true }

@@ -29,7 +29,7 @@ fn fit_on_pb_graph(
     );
     let mut resolved = resolve_inputs(common)?;
     let prep = preprocess_layout_data(common, &resolved)?;
-    let pb_coords = layout(prep.pb_kp.ncols(), &prep.pb_edges);
+    let pb_coords = layout(prep.pbs.n_pb(), &prep.pbs.pb_edges);
     finalize_viz(common, &mut resolved, &prep, &pb_coords, method)
 }
 

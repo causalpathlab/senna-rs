@@ -27,6 +27,6 @@ pub fn fit_layout_sugiyama(args: &LayoutSugiyamaArgs) -> anyhow::Result<()> {
     );
     let mut resolved = resolve_inputs(&args.common)?;
     let prep = preprocess_layout_data(&args.common, &resolved)?;
-    let pb_coords = sugiyama_layout_2d_on_graph(prep.pb_kp.ncols(), &prep.pb_edges, None);
+    let pb_coords = sugiyama_layout_2d_on_graph(prep.pbs.n_pb(), &prep.pbs.pb_edges, None);
     finalize_viz(&args.common, &mut resolved, &prep, &pb_coords, "sugiyama")
 }
