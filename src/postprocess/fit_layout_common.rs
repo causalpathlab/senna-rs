@@ -132,11 +132,10 @@ pub struct LayoutCommonArgs {
         short = 'k',
         alias = "umap-knn",
         default_value_t = 15,
-        help = "Neighbours per cell, counting itself, in the cell kNN graph; and PBs a cell is placed by",
+        help = "Neighbours per cell, counting itself, in the cell kNN graph",
         long_help = "Neighbours per cell in the cell kNN graph every layout reads (counting\n\
                      the cell itself, as uwot's n_neighbors): the PB layouts coarsen and\n\
-                     collapse it. Also how many nearest PBs place each cell after a PB\n\
-                     layout, and the neighbours of a --target features or --joint UMAP."
+                     collapse it. Also the neighbours of a --target features or --joint UMAP."
     )]
     pub knn: usize,
 
@@ -146,6 +145,17 @@ pub struct LayoutCommonArgs {
         help = "Alpha-decay kernel exponent for Nyström cell projection"
     )]
     pub kernel_alpha: f32,
+
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Nearest PBs that place each cell after a PB layout",
+        long_help = "How many nearest PBs (in the feature space) place each cell after a\n\
+                     PB layout, by an alpha-decay kernel over their layout coordinates.\n\
+                     Keep it small: a cell averaged over many PBs from two groups lands\n\
+                     between them, as a streak across the layout."
+    )]
+    pub place_knn: usize,
 
     #[arg(
         long,
@@ -614,9 +624,12 @@ pub(crate) fn finalize_viz(
     pb_coords: &Mat,
     method: &str,
 ) -> anyhow::Result<()> {
-    let cell_coords =
-        prep.pbs
-            .place_cells(&prep.cells.cells_kn, pb_coords, args.knn, args.kernel_alpha);
+    let cell_coords = prep.pbs.place_cells(
+        &prep.cells.cells_kn,
+        pb_coords,
+        args.place_knn,
+        args.kernel_alpha,
+    );
     info!("Placed cells by Nyström");
     write_viz_outputs_pb(args, resolved, prep, pb_coords, &cell_coords, method)
 }
