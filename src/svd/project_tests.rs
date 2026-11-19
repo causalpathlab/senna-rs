@@ -4,26 +4,26 @@
 //! svd run reported a reconstruction wearing a prediction's name.
 
 use super::*;
-use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+use data_beans::sparse_io::open_sparse_matrix_by_path;
+use senna::sparse_output::{write_backend, Entries};
 use std::collections::HashSet;
 
 fn backend(dir: &tempfile::TempDir, genes: &[&str], n_cells: usize) -> anyhow::Result<SparseIoVec> {
-    let path = dir.path().join("q.zarr");
+    let path = dir.path().join("q.zarr.zip");
     // Every gene carries counts in every cell, so hiding some genuinely
     // removes evidence rather than dropping empty rows.
     let triplets: Vec<(u64, u64, f32)> = (0..genes.len())
         .flat_map(|g| (0..n_cells).map(move |c| (g as u64, c as u64, 1.0 + (g + c) as f32)))
         .collect();
-    let mut b = create_sparse_from_triplets(
-        &triplets,
-        (genes.len(), n_cells, triplets.len()),
-        Some(path.to_str().unwrap()),
-        Some(&SparseIoBackend::Zarr),
-    )?;
     let gn: Vec<Box<str>> = genes.iter().map(|s| Box::from(*s)).collect();
     let cn: Vec<Box<str>> = (0..n_cells).map(|i| format!("cell_{i}").into()).collect();
-    b.register_row_names_vec(&gn);
-    b.register_column_names_vec(&cn);
+    let eff = write_backend(
+        path.to_str().unwrap(),
+        Entries::Triplets(triplets),
+        &gn,
+        &cn,
+    )?;
+    let b = open_sparse_matrix_by_path(&eff)?;
     let mut v = SparseIoVec::new();
     v.push(std::sync::Arc::from(b), None)?;
     Ok(v)

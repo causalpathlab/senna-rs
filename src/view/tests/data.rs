@@ -1,20 +1,18 @@
 use super::*;
-use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 use senna::run_manifest::RunKind;
+use senna::sparse_output::{write_backend, Entries};
 
 /// A backend `name` in `dir` with two genes and `n` cells `c0`, `c1`, ….
 fn backend(dir: &Path, name: &str, n: usize) {
     let triplets: Vec<(u64, u64, f32)> = (0..n as u64).map(|c| (0, c, 1.0)).collect();
-    let mut b = create_sparse_from_triplets(
-        &triplets,
-        (2, n, triplets.len()),
-        Some(dir.join(name).to_str().unwrap()),
-        Some(&SparseIoBackend::Zarr),
+    let cells: Vec<Box<str>> = (0..n).map(|i| format!("c{i}").into()).collect();
+    write_backend(
+        dir.join(name).to_str().unwrap(),
+        Entries::Triplets(triplets),
+        &["GENE1".into(), "GENE2".into()],
+        &cells,
     )
     .unwrap();
-    b.register_row_names_vec(&["GENE1".into(), "GENE2".into()]);
-    let cells: Vec<Box<str>> = (0..n).map(|i| format!("c{i}").into()).collect();
-    b.register_column_names_vec(&cells);
 }
 
 /// The level each cell has, by name.
@@ -26,10 +24,10 @@ fn level(l: &Labels, cell: &str) -> String {
 fn each_cell_gets_the_batch_the_fit_gave_it() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    backend(d, "lib1.zarr", 2);
-    backend(d, "lib2.zarr", 3);
+    backend(d, "lib1.zarr.zip", 2);
+    backend(d, "lib2.zarr.zip", 3);
     let mut m = RunManifest::new(RunKind::Svd, "r");
-    m.data.input = vec!["lib1.zarr".into(), "lib2.zarr".into()];
+    m.data.input = vec!["lib1.zarr.zip".into(), "lib2.zarr.zip".into()];
 
     // No batch files: each file is its own batch.
     let batches = |m: &RunManifest| {
@@ -71,10 +69,10 @@ fn missing_data_skips_the_batch_colouring() {
 fn a_scene_takes_the_batches_once_its_run_s_data_files_are_read() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    backend(d, "lib1.zarr", 2);
-    backend(d, "lib2.zarr", 3);
+    backend(d, "lib1.zarr.zip", 2);
+    backend(d, "lib2.zarr.zip", 3);
     let mut m = RunManifest::new(RunKind::Svd, "r");
-    m.data.input = vec!["lib1.zarr".into(), "lib2.zarr".into()];
+    m.data.input = vec!["lib1.zarr.zip".into(), "lib2.zarr.zip".into()];
     let mut s = crate::view::tests::scene();
     s.data.loads = crate::view::activity::RunLoads::new(&m, d);
     assert!(s.data.loads.files.get().is_ok());

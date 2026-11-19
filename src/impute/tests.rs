@@ -4,7 +4,8 @@
 //! (row order must not matter) with the training-time transform.
 
 use super::*;
-use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+use data_beans::sparse_io::open_sparse_matrix_by_path;
+use senna::sparse_output::{write_backend, Entries};
 
 /// A minimal manifest through the real writer, so the fixture tracks the
 /// manifest schema instead of a hand-formatted JSON string.
@@ -144,18 +145,17 @@ fn make_backend(
     n_cells: usize,
 ) -> anyhow::Result<SparseIoVec> {
     let path = dir.path().join(name);
-    let mut backend = create_sparse_from_triplets(
-        triplets,
-        (gene_names.len(), n_cells, triplets.len()),
-        Some(path.to_str().unwrap()),
-        Some(&SparseIoBackend::Zarr),
-    )?;
     let genes: Vec<Box<str>> = gene_names.iter().map(|s| Box::from(*s)).collect();
     let cells: Vec<Box<str>> = (0..n_cells).map(|i| format!("cell_{i}").into()).collect();
-    backend.register_row_names_vec(&genes);
-    backend.register_column_names_vec(&cells);
+    let eff = write_backend(
+        path.to_str().unwrap(),
+        Entries::Triplets(triplets.to_vec()),
+        &genes,
+        &cells,
+    )?;
+    let opened = open_sparse_matrix_by_path(&eff)?;
     let mut data_vec = SparseIoVec::new();
-    data_vec.push(Arc::from(backend), None)?;
+    data_vec.push(Arc::from(opened), None)?;
     Ok(data_vec)
 }
 
@@ -169,7 +169,7 @@ fn svd_projection_is_keyed_by_gene_name_not_row_order() -> anyhow::Result<()> {
     // with the rows permuted (and the triplet row ids permuted to match).
     let aligned = make_backend(
         &dir,
-        "aligned.zarr",
+        "aligned.zarr.zip",
         &["a", "b", "c"],
         &[
             (0, 0, 5.0),
@@ -183,7 +183,7 @@ fn svd_projection_is_keyed_by_gene_name_not_row_order() -> anyhow::Result<()> {
     )?;
     let permuted = make_backend(
         &dir,
-        "permuted.zarr",
+        "permuted.zarr.zip",
         &["c", "a", "b"],
         &[
             (1, 0, 5.0),
@@ -233,7 +233,7 @@ fn svd_projection_refuses_a_query_sharing_no_gene() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let train_genes: Vec<Box<str>> = vec!["a".into(), "b".into()];
     let u_dk = Mat::from_row_slice(2, 1, &[1.0, 1.0]);
-    let query = make_backend(&dir, "query.zarr", &["x", "y"], &[(0, 0, 1.0)], 1)?;
+    let query = make_backend(&dir, "query.zarr.zip", &["x", "y"], &[(0, 0, 1.0)], 1)?;
     assert!(crate::svd::project::project_onto_dictionary(
         &query,
         &crate::svd::project::Dictionary {
@@ -294,18 +294,16 @@ fn simba_shares_bges_matching_plan() {
 // δ = 1 everywhere the pool is exactly `retrieval_impute`'s.
 #[test]
 fn imputed_counts_pool_each_neighbour_divided_by_its_delta() -> anyhow::Result<()> {
-    use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
     let dir = tempfile::tempdir()?;
-    let path = dir.path().join("ref.zarr");
+    let path = dir.path().join("ref.zarr.zip");
     let triplets: Vec<(u64, u64, f32)> = vec![(0, 0, 6.0), (1, 0, 2.0), (0, 1, 2.0), (1, 1, 2.0)];
-    let mut b = create_sparse_from_triplets(
-        &triplets,
-        (2, 2, triplets.len()),
-        Some(path.to_str().unwrap()),
-        Some(&SparseIoBackend::Zarr),
+    let eff = write_backend(
+        path.to_str().unwrap(),
+        Entries::Triplets(triplets),
+        &["g0".into(), "g1".into()],
+        &["a".into(), "b".into()],
     )?;
-    b.register_row_names_vec(&["g0".into(), "g1".into()]);
-    b.register_column_names_vec(&["a".into(), "b".into()]);
+    let b = open_sparse_matrix_by_path(&eff)?;
     let mut ref_data = SparseIoVec::new();
     ref_data.push(std::sync::Arc::from(b), None)?;
     let theta_ref = Mat::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);

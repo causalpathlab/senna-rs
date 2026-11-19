@@ -1,6 +1,6 @@
 //! A small planted data set for tests that fit end to end.
 
-use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+use senna::sparse_output::{write_backend, Entries};
 use std::path::Path;
 
 /// Two groups of cells, each with its own block of high genes and sparse
@@ -40,25 +40,10 @@ pub(crate) fn planted_batched_zarr(
             }
         }
     }
-    let nnz = triplets.len();
-    let path = dir.join("planted.zarr").to_string_lossy().into_owned();
-    let mut b = create_sparse_from_triplets(
-        &triplets,
-        (n_genes, n_cells, nnz),
-        Some(&path),
-        Some(&SparseIoBackend::Zarr),
-    )
-    .expect("backend");
-    b.register_row_names_vec(
-        &(0..n_genes)
-            .map(|g| format!("GENE{g}").into_boxed_str())
-            .collect::<Vec<_>>(),
-    );
-    b.register_column_names_vec(
-        &(0..n_cells)
-            .map(|c| format!("c{c}").into_boxed_str())
-            .collect::<Vec<_>>(),
-    );
+    let path = dir.join("planted.zarr.zip").to_string_lossy().into_owned();
+    let rows: Vec<Box<str>> = (0..n_genes).map(|g| format!("GENE{g}").into()).collect();
+    let cols: Vec<Box<str>> = (0..n_cells).map(|c| format!("c{c}").into()).collect();
+    write_backend(&path, Entries::Triplets(triplets), &rows, &cols).expect("backend");
     let batches = dir.join("planted.batch.txt");
     let labels: String = (0..n_cells)
         .map(|c| format!("B{}\n", c % n_batches))

@@ -13,11 +13,13 @@
 //! happens in `build_remap`, as for every other input. The model's genes are
 //! consulted here only to decide which axis of the table is the gene axis.
 
-use data_beans::sparse_io::{create_sparse_from_dmatrix, remove_backend_path};
+use data_beans::sparse_io::remove_backend_path;
+use legume_numeric::matrix::common_io::create_temp_dir_file;
 use log::{info, warn};
 use senna::embed_common::{oriented, read_labeled_mat, resolve_orientation, BulkTableOpts};
 use senna::run_manifest::RunKind;
-use std::path::{Path, PathBuf};
+use senna::sparse_output::{write_backend, Entries};
+use std::path::Path;
 
 /// The model's gene axis, whichever family wrote it. Used only to decide the
 /// orientation of a bulk table; alignment happens downstream.
@@ -131,8 +133,12 @@ pub(crate) fn materialize(
     model_genes: &[Box<str>],
     opts: &BulkTableOpts,
 ) -> anyhow::Result<BulkBackends> {
-    let mut paths: Vec<Box<str>> = Vec::with_capacity(bulk_files.len());
-    let mut n_samples: Vec<usize> = Vec::with_capacity(bulk_files.len());
+    // Built up in place, so a failure on a later file drops it and removes
+    // the backends already written.
+    let mut out = BulkBackends {
+        paths: Vec::with_capacity(bulk_files.len()),
+        n_samples: Vec::with_capacity(bulk_files.len()),
+    };
     for f in bulk_files {
         let m = read_labeled_mat(f, opts.header)?;
         let o = resolve_orientation(&m.rows, &m.cols, model_genes, opts.orientation)
@@ -162,17 +168,26 @@ pub(crate) fn materialize(
             m.cols.first().map_or("", AsRef::as_ref),
         );
 
-        // `None` path → a temp `.zarr` directory of its own. The writer is
-        // dropped at the end of this iteration, before anything reopens the path.
-        let mut sp = create_sparse_from_dmatrix(&m.mat, None, None)?;
-        sp.register_row_names_vec(&m.rows);
-        sp.register_column_names_vec(&m.cols);
-        let path: PathBuf = sp.get_backend_file_name().into();
-        info!("{f}: materialized as {}", path.display());
-        paths.push(path.to_string_lossy().into_owned().into_boxed_str());
-        n_samples.push(m.cols.len());
+        // A temp `.zarr.zip` archive in a fresh directory of its own. A failed
+        // write leaves that directory empty, and it goes the way `Drop` takes
+        // the others: non-recursively.
+        let target = create_temp_dir_file(".zarr.zip")?;
+        let eff = write_backend(
+            &target.to_string_lossy(),
+            Entries::Dense(&m.mat),
+            &m.rows,
+            &m.cols,
+        )
+        .inspect_err(|_| {
+            if let Some(dir) = target.parent() {
+                let _ = std::fs::remove_dir(dir);
+            }
+        })?;
+        info!("{f}: materialized as {eff}");
+        out.paths.push(eff);
+        out.n_samples.push(m.cols.len());
     }
-    Ok(BulkBackends { paths, n_samples })
+    Ok(out)
 }
 
 #[cfg(test)]

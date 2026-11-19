@@ -161,14 +161,15 @@ fn add_block_gene_sum(
 #[cfg(test)]
 mod fold_tests {
     use super::*;
-    use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+    use crate::sparse_output::{write_backend, Entries};
+    use data_beans::sparse_io::open_sparse_matrix_by_path;
 
     // Bar: with a fold, a cell's counts are divided by its batch's per-gene
     // fold as they are summed; without one the sums are the raw counts.
     #[test]
     fn gene_sums_divide_each_cell_by_its_batch_fold() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("x.zarr");
+        let path = dir.path().join("x.zarr.zip");
         // Two genes × three cells, all in one group; cell 2 is in batch 1.
         let triplets: Vec<(u64, u64, f32)> = vec![
             (0, 0, 2.0),
@@ -177,14 +178,13 @@ mod fold_tests {
             (0, 2, 9.0),
             (1, 2, 5.0),
         ];
-        let mut b = create_sparse_from_triplets(
-            &triplets,
-            (2, 3, triplets.len()),
-            Some(path.to_str().unwrap()),
-            Some(&SparseIoBackend::Zarr),
+        let eff = write_backend(
+            path.to_str().unwrap(),
+            Entries::Triplets(triplets),
+            &["g0".into(), "g1".into()],
+            &["c0".into(), "c1".into(), "c2".into()],
         )?;
-        b.register_row_names_vec(&["g0".into(), "g1".into()]);
-        b.register_column_names_vec(&["c0".into(), "c1".into(), "c2".into()]);
+        let b = open_sparse_matrix_by_path(&eff)?;
         let mut data = SparseIoVec::new();
         data.push(std::sync::Arc::from(b), None)?;
         let labels = [0usize, 0, 0];

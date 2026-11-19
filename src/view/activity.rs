@@ -1881,7 +1881,7 @@ mod tests {
     /// A backend at `path`: genes `GENE1..3`, cells `columns`; cell `i`
     /// has `i + 1` reads of GENE1 and, on even cells, 3 of GENE3.
     fn counts_file(path: &Path, columns: &[&str]) {
-        use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+        use senna::sparse_output::{write_backend, Entries};
         let mut triplets = Vec::new();
         for i in 0..columns.len() as u64 {
             triplets.push((0, i, (i + 1) as f32));
@@ -1889,27 +1889,28 @@ mod tests {
                 triplets.push((2, i, 3.0));
             }
         }
-        let mut b = create_sparse_from_triplets(
-            &triplets,
-            (3, columns.len(), triplets.len()),
-            Some(path.to_str().unwrap()),
-            Some(&SparseIoBackend::Zarr),
+        write_backend(
+            path.to_str().unwrap(),
+            Entries::Triplets(triplets),
+            &boxed(&["GENE1", "GENE2", "GENE3"]),
+            &boxed(columns),
         )
         .unwrap();
-        b.register_row_names_vec(&boxed(&["GENE1", "GENE2", "GENE3"]));
-        b.register_column_names_vec(&boxed(columns));
     }
 
     #[test]
     fn an_extra_file_shows_features_and_per_cell_stats_on_the_run_s_cells() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("other.zarr");
+        let path = dir.path().join("other.zarr.zip");
         // The file's columns in another order, one run cell missing, one
         // column not the run's.
         counts_file(&path, &["c2", "c0", "zz", "c1"]);
         let run = boxed(&["c0@lib", "c1@lib", "c2@lib", "c3@lib"]);
         let read = read_extra(&[path], &run).unwrap();
-        assert_eq!((read.matched(), read.of, &*read.name), (3, 4, "other.zarr"));
+        assert_eq!(
+            (read.matched(), read.of, &*read.name),
+            (3, 4, "other.zarr.zip")
+        );
 
         let mut a = Activity::new(
             RunManifest::new(senna::run_manifest::RunKind::Svd, "r"),
@@ -1950,21 +1951,21 @@ mod tests {
     #[test]
     fn several_extra_files_are_read_together() {
         let dir = tempfile::tempdir().unwrap();
-        let (a, b) = (dir.path().join("a.zarr"), dir.path().join("b.zarr"));
+        let (a, b) = (dir.path().join("a.zarr.zip"), dir.path().join("b.zarr.zip"));
         counts_file(&a, &["c0", "c1"]);
         counts_file(&b, &["c2", "zz"]);
         let run = boxed(&["c0", "c1", "c2", "c3"]);
         let read = read_extra(&[a, b], &run).unwrap();
         assert_eq!(
             (read.matched(), read.of, &*read.name),
-            (3, 4, "a.zarr + 1 more")
+            (3, 4, "a.zarr.zip + 1 more")
         );
     }
 
     #[test]
     fn a_file_with_none_of_the_run_s_cells_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("other.zarr");
+        let path = dir.path().join("other.zarr.zip");
         counts_file(&path, &["q0", "q1"]);
         let Err(e) = read_extra(&[path], &boxed(&["c0", "c1"])) else {
             panic!("a file with none of the run's cells was read");
@@ -1976,7 +1977,7 @@ mod tests {
     fn a_scene_opens_an_extra_file_and_steps_through_its_stats() {
         use crate::view::Pick;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("other.zarr");
+        let path = dir.path().join("other.zarr.zip");
         counts_file(&path, &["c1", "c2", "c3", "c4"]);
         let mut s = crate::view::tests::scene();
         s.data.run = Some((
@@ -2006,7 +2007,7 @@ mod tests {
     #[test]
     fn the_run_s_own_totals_are_read_on_the_side() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("run.zarr");
+        let path = dir.path().join("run.zarr.zip");
         counts_file(&path, &["c0", "c1"]);
         let cells = boxed(&["c0", "c1"]);
         let observed = read_extra(&[path], &cells).unwrap().observed;

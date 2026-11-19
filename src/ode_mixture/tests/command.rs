@@ -2,11 +2,11 @@ use super::init::spearman;
 use crate::ode_mixture::command::{run_ode, OdeArgs};
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 use clap::Parser;
-use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
 use legume_numeric::matrix::parquet::read_table_columns;
 use legume_numeric::matrix::traits::IoOps;
 use nalgebra::DMatrix;
 use senna::run_manifest::{RunKind, RunManifest};
+use senna::sparse_output::{write_backend, Entries};
 
 #[derive(Parser)]
 struct Cli {
@@ -24,7 +24,7 @@ fn parse(argv: &[&str]) -> OdeArgs {
 /// `GENEj/count/spliced` then `GENEj/count/unspliced`, columns `cI`;
 /// `GENE0` has no unspliced reads at all.
 fn backend(sim: &Sim, dir: &std::path::Path) -> String {
-    let path = dir.join("tracks.zarr").to_string_lossy().into_owned();
+    let path = dir.join("tracks.zarr.zip").to_string_lossy().into_owned();
     let (p, g) = (sim.n_pb, sim.n_genes);
     let m = DMatrix::<f32>::from_fn(2 * g, p, |r, c| {
         let x = if r < g {
@@ -38,14 +38,12 @@ fn backend(sim: &Sim, dir: &std::path::Path) -> String {
         };
         x.round() as f32
     });
-    let mut b = create_sparse_from_dmatrix(&m, Some(&path), Some(&SparseIoBackend::Zarr)).unwrap();
     let rows: Vec<Box<str>> = (0..g)
         .map(|j| format!("GENE{j}/count/spliced").into())
         .chain((0..g).map(|j| format!("GENE{j}/count/unspliced").into()))
         .collect();
     let cols: Vec<Box<str>> = (0..p).map(|c| format!("c{c}").into()).collect();
-    b.register_row_names_vec(&rows);
-    b.register_column_names_vec(&cols);
+    write_backend(&path, Entries::Dense(&m), &rows, &cols).unwrap();
     path
 }
 

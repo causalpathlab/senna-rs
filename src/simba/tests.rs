@@ -3,10 +3,10 @@
 
 use super::{fit_simba, SimbaArgs};
 use clap::Parser;
-use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 use legume_numeric::matrix::traits::IoOps;
 use senna::embed_common::Mat;
 use senna::run_manifest::{CellSpace, RunKind, RunManifest};
+use senna::sparse_output::{write_backend, Entries};
 use std::path::Path;
 
 /// Parse any `#[derive(Args)]` struct from a bare argv, as the CLI would.
@@ -31,13 +31,13 @@ fn planted_zarr(dir: &Path) -> (String, usize) {
 /// As [`planted_zarr`], plus (with `near_empty`) two extra cells carrying a
 /// single count each; also returns the nnz per gene.
 fn planted_zarr_with(dir: &Path, near_empty: bool) -> (String, usize, Vec<usize>) {
-    planted_zarr_named(dir, "planted.zarr", 20, near_empty)
+    planted_zarr_named(dir, "planted.zarr.zip", 20, near_empty)
 }
 
 /// The same cells measured on the first `n_genes` of the planted genes only
 /// (group 0's block is genes 0..10, so a half panel sees one group's markers).
 fn half_panel_zarr(dir: &Path) -> String {
-    planted_zarr_named(dir, "half.zarr", 10, false).0
+    planted_zarr_named(dir, "half.zarr.zip", 10, false).0
 }
 
 fn planted_zarr_named(
@@ -74,23 +74,9 @@ fn planted_zarr_named(
         per_gene[t.0 as usize] += 1;
     }
     let path = dir.join(name).to_string_lossy().into_owned();
-    let mut b = create_sparse_from_triplets(
-        &triplets,
-        (n_genes, n_cells, nnz),
-        Some(&path),
-        Some(&SparseIoBackend::Zarr),
-    )
-    .expect("backend");
-    b.register_row_names_vec(
-        &(0..n_genes)
-            .map(|g| format!("GENE{g}").into_boxed_str())
-            .collect::<Vec<_>>(),
-    );
-    b.register_column_names_vec(
-        &(0..n_cells)
-            .map(|c| format!("c{c}").into_boxed_str())
-            .collect::<Vec<_>>(),
-    );
+    let rows: Vec<Box<str>> = (0..n_genes).map(|g| format!("GENE{g}").into()).collect();
+    let cols: Vec<Box<str>> = (0..n_cells).map(|c| format!("c{c}").into()).collect();
+    write_backend(&path, Entries::Triplets(triplets), &rows, &cols).expect("backend");
     (path, nnz, per_gene)
 }
 

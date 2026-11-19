@@ -1,10 +1,14 @@
 use crate::ode_mixture::counts::*;
 use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::aux::feature_names::FeatureNameKind;
-use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
 use data_beans::sparse_io_vector::SparseIoVec;
 use data_beans::sparse_io_vector::{ColumnAlignment, RowAlignment};
 use nalgebra::DMatrix;
+use senna::sparse_output::{write_backend, Entries};
+
+fn boxed(names: &[&str]) -> Vec<Box<str>> {
+    names.iter().map(|&n| n.into()).collect()
+}
 
 /// The backends at `paths` read as `senna ode` reads them: every file's cells
 /// in turn, tagged `@{file}` when there are several, on the rows every file
@@ -24,7 +28,7 @@ fn open_tracks(paths: &[Box<str>]) -> SparseIoVec {
 /// Rows: A spliced, B spliced, A unspliced, C unspliced (C has one track
 /// only); cells c1..c4.
 fn backend(dir: &std::path::Path) -> String {
-    let path = dir.join("tracks.zarr").to_string_lossy().into_owned();
+    let path = dir.join("tracks.zarr.zip").to_string_lossy().into_owned();
     #[rustfmt::skip]
     let m = DMatrix::<f32>::from_row_slice(4, 4, &[
         1.0, 2.0, 3.0, 4.0,
@@ -32,22 +36,19 @@ fn backend(dir: &std::path::Path) -> String {
         0.0, 1.0, 0.0, 2.0,
         9.0, 9.0, 9.0, 9.0,
     ]);
-    let mut b = create_sparse_from_dmatrix(&m, Some(&path), Some(&SparseIoBackend::Zarr)).unwrap();
-    let rows: Vec<Box<str>> = [
+    let rows = boxed(&[
         "A/count/spliced",
         "B/count/spliced",
         "A/count/unspliced",
         "C/count/unspliced",
-    ]
-    .into_iter()
-    .map(Box::from)
-    .collect();
-    let cols: Vec<Box<str>> = ["c1", "c2", "c3", "c4"]
-        .into_iter()
-        .map(Box::from)
-        .collect();
-    b.register_row_names_vec(&rows);
-    b.register_column_names_vec(&cols);
+    ]);
+    write_backend(
+        &path,
+        Entries::Dense(&m),
+        &rows,
+        &boxed(&["c1", "c2", "c3", "c4"]),
+    )
+    .unwrap();
     path
 }
 
@@ -112,7 +113,7 @@ fn cell_blocks_read_each_cells_tracks_on_the_named_genes() {
 /// A second file with its rows in another order, one gene the first lacks
 /// and cells c1, c2.
 fn second_backend(dir: &std::path::Path) -> String {
-    let path = dir.join("more.zarr").to_string_lossy().into_owned();
+    let path = dir.join("more.zarr.zip").to_string_lossy().into_owned();
     #[rustfmt::skip]
     let m = DMatrix::<f32>::from_row_slice(4, 2, &[
         1.0, 0.0,
@@ -120,19 +121,13 @@ fn second_backend(dir: &std::path::Path) -> String {
         5.0, 5.0,
         7.0, 7.0,
     ]);
-    let mut b = create_sparse_from_dmatrix(&m, Some(&path), Some(&SparseIoBackend::Zarr)).unwrap();
-    let rows: Vec<Box<str>> = [
+    let rows = boxed(&[
         "A/count/unspliced",
         "A/count/spliced",
         "D/count/spliced",
         "D/count/unspliced",
-    ]
-    .into_iter()
-    .map(Box::from)
-    .collect();
-    let cols: Vec<Box<str>> = ["c1", "c2"].into_iter().map(Box::from).collect();
-    b.register_row_names_vec(&rows);
-    b.register_column_names_vec(&cols);
+    ]);
+    write_backend(&path, Entries::Dense(&m), &rows, &boxed(&["c1", "c2"])).unwrap();
     path
 }
 

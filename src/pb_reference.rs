@@ -37,6 +37,7 @@
 //! same as one cell.
 
 use crate::embed_common::*;
+use crate::sparse_output::{write_backend, Entries};
 use serde::{Deserialize, Serialize};
 
 /// Suffixes under the run's `--out` prefix.
@@ -279,22 +280,14 @@ pub fn write(
         100.0 * density
     );
 
-    // Written as a directory, then zipped into the archive the manifest names;
-    // the handle is dropped first so the directory is fully flushed.
-    let path = backend_path(prefix);
-    let zarr_dir = format!("{prefix}.{LEGACY_BACKEND_SUFFIX}");
-    remove_file(&path)?;
-    remove_file(&zarr_dir)?;
-    let mut backend = create_sparse_from_triplets(
-        &triplets,
-        (n_genes, n_pb, triplets.len()),
-        Some(&zarr_dir),
-        Some(&SparseIoBackend::Zarr),
+    // An older binary's unzipped directory would sit stale beside the archive.
+    remove_file(&format!("{prefix}.{LEGACY_BACKEND_SUFFIX}"))?;
+    let path = write_backend(
+        &backend_path(prefix),
+        Entries::Triplets(triplets),
+        gene_names,
+        &axis_id_names(COLUMN_PREFIX, n_pb),
     )?;
-    backend.register_row_names_vec(gene_names);
-    backend.register_column_names_vec(&axis_id_names(COLUMN_PREFIX, n_pb));
-    drop(backend);
-    data_beans::zarr_io::finalize_zarr_output(&zarr_dir, &path)?;
 
     let n_passthrough = (0..n_pb).filter(|&pb| pure_carried(pb)).count();
     let meta = PbReferenceMeta {

@@ -2,6 +2,7 @@ use crate::hvg::HvgCliArgs;
 use crate::topic::common::{collapse_multilevel, load_and_project, LoadProjectArgs, ProjectedData};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 use senna::embed_common::*;
+use senna::sparse_output::{write_backend, Entries};
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]
@@ -31,7 +32,7 @@ pub struct SvdArgs {
                      {out}.dictionary.parquet         gene × component loadings\n  \
                      {out}.latent.parquet             cell × component scores\n  \
                      {out}.delta.parquet              per-batch effects (if --batch-files)\n  \
-                     {out}.adjusted.zarr              batch-adjusted backend (if --save-adjusted)\n  \
+                     {out}.adjusted.zarr.zip          batch-adjusted backend (if --save-adjusted)\n  \
                      {out}.selected_features.txt      selected HVG names (if HVG enabled)\n  \
                      {out}.cell_proj.parquet          cached random projection\n  \
                      {out}.senna.json                 run manifest for `senna layout/plot --from`"
@@ -224,21 +225,12 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
             let triplets = triplets_adjusted_by_pseudobulk(&data_vec, delta_dp)?;
 
-            let mtx_shape = (data_vec.num_rows(), data_vec.num_columns(), triplets.len());
-
-            let backend_file = args.out.to_string() + ".adjusted.zarr";
-            let backend = SparseIoBackend::Zarr;
-            remove_file(&backend_file)?;
-
-            let mut adjusted_data = create_sparse_from_triplets(
-                &triplets,
-                mtx_shape,
-                Some(&backend_file),
-                Some(&backend),
+            let backend_file = write_backend(
+                &format!("{}.adjusted.zarr.zip", args.out),
+                Entries::Triplets(triplets),
+                &data_vec.row_names()?,
+                &data_vec.column_names()?,
             )?;
-
-            adjusted_data.register_row_names_vec(&data_vec.row_names()?);
-            adjusted_data.register_column_names_vec(&data_vec.column_names()?);
 
             info!("Batch-adjusted backend: {backend_file}");
         }

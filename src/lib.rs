@@ -24,3 +24,4 @@ pub mod output_helpers;
 pub mod pb_reference;
 pub mod run_manifest;
 pub mod senna_input;
+pub mod sparse_output;
