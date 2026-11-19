@@ -2,11 +2,11 @@
 //! set and a manifest of kind `bge`.
 
 use clap::Parser;
-use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
 use nalgebra::DMatrix;
 
 use crate::bge::{fit_bge, BgeArgs};
 use senna::run_manifest::{self, RunKind};
+use senna::sparse_output::{write_backend, Entries};
 
 const N_GENES: usize = 12;
 const N_CELLS: usize = 40;
@@ -16,17 +16,14 @@ const N_CELLS: usize = 40;
 /// empty (near-empty cell QC would otherwise drop it before it reaches the
 /// fit).
 fn synthetic_backend(dir: &std::path::Path) -> Box<str> {
-    let path = dir.join("fixture.zarr");
+    let path = dir.join("fixture.zarr.zip");
     let path: Box<str> = path.to_string_lossy().into_owned().into();
     let m = DMatrix::<f32>::from_fn(N_GENES, N_CELLS, |g, c| {
         (((g * 7 + c * 11 + 3) % 9) + 1) as f32
     });
-    let mut b = create_sparse_from_dmatrix(&m, Some(&path), Some(&SparseIoBackend::Zarr))
-        .expect("create synthetic backend");
     let genes: Vec<Box<str>> = (1..=N_GENES).map(|i| format!("GENE{i}").into()).collect();
     let cells: Vec<Box<str>> = (1..=N_CELLS).map(|i| format!("C{i}").into()).collect();
-    b.register_row_names_vec(&genes);
-    b.register_column_names_vec(&cells);
+    write_backend(&path, Entries::Dense(&m), &genes, &cells).expect("create synthetic backend");
     path
 }
 
@@ -78,8 +75,8 @@ fn bge_writes_its_documented_output_set_and_manifest_kind() {
         .expect("read the run directory")
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        // Exclude the input fixture (`fixture.zarr`); every real output is
-        // named `run.<suffix>`.
+        // Keep only the run's outputs, all named `run.<suffix>`; the input
+        // fixture is not.
         .filter(|name| name.starts_with("run."))
         .collect();
     actual.sort();

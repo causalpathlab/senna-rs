@@ -43,6 +43,7 @@ use legume_numeric::candle::topic_refinement::{refine_topic_proportions, TopicRe
 use legume_numeric::candle::traits::{DecoderModuleT, EncoderModuleT, NewDecoder};
 use log::info;
 use rayon::prelude::*;
+use senna::sparse_output::{check_target, write_backend, Entries};
 
 #[derive(Args, Clone, Debug)]
 #[command(group(
@@ -275,7 +276,8 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        help = "Also write residual expression to a sparse backend ({out}.residual.zarr / .h5)",
+        value_parser = check_target,
+        help = "Also write residual expression to a sparse backend ({out}.residual.zarr.zip / .h5)",
         long_help = "Regress the reference reconstruction out of the held-out counts.\n\
                      The reference is μ ∝ δ?·Σ_k θ_k·exp(β_dk). Regression is by DIVISION.\n\
                      The leftover is written as a NEW sparse backend, gene × cell.\n\
@@ -286,7 +288,7 @@ pub struct PredictArgs {
                      `senna svd` uses the same division semantics for batches.\n\
                      \n\
                      Only entries above --residual-threshold are kept. All are ≥ 0,\n\
-                     so the file stays sparse. The backend follows the extension: .zarr,\n\
+                     so the file stays sparse. The backend follows the extension: .zarr.zip,\n\
                      or .h5 with the `hdf5` feature."
     )]
     pub(crate) residual_out: Option<Box<str>>,
@@ -2730,21 +2732,14 @@ fn write_residual_backend(
         .flatten()
         .collect();
 
-    let backend = match file_ext(path)?.as_ref() {
-        "zarr" => SparseIoBackend::Zarr,
-        "h5" => SparseIoBackend::HDF5,
-        other => anyhow::bail!("residual: unknown backend extension '.{other}' (use .zarr or .h5)"),
-    };
-    let mtx_shape = (d_test, ntot, triplets.len());
-    remove_file(path)?;
-    let mut residual =
-        create_sparse_from_triplets(&triplets, mtx_shape, Some(path), Some(&backend))?;
-    residual.register_row_names_vec(&data_vec.row_names()?);
-    residual.register_column_names_vec(&data_vec.column_names()?);
+    let nnz = triplets.len();
+    let written = write_backend(
+        path,
+        Entries::Triplets(triplets),
+        &data_vec.row_names()?,
+        &data_vec.column_names()?,
+    )?;
 
-    info!(
-        "Wrote residual backend: {path} ({d_test} genes × {ntot} cells, {} nonzeros)",
-        triplets.len(),
-    );
+    info!("Wrote residual backend: {written} ({d_test} genes × {ntot} cells, {nnz} nonzeros)");
     Ok(())
 }

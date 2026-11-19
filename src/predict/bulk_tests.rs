@@ -4,10 +4,11 @@
 //! downstream can tell which door the data came in through.
 
 use super::{materialize, BulkBackends};
-use data_beans::sparse_io::{create_sparse_from_triplets, open_sparse_matrix, SparseIoBackend};
+use data_beans::sparse_io::open_sparse_matrix_by_path;
 use data_beans::sparse_io_vector::SparseIoVec;
 use legume_numeric::matrix::traits::IoOps;
 use senna::embed_common::{BulkTableOpts, HeaderArg, Mat, Orientation};
+use senna::sparse_output::{write_backend, Entries};
 use std::sync::Arc;
 
 fn labels(v: &[&str]) -> Vec<Box<str>> {
@@ -44,7 +45,7 @@ fn read_all(v: &SparseIoVec) -> nalgebra_sparse::CscMatrix<f32> {
 }
 
 fn open_vec(path: &str) -> SparseIoVec {
-    let b = open_sparse_matrix(path, &SparseIoBackend::Zarr).expect("reopen by path");
+    let b = open_sparse_matrix_by_path(path).expect("reopen by path");
     let mut v = SparseIoVec::new();
     v.push(Arc::from(b), None).expect("push");
     v
@@ -76,16 +77,15 @@ fn the_temp_backend_equals_one_built_from_triplets() {
             }
         }
     }
-    let mtx_path = dir.path().join("mtx.zarr");
-    let mut b = create_sparse_from_triplets(
-        &triplets,
-        (3, 2, triplets.len()),
-        Some(mtx_path.to_str().unwrap()),
-        Some(&SparseIoBackend::Zarr),
+    let mtx_path = dir.path().join("mtx.zarr.zip");
+    let eff = write_backend(
+        mtx_path.to_str().unwrap(),
+        Entries::Triplets(triplets),
+        &genes,
+        &samples,
     )
     .expect("triplets");
-    b.register_row_names_vec(&genes);
-    b.register_column_names_vec(&samples);
+    let b = open_sparse_matrix_by_path(&eff).unwrap();
     let mut v = SparseIoVec::new();
     v.push(Arc::from(b), None).unwrap();
     let via_mtx = read_all(&v);
