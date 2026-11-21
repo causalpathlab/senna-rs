@@ -5,8 +5,9 @@ use super::fit_layout_common::{
     finalize_viz, preprocess_layout_data, resolve_inputs, LayoutCommonArgs, PhateCliArgs,
 };
 use super::fit_layout_features::{load_feature_layout_input, write_feature_layout, LayoutTarget};
-use crate::geometry::cell_layout::project_cells_nystrom;
-use crate::geometry::phate::{phate_layout_2d, phate_layout_2d_on_graph};
+use legume_numeric::matrix::layout::{
+    phate_layout_2d, phate_layout_2d_on_graph, project_cells_nystrom,
+};
 use senna::embed_common::*;
 
 #[derive(Args, Debug)]

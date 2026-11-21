@@ -53,7 +53,6 @@ mod feature_preset;
 #[path = "tests/fit_cli.rs"]
 mod fit_cli;
 mod fne;
-mod geometry;
 mod hvg;
 mod impute;
 mod joint_topic;

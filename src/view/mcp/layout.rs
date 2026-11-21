@@ -2,10 +2,10 @@
 
 use super::jobs::{one_of, senna_parses, Task};
 use super::parse;
-use crate::postprocess::{MIN_DIST, SPREAD};
 use crate::view::recompute::{Step, Target};
 use anyhow::{ensure, Context, Result};
 use legume_mcp::{Call, Content, ToolSpec};
+use legume_numeric::matrix::umap::{MIN_DIST, SPREAD};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -65,7 +65,7 @@ fn layout_task(a: &LayoutArgs, t: &Target) -> Result<Task> {
         cmd: crate::LayoutCmd::Umap(umap),
     } = senna_parses(&argv)?.commands
     {
-        umap.tumap_params()?;
+        umap.umap_layout_args()?;
     }
     let made = step.outputs(t, &a.method).remove(0);
     Ok(Task {

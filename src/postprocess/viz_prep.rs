@@ -1,38 +1,7 @@
 //! Data-preparation helpers for `fit_layout`:
-//! - Coverage-based tail pruning of projection-bit PBs.
 //! - The run's cell projection and PB membership, written at training.
 
 use senna::embed_common::*;
-
-/// Return the sorted list of PB indices whose cell counts, taken in
-/// descending size order, cumulatively cover at least `coverage` of the
-/// total cells. Result is in ascending-index order so that downstream
-/// slicing preserves relative positions. If `coverage >= 1.0` all PBs are
-/// returned.
-pub(super) fn select_pb_coverage(pb_size: &[usize], coverage: f32) -> Vec<usize> {
-    let n = pb_size.len();
-    if coverage >= 1.0 || n == 0 {
-        return (0..n).collect();
-    }
-    let total: usize = pb_size.iter().sum();
-    let target = (coverage.clamp(0.0, 1.0) * total as f32).ceil() as usize;
-
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| pb_size[b].cmp(&pb_size[a]));
-
-    let mut cum = 0usize;
-    let mut cut = 0usize;
-    for (i, &idx) in order.iter().enumerate() {
-        cum += pb_size[idx];
-        cut = i + 1;
-        if cum >= target {
-            break;
-        }
-    }
-    let mut kept: Vec<usize> = order[..cut].to_vec();
-    kept.sort_unstable();
-    kept
-}
 
 /// Persist the per-cell random projection so `senna layout` can reuse it
 /// without re-running `load_and_collapse` on raw data. Writes
