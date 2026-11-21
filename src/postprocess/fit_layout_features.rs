@@ -11,7 +11,7 @@
 //!   is laid out directly, gene-gene structure only. Needs no count data.
 
 use super::fit_layout_common::LayoutCommonArgs;
-use crate::geometry::cell_layout::project_cells_nystrom;
+use legume_numeric::matrix::layout::project_cells_nystrom;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use senna::embed_common::*;

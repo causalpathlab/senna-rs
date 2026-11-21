@@ -4,8 +4,8 @@
 //!   cell embedding), else its cached cell projection. The count data is
 //!   never read, so a run can be laid out where its data is not.
 //! - The run's PBs as legume's [`Coarsened`]: its cell kNN graph coarsened
-//!   (or, without a latent, projection bits with the tail pruned), and the
-//!   graph between them.
+//!   (or, without a latent, projection bits with the tail pruned by legume's
+//!   [`groups_covering`]), and the graph between them.
 //! - Shared output writer.
 //!
 //! Every layout subcommand delegates here for everything except the
@@ -15,9 +15,11 @@ use super::fit_layout_features::{
     place_features_on_cells, record_cell_layout, write_features_on_cells, FeatureSpace,
     LayoutTarget,
 };
-use super::viz_prep::select_pb_coverage;
 use data_beans::alg::random_projection::binary_sort_columns;
-use legume_numeric::matrix::layout::{coarsened, fuzzy_graph_of_columns, CoarsenArgs, Coarsened};
+use legume_numeric::matrix::dmatrix_util::winsorize_rows_inplace;
+use legume_numeric::matrix::layout::{
+    coarsened, fuzzy_graph_of_columns, groups_covering, CoarsenArgs, Coarsened, PhateArgs,
+};
 use senna::embed_common::*;
 use senna::run_manifest::{self, LayoutEntry, RunManifest};
 use std::path::PathBuf;
@@ -219,8 +221,7 @@ pub struct LayoutCommonArgs {
     pub theta_temperature: f32,
 }
 
-/// PHATE diffusion-embedding args. Shared by `layout phate` (main
-/// layout) and `layout tsne` (PHATE-based t-SNE initialization).
+/// PHATE diffusion-embedding args of `layout phate`.
 #[derive(Args, Debug, Clone)]
 pub struct PhateCliArgs {
     #[arg(long, default_value_t = 20, help = "PHATE diffusion time t")]
@@ -251,7 +252,7 @@ pub struct PhateCliArgs {
     pub phate_mds_tol: f32,
 }
 
-impl From<&PhateCliArgs> for crate::geometry::phate::PhateArgs {
+impl From<&PhateCliArgs> for PhateArgs {
     fn from(a: &PhateCliArgs) -> Self {
         Self {
             t: a.phate_t,
@@ -400,7 +401,7 @@ fn read_cell_proj(args: &LayoutCommonArgs, path: &str) -> anyhow::Result<(Vec<Bo
         proj_kn.nrows()
     );
     proj_kn.scale_rows_inplace();
-    winsorize_rows_inplace(&mut proj_kn, args.trim_cell_mads);
+    winsorize_cells(&mut proj_kn, args.trim_cell_mads);
     Ok((cell_names, proj_kn))
 }
 
@@ -439,39 +440,23 @@ pub(crate) fn preprocess_layout_data(
         info!("PBs: projection bits of the cell projection");
         let edges = fuzzy_graph_of_columns(&cells.cells_kn, args.knn, block_size)?;
         let kk = args.sort_dim.min(cells.cells_kn.nrows()).min(n_cells);
-        let membership = canonicalize_codes(&binary_sort_columns(&cells.cells_kn, kk)?);
-        Coarsened::from_membership(
-            &cells.cells_kn,
-            &edges,
-            prune_tail(&membership, args.pb_coverage),
-        )
+        let membership =
+            groups_covering(&binary_sort_columns(&cells.cells_kn, kk)?, args.pb_coverage);
+        log_coverage(&membership);
+        Coarsened::from_membership(&cells.cells_kn, &edges, membership)
     };
     info!("PB graph: {} PBs, {} edges", pbs.n_pb(), pbs.pb_edges.len());
     Ok(PbLayoutPrep { cells, pbs })
 }
 
-/// A grouping of the cells (`membership`, ids `0..`) with its long tail
-/// pruned to `coverage` of the cells: the kept groups renumbered `0..`,
-/// cells of a dropped one `usize::MAX`.
-fn prune_tail(membership: &[usize], coverage: f32) -> Vec<usize> {
-    let n_pb = membership.iter().max().map_or(0, |&g| g + 1);
-    let mut pb_size = vec![0usize; n_pb];
-    for &g in membership {
-        pb_size[g] += 1;
-    }
-    let kept = select_pb_coverage(&pb_size, coverage);
-    let covered: usize = kept.iter().map(|&i| pb_size[i]).sum();
+/// Log how many cells the PBs kept by the coverage filter hold.
+fn log_coverage(membership: &[usize]) {
+    let covered = membership.iter().filter(|&&g| g != usize::MAX).count();
     let total = membership.len();
     info!(
-        "Coverage filter: kept {} / {n_pb} PBs covering {covered} / {total} cells ({:.1}%)",
-        kept.len(),
+        "Coverage filter: kept PBs covering {covered} / {total} cells ({:.1}%)",
         100.0 * covered as f32 / total.max(1) as f32
     );
-    let mut old_to_new = vec![usize::MAX; n_pb];
-    for (new_i, &old_i) in kept.iter().enumerate() {
-        old_to_new[old_i] = new_i;
-    }
-    membership.iter().map(|&g| old_to_new[g]).collect()
 }
 
 /// The per-cell table a layout runs on, from a run's geometry latent
@@ -521,73 +506,21 @@ pub(crate) fn latent_layout_features(
         ("z-scored scores".into(), true)
     };
     if clip {
-        winsorize_rows_inplace(&mut feat_kn, trim_mads);
+        winsorize_cells(&mut feat_kn, trim_mads);
     }
     (feat_kn, latent_desc)
 }
 
-/// Robustly winsorize each feature dimension (row) of a column-per-cell matrix
-/// to `median ± n_mads · MAD · 1.4826`, so a few extreme-outlier cells can't
-/// stretch the layout or dominate the PB-PB similarity. `n_mads <= 0` (or fewer
-/// than 8 cells) is a no-op. MAD-based ⇒ no Gaussian assumption; only the
-/// extreme tails are clipped.
-fn winsorize_rows_inplace(feat: &mut Mat, n_mads: f32) {
-    let (d, n) = (feat.nrows(), feat.ncols());
-    if n_mads <= 0.0 || n < 8 {
-        return;
-    }
-    let mut clipped = 0usize;
-    let mut buf: Vec<f32> = Vec::with_capacity(n);
-    for r in 0..d {
-        buf.clear();
-        buf.extend((0..n).map(|c| feat[(r, c)]));
-        let med = median_of(&mut buf);
-        buf.iter_mut().for_each(|v| *v = (*v - med).abs());
-        let mad = median_of(&mut buf) * 1.4826;
-        if mad <= 1e-12 {
-            continue;
-        }
-        let (lo, hi) = (med - n_mads * mad, med + n_mads * mad);
-        for c in 0..n {
-            let v = feat[(r, c)];
-            if v < lo {
-                feat[(r, c)] = lo;
-                clipped += 1;
-            } else if v > hi {
-                feat[(r, c)] = hi;
-                clipped += 1;
-            }
-        }
-    }
+/// [`winsorize_rows_inplace`] of a column-per-cell table, logged.
+fn winsorize_cells(feat: &mut Mat, n_mads: f32) {
+    let clipped = winsorize_rows_inplace(feat, n_mads);
     if clipped > 0 {
-        info!("Winsorized {clipped} outlier feature value(s) to ±{n_mads} MADs ({d} dims × {n} cells)");
+        info!(
+            "Winsorized {clipped} outlier feature value(s) to ±{n_mads} MADs ({} dims × {} cells)",
+            feat.nrows(),
+            feat.ncols()
+        );
     }
-}
-
-/// Median via quickselect on a scratch buffer (mutates its order). 0 for empty.
-fn median_of(buf: &mut [f32]) -> f32 {
-    if buf.is_empty() {
-        return 0.0;
-    }
-    let mid = buf.len() / 2;
-    buf.select_nth_unstable_by(mid, |a, b| {
-        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    buf[mid]
-}
-
-/// Canonicalize raw bucket codes from `binary_sort_columns` into
-/// contiguous PB ids `[0, n_pb)`.
-fn canonicalize_codes(codes: &[usize]) -> Vec<usize> {
-    use std::collections::HashMap;
-    let mut mapping: HashMap<usize, usize> = HashMap::new();
-    let mut membership = Vec::with_capacity(codes.len());
-    for &c in codes {
-        let next_id = mapping.len();
-        let id = *mapping.entry(c).or_insert(next_id);
-        membership.push(id);
-    }
-    membership
 }
 
 /// Load cluster assignments (one-column parquet of cell IDs) and validate length.
@@ -804,17 +737,6 @@ pub(crate) fn write_cell_layout(
 mod tests {
     use super::*;
     use senna::run_manifest::RunKind;
-
-    /// The tail pruned keeps the largest groups covering the share asked,
-    /// renumbered; cells of the rest are in none.
-    #[test]
-    fn the_tail_pruned_keeps_the_largest_groups() {
-        // Groups of 5, 1, 3 and 1 cells.
-        let membership = [0, 0, 0, 0, 0, 1, 2, 2, 2, 3];
-        let x = usize::MAX;
-        assert_eq!(prune_tail(&membership, 0.8), [0, 0, 0, 0, 0, x, 1, 1, 1, x]);
-        assert_eq!(prune_tail(&membership, 1.0), membership);
-    }
 
     #[test]
     fn an_embedding_cell_is_laid_out_by_its_direction_alone() {
