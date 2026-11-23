@@ -374,7 +374,7 @@ pub(crate) fn cell_table(
         .into_iter()
         .enumerate()
         .map(|(i, l)| (i, Box::<str>::from(l.trim())))
-        .filter(|(i, l)| !l.is_empty() && !(*i == 0 && &**l == "cell"))
+        .filter(|(i, l)| !l.is_empty() && (*i != 0 || &**l != "cell"))
         .map(|(_, l)| l)
         .collect();
     let kept = table.keep(|name| !drop.contains(name));
