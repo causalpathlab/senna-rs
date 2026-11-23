@@ -1242,3 +1242,26 @@ fn the_queue_log_goes_to_the_job_once_each_line() {
     shared.dropped += 3;
     assert_eq!(sent.new_lines(&shared), ["d", "e"]);
 }
+
+/// A fit's bar becomes a stage with the times its frame drew; a bar with no
+/// message of its own is labelled by the fit's newest log line, and a
+/// spinner has no end and no time left.
+#[test]
+fn a_bar_is_a_stage_with_the_times_its_frame_drew() {
+    use legume_tui::child::Progress;
+    let secs = Duration::from_secs;
+    let bar = Progress::new(200, 1000, "fit gap=0.41").timed(Some(secs(10)), Some(secs(40)));
+    let s = stage_of(&bar, "epoch 200/1000");
+    assert_eq!(s.label, "fit gap=0.41");
+    assert_eq!(
+        (s.pos, s.len, s.elapsed_s, s.eta_s),
+        (200, Some(1000), 10, Some(40))
+    );
+
+    let bare = Progress::new(5, 10, "");
+    assert_eq!(stage_of(&bare, "  epoch 200/1000 ").label, "epoch 200/1000");
+
+    let spin = Progress::new(37, 0, "streamed").timed(Some(secs(3)), Some(secs(0)));
+    let s = stage_of(&spin, "");
+    assert_eq!((s.len, s.eta_s), (None, None));
+}

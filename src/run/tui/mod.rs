@@ -28,7 +28,7 @@ use ratatui::crossterm::event::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The methods `senna run` sets up, in the order listed.
 pub const METHODS: [&str; 10] = [
@@ -227,6 +227,29 @@ impl Sent {
     }
 }
 
+/// How often a fit given whole tells its job where its bars stand.
+const SAY_STAGES_EVERY: Duration = Duration::from_secs(2);
+/// A stage's label is cut to this many characters.
+const STAGE_LABEL_MAX: usize = 120;
+
+/// A fit's progress bar as its job's `job_status` shows it: what it counts
+/// (the bar's message, else `last`, the fit's newest log line), its count,
+/// and the times its frame drew. A spinner has no end and no time left.
+fn stage_of(p: &legume_tui::child::Progress, last: &str) -> legume_mcp::job::Stage {
+    let label = match p.what.trim() {
+        "" => last.trim(),
+        what => what,
+    };
+    let len = (p.len > 0).then_some(p.len);
+    legume_mcp::job::Stage {
+        label: label.chars().take(STAGE_LABEL_MAX).collect(),
+        pos: p.pos,
+        len,
+        elapsed_s: p.elapsed.map_or(0, |d| d.as_secs()),
+        eta_s: p.eta.filter(|_| len.is_some()).map(|d| d.as_secs()),
+    }
+}
+
 /// How long a fit has to wrap up when senna run quits under it.
 const STOP_GRACE: Duration = Duration::from_secs(10);
 
@@ -287,15 +310,30 @@ pub fn run(cli: clap::Command, args: &super::RunArgs) -> anyhow::Result<()> {
     };
     let mut app = App::new(cli, mung, start).map_err(failed)?;
     let mut sent = Sent::default();
-    let report = |sent: &mut Sent, q: &Queue| {
+    let mut said_stages = Instant::now();
+    let mut report = |sent: &mut Sent, q: &Queue| {
         let Some(r) = &reporter else { return };
+        let now = Instant::now();
+        let say_stages = now.duration_since(said_stages) >= SAY_STAGES_EVERY;
         // Taken off the lock, then written.
-        let lines = q
+        let (lines, bars) = q
             .shared
             .lock()
-            .map(|s| sent.new_lines(&s))
+            .map(|s| {
+                let bars = say_stages.then(|| (s.progress.clone(), s.last.clone()));
+                (sent.new_lines(&s), bars)
+            })
             .unwrap_or_default();
         lines.iter().for_each(|l| r.line(l));
+        if let Some((bars, last)) = bars {
+            said_stages = now;
+            let stages: Vec<_> = bars
+                .iter()
+                .zip(&last)
+                .filter_map(|(p, last)| p.as_ref().map(|p| stage_of(p, last)))
+                .collect();
+            r.progress(&stages);
+        }
     };
     let quiet = legume_tui::logs::quiet();
     // The mouse's buttons and wheel reported, never its movement, so a
