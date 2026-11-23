@@ -35,6 +35,7 @@ pub(crate) fn fit_on_pseudobulks(
                 delta,
                 collapse_batch_names: &pseudobulks.collapse_batch_names,
             }),
+            sketched_rows: pseudobulks.sketched_rows.as_deref(),
         },
         config,
     )
