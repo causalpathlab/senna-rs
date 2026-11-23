@@ -3,7 +3,7 @@
 //!
 //! Two ways in, one way out. `--multiome rna.zarr,adt.zarr` declares the
 //! layout; with plain positional files the layout is read off the inputs by
-//! [`graph_embedding_util::detect_multiome_plan`]. Both produce a
+//! [`crate::multiome_plan::detect_multiome_plan`]. Both produce a
 //! [`crate::multiome_plan::MultiomePlan`], so everything downstream — feature namespacing,
 //! group validation, batch resolution — sees one shape.
 
