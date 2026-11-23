@@ -8,7 +8,6 @@ use data_beans::aux::feature_types::{
     write_feature_types, FeatureType, GENE_TYPE,
 };
 use data_beans::aux::frozen_features::FrozenFeatureHost;
-use graph_embedding_util as ge;
 use legume_numeric::matrix::dmatrix_util::concatenate_vertical;
 use legume_numeric::matrix::parquet::{peek_parquet_field_names, read_parquet_string_column};
 use legume_numeric::matrix::traits::IoOps;
@@ -95,7 +94,7 @@ impl CarriedRows {
         flag: &str,
         host: &FrozenFeatureHost,
         target_names: &[Box<str>],
-        kind: &ge::FeatureNameKind,
+        kind: &data_beans::aux::feature_names::FeatureNameKind,
         src_types: &[FeatureType],
         dictionary_path: &str,
     ) -> anyhow::Result<Option<Self>> {

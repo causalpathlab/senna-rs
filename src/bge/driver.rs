@@ -26,7 +26,7 @@ pub(crate) struct EmbedKnobs<'a> {
     pub emit_pb_reference: bool,
     /// BBKNN + DC-Poisson refinement params, already resolved by the
     /// caller from the shared `--pb-refine-*` flags.
-    pub refine: ge::RefineParams,
+    pub refine: data_beans::alg::refine_multilevel::RefineParams,
 
     pub qc: &'a QcArgs,
     pub phase1_cells_per_pb: usize,
@@ -56,7 +56,7 @@ pub(crate) struct EmbedKnobs<'a> {
 /// -loaded data plus its resolved knobs.
 pub(crate) struct EmbedPlan<'a> {
     pub knobs: EmbedKnobs<'a>,
-    pub unified: ge::UnifiedData,
+    pub unified: data_beans::unified::UnifiedData,
     /// The data files this run was loaded from (manifest `data.input`).
     pub data_files: Vec<Box<str>>,
     /// The resolved multiome layout, when this load had one.
@@ -88,7 +88,10 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     let preset_features = plan.preset_features.take();
     let carried = plan.carried.take();
     let partition = plan.partition.take();
-    let build_config = move |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
+    let build_config = move |unified: &data_beans::unified::UnifiedData| -> anyhow::Result<(
+        ge::FitConfig,
+        data_beans::unified::EmbeddingPseudobulkArgs,
+    )> {
         let hvg_weights = plan.hvg_weights.as_ref().map(|w| {
             unified
                 .feature_to_backend_row
@@ -110,9 +113,8 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             )?),
             None => None,
         };
-        Ok(ge::FitConfig {
+        let pseudobulks = data_beans::unified::EmbeddingPseudobulkArgs {
             partition,
-            embedding_dim: knobs.embedding_dim,
             // Greedy batch correction against the carried reference, exactly
             // as in the other families — see `MultilevelParams::anchor_batches`.
             anchor_batches: plan
@@ -120,21 +122,26 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 .is_some()
                 .then(|| vec![senna::pb_reference::REFERENCE_BATCH.into()]),
             bulk_batches: knobs.bulk_batches.map(<[Box<str>]>::to_vec),
-            emit_finest_collapse: knobs.emit_pb_reference,
             num_levels: knobs.collapse.num_levels,
             sort_dim: knobs.collapse.sort_dim,
             knn_pb_samples: knobs.collapse.knn_cells,
             num_opt_iter: knobs.collapse.iter_opt,
             proj_dim: knobs.collapse.proj_dim,
             hvg_weights,
+            projection_rows: None,
             refine: knobs.refine.clone(),
+            block_size: knobs.block_size,
+            seed: knobs.seed,
+            strata,
+        };
+        let fit = ge::FitConfig {
+            embedding_dim: knobs.embedding_dim,
             epochs: knobs.epochs,
             batches_per_epoch: knobs.batches_per_epoch,
             batch_size: knobs.batch_size.unwrap_or(1024),
             learning_rate: knobs.learning_rate,
             seed: knobs.seed,
             device: knobs.device.to_device(knobs.device_no)?,
-            block_size: knobs.block_size,
             weight_decay: knobs.weight_decay,
             unit_weight_decay: None,
             phase1_cells_per_pb: knobs.phase1_cells_per_pb,
@@ -147,32 +154,36 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             offset_rank: ge::LoraSpec::default().rank,
             preset_features,
             preset_offsets: Vec::new(),
-            strata,
             cis_gates: None,
             flat_module_only: false,
             multiome: None,
-        })
+        };
+        Ok((fit, pseudobulks))
     };
 
     // Single-pass fit over the full feature axis (no post-hoc null-drop / refit).
-    let cfg = build_config(&plan.unified)?;
-    let out = ge::fit(&mut plan.unified, cfg)?;
+    let (cfg, pb_args) = build_config(&plan.unified)?;
+    let pseudobulks =
+        data_beans::unified::build_embedding_pseudobulks(&mut plan.unified, &pb_args)?;
+    let out = super::fit_input::fit_on_pseudobulks(&plan.unified, &pseudobulks, cfg)?;
 
     // Carried pseudobulks out, same contract as every other family: the
     // finest collapse level's evidence rates + per-column cell counts.
-    let pb_reference_suffix = match out.finest_collapse.as_ref() {
-        Some((finest, membership)) => senna::pb_reference::emit_if_requested(
-            knobs.emit_pb_reference,
-            knobs.out,
-            finest,
-            Some(std::slice::from_ref(membership)),
-            plan.unified.count_backend().column_multiplicities(),
-            &plan.unified.count_backend().row_names()?,
-            plan.init_from,
-            plan.pb_reference,
-        )?,
-        None => None,
-    };
+    let (finest, _) = pseudobulks.finest_collapse();
+    let pb_reference_suffix = senna::pb_reference::emit_if_requested(
+        knobs.emit_pb_reference,
+        knobs.out,
+        finest,
+        pseudobulks
+            .cell_to_pb_per_level
+            .last()
+            .map(std::slice::from_ref),
+        plan.unified.count_backend().column_multiplicities(),
+        &plan.unified.count_backend().row_names()?,
+        plan.init_from,
+        plan.pb_reference,
+    )?;
+    drop(pseudobulks);
 
     /////////////////////////////
     // Cell QC (output filter) //

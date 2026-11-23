@@ -18,11 +18,11 @@
 //! `masked-topic` keep their own, unrelated feature-network restriction.
 
 use data_beans::alg::hvg::select_hvg_streaming;
-use graph_embedding_util as ge;
 use senna::embed_common::*;
 
 pub(crate) mod args;
 pub(crate) mod driver;
+pub(crate) mod fit_input;
 pub(crate) mod multiome;
 pub(crate) mod resolve_etm;
 pub(crate) mod score;
@@ -89,9 +89,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // still exposes its own overrides, where query-vs-reference name bridging
     // is an actual concern.
     let feature_kind = if is_multiome {
-        ge::FeatureNameKind::Mixed
+        data_beans::aux::feature_names::FeatureNameKind::Mixed
     } else {
-        ge::FeatureNameKind::Gene { delim: '_' }
+        data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' }
     };
 
     // Under a plan the files are re-ordered so each sample group is contiguous
@@ -112,7 +112,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     let feature_suffix: Option<Vec<Box<str>>> = multiome_plan.as_ref().map(|p| p.modality.clone());
     let barcode_suffix: Option<Vec<Option<Box<str>>>> = multiome_plan
         .as_ref()
-        .and_then(ge::MultiomePlan::barcode_suffix);
+        .and_then(crate::multiome_plan::MultiomePlan::barcode_suffix);
 
     let effective_hvg =
         crate::hvg::resolve_multiome_with_hvg(is_multiome, data_files.len(), &args.hvg);
@@ -130,19 +130,20 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         given_batches.as_deref(),
     );
 
-    let mut unified = ge::load_unified_data(ge::LoadUnifiedArgs {
-        data_files: data_files.clone(),
-        batch_files: batch_files.map(<[Box<str>]>::to_vec),
-        feature_kind: Some(feature_kind.clone()),
-        preload: args.preload_data,
-        column_alignment,
-        per_file_feature_suffix: feature_suffix,
-        // Only set when a detected layout has several sample groups: raw 10x
-        // barcodes collide across samples, and Union loading would fold two
-        // donors' cells into one.
-        per_file_barcode_suffix: barcode_suffix,
-        ..Default::default()
-    })?;
+    let mut unified =
+        data_beans::unified::load_unified_data(data_beans::unified::LoadUnifiedArgs {
+            data_files: data_files.clone(),
+            batch_files: batch_files.map(<[Box<str>]>::to_vec),
+            feature_kind: Some(feature_kind.clone()),
+            preload: args.preload_data,
+            column_alignment,
+            per_file_feature_suffix: feature_suffix,
+            // Only set when a detected layout has several sample groups: raw 10x
+            // barcodes collide across samples, and Union loading would fold two
+            // donors' cells into one.
+            per_file_barcode_suffix: barcode_suffix,
+            ..Default::default()
+        })?;
 
     // Carried pseudobulks: registered exactly like every other family — their
     // cell counts become column multiplicities on the count backend (weights
@@ -167,7 +168,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // from different samples. A detected layout already tags barcodes by group,
     // which makes this a no-op; a declared one relies on it.
     if let Some(p) = multiome_plan.as_ref() {
-        ge::validate_multiome_groups(&p.group_sizes, &unified.barcodes, &unified.cell_modality)?;
+        data_beans::unified::validate_multiome_groups(
+            &p.group_sizes,
+            &unified.barcodes,
+            &unified.cell_modality,
+        )?;
     }
 
     // HVG → projection weights (no longer subsets the feature axis).
@@ -229,7 +234,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
 /// cells `names`) and return it aligned to them, finest first as the
 /// engine takes it.
 fn on_partition(
-    unified: &mut ge::UnifiedData,
+    unified: &mut data_beans::unified::UnifiedData,
     levels: Vec<Vec<usize>>,
     names: &[Box<str>],
 ) -> anyhow::Result<Vec<Vec<usize>>> {

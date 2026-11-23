@@ -10,7 +10,6 @@ use super::weights::{Given, Weights};
 use crate::topic::common::{
     create_device, load_and_collapse, setup_stop_handler, LoadCollapseArgs,
 };
-use graph_embedding_util as ge;
 use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::matrix::parquet::{write_named_table, Column};
 use senna::embed_common::*;
@@ -97,7 +96,7 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
     let data_files: Vec<Box<str>> = plan.as_ref().map_or(data_files, |p| p.files.clone());
     let hvg = crate::hvg::resolve_multiome_with_hvg(is_multiome, data_files.len(), &args.hvg);
     let feature_kind = if is_multiome {
-        Some(ge::FeatureNameKind::Mixed)
+        Some(data_beans::aux::feature_names::FeatureNameKind::Mixed)
     } else {
         args.feature_name_kind.clone().into()
     };
@@ -187,7 +186,7 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
     // Multiome rows mix gene and locus names, tied or not: match a given
     // table by the same rule the load used.
     let preset_kind = if is_multiome {
-        ge::FeatureNameKind::Mixed
+        data_beans::aux::feature_names::FeatureNameKind::Mixed
     } else {
         args.feature_name_kind.resolve_or_gene()
     };

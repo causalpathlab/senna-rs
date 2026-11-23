@@ -111,6 +111,7 @@ use probe::{run_probe, ProbeArgs};
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
 use resolve_topics::{resolve_topics, ResolveTopicsArgs};
 use senna::embed_common::*;
+use senna::multiome_plan;
 use simba::{fit_simba, SimbaArgs};
 use svd::*;
 use topic::cmd::*;

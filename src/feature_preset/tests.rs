@@ -48,7 +48,7 @@ fn gene_rows_match_the_axis_by_canonical_name_and_other_types_are_left_out() {
         &prefix,
         PresetMode::Freeze,
         &axis,
-        &ge::FeatureNameKind::Gene { delim: '_' },
+        &data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' },
     )
     .unwrap()
     .0;
@@ -63,7 +63,7 @@ fn gene_rows_match_the_axis_by_canonical_name_and_other_types_are_left_out() {
 fn an_untyped_source_is_all_genes() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), false);
-    let kind = ge::FeatureNameKind::Gene { delim: '_' };
+    let kind = data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' };
     let axis: Vec<Box<str>> = ["apoptosis", "ENSG3_GENEU"]
         .iter()
         .map(|s| Box::from(*s))
@@ -91,7 +91,7 @@ fn no_matching_gene_is_an_error() {
         &prefix,
         PresetMode::Freeze,
         &axis,
-        &ge::FeatureNameKind::Gene { delim: '_' }
+        &data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' }
     )
     .is_err());
 }
@@ -101,7 +101,7 @@ fn the_mode_is_carried_and_a_rank_as_wide_as_the_table_is_taken() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), true);
     let axis: Vec<Box<str>> = vec![Box::from("ENSG3_GENEU")];
-    let kind = ge::FeatureNameKind::Gene { delim: '_' };
+    let kind = data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' };
     for mode in [
         PresetMode::Freeze,
         PresetMode::Init,
@@ -155,7 +155,7 @@ fn the_mode_is_carried_and_a_rank_as_wide_as_the_table_is_taken() {
 fn the_unused_rows_are_carried_under_a_pinning_mode_only() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), true);
-    let kind = ge::FeatureNameKind::Gene { delim: '_' };
+    let kind = data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' };
     let lora = PresetMode::Lora(LoraSpec {
         rank: 1,
         lr_ratio: 1.0,
@@ -210,7 +210,7 @@ fn the_types_are_read_when_the_flag_names_a_table_or_manifest() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), true);
     let axis: Vec<Box<str>> = vec![Box::from("ENSG3_GENEU")];
-    let kind = ge::FeatureNameKind::Gene { delim: '_' };
+    let kind = data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' };
     for given in [
         format!("{prefix}.feature_embedding.parquet"),
         format!("{prefix}.senna.json"),
@@ -353,7 +353,7 @@ fn a_cell_type_named_like_a_gene_does_not_stand_in_for_it() {
         &prefix,
         PresetMode::Freeze,
         &axis,
-        &ge::FeatureNameKind::Gene { delim: '_' },
+        &data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' },
     )
     .unwrap();
     assert_eq!(f.ids, vec![0]);
@@ -492,7 +492,7 @@ fn write_table(dir: &std::path::Path, names: &[&str]) -> String {
 /// permissive, a gene spelt in another case still finds its row.
 #[test]
 fn gene_and_track_rows_find_their_rows_in_the_table() {
-    let kind = ge::FeatureNameKind::Gene { delim: '_' };
+    let kind = data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' };
     for (label, table, axis, ids, rows) in [
         (
             "GENE2's row twice",

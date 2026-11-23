@@ -35,7 +35,7 @@ pub(crate) use senna::carried_rows::CarriedRows;
 pub(crate) fn resolve_preset(
     resolved: Option<(&str, PresetMode)>,
     feature_names: &[Box<str>],
-    kind: &ge::FeatureNameKind,
+    kind: &data_beans::aux::feature_names::FeatureNameKind,
 ) -> anyhow::Result<(Option<ge::PresetRows>, Option<CarriedRows>)> {
     let Some((prefix, mode)) = resolved else {
         return Ok((None, None));
@@ -48,7 +48,7 @@ pub(crate) fn load_preset_genes(
     prefix: &str,
     mode: PresetMode,
     feature_names: &[Box<str>],
-    kind: &ge::FeatureNameKind,
+    kind: &data_beans::aux::feature_names::FeatureNameKind,
 ) -> anyhow::Result<(ge::PresetRows, Option<CarriedRows>)> {
     let flag = crate::feature_embedding_args::flag_name(mode);
     let (dictionary_path, _bias) = senna::run_manifest::resolve_feature_embedding(prefix)

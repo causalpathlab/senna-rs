@@ -22,7 +22,6 @@
 use data_beans::aux::data_loading::ReadSharedRowsArgs;
 use data_beans::aux::feature_names::FeatureNameKind;
 use data_beans::sparse_io_vector::ColumnAlignment;
-use graph_embedding_util as ge;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +40,7 @@ pub struct RunMultiome {
 impl RunMultiome {
     /// The record for a resolved plan, as the trainer is about to load it.
     #[must_use]
-    pub fn from_plan(plan: &ge::MultiomePlan) -> Self {
+    pub fn from_plan(plan: &crate::multiome_plan::MultiomePlan) -> Self {
         Self {
             modality: plan.modality.iter().map(ToString::to_string).collect(),
             group: plan.group.iter().map(ToString::to_string).collect(),
@@ -210,10 +209,10 @@ pub fn trained_modalities(trained_features: &[Box<str>]) -> Vec<Box<str>> {
 /// trained block is an error, since that would stack two assays on one row
 /// block.
 pub fn reconcile_modalities(
-    mut plan: ge::MultiomePlan,
+    mut plan: crate::multiome_plan::MultiomePlan,
     query_rows: &[Vec<Box<str>>],
     trained_features: &[Box<str>],
-) -> anyhow::Result<ge::MultiomePlan> {
+) -> anyhow::Result<crate::multiome_plan::MultiomePlan> {
     anyhow::ensure!(
         query_rows.len() == plan.files.len(),
         "row lists {} != planned files {}",
@@ -242,7 +241,7 @@ pub fn reconcile_modalities(
         let tag = plan.modality[i].as_ref();
         let keys: Vec<Box<str>> = rows
             .iter()
-            .map(|r| ge::FeatureNameKind::Mixed.canonicalize(r))
+            .map(|r| data_beans::aux::feature_names::FeatureNameKind::Mixed.canonicalize(r))
             .collect();
         for (&trained_tag, names) in &trained {
             let hits = keys.iter().filter(|k| names.contains(k.as_ref())).count();
@@ -282,18 +281,18 @@ pub fn reconcile_modalities(
 pub fn query_layout(
     files: &[Box<str>],
     trained_features: &[Box<str>],
-) -> anyhow::Result<Option<ge::MultiomePlan>> {
+) -> anyhow::Result<Option<crate::multiome_plan::MultiomePlan>> {
     if trained_modalities(trained_features).is_empty() {
         return Ok(None);
     }
     // One read of both name axes, shared by the planner and the reconciliation
     // below: re-opening each backend for its row names would pay a second
     // round of archive opens and name decodes for rows already in hand.
-    let axes = ge::read_file_axes(files)?;
-    let Some(plan) = ge::plan_from_axes(&axes)? else {
+    let axes = crate::multiome_plan::read_file_axes(files)?;
+    let Some(plan) = crate::multiome_plan::plan_from_axes(&axes)? else {
         return Ok(None);
     };
-    let by_file: FxHashMap<&str, &ge::FileAxes> =
+    let by_file: FxHashMap<&str, &crate::multiome_plan::FileAxes> =
         axes.iter().map(|a| (a.file.as_ref(), a)).collect();
     let rows: Vec<Vec<Box<str>>> = plan
         .files
@@ -306,7 +305,7 @@ pub fn query_layout(
 /// The loader settings for a detected plan — the same shape `recorded_layout`
 /// replays, so the trainer and every replayer agree by construction.
 #[must_use]
-pub fn layout_of_plan(plan: &ge::MultiomePlan) -> ReloadLayout {
+pub fn layout_of_plan(plan: &crate::multiome_plan::MultiomePlan) -> ReloadLayout {
     ReloadLayout(Some(Suffixes {
         feature: plan.modality.clone(),
         barcode: plan.barcode_suffix(),

@@ -20,6 +20,7 @@ pub mod cluster_aggregation;
 pub mod embed_common;
 pub mod marker_support;
 pub mod multiome_layout;
+pub mod multiome_plan;
 pub mod output_helpers;
 pub mod pb_reference;
 pub mod run_manifest;
