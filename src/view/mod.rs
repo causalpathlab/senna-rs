@@ -67,9 +67,9 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        help = "Start on this layout method (any `senna layout` method: umap, phate, tsne, lle, \
+        help = "Start on this layout method (any `senna layout` method: tsne, umap, phate, lle, \
                 stress, forceatlas2, diffusion, radial, sugiyama); computed first when the run \
-                lacks it"
+                lacks it [default: the run's current layout, else tsne]"
     )]
     pub method: Option<Box<str>>,
 
@@ -572,7 +572,7 @@ fn prepare_run(args: &ViewArgs, from: &str, run_step: &RunStep) -> anyhow::Resul
         .method
         .as_deref()
         .or(m.layout.current.as_deref())
-        .unwrap_or("umap")
+        .unwrap_or("tsne")
         .to_string();
     // An output counts only when its file is here: one recorded but moved
     // or deleted is computed again.

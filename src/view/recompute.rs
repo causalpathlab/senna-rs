@@ -61,9 +61,9 @@ impl Step {
     pub fn settings(self) -> &'static [&'static str] {
         match self {
             Step::CellLayout => &[
+                "tsne",
                 "umap",
                 "phate",
-                "tsne",
                 "lle",
                 "sugiyama",
                 "stress",
@@ -71,7 +71,7 @@ impl Step {
                 "diffusion",
                 "radial",
             ],
-            Step::FeatureLayout => &["umap", "phate", "tsne"],
+            Step::FeatureLayout => &["tsne", "umap", "phate"],
             Step::CellClusters | Step::FeatureClusters => &RESOLUTIONS,
             Step::JointLayout | Step::Topics => &[],
         }
@@ -521,9 +521,9 @@ mod tests {
         assert_eq!(
             Step::CellLayout.settings(),
             [
+                "tsne",
                 "umap",
                 "phate",
-                "tsne",
                 "lle",
                 "sugiyama",
                 "stress",
@@ -532,7 +532,7 @@ mod tests {
                 "radial"
             ]
         );
-        assert_eq!(Step::FeatureLayout.settings(), ["umap", "phate", "tsne"]);
+        assert_eq!(Step::FeatureLayout.settings(), ["tsne", "umap", "phate"]);
         assert_eq!(Step::CellClusters.settings(), RESOLUTIONS);
         assert_eq!(Step::FeatureClusters.settings(), RESOLUTIONS);
         // A chosen resolution goes to leiden; none (opening a run) leaves
@@ -621,7 +621,7 @@ mod tests {
         assert_eq!(m.at, 1);
         // A method the step cannot use falls back to its first.
         let m = Menu::new(&target(true), Step::FeatureLayout, "lle");
-        assert_eq!(m.chosen(), vec![(Step::FeatureLayout, "umap")]);
+        assert_eq!(m.chosen(), vec![(Step::FeatureLayout, "tsne")]);
     }
 
     #[test]
