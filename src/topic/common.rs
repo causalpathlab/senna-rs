@@ -656,7 +656,7 @@ pub struct LoadProjectArgs<'a> {
     pub reuse: Option<&'a str>,
 }
 
-/// Per-file suffixes of a multiome load (see `ge::MultiomePlan`): every
+/// Per-file suffixes of a multiome load (see `crate::multiome_plan::MultiomePlan`): every
 /// file's features become `{name}/{modality}`, and its barcodes may carry a
 /// sample tag so one cell's modalities line up.
 #[derive(Clone)]

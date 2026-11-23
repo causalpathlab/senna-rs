@@ -86,7 +86,7 @@ fn query_modalities_are_renamed_to_the_trained_ones() {
         "ADT-GENEE/scADT",
         "ADT-GENEF/scADT",
     ]);
-    let detected = ge::MultiomePlan {
+    let detected = crate::multiome_plan::MultiomePlan {
         files: boxed(&["gex_q.zarr", "prot_q.zarr"]),
         modality: boxed(&["gex", "prot"]),
         group: boxed(&["q", "q"]),
@@ -108,7 +108,7 @@ fn query_modalities_are_renamed_to_the_trained_ones() {
 #[test]
 fn an_unmatched_query_modality_keeps_its_detected_tag() {
     let trained = boxed(&["GENEG/scRNA", "GENEQ/scRNA"]);
-    let detected = ge::MultiomePlan {
+    let detected = crate::multiome_plan::MultiomePlan {
         files: boxed(&["gex_q.zarr", "atac_q.zarr"]),
         modality: boxed(&["gex", "atac"]),
         group: boxed(&["q", "q"]),
@@ -130,7 +130,7 @@ fn an_unmatched_query_modality_keeps_its_detected_tag() {
 #[test]
 fn two_query_modalities_cannot_claim_one_trained_block() {
     let trained = boxed(&["GENEG/scRNA", "GENEQ/scRNA", "GENEO/scRNA"]);
-    let detected = ge::MultiomePlan {
+    let detected = crate::multiome_plan::MultiomePlan {
         files: boxed(&["a.zarr", "b.zarr"]),
         modality: boxed(&["a", "b"]),
         group: boxed(&["q", "q"]),
@@ -266,7 +266,7 @@ fn query_peaks_match_trained_peaks_by_their_canonical_key() {
         .map(|p| key(p).into())
         .chain(["GENEG/scRNA".into()])
         .collect();
-    let detected = ge::MultiomePlan {
+    let detected = crate::multiome_plan::MultiomePlan {
         files: boxed(&["gex_q.zarr", "atac_q.zarr"]),
         modality: boxed(&["gex", "atac"]),
         group: boxed(&["q", "q"]),

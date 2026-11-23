@@ -3,11 +3,10 @@
 //!
 //! Two ways in, one way out. `--multiome rna.zarr,adt.zarr` declares the
 //! layout; with plain positional files the layout is read off the inputs by
-//! [`graph_embedding_util::detect_multiome_plan`]. Both produce a
-//! [`ge::MultiomePlan`], so everything downstream — feature namespacing,
+//! [`crate::multiome_plan::detect_multiome_plan`]. Both produce a
+//! [`crate::multiome_plan::MultiomePlan`], so everything downstream — feature namespacing,
 //! group validation, batch resolution — sees one shape.
 
-use graph_embedding_util as ge;
 use log::{info, warn};
 
 /// One parsed `--multiome` file entry: `(optional modality label, file path)`.
@@ -58,7 +57,7 @@ pub(crate) fn auto_plan(
     data_files: &[Box<str>],
     n_batch_files: usize,
     has_pb_reference: bool,
-) -> anyhow::Result<Option<ge::MultiomePlan>> {
+) -> anyhow::Result<Option<crate::multiome_plan::MultiomePlan>> {
     if data_files.len() < 2 {
         return Ok(None); // nothing to glue against
     }
@@ -70,7 +69,7 @@ pub(crate) fn auto_plan(
         );
         return Ok(None);
     }
-    ge::detect_multiome_plan(data_files)
+    crate::multiome_plan::detect_multiome_plan(data_files)
 }
 
 /// Parse the declared `--multiome` groups into the same plan the detector
@@ -78,7 +77,9 @@ pub(crate) fn auto_plan(
 /// comma-separated, each optionally prefixed `label=` to name its modality.
 /// Without a label the modality is the file's position in its group, so the
 /// tag lines up across groups.
-pub(crate) fn declared_plan(groups: &[Box<str>]) -> anyhow::Result<Option<ge::MultiomePlan>> {
+pub(crate) fn declared_plan(
+    groups: &[Box<str>],
+) -> anyhow::Result<Option<crate::multiome_plan::MultiomePlan>> {
     let parsed: Vec<Vec<MultiomeFile>> = groups
         .iter()
         .map(|s| {
@@ -128,7 +129,7 @@ pub(crate) fn declared_plan(groups: &[Box<str>]) -> anyhow::Result<Option<ge::Mu
         }
     }
 
-    Ok(Some(ge::MultiomePlan {
+    Ok(Some(crate::multiome_plan::MultiomePlan {
         files,
         modality,
         group,
@@ -148,7 +149,7 @@ pub(crate) fn resolve_plan(
     data_files: &[Box<str>],
     n_batch_files: usize,
     has_pb_reference: bool,
-) -> anyhow::Result<Option<ge::MultiomePlan>> {
+) -> anyhow::Result<Option<crate::multiome_plan::MultiomePlan>> {
     let plan = if declared.is_empty() {
         auto_plan(data_files, n_batch_files, has_pb_reference)?
     } else {
@@ -162,7 +163,7 @@ pub(crate) fn resolve_plan(
 
 /// Print the layout a run is about to load under. Auditable by design: this
 /// is the only place the derived grouping is visible before training starts.
-pub(crate) fn log_plan(plan: &ge::MultiomePlan, declared: bool) {
+pub(crate) fn log_plan(plan: &crate::multiome_plan::MultiomePlan, declared: bool) {
     let how = if declared { "declared" } else { "auto" };
     let modalities = plan.modalities();
     info!(

@@ -18,15 +18,19 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         !args.data_files.is_empty(),
         "no input files: pass one or more zarr/h5 count matrices"
     );
-    let unified = ge::load_unified_data(ge::LoadUnifiedArgs {
-        data_files: args.data_files.clone(),
-        batch_files: args.batch_files.clone(),
-        feature_kind: Some(ge::FeatureNameKind::Gene { delim: '_' }),
-        preload: args.preload_data,
-        column_alignment: data_beans::sparse_io_vector::ColumnAlignment::Disjoint,
-        per_file_feature_suffix: None,
-        ..Default::default()
-    })?;
+    let unified = data_beans::bipartite_graph_embedding_input::load_bipartite_embedding_cells(
+        data_beans::bipartite_graph_embedding_input::LoadBipartiteEmbeddingCellsArgs {
+            data_files: args.data_files.clone(),
+            batch_files: args.batch_files.clone(),
+            feature_kind: Some(data_beans::aux::feature_names::FeatureNameKind::Gene {
+                delim: '_',
+            }),
+            preload: args.preload_data,
+            column_alignment: data_beans::sparse_io_vector::ColumnAlignment::Disjoint,
+            per_file_feature_suffix: None,
+            ..Default::default()
+        },
+    )?;
     let data = unified.count_backend();
     let n_cells = unified.n_cells();
 
@@ -97,7 +101,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     let (mut preset, mut carried) = crate::feature_preset::resolve_preset(
         args.feature_embedding.resolve()?,
         &feature_names,
-        &ge::FeatureNameKind::Gene { delim: '_' },
+        &data_beans::aux::feature_names::FeatureNameKind::Gene { delim: '_' },
     )?;
     let dim = crate::feature_preset::resolve_dim(args.embedding_dim, &mut preset, &mut carried)?;
     let cfg = SimbaConfig {
@@ -116,7 +120,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         seed: args.train.seed,
         device: args.train.device.to_device(args.train.device_no)?,
     };
-    let out = run_simba(data, &hvg_rows, &cfg)?;
+    let out = run_simba(&crate::training_data::Backend(data), &hvg_rows, &cfg)?;
 
     /////////////
     // Outputs //
