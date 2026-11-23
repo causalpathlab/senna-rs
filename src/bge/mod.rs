@@ -22,7 +22,6 @@ use senna::embed_common::*;
 
 pub(crate) mod args;
 pub(crate) mod driver;
-pub(crate) mod fit_input;
 pub(crate) mod multiome;
 pub(crate) mod resolve_etm;
 pub(crate) mod score;

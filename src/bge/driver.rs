@@ -165,7 +165,17 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     let (cfg, pb_args) = build_config(&plan.unified)?;
     let pseudobulks =
         data_beans::unified::build_embedding_pseudobulks(&mut plan.unified, &pb_args)?;
-    let out = super::fit_input::fit_on_pseudobulks(&plan.unified, &pseudobulks, cfg)?;
+    let unified = &plan.unified;
+    let out = ge::fit(
+        ge::FitInput {
+            cells: unified,
+            batch_membership: &unified.batch_membership,
+            batch_names: &unified.batch_names,
+            feature_modality: unified.feature_modality.clone(),
+            pseudobulks: &pseudobulks,
+        },
+        cfg,
+    )?;
 
     // Carried pseudobulks out, same contract as every other family: the
     // finest collapse level's evidence rates + per-column cell counts.
