@@ -262,6 +262,10 @@ pub(crate) struct ProgressiveTrainConfig<'a> {
     pub dev: &'a candle_core::Device,
     pub args: &'a JointTopicArgs,
     pub coarsenings: &'a [Option<FeatureCoarsening>],
+    /// Per modality, each level's encoder null under `--adj-method batch`
+    /// (`common::batch_level_nulls`, `[D, P_level]` coarsest..finest);
+    /// `None` trains that modality on `μ_residual`.
+    pub batch_nulls: &'a [Option<Vec<Mat>>],
     pub stop: &'a AtomicBool,
 }
 
@@ -345,18 +349,19 @@ where
                 .zip(config.coarsenings)
                 .enumerate()
                 .map(|(m, (x, fc))| -> anyhow::Result<Option<Mat>> {
-                    x.mu_residual
-                        .as_ref()
-                        .map(|y| {
-                            let mut mat = y
-                                .posterior_sample_seeded(draw_seed(level, m, "residual"))?
-                                .transpose();
-                            if let Some(fc) = fc {
-                                mat = fc.aggregate_columns_nd(&mat);
-                            }
-                            Ok(mat)
-                        })
-                        .transpose()
+                    let null_nd = match config.batch_nulls[m].as_ref() {
+                        Some(nulls) => Some(nulls[level].transpose()),
+                        None => x
+                            .mu_residual
+                            .as_ref()
+                            .map(|y| y.posterior_sample_seeded(draw_seed(level, m, "residual")))
+                            .transpose()?
+                            .map(|y| y.transpose()),
+                    };
+                    Ok(null_nd.map(|mat| match fc {
+                        Some(fc) => fc.aggregate_columns_nd(&mat),
+                        None => mat,
+                    }))
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
 

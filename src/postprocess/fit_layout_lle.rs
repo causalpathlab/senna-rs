@@ -18,7 +18,7 @@ pub struct LayoutLleArgs {
 pub fn fit_layout_lle(args: &LayoutLleArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.common.target == LayoutTarget::Cells,
-        "`layout lle` lays out cells only; use `layout umap` or `layout phate` \
+        "`layout lle` lays out cells only; use `layout umap`, `layout phate` or `layout tsne` \
          with --target features"
     );
     let mut resolved = resolve_inputs(&args.common)?;

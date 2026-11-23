@@ -158,8 +158,8 @@ pub struct JointTopicArgs {
         value_enum,
         default_value = "residual",
         help = "Batch adjustment (batch|residual)",
-        long_help = "batch    — divide by the per-batch delta at inference; the encoder\n\
-                     \x20          still trains on the pseudobulk fold here.\n\
+        long_help = "batch    — divide by the per-batch delta; the encoder trains on each\n\
+                     \x20          level's delta mixed by its pseudobulks' batch shares.\n\
                      residual — divide by each pseudobulk group's own fold."
     )]
     pub(crate) adj_method: AdjMethod,
@@ -264,7 +264,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
 
     let StackCollapseOut {
         levels: mut collapsed_levels,
-        cell_to_pb_per_level,
+        mut cell_to_pb_per_level,
     } = collapse_stack_multilevel_with_hierarchy(
         &mut data_stack,
         &proj_kn,
@@ -289,6 +289,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // Reverse so training goes coarse→fine: coarsest (fewest samples)
     // gets the most epochs for a warm start, finest gets brief refinement.
     collapsed_levels.reverse();
+    cell_to_pb_per_level.reverse();
 
     // After reversing, the finest level (most groups) is the last element.
     let collapsed_data_vec = collapsed_levels.last().unwrap();
@@ -303,7 +304,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // One coarsening level per modality, from its finest pseudobulk counts —
     // the same `coarsen_features` `senna topic` uses.
     let cell_to_pb_finest = cell_to_pb_per_level
-        .first()
+        .last()
         .ok_or_else(|| anyhow::anyhow!("the collapse returned no pseudobulk membership"))?;
     let coarsen_one = |collapsed: &CollapsedOut| -> anyhow::Result<FeatureCoarsening> {
         let (counts, sizes) = collapsed.observed_counts(cell_to_pb_finest)?;
@@ -396,11 +397,29 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
 
     let stop = setup_stop_handler();
 
+    // Under `--adj-method batch` each modality's encoder trains on the δ it
+    // reads at inference, each level's own, mixed by its batch shares.
+    let batch_nulls: Vec<Option<Vec<Mat>>> = data_stack
+        .stack
+        .iter()
+        .enumerate()
+        .map(|(m, dv)| {
+            let levels: Vec<&CollapsedOut> = collapsed_levels.iter().map(|l| &l[m]).collect();
+            crate::topic::common::batch_level_nulls(
+                &args.adj_method,
+                &levels,
+                Some(&cell_to_pb_per_level),
+                dv,
+            )
+        })
+        .collect::<anyhow::Result<_>>()?;
+
     let train_config = ProgressiveTrainConfig {
         parameters: &parameters,
         dev: &dev,
         args,
         coarsenings: &coarsenings,
+        batch_nulls: &batch_nulls,
         stop: &stop,
     };
 

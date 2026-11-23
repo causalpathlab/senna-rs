@@ -56,7 +56,7 @@ impl Step {
     }
 
     /// What the step's one setting can be: a layout's methods (the default
-    /// first; only umap and phate lay out features), a clustering's
+    /// first; only umap, phate and tsne lay out features), a clustering's
     /// resolutions, nothing for the joint layout.
     pub fn settings(self) -> &'static [&'static str] {
         match self {
@@ -71,7 +71,7 @@ impl Step {
                 "diffusion",
                 "radial",
             ],
-            Step::FeatureLayout => &["umap", "phate"],
+            Step::FeatureLayout => &["umap", "phate", "tsne"],
             Step::CellClusters | Step::FeatureClusters => &RESOLUTIONS,
             Step::JointLayout | Step::Topics => &[],
         }
@@ -532,7 +532,7 @@ mod tests {
                 "radial"
             ]
         );
-        assert_eq!(Step::FeatureLayout.settings(), ["umap", "phate"]);
+        assert_eq!(Step::FeatureLayout.settings(), ["umap", "phate", "tsne"]);
         assert_eq!(Step::CellClusters.settings(), RESOLUTIONS);
         assert_eq!(Step::FeatureClusters.settings(), RESOLUTIONS);
         // A chosen resolution goes to leiden; none (opening a run) leaves
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(chosen, vec![(Step::FeatureLayout, "phate")]);
         assert_eq!(m.at, 1);
         // A method the step cannot use falls back to its first.
-        let m = Menu::new(&target(true), Step::FeatureLayout, "tsne");
+        let m = Menu::new(&target(true), Step::FeatureLayout, "lle");
         assert_eq!(m.chosen(), vec![(Step::FeatureLayout, "umap")]);
     }
 

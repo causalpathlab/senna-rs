@@ -13,7 +13,7 @@
     // a line-count lint would fragment logical phases.
     clippy::too_many_lines,
     // CLI struct fields intentionally share a `phate_` prefix so the
-    // clap flag names (`--phate-t`, `--phate-knn`) are self-documenting.
+    // clap flag names (`--phate-t`, `--phate-mds-iter`) are self-documenting.
     clippy::struct_field_names,
     // Config / args structs are typically built once at the call site
     // and consumed — passing by value is part of the ownership-forward

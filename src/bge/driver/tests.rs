@@ -4,7 +4,9 @@
 use clap::Parser;
 use nalgebra::DMatrix;
 
+use super::ensure_finite;
 use crate::bge::{fit_bge, BgeArgs};
+use senna::embed_common::candle_core;
 use senna::run_manifest::{self, RunKind};
 use senna::sparse_output::{write_backend, Entries};
 
@@ -150,4 +152,17 @@ fn bge_carries_the_unmatched_rows_of_a_pinned_table_through() {
         N_GENES,
         "the co-embed stays on the data's genes"
     );
+}
+
+/// The device-side probe passes a finite embedding and catches a NaN or an
+/// infinity anywhere in it.
+#[test]
+fn a_non_finite_embedding_is_refused() {
+    let dev = candle_core::Device::Cpu;
+    let t = |v: Vec<f32>| candle_core::Tensor::from_vec(v, (2, 2), &dev).unwrap();
+    assert!(ensure_finite(&t(vec![1.0, -2.0, 3e30, 0.0]), "x").is_ok());
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let err = ensure_finite(&t(vec![1.0, bad, 3.0, 4.0]), "the cell embedding").unwrap_err();
+        assert!(err.to_string().contains("the cell embedding"), "{err}");
+    }
 }

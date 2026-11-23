@@ -402,27 +402,34 @@ pub(crate) fn sample_collapsed_data_dp(
 /// batch.
 ///
 /// At inference a cell reads its batch's `δ[g, b]`. A training pseudobulk
-/// mixes cells of several batches, so it reads the same δ mixed by its batch
-/// shares, `Σ_b δ[g,b] · n_bp / n_p`: what its counts carry of the batch
-/// effect under the collapse's own model `E[obs_gp] = μ_gp · Σ_b δ_gb n_bp`.
-/// Every level reads the finest level's δ (posterior mean), the one written
-/// to `{out}.delta.parquet` and read back at inference and by `predict`.
+/// mixes cells of several batches, so it reads δ mixed by its batch shares,
+/// `Σ_b δ[g,b] · n_bp / n_p`: what its counts carry of the batch effect under
+/// the collapse's own model `E[obs_gp] = μ_gp · Σ_b δ_gb n_bp`. The collapse
+/// fits that model at every level, each with its own δ, and each level's
+/// null reads its own: the δ its `μ_adjusted` (the decoder's target) was
+/// divided by. The finest level's δ is the one written to
+/// `{out}.delta.parquet` and read back at inference and by `predict`.
 ///
 /// Without this the encoder trained on the pseudobulk's own fold `μ_residual`
 /// whatever the method, and met a per-batch δ only at inference.
-pub(crate) fn batch_level_nulls(
+///
+/// Levels and memberships both run coarsest..finest. The levels may be
+/// borrowed, e.g. one modality's of a stacked collapse (`senna joint-topic`).
+pub(crate) fn batch_level_nulls<C: std::borrow::Borrow<CollapsedOut>>(
     adj_method: &AdjMethod,
-    collapsed_levels: &[CollapsedOut],
+    collapsed_levels: &[C],
     cell_to_pb_per_level: Option<&[Vec<usize>]>,
     data_vec: &SparseIoVec,
 ) -> anyhow::Result<Option<Vec<Mat>>> {
     if !matches!(adj_method, AdjMethod::Batch) {
         return Ok(None);
     }
-    let Some(delta) = collapsed_levels.last().and_then(|c| c.delta.as_ref()) else {
+    if collapsed_levels
+        .last()
+        .is_none_or(|c| c.borrow().delta.is_none())
+    {
         return Ok(None);
-    };
-    let delta_db = delta.posterior_mean();
+    }
     let cell_to_pb_per_level = cell_to_pb_per_level.ok_or_else(|| {
         anyhow::anyhow!("--adj-method batch needs the collapse's cell → pseudobulk membership")
     })?;
@@ -439,7 +446,16 @@ pub(crate) fn batch_level_nulls(
     collapsed_levels
         .iter()
         .zip(cell_to_pb_per_level)
-        .map(|(collapsed, cell_to_pb)| {
+        .enumerate()
+        .map(|(level, (collapsed, cell_to_pb))| {
+            let collapsed = collapsed.borrow();
+            let delta_db = collapsed
+                .delta
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("collapse level {level} fit no δ, the finest level did")
+                })?
+                .posterior_mean();
             let n_pb = collapsed.mu_observed.posterior_mean().ncols();
             let shares = batch_shares(&batches, cell_to_pb, weights, delta_db.ncols(), n_pb)?;
             Ok(delta_db * shares)

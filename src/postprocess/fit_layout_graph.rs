@@ -24,7 +24,7 @@ fn fit_on_pb_graph(
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         common.target == LayoutTarget::Cells,
-        "`layout {method}` lays out cells only; use `layout umap` or `layout phate` \
+        "`layout {method}` lays out cells only; use `layout umap`, `layout phate` or `layout tsne` \
          with --target features"
     );
     let mut resolved = resolve_inputs(common)?;

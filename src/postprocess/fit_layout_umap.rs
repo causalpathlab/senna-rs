@@ -4,20 +4,17 @@
 //! collapsed) is laid out by SGD from a random start, and every cell is
 //! then placed by Nyström from its nearest PBs.
 //!
-//! `--target features` and `--joint` still lay out every point: the
-//! feature embedding's (or cells' and features') fuzzy kNN graph by SGD
-//! from a PCA(2) start.
+//! `--target features` takes the same route over the feature embedding
+//! (`feature_pb_layout`). `--joint` still lays out every point: the cells'
+//! and features' fuzzy kNN graph by SGD from a PCA(2) start.
 
 use super::fit_layout_common::{
     cell_table, finalize_viz, preprocess_layout_data, resolve_inputs, write_cell_layout, CellTable,
     LayoutCommonArgs, ResolvedViz,
 };
-use super::fit_layout_features::{
-    load_feature_layout_input, read_coembedding, write_feature_layout, LayoutTarget,
-};
+use super::fit_layout_features::{feature_pb_layout, read_coembedding, LayoutTarget};
 use legume_numeric::matrix::layout::{
-    joint_umap_layout_2d_of_columns, umap_layout_2d_of_columns, umap_layout_2d_on_graph,
-    UmapLayoutArgs,
+    joint_umap_layout_2d_of_columns, umap_layout_2d_on_graph, UmapLayoutArgs,
 };
 use legume_numeric::matrix::umap::{Umap, MIN_DIST, SPREAD};
 use senna::embed_common::*;
@@ -84,7 +81,10 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
     // First, so a bad kernel is refused before the run is read.
     let params = args.umap_layout_args()?;
     if args.common.target == LayoutTarget::Features {
-        return fit_feature_layout_umap(args, &params);
+        return feature_pb_layout(&args.common, "umap", |pbs| {
+            let n = pbs.n_pb();
+            Ok(umap_layout_2d_on_graph(n, &pbs.pb_edges, &params.umap(n)))
+        });
     }
     let mut resolved = resolve_inputs(&args.common)?;
     if args.joint {
@@ -157,14 +157,6 @@ fn fit_cell_layout_umap(
     let pb_coords = umap_layout_2d_on_graph(n, &prep.pbs.pb_edges, &umap);
     info!("UMAP done");
     finalize_viz(&args.common, resolved, &prep, &pb_coords, "umap")
-}
-
-/// `--target features`: t-UMAP of the feature embedding on its own, over a
-/// cosine fuzzy kNN graph with a PCA(2) init. Same SGD as `--joint`.
-fn fit_feature_layout_umap(args: &LayoutUmapArgs, params: &UmapLayoutArgs) -> anyhow::Result<()> {
-    let mut input = load_feature_layout_input(&args.common)?;
-    let coords = umap_layout_2d_of_columns(&input.feat_kn, params)?;
-    write_feature_layout(&mut input, "umap", &coords)
 }
 
 impl LayoutUmapArgs {

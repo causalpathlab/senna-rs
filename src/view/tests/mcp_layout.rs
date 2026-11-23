@@ -116,8 +116,8 @@ fn a_layout_senna_would_refuse_is_refused_before_it_runs() {
         // A method senna lacks for its points.
         (json!({"run": "r.senna.json", "method": "pca"}), ""),
         (
-            json!({"run": "r.senna.json", "method": "tsne", "target": "features"}),
-            "umap, phate",
+            json!({"run": "r.senna.json", "method": "lle", "target": "features"}),
+            "umap, phate, tsne",
         ),
     ] {
         let e = format!("{:#}", layout(bad.clone()).unwrap_err());

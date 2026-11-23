@@ -196,10 +196,10 @@ pub struct LayoutCommonArgs {
                      until this many groups remain: each round merges cells, then groups,\n\
                      with the neighbour they are most strongly linked to, so a PB never\n\
                      spans a gap in the graph. Fewer gives larger, smoother PBs; more\n\
-                     gives finer ones. Aim for a few dozen cells per PB.\n\
+                     gives finer ones. Aim for a few dozen cells per PB. A run laid out\n\
+                     from its cell projection ignores this.\n\
                      \n\
-                     With --target features: how many features PHATE lays out itself.\n\
-                     A run laid out from its cell projection ignores this."
+                     With --target features: how many PBs the feature graph is coarsened to."
     )]
     pub n_landmarks: usize,
 
@@ -227,19 +227,14 @@ pub struct PhateCliArgs {
     #[arg(long, default_value_t = 20, help = "PHATE diffusion time t")]
     pub phate_t: usize,
 
-    #[arg(
-        long,
-        default_value_t = 5,
-        help = "PHATE adaptive-bandwidth kNN (--target features; PBs diffuse on their graph)"
-    )]
-    pub phate_knn: usize,
+    /// Deprecated: no PHATE layout reads it since every target diffuses on
+    /// its PB graph. Kept so old commands still parse; warns when given.
+    #[arg(long, hide = true)]
+    pub phate_knn: Option<usize>,
 
-    #[arg(
-        long,
-        default_value_t = 40.0,
-        help = "PHATE alpha-decay kernel exponent (--target features; PBs diffuse on their graph)"
-    )]
-    pub phate_alpha: f32,
+    /// Deprecated, as `--phate-knn`.
+    #[arg(long, hide = true)]
+    pub phate_alpha: Option<f32>,
 
     #[arg(long, default_value_t = 300, help = "Max SMACOF iterations")]
     pub phate_mds_iter: usize,
@@ -256,10 +251,9 @@ impl From<&PhateCliArgs> for PhateArgs {
     fn from(a: &PhateCliArgs) -> Self {
         Self {
             t: a.phate_t,
-            knn: a.phate_knn,
-            alpha: a.phate_alpha,
             mds_iter: a.phate_mds_iter,
             mds_tol: a.phate_mds_tol,
+            ..Self::default()
         }
     }
 }
@@ -427,15 +421,7 @@ pub(crate) fn preprocess_layout_data(
         );
         // Even groups, so no long tail to prune: the smallest are the ones
         // that could not merge, small populations of their own.
-        coarsened(
-            &cells.cells_kn,
-            &CoarsenArgs {
-                knn: args.knn,
-                n_landmarks,
-                block_size,
-                seed: args.seed,
-            },
-        )?
+        coarsen_columns(&cells.cells_kn, args)?
     } else {
         info!("PBs: projection bits of the cell projection");
         let edges = fuzzy_graph_of_columns(&cells.cells_kn, args.knn, block_size)?;
@@ -447,6 +433,24 @@ pub(crate) fn preprocess_layout_data(
     };
     info!("PB graph: {} PBs, {} edges", pbs.n_pb(), pbs.pb_edges.len());
     Ok(PbLayoutPrep { cells, pbs })
+}
+
+/// The columns of `table_kn` (cells or features) as `--n-landmarks` PBs: their
+/// fuzzy kNN graph coarsened by heavy-edge matching, and the graph between
+/// the groups.
+pub(crate) fn coarsen_columns(
+    table_kn: &Mat,
+    args: &LayoutCommonArgs,
+) -> anyhow::Result<Coarsened> {
+    coarsened(
+        table_kn,
+        &CoarsenArgs {
+            knn: args.knn,
+            n_landmarks: args.n_landmarks.min(table_kn.ncols()).max(1),
+            block_size: args.block_size.unwrap_or(1000),
+            seed: args.seed,
+        },
+    )
 }
 
 /// Log how many cells the PBs kept by the coverage filter hold.
