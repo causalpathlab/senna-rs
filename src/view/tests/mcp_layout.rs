@@ -117,7 +117,7 @@ fn a_layout_senna_would_refuse_is_refused_before_it_runs() {
         (json!({"run": "r.senna.json", "method": "pca"}), ""),
         (
             json!({"run": "r.senna.json", "method": "lle", "target": "features"}),
-            "umap, phate, tsne",
+            "tsne, umap, phate",
         ),
     ] {
         let e = format!("{:#}", layout(bad.clone()).unwrap_err());
