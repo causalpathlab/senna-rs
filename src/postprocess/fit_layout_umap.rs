@@ -10,7 +10,7 @@
 
 use super::fit_layout_common::{
     cell_table, finalize_viz, preprocess_layout_data, resolve_inputs, write_cell_layout, CellTable,
-    LayoutCommonArgs, ResolvedViz,
+    LayoutCommonArgs, OutlierCut, ResolvedViz,
 };
 use super::fit_layout_features::{feature_pb_layout, read_coembedding, LayoutTarget};
 use legume_numeric::matrix::layout::{
@@ -97,6 +97,9 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
         );
     }
     if args.joint {
+        if let OutlierCut::Mads(_) = args.common.drop_outliers {
+            log::warn!("--drop-outliers is for PB layouts; --joint lays out every cell");
+        }
         let prep = cell_table(&args.common, &resolved)?;
         fit_layout_joint(args, &params, &mut resolved, &prep)
     } else {

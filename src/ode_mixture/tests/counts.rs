@@ -95,7 +95,8 @@ fn cell_blocks_read_each_cells_tracks_on_the_named_genes() {
         // Blocks of three: the fourth cell starts a second.
         3,
         None,
-        |start, u, s| {
+        |b: CellBlock| {
+            let (start, u, s) = (b.start, b.unspliced, b.spliced);
             assert_eq!((u.ncols(), s.ncols()), (1, 1));
             for c in 0..u.nrows() {
                 seen.push((start + c, u[(c, 0)], s[(c, 0)]));
@@ -153,7 +154,8 @@ fn several_files_read_together_on_their_shared_genes() {
         "A's two tracks; D is in one file"
     );
     let mut seen = Vec::new();
-    for_cell_blocks(&data, &[Box::from("A")], 4096, None, |start, u, s| {
+    for_cell_blocks(&data, &[Box::from("A")], 4096, None, |b: CellBlock| {
+        let (start, u, s) = (b.start, b.unspliced, b.spliced);
         for c in 0..u.nrows() {
             seen.push((start + c, u[(c, 0)], s[(c, 0)]));
         }
@@ -174,12 +176,19 @@ fn cell_blocks_adjust_by_the_batch_effect_and_keep_the_depth() {
     // twice the spliced reads of A.
     let delta = DMatrix::<f32>::from_row_slice(4, 2, &[1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
     let mut seen = Vec::new();
-    for_cell_blocks(&data, &[Box::from("A")], 4096, Some(&delta), |_, u, s| {
-        for c in 0..u.nrows() {
-            seen.push((u[(c, 0)], s[(c, 0)]));
-        }
-        Ok(())
-    })
+    for_cell_blocks(
+        &data,
+        &[Box::from("A")],
+        4096,
+        Some(&delta),
+        |b: CellBlock| {
+            let (u, s) = (b.unspliced, b.spliced);
+            for c in 0..u.nrows() {
+                seen.push((u[(c, 0)], s[(c, 0)]));
+            }
+            Ok(())
+        },
+    )
     .unwrap();
     // c1 (batch 0) as it is; c4 (batch 1): u 2, s 4 → s 2, then scaled
     // back to 6 reads: u 3, s 3.
@@ -240,4 +249,27 @@ fn two_track_genes_counts_genes_with_both_rows() {
         (1, true),
         "GENE1's two tracks alone"
     );
+}
+
+/// Every cell's unspliced share, with a pseudocount each side, counts only
+/// genes with both tracks (here
+/// A; B has no unspliced row and C no spliced one), whatever is fitted.
+#[test]
+fn the_unspliced_share_counts_every_two_track_gene() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = backend(dir.path());
+    let mut seen = Vec::new();
+    for_cell_blocks(
+        &open_tracks(&[path.into()]),
+        &[],
+        4096,
+        None,
+        |b: CellBlock| {
+            seen.extend(b.unspliced_share());
+            Ok(())
+        },
+    )
+    .unwrap();
+    // (U+1)/(U+S+2) with A's reads (U, S): (0, 1), (1, 2), (0, 3), (2, 4).
+    assert_eq!(seen, vec![1.0 / 3.0, 2.0 / 5.0, 1.0 / 5.0, 3.0 / 8.0]);
 }

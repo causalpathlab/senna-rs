@@ -123,6 +123,10 @@ pub fn jittered_table(reads: &Reads, lv: &Levels, omega: &[f64]) -> DMatrix<f64>
 pub fn integrated_table(reads: &Reads, lv: &Levels, sd: f64) -> DMatrix<f64> {
     let mut tab = table(reads, lv);
     let n = tab.nrows();
+    // No rows (a block QC emptied): `par_chunks_mut(0)` would panic.
+    if n == 0 {
+        return tab;
+    }
     tab.as_mut_slice()
         .par_chunks_mut(n)
         .zip(lv.totals())

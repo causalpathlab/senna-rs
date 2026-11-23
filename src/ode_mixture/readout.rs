@@ -63,7 +63,7 @@ pub fn log_rate(du: f64, ds: f64, u: f64, s: f64) -> f64 {
 /// the grid's positions; a cell the mode cannot place anywhere (its row
 /// not finite) is NaN throughout.
 pub fn read_cells(cells: &Reads, mode: &Mode) -> CellReadout {
-    let (n_cells, genes) = (cells.u.nrows(), cells.u.ncols());
+    let n_cells = cells.u.nrows();
     let p = &mode.params;
     let (lineages, positions) = (p.path.len(), p.positions());
     let rows = lineages * positions;
@@ -117,9 +117,7 @@ pub fn read_cells(cells: &Reads, mode: &Mode) -> CellReadout {
     // `[G × C]`, transposed at the end: `duᵀ · post` is a plain product
     // (threaded), where `postᵀ · du` would not be.
     let (du, ds) = p.velocities_of(&lv);
-    let dlog = DMatrix::from_fn(rows, genes, |r, g| {
-        log_rate(du[(r, g)], ds[(r, g)], lv.u[(r, g)], lv.s[(r, g)])
-    });
+    let dlog = p.log_velocities_of(&lv, &du, &ds);
     let nan_rows = |m: DMatrix<f64>| {
         let mut m = m.transpose();
         for c in (0..n_cells).filter(|&c| acc[c].unknown) {

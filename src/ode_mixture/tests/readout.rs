@@ -1,6 +1,7 @@
 use super::init::{first, pearson, spearman};
 use super::model::truth_params;
 use crate::ode_mixture::likelihood::Reads;
+use crate::ode_mixture::model::Params;
 use crate::ode_mixture::readout::{read_cells, CellReadout, Mode};
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
 
@@ -127,7 +128,9 @@ fn at_the_truth_cells_log_velocities_track_the_truths() {
         let row = t.lineage[c] * FINE + (t.time[c] * (FINE - 1) as f64).round() as usize;
         for g in 0..sim.n_genes {
             a.push(out.velocity_log[(c, g)]);
-            b.push((du[(row, g)] + ds[(row, g)]) / (lv.u[(row, g)] + lv.s[(row, g)]));
+            // The level on the kinetics' scale, as the velocities are.
+            let u = lv.u[(row, g)] / fine.capture();
+            b.push((du[(row, g)] + ds[(row, g)]) / (u + lv.s[(row, g)]));
         }
     }
     let r = pearson(&a, &b);
@@ -284,4 +287,22 @@ fn the_grid_posterior_is_the_readouts() {
             out.time_mean[c]
         );
     }
+}
+
+/// The unspliced capture scales the reads, not the kinetics: every row's
+/// `d log(ū + s̄)/dt` is the same whatever the capture.
+#[test]
+fn the_log_velocity_does_not_depend_on_the_capture() {
+    let sim = cells();
+    let at = |p: &Params| {
+        let lv = p.levels();
+        let (du, ds) = p.velocities_of(&lv);
+        p.log_velocities_of(&lv, &du, &ds)
+    };
+    let mut p = truth_params(&sim, FINE, GRID);
+    let one = at(&p);
+    p.log_capture = -1.0;
+    let other = at(&p);
+    let worst = (&one - &other).abs().max();
+    assert!(worst < 1e-9 * one.abs().max().max(1.0), "moved by {worst}");
 }
