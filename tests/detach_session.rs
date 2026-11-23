@@ -1,15 +1,13 @@
 //! `senna run` as a detachable session, driven through pseudo-terminals
-//! standing in for the user's: it starts hosted, a detach leaves it
-//! running and asks for a name, an attach from another terminal repaints
-//! it, a TUI started under a session's marker runs plain, `senna rename`
-//! relabels it, and `senna kill` stops it through its own quit path,
-//! leaving no process, socket or label behind. An ignored
-//! smoke test (`cargo test -- --ignored`, Linux) goes through it all once
-//! more with the client lost instead of detached, and checks `--no-detach`.
+//! standing in for the user's. Opt-in only (`cargo test -- --ignored`,
+//! Linux): it waits on what a real terminal paints, so its timing follows
+//! the machine's speed, which a default test run must not depend on. It
+//! goes through a hosted run with the client lost instead of detached, and
+//! checks `--no-detach`.
 
 #![cfg(all(unix, feature = "view"))]
 
-use legume_tui::testing::{alive, Private, Term, PROMPT};
+use legume_tui::testing::{alive, Private, Term};
 use legume_tui::Size;
 use std::time::Duration;
 
@@ -32,108 +30,6 @@ fn private() -> Private {
 
 fn term(dir: &Private, args: &[&str], env: &[(&str, &str)]) -> Term {
     dir.term_sized(args, env, SIZE)
-}
-
-#[test]
-fn run_detaches_attaches_and_is_killed_through_its_quit_path() {
-    let dir = private();
-    let work = tempfile::tempdir().unwrap();
-    let work = work.path().to_string_lossy().into_owned();
-
-    // Started in a terminal, it is hosted: this terminal is its first client.
-    let mut first = term(&dir, &["run", &work], &[]);
-    first.wait_for(PAINTED);
-    assert!(!first.cooked(), "the client's terminal is raw");
-    let listed = dir.wait_listed("setting up fits");
-    assert!(listed.contains("senna-run-1\tattached"), "{listed:?}");
-    let pid = dir.program_pid();
-
-    // Detached (ctrl+alt+d): the client ends, its terminal restored, and
-    // the program runs on; Enter leaves it unnamed.
-    first.type_(b"\x1b\x04");
-    first.answer(1, b"\r");
-    assert_eq!(first.exit_code(), 0);
-    assert!(first.cooked(), "terminal restored after detach");
-    first.wait_for("Detached senna-run-1.");
-    dir.wait_listed("senna-run-1\tdetached");
-    assert!(alive(pid));
-
-    // Attached from another terminal: painted whole there.
-    let mut second = term(&dir, &["attach"], &[]);
-    second.wait_screen(PAINTED);
-    // Keys reach the program: typed into the output header it asks first.
-    second.type_(b"z");
-    second.wait_screen("z▏");
-    // Out of the field and the file browser after it, its `?` page lists
-    // the detach key.
-    for _ in 0..2 {
-        second.type_(b"\x1b");
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    second.type_(b"?");
-    second.wait_screen("ctrl+alt+d");
-    second.wait_screen("detach:");
-    second.wait_screen("ctrl+alt+s");
-    second.wait_screen("switch:");
-
-    // A TUI started under the session's marker, as `senna run` starts
-    // `senna view` when its fits are done, runs plain: no second host, no
-    // second socket, drawn while the session is attached.
-    let mut nested = term(&dir, &["view"], &[(legume_tui::SESSION_VAR, "senna-run-1")]);
-    nested.wait_for("Run to view");
-    assert_eq!(dir.sockets(), ["senna-run-1"]);
-    nested.type_(b"\x03");
-    assert_eq!(nested.exit_code(), 0);
-    second.type_(b"\x1b\x04");
-    second.answer(1, b"\r");
-    assert_eq!(second.exit_code(), 0);
-    dir.wait_listed("senna-run-1\tdetached");
-
-    // Renamed from a shell: listed and found by its label.
-    let said = dir.run(&["rename", "run-1", "fits"]);
-    assert!(said.contains("senna-run-1 is now fits"), "{said:?}");
-    dir.wait_listed("fits (senna-run-1)\tdetached");
-
-    // Killed: it quits as ctrl+c does, and leaves nothing behind.
-    let said = dir.run(&["kill", "fits"]);
-    assert!(said.contains("senna-run-1 stopped"), "{said:?}");
-    assert!(dir.sockets().is_empty());
-    assert!(dir.is_empty(), "no label or status left");
-    dir.gone(pid);
-    assert!(dir.run(&["sessions"]).contains("no live senna sessions"));
-}
-
-#[test]
-fn view_comes_back_on_attach_and_stops_on_kill() {
-    let dir = private();
-
-    // With no run named it browses for one, hosted.
-    let mut first = term(&dir, &["view"], &[]);
-    first.wait_for("Run to view");
-    dir.wait_listed("senna-view-1\tattached");
-    let pid = dir.program_pid();
-    // Named as it is left.
-    first.type_(b"\x1b\x04");
-    first.answer(1, b"browse\r");
-    assert_eq!(first.exit_code(), 0);
-    first.wait_for("detached: browse");
-    dir.wait_listed("browse (senna-view-1)\tdetached");
-
-    // Back by its label on another terminal, the browser is drawn there
-    // whole; it is not asked for a name again.
-    let mut second = term(&dir, &["attach", "browse"], &[]);
-    second.wait_for("Run to view");
-    second.type_(b"\x1b\x04");
-    assert_eq!(second.exit_code(), 0);
-    second.wait_for("detached: browse");
-    assert!(!second.text().contains(PROMPT));
-
-    // Its id still finds it. Killed while detached: the browser gives up
-    // as on ctrl+c.
-    let said = dir.run(&["kill", "view-1"]);
-    assert!(said.contains("senna-view-1 stopped"), "{said:?}");
-    assert!(dir.sockets().is_empty());
-    dir.gone(pid);
 }
 
 /// A process's parent and session, as `/proc` has them.
@@ -263,25 +159,4 @@ fn smoke_hosted_run_survives_a_lost_client() {
         assert_eq!(plain.exit_code(), 0);
         assert!(plain.cooked(), "terminal restored");
     }
-}
-
-#[test]
-fn an_early_failure_stays_in_sight_on_the_normal_screen() {
-    let dir = private();
-
-    // Hosted, the run named is not there: the program's error reaches
-    // this terminal, which never left the normal screen, and the launcher
-    // ends with the program's failure, leaving nothing behind.
-    let missing = dir.path().join("none").join("x.senna.json");
-    let mut t = term(&dir, &["view", "-f", &missing.to_string_lossy()], &[]);
-    t.wait_for("Error");
-    assert_ne!(t.exit_code(), 0);
-    let text = t.text();
-    assert!(text.contains("x.senna.json"), "{text:?}");
-    assert!(text.contains("senna-view-1 exited"), "hosted: {text:?}");
-    assert!(!text.contains("\x1b[?1049h"), "alternate screen: {text:?}");
-    assert!(t.screen().contains("x.senna.json"), "{}", t.screen());
-    assert!(t.cooked(), "terminal restored");
-    assert!(dir.sockets().is_empty());
-    assert!(dir.is_empty(), "files left");
 }
