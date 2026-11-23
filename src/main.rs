@@ -88,6 +88,7 @@ mod session_cli_tests;
 mod simba;
 mod svd;
 mod topic;
+mod training_data;
 #[cfg(feature = "view")]
 mod tui;
 mod update;

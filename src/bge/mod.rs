@@ -129,8 +129,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         given_batches.as_deref(),
     );
 
-    let mut unified =
-        data_beans::unified::load_unified_data(data_beans::unified::LoadUnifiedArgs {
+    let mut unified = data_beans::bipartite_graph_embedding_input::load_bipartite_embedding_cells(
+        data_beans::bipartite_graph_embedding_input::LoadBipartiteEmbeddingCellsArgs {
             data_files: data_files.clone(),
             batch_files: batch_files.map(<[Box<str>]>::to_vec),
             feature_kind: Some(feature_kind.clone()),
@@ -142,7 +142,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // donors' cells into one.
             per_file_barcode_suffix: barcode_suffix,
             ..Default::default()
-        })?;
+        },
+    )?;
 
     // Carried pseudobulks: registered exactly like every other family — their
     // cell counts become column multiplicities on the count backend (weights
@@ -167,7 +168,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // from different samples. A detected layout already tags barcodes by group,
     // which makes this a no-op; a declared one relies on it.
     if let Some(p) = multiome_plan.as_ref() {
-        data_beans::unified::validate_multiome_groups(
+        data_beans::bipartite_graph_embedding_input::validate_multiome_groups(
             &p.group_sizes,
             &unified.barcodes,
             &unified.cell_modality,
@@ -233,7 +234,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
 /// cells `names`) and return it aligned to them, finest first as the
 /// engine takes it.
 fn on_partition(
-    unified: &mut data_beans::unified::UnifiedData,
+    unified: &mut data_beans::bipartite_graph_embedding_input::BipartiteEmbeddingCells,
     levels: Vec<Vec<usize>>,
     names: &[Box<str>],
 ) -> anyhow::Result<Vec<Vec<usize>>> {
