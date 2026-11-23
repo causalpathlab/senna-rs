@@ -22,7 +22,7 @@ pub struct LayoutSugiyamaArgs {
 pub fn fit_layout_sugiyama(args: &LayoutSugiyamaArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.common.target == LayoutTarget::Cells,
-        "`layout sugiyama` lays out cells only; use `layout umap` or `layout phate` \
+        "`layout sugiyama` lays out cells only; use `layout umap`, `layout phate` or `layout tsne` \
          with --target features"
     );
     let mut resolved = resolve_inputs(&args.common)?;

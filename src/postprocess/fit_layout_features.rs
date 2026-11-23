@@ -8,10 +8,13 @@
 //!   cells, against a subsample of the just-laid-out cells. Runs automatically
 //!   for embedding runs that wrote a co-embed; no flag.
 //! - **features on their own** (`--target features`): the feature embedding ρ
-//!   is laid out directly, gene-gene structure only. Needs no count data.
+//!   laid out by the cells' own route — its kNN graph coarsened to
+//!   `--n-landmarks` PBs, the method run on the graph between them, every
+//!   feature placed by Nyström ([`feature_pb_layout`]). Gene-gene structure
+//!   only; needs no count data.
 
-use super::fit_layout_common::LayoutCommonArgs;
-use legume_numeric::matrix::layout::project_cells_nystrom;
+use super::fit_layout_common::{coarsen_columns, LayoutCommonArgs};
+use legume_numeric::matrix::layout::{project_cells_nystrom, Coarsened};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use senna::embed_common::*;
@@ -202,6 +205,12 @@ pub(crate) fn read_feature_rows(
         }
     };
     let MatWithNames { rows, mut mat, .. } = Mat::from_parquet_with_row_names(&path, Some(0))?;
+    let non_finite = mat.iter().filter(|v| !v.is_finite()).count();
+    anyhow::ensure!(
+        non_finite == 0,
+        "{path}: {non_finite} of {} entries of the {from} are not finite; refit the run",
+        mat.len()
+    );
     l2_normalize_rows_inplace(&mut mat);
     info!(
         "Features: {} × {} dims, the {from} in {path} (cosine)",
@@ -231,6 +240,37 @@ pub(crate) fn load_feature_layout_input(
         names,
         feat_kn,
     })
+}
+
+/// `senna layout {method} --target features`, the way cells are laid out:
+/// the features' cosine kNN graph coarsened to `--n-landmarks` PBs,
+/// `layout_pbs` placing the PBs from the graph between them, every feature
+/// then placed by Nyström against the PBs' mean rows, and the result written
+/// and recorded. The method's cost follows the PB count, not the tens of
+/// thousands of features.
+pub(crate) fn feature_pb_layout(
+    args: &LayoutCommonArgs,
+    method: &str,
+    layout_pbs: impl FnOnce(&Coarsened) -> anyhow::Result<Mat>,
+) -> anyhow::Result<()> {
+    let mut input = load_feature_layout_input(args)?;
+    let n = input.feat_kn.ncols();
+    anyhow::ensure!(n > 0, "the run's feature table has no rows to lay out");
+    let pbs = coarsen_columns(&input.feat_kn, args)?;
+    info!(
+        "Feature PBs: {n} features coarsened to {} ({} edges)",
+        pbs.n_pb(),
+        pbs.pb_edges.len()
+    );
+    let pb_coords = layout_pbs(&pbs)?;
+    let coords = pbs.place_cells(
+        &input.feat_kn,
+        &pb_coords,
+        args.place_knn,
+        args.kernel_alpha,
+    );
+    info!("Placed {n} features by Nyström");
+    write_feature_layout(&mut input, method, &coords)
 }
 
 /// Write a `--target features` result and record it under

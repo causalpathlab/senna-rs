@@ -181,6 +181,10 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         },
         cfg,
     )?;
+    // A diverged fit must not reach disk looking like a good one: NaN cells
+    // cluster one per cell, and every reader downstream inherits the NaN.
+    ensure_finite(&out.model.e_feat, "the feature embedding ρ")?;
+    ensure_finite(&out.model.e_cell, "the cell embedding")?;
 
     // Carried pseudobulks out, same contract as every other family: the
     // finest collapse level's evidence rates + per-column cell counts.
@@ -492,6 +496,22 @@ fn parent_modules(
         row_to_parent: remap.new_to_train,
         knobs: ge::transfer::AlignKnobs::default(),
     }))
+}
+
+/// Fail when `t` holds a NaN or an infinity, naming `what`.
+fn ensure_finite(t: &candle_core::Tensor, what: &str) -> anyhow::Result<()> {
+    // `0 · x` is 0 for every finite entry and NaN otherwise, so its sum is
+    // exactly 0 unless one is not finite; reduced on the device.
+    let probe = t
+        .to_dtype(candle_core::DType::F32)?
+        .affine(0.0, 0.0)?
+        .sum_all()?
+        .to_scalar::<f32>()?;
+    anyhow::ensure!(
+        probe == 0.0,
+        "{what} has non-finite (NaN/Inf) entries: the fit diverged; nothing was written"
+    );
+    Ok(())
 }
 
 /// `{out}.batch_gene_fold.parquet`: the per-batch gene fold phase 2 divided each
