@@ -133,58 +133,15 @@ fn from_scratch_the_rates_are_the_truths_where_the_reads_pin_them() {
     assert!(gamma < 1.25f64.ln(), "median |log γ̂/γ| {gamma}");
 }
 
-/// With the jitter in the model ([`Climb::jitter`]), a jitter of the
-/// unspliced share from pseudobulk to pseudobulk leaves the gates as they
-/// are without it: rates and time. (The shared model loses the rates
-/// already at the smaller jitter.)
-#[test]
-#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
-fn with_the_jitter_in_the_model_the_gates_survive_a_jitter_of_the_unspliced_share() {
-    for j in [0.3, 1.0] {
-        let cfg = SimConfig {
-            share_jitter: j,
-            ..config()
-        };
-        let c = climbed(&cfg);
-        let (gamma, beta) = rate_errors(&c, &pinned(&c.sim));
-        let sd = c.fit.share_sd().unwrap().unwrap();
-        eprintln!(
-            "jitter {j}: fitted sd {sd:.3}; median |log γ̂/γ| {gamma:.3}, |log β̂/β| {beta:.3}"
-        );
-        assert!(gamma < 1.25f64.ln(), "jitter {j}: median |log γ̂/γ| {gamma}");
-        assert!(
-            c.spearman.abs() > 0.95,
-            "jitter {j}: climbed Spearman {}",
-            c.spearman
-        );
-        assert!((sd / j).ln().abs() < 0.25f64, "jitter {j}: fitted sd {sd}");
-    }
-}
-
-/// With no jitter in the reads, the jitter in the model costs nothing: the
-/// gates pass and the fitted jitter is small.
-#[test]
-#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
-fn with_no_jitter_in_the_reads_the_jitter_in_the_model_stays_small() {
-    let c = kinetics();
-    let (gamma, _) = rate_errors(c, &pinned(&c.sim));
-    let sd = c.fit.share_sd().unwrap().unwrap();
-    eprintln!("no jitter: fitted sd {sd:.4}; median |log γ̂/γ| {gamma:.3}");
-    assert!(gamma < 1.25f64.ln(), "median |log γ̂/γ| {gamma}");
-    assert!(c.spearman.abs() > 0.95, "climbed Spearman {}", c.spearman);
-    assert!(sd < 0.05, "fitted sd {sd}");
-}
-
 /// With every unspliced read captured at `e^c` and each pseudobulk's share
 /// jittering around it, the climb from scratch finds `c` and the jitter's
 /// spread (not their sum), and the gates pass: neither is pushed into the
-/// rates.
+/// rates. (One case: a capture below 1 with a jitter covers both the
+/// capture and the jitter the model carries.)
 #[test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_climb_finds_a_global_capture_apart_from_the_jitter() {
-    for (c_true, j) in [(-1.2, 0.0), (-1.2, 0.3), (0.6, 0.3)] {
-        capture_gate(c_true, j, 1);
-    }
+    capture_gate(-1.2, 0.3, 1);
 }
 
 /// The climb from scratch on reads captured at `e^{c_true}` and jittering

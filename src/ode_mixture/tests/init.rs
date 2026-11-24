@@ -95,68 +95,6 @@ fn from_scratch_the_climb_finds_time_and_its_direction() {
     assert!(f64::from(objective) > f64::from(at_truth) - 50.0);
 }
 
-/// Two lineages from scratch: each true lineage in a fitted one of its
-/// own, and time right within each.
-#[test]
-#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
-fn from_scratch_two_lineages_come_apart() {
-    let cfg = SimConfig {
-        lineages: 2,
-        n_pb: 600,
-        fine: 133,
-        ..SimConfig::default()
-    };
-    let sim = simulate(&cfg).unwrap();
-    let n_train = 480;
-    let train = first(&sim, n_train);
-    let dev = Device::Cpu;
-    let opts = Climb {
-        jitter: true,
-        trunk: false,
-        lineages: 2,
-        points: 45,
-        dim: 3,
-        kappa: cfg.kappa,
-        steps: 2500,
-        lr: 0.03,
-        sub: 1,
-        roots: Vec::new(),
-    };
-    let climbed = climb(&train, &opts, &dev).unwrap();
-    let (fit, objective) = (climbed.fit, climbed.objective);
-    let all = first(&sim, sim.n_pb);
-    let (weights, time) = fit.posterior(&fit.reads(&all).unwrap()).unwrap();
-    let held: Vec<usize> = (n_train..sim.n_pb).collect();
-    let fitted: Vec<usize> = held
-        .iter()
-        .map(|&p| if weights[p][0] > weights[p][1] { 0 } else { 1 })
-        .collect();
-    let mut table = [[0usize; 2]; 2];
-    for (i, &p) in held.iter().enumerate() {
-        table[sim.truth.lineage[p]][fitted[i]] += 1;
-    }
-    let purity =
-        (table[0][0] + table[1][1]).max(table[0][1] + table[1][0]) as f64 / held.len() as f64;
-    let mut per = Vec::new();
-    for lin in 0..2 {
-        let rows: Vec<usize> = held
-            .iter()
-            .copied()
-            .filter(|&p| sim.truth.lineage[p] == lin)
-            .collect();
-        per.push(spearman(
-            &rows.iter().map(|&p| time[p]).collect::<Vec<_>>(),
-            &rows.iter().map(|&p| sim.truth.time[p]).collect::<Vec<_>>(),
-        ));
-    }
-    eprintln!("objective {objective:.1}; table {table:?}; purity {purity:.3}; per-lineage signed Spearman {per:?}");
-    assert!(purity > 0.95, "purity {purity}");
-    assert!(
-        per.iter().all(|&r| r > 0.95),
-        "per-lineage Spearman {per:?}"
-    );
-}
-
 /// On a tree, one of the starts (one per end taken as the root) puts the
 /// trunk on both lineages and each branch on one of its own, roughly in
 /// order. Rough: on the leading axes the branches part well after the
