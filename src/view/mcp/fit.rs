@@ -185,6 +185,7 @@ fn helped() -> Vec<String> {
         "critique",
         "impute",
         "deconvolve",
+        "donor-deviation",
     ]
     .into_iter()
     .chain(super::steps::COMMANDS)

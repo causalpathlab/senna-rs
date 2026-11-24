@@ -1,12 +1,11 @@
-//! Several fates on a shared trunk: the climb from scratch finds every
-//! fate as its own lineage.
+//! Several fates on a shared trunk: the tree starts put every fate on a
+//! lineage of its own (the climb from scratch is checked on branching
+//! lineages in `branch`).
 
-use super::init::{first, spearman};
-use crate::ode_mixture::fit::Fit;
-use crate::ode_mixture::init::{climb, tree_start_from_roots, tree_starts, Climb, Places};
+use super::init::first;
+use crate::ode_mixture::init::{tree_start_from_roots, tree_starts, Places};
 use crate::ode_mixture::likelihood::Reads;
 use crate::ode_mixture::sim::{simulate, Sim, SimConfig};
-use legume_numeric::candle::candle_core::Device;
 
 const BRANCH: f64 = 0.4;
 
@@ -23,44 +22,6 @@ fn fates(l: usize, seed: u64) -> (Sim, Reads) {
     .unwrap();
     let reads = first(&sim, sim.n_pb);
     (sim, reads)
-}
-
-fn opts(l: usize) -> Climb {
-    Climb {
-        trunk: true,
-        jitter: true,
-        lineages: l,
-        points: 45,
-        dim: 3,
-        kappa: 0.25,
-        steps: 2500,
-        lr: 0.03,
-        sub: 1,
-        roots: Vec::new(),
-    }
-}
-
-/// Over the pseudobulks well past the branch (a quarter of it or more),
-/// the share on the fitted lineage that best matches their true one, the
-/// lineages matched one to one (the best of every permutation).
-fn purity(fit: &Fit, reads: &Reads, sim: &Sim) -> f64 {
-    let (weights, _) = fit.posterior(&fit.reads(reads).unwrap()).unwrap();
-    let t = &sim.truth;
-    let past: Vec<usize> = (0..sim.n_pb)
-        .filter(|&p| t.time[p] > BRANCH * 1.25)
-        .collect();
-    let l = weights[0].len();
-    let pairs: Vec<(usize, usize)> = past
-        .iter()
-        .map(|&p| {
-            let w = &weights[p];
-            (
-                t.lineage[p],
-                (0..l).max_by(|&a, &b| w[a].total_cmp(&w[b])).unwrap(),
-            )
-        })
-        .collect();
-    best_match(l, &pairs) as f64 / past.len() as f64
 }
 
 /// Over `(true, called)` lineage pairs, how many agree under the best
@@ -87,16 +48,6 @@ fn permute(v: &mut Vec<usize>, k: usize, f: &mut dyn FnMut(&[usize])) {
         permute(v, k + 1, f);
         v.swap(k, i);
     }
-}
-
-fn check(l: usize, seed: u64) -> (f64, f64) {
-    let (sim, reads) = fates(l, seed);
-    let climbed = climb(&reads, &opts(l), &Device::Cpu).unwrap();
-    let (fit, objective) = (climbed.fit, climbed.objective);
-    let (_, time) = fit.posterior(&fit.reads(&reads).unwrap()).unwrap();
-    let (rho, pure) = (spearman(&time, &sim.truth.time), purity(&fit, &reads, &sim));
-    eprintln!("{l} fates, seed {seed}: objective {objective:.1}, time Spearman {rho:.3}, purity {pure:.3}");
-    (rho, pure)
 }
 
 /// Over the pseudobulks well past the branch placed on one lineage, the
@@ -186,14 +137,4 @@ fn from_roots_the_start_finds_the_fates(seeds: std::ops::RangeInclusive<u64>, n_
         missed.is_empty(),
         "seeds {missed:?}: the start from the root misses a fate"
     );
-}
-
-/// Three fates off one trunk, each its own lineage: the fitted lineages
-/// are the fates, time in order.
-#[test]
-#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
-fn from_scratch_three_fates_are_three_lineages() {
-    let (rho, pure) = check(3, 1);
-    assert!(rho.abs() > 0.9, "time Spearman {rho}");
-    assert!(pure > 0.9, "purity {pure}");
 }

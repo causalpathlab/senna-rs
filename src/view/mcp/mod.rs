@@ -22,6 +22,7 @@ mod layout;
 mod model;
 mod predict;
 mod reference;
+mod stage2;
 mod steps;
 mod view;
 
@@ -69,6 +70,7 @@ impl Handler for Tools {
         specs.extend(predict::specs());
         specs.extend(model::specs());
         specs.extend(reference::specs());
+        specs.extend(stage2::specs());
         specs.extend(layout::specs());
         specs.extend(steps::specs());
         specs.extend(view::specs());
@@ -81,6 +83,7 @@ impl Handler for Tools {
             predict::call,
             model::call,
             reference::call,
+            stage2::call,
             layout::call,
             steps::call,
         ] {
