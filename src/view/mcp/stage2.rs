@@ -1,7 +1,7 @@
 //! `run_donor_deviation`: stage 2 on a finished embedding run, which of its
 //! states are specific to a donor and which genes drive them.
 
-use super::jobs::{job_property, start_server, Argv, Task};
+use super::jobs::{job_property, planned, start_server, Argv, Task};
 use super::parse;
 use anyhow::Result;
 use legume_mcp::{Call, Content, ToolSpec};
@@ -30,12 +30,7 @@ pub(super) struct DonorDeviationCall {
 
 /// `senna donor-deviation --from {from} -o {out}`: the per-(gene, donor)
 /// deviations first, then their batch jackknife and the state tables.
-pub(super) fn donor_deviation_task(a: &DonorDeviationCall) -> Task {
-    // senna's own default, named here so the files can be checked.
-    let out = a
-        .out
-        .clone()
-        .unwrap_or_else(|| crate::donor_deviation::default_out(&a.from));
+pub(super) fn donor_deviation_task(a: &DonorDeviationCall, out: &str) -> Task {
     let made = [
         "donor_gene_deviation",
         "donor_gene_deviation_without_batch",
@@ -46,7 +41,7 @@ pub(super) fn donor_deviation_task(a: &DonorDeviationCall) -> Task {
     Task {
         argv: Argv::new("donor-deviation")
             .flag("--from", Some(&a.from))
-            .flag("-o", Some(&out))
+            .flag("-o", Some(out))
             .flag("--donor-of-batch", a.donor_of_batch.as_deref())
             .rest(&a.args),
         made: made.to_vec(),
@@ -54,8 +49,13 @@ pub(super) fn donor_deviation_task(a: &DonorDeviationCall) -> Task {
     }
 }
 
+/// Named as the other run tools name theirs ([`planned`]): `out` when given,
+/// else `{run}_stage2` in the results folder, a name no running job holds.
 fn run_donor_deviation(a: DonorDeviationCall, cx: &Call) -> Result<Vec<Content>> {
-    let done = start_server(donor_deviation_task(&a), a.background, cx)?;
+    let (_, task) = planned(cx, a.out.as_deref(), Some(&a.from), "stage2", |out| {
+        Ok(donor_deviation_task(&a, out))
+    })?;
+    let done = start_server(task, a.background, cx)?;
     Ok(vec![Content::Json(done)])
 }
 
@@ -78,7 +78,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "type": "object",
             "properties": {
                 "from": {"type": "string", "description": "Run manifest (or prefix) of a run that recorded its cell → pseudobulk partition (bge, the topic family, svd, vae; not ode)"},
-                "out": {"type": "string", "description": "Output prefix [default: from's prefix with .stage2]"},
+                "out": {"type": "string", "description": "Output prefix [default: today's results folder, by the run's name]"},
                 "donor_of_batch": {"type": "string", "description": "Two-column file, each batch and its donor (--donor-of-batch) [default: each batch is its own donor]"},
                 "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (donor-deviation) lists them, e.g. --device cuda"},
                 "background": job_property(),

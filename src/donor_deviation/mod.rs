@@ -208,9 +208,9 @@ pub struct DonorDeviationArgs {
     pub gpu_mem_fraction: f32,
 }
 
-/// The default output prefix: the run's, with `.stage2` (the CLI's and the
-/// MCP tool's, so both name the same files).
-pub fn default_out(from: &str) -> String {
+/// The command line's default output prefix: the run's, with `.stage2`
+/// (the MCP tool names its results in the session's results folder).
+fn default_out(from: &str) -> String {
     format!("{}.stage2", senna::run_manifest::derive_out_prefix(from))
 }
 

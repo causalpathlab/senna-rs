@@ -10,7 +10,7 @@ fn donor_deviation_runs_on_the_run_and_names_its_gene_table_first() {
         "args": ["--device", "cuda"],
     }))
     .unwrap();
-    let t = donor_deviation_task(&a);
+    let t = donor_deviation_task(&a, "r.stage2");
     assert_eq!(
         t.argv,
         [
@@ -34,9 +34,9 @@ fn donor_deviation_runs_on_the_run_and_names_its_gene_table_first() {
         )
     );
     assert_eq!(t.made.len(), 4);
-    let bare: DonorDeviationCall = parse(json!({"from": "r", "out": "s2"})).unwrap();
+    let bare: DonorDeviationCall = parse(json!({"from": "r"})).unwrap();
     assert_eq!(
-        donor_deviation_task(&bare).argv,
+        donor_deviation_task(&bare, "s2").argv,
         ["donor-deviation", "--from", "r", "-o", "s2"]
     );
 }
