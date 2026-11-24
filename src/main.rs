@@ -41,7 +41,6 @@ mod anchor_common;
 mod bge;
 mod cluster_bhc;
 mod clustering;
-mod counterfactual;
 mod critique;
 mod deconvolve;
 mod docs;
@@ -691,7 +690,7 @@ enum Commands {
                       Usage:\n\
                       senna probe --model M --calibration ref.zarr query.zarr -o out\n  \
                       Writes {out}.probe.tsv (per-cell fit + flag) and {out}.probe.json\n\
-                      (the verdict, and the --counterfactual effects)."
+                      (the verdict)."
     )]
     Probe(ProbeArgs),
 

@@ -189,8 +189,6 @@ struct ProbeCall {
     out: Option<String>,
     alpha: Option<f64>,
     #[serde(default)]
-    counterfactual: bool,
-    #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
     background: bool,
@@ -205,7 +203,6 @@ fn probe_task(a: &ProbeCall, out: &str) -> Task {
             .flag("--calibration", Some(&a.calibration))
             .flag("-o", Some(out))
             .flag("--alpha", a.alpha)
-            .switch("--counterfactual", a.counterfactual)
             .rest(&a.args),
         made: vec![
             ("verdict", format!("{out}.probe.json").into()),
@@ -215,18 +212,7 @@ fn probe_task(a: &ProbeCall, out: &str) -> Task {
     }
 }
 
-/// The counterfactual is the masked models' only: theirs is the one small
-/// gene-side block a batch can move.
-fn check_probe(a: &ProbeCall, kind: RunKind) -> Result<()> {
-    ensure!(
-        !a.counterfactual || kind.is_masked_family(),
-        "counterfactual is for masked-topic, masked-sbp and masked-vae runs; {} is a {kind} run",
-        a.model
-    );
-    Ok(())
-}
-
-/// The probe's verdict and counterfactual effects, as it wrote them.
+/// The probe's verdict, as it wrote it.
 fn probe_summary(verdict: &Path) -> Result<Value> {
     let text = std::fs::read_to_string(verdict)
         .with_context(|| format!("reading {}", verdict.display()))?;
@@ -235,19 +221,8 @@ fn probe_summary(verdict: &Path) -> Result<Value> {
 
 /// Whether a trained model explains new cells, as `senna probe` judges.
 fn run_probe(a: ProbeCall, cx: &Call) -> Result<Vec<Content>> {
-    if a.counterfactual {
-        check_probe(&a, model_kind(&a.model)?)?;
-    }
     let data = a.data.first().map(String::as_str);
-    // The counterfactual is another result than the fit alone.
-    let tag = model_tag(
-        &a.model,
-        if a.counterfactual {
-            "probe_cf"
-        } else {
-            "probe"
-        },
-    );
+    let tag = model_tag(&a.model, "probe");
     let (_, task) = planned(cx, a.out.as_deref(), data, &tag, |o| Ok(probe_task(&a, o)))?;
     let done = start_server(task, a.background, cx)?;
     with_summary(done, "verdict", probe_summary)
@@ -306,11 +281,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "Ask whether a frozen model explains new cells, as `senna probe {data} --model \
              {model} --calibration {calibration} -o {out}`: each cell's fit against a null \
              calibrated on cells the model already explains, and a batch verdict (covered or \
-             novel). With counterfactual (masked-topic, masked-sbp and masked-vae runs only) \
-             it also estimates what updating on this batch would do: benefit, the fit it \
-             would gain on the new cells (would it teach the model), and forgetting, the fit \
-             it would lose on the reference (would it damage it). Writes {out}.probe.json \
-             (returned: verdict, flagged cells, the counterfactual effects) and \
+             novel). Writes {out}.probe.json (returned: verdict, flagged cells) and \
              {out}.probe.tsv (per cell). Trains and writes no model. Serves masked, topic, \
              vae, bge and simba runs.",
             json!({
@@ -321,7 +292,6 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "calibration": {"type": "string", "description": "A backend of cells the model already explains (held-out training cells), which sets the null"},
                     "out": {"type": "string", "description": "Output prefix [default: today's results folder, by data file and model]"},
                     "alpha": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "description": "Null tail probability, the per-cell false-positive rate (--alpha) [default: 0.05]"},
-                    "counterfactual": {"type": "boolean", "description": "Masked runs only: also estimate benefit and forgetting (--counterfactual) [default: false]"},
                     "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (probe) lists them"},
                     "background": job,
                 },

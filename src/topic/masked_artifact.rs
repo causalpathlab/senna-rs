@@ -81,10 +81,6 @@ pub struct MaskedModel<'a> {
     pub prefix: &'a str,
     pub metadata: TopicModelMetadata,
     pub head: LatentHead,
-    pub feature_mean: Vec<f32>,
-    /// The shortlist an OLD model was fitted with; `None` for a window-free
-    /// model, which has nothing to rank.
-    pub shortlist: Option<Vec<f32>>,
 }
 
 impl<'a> MaskedModel<'a> {
@@ -100,25 +96,20 @@ impl<'a> MaskedModel<'a> {
                 metadata.model_type
             )
         })?;
-        let (_gene_names, feature_mean) = load_feature_mean(prefix)?;
-        let shortlist = match metadata.enc_context_size {
-            None => None,
-            Some(_) => {
-                require_files(
-                    prefix,
-                    REQUIRED_WINDOWED,
-                    "masked model with a context window",
-                )?;
-                Some(load_shortlist_weights(prefix)?.1)
-            }
-        };
+        load_feature_mean(prefix)?;
+        if metadata.enc_context_size.is_some() {
+            require_files(
+                prefix,
+                REQUIRED_WINDOWED,
+                "masked model with a context window",
+            )?;
+            load_shortlist_weights(prefix)?;
+        }
 
         Ok(Self {
             prefix,
             metadata,
             head,
-            feature_mean,
-            shortlist,
         })
     }
 
@@ -220,7 +211,6 @@ mod tests {
         let prefix = dir.path().join("dense").to_string_lossy().into_owned();
         skeleton(&prefix, None, false);
         let m = MaskedModel::open(&prefix).expect("a window-free model is complete without it");
-        assert!(m.shortlist.is_none(), "no window, no shortlist");
         assert!(m.metadata.enc_context_size.is_none());
     }
 
@@ -241,8 +231,7 @@ mod tests {
         );
 
         skeleton(&prefix, Some(512), true);
-        let m = MaskedModel::open(&prefix).expect("with the weights it opens");
-        assert_eq!(m.shortlist.as_deref().map(<[f32]>::len), Some(4));
+        MaskedModel::open(&prefix).expect("with the weights it opens");
     }
 
     #[test]

@@ -172,10 +172,7 @@ pub struct TopicModelMetadata {
     /// a non-finite mean). Predict no longer reads it; absent in older models.
     #[serde(default)]
     pub theta_mean: Option<Vec<f32>>,
-    /// Number of cells the model was trained on. Model provenance, and the running
-    /// `N_absorbed` for sequential integration: net gain is weighted
-    /// `n_query · benefit − n_train · forgetting`, so later rounds resist updates in
-    /// proportion to how much data the model already carries. Absent in older models.
+    /// Number of cells the model was trained on: model provenance. Absent in older models.
     #[serde(default)]
     pub n_train_cells: Option<usize>,
     /// Number of learned gene modules `M` in the encoder's module-pooling branch

@@ -100,7 +100,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
 | `run_help` | every flag of one method, or of a command another run tool starts (`predict`, `probe`, `update`, `critique`, `impute`, `deconvolve`, `donor-deviation`, a `run_step` command, `layout <method>`), with its help |
 | `run_predict` | new cells placed in a trained model's latent (`senna predict`), with the null, eval features, batches, bulk tables and latent mode as options; returns the latent, the predictive table and the mean held-out and null log-likelihood per count |
-| `run_probe` | whether a frozen model explains new cells (`senna probe`): the covered or novel verdict, and with `counterfactual` (masked runs) the benefit and forgetting an update on them would bring, read from `{out}.probe.json` |
+| `run_probe` | whether a frozen model explains new cells (`senna probe`): the covered or novel verdict, read from `{out}.probe.json` |
 | `run_update` | a trained model continued into a new run (`senna update`): new samples absorbed, or a round on its own cells taking `run_critique`'s peer labels; returns the new run's manifest |
 | `run_critique` | where fits disagree on which pseudobulks are alike (`senna critique`); with `questions`, the peer labels for an update round |
 | `run_impute` | full-feature counts on new cells from their nearest reference cells (`senna impute`); returns `{out}.imputed.parquet` |

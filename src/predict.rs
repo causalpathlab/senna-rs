@@ -2119,9 +2119,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
 
     // Only the finest level is ever scored, and only it needs registering: `VarMap::load`
     // iterates the varmap's OWN entries and looks each up in the file, so extra tensors in the
-    // checkpoint are simply never visited. (`counterfactual::rebuild_model` must register every
-    // level for the opposite reason — it *writes* a child checkpoint that `--init-from` would
-    // reject if levels were missing. This path writes nothing.)
+    // checkpoint are simply never visited.
     let finest = metadata.num_levels.saturating_sub(1);
     let decoder = if a.need_llik {
         Some(legume_numeric::candle::decoder::GaussianNbDecoder::new(
