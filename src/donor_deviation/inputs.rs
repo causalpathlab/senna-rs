@@ -1,19 +1,23 @@
 //! What stage 2 reads from a finished stage-1 run: each cell's place in the
-//! embedding, its finest pseudobulk, its batch, and its donor; and the raw
+//! run's cell table (in a Euclidean view of its kind), its finest pseudobulk, its batch, and its donor; and the raw
 //! counts the run was fitted on.
 
 use super::DonorDeviationArgs;
 use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use rustc_hash::FxHashMap as HashMap;
 use senna::embed_common::*;
-use senna::run_manifest::{self, CellSpace};
+use senna::run_manifest::{self, CellSpace, RunKind};
 
 /// The run's cells, in its embedding table's row order.
 pub struct Stage1Cells {
     pub cell_names: Vec<Box<str>>,
-    /// `[cells × dims]`, each row scaled to unit length: an embedding run's
-    /// magnitude follows depth, so cells are compared by direction.
+    /// `[cells × dims]`, the run's cell table in a Euclidean view
+    /// ([`euclidean_view`]): where cells are compared and the state axes are
+    /// taken.
     pub embedding: Mat,
+    /// Whether the view's rows have unit length (an embedding, or √θ), so a
+    /// mean of rows is renormalized to stay in it.
+    pub unit_rows: bool,
     /// Each cell's pseudobulk at the run's finest level.
     pub finest_pb_of_cell: Vec<usize>,
     pub batch_of_cell: Vec<Box<str>>,
@@ -35,10 +39,9 @@ pub struct Stage1Inputs {
 pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inputs> {
     let (manifest, dir) = run_manifest::load_for(&args.from)?;
     anyhow::ensure!(
-        manifest.kind.cell_space() == CellSpace::Embedding,
-        "{}: a {} run's cells are not a Euclidean embedding (stage 2 runs on bge runs)",
-        args.from,
-        manifest.kind.as_str()
+        manifest.kind != RunKind::Ode,
+        "{}: an ode run's counts are two tracks (spliced and unspliced), not one gene axis",
+        args.from
     );
     let resolve = |rel: &str| {
         run_manifest::resolve(&dir, rel)
@@ -60,12 +63,13 @@ pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inp
 
     let named = Mat::from_parquet_with_row_names(&embedding_path, Some(0))?;
     let cell_names = named.rows;
-    let mut embedding = named.mat;
-    l2_normalize_rows_inplace(&mut embedding);
+    let cell_space = manifest.kind.cell_space();
+    let (embedding, unit_rows) = euclidean_view(named.mat, cell_space);
     info!(
-        "Stage-1 embedding {embedding_path}: {} cells × {} dims",
+        "Stage-1 cells {embedding_path}: {} cells × {} dims ({} run, {cell_space:?} space)",
         embedding.nrows(),
-        embedding.ncols()
+        embedding.ncols(),
+        manifest.kind.as_str()
     );
 
     let (levels, partition_cells) = run_manifest::load_cell_to_pb_raw(&partition_path)?;
@@ -180,6 +184,7 @@ pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inp
         cells: Stage1Cells {
             cell_names,
             embedding,
+            unit_rows,
             finest_pb_of_cell,
             batch_of_cell,
             donor_names,
@@ -188,6 +193,39 @@ pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inp
         data,
         cell_of_column,
     })
+}
+
+/// The run's cell table in a space where Euclidean distance compares cells
+/// the way the run's kind calls for (as `senna critique` compares them), and
+/// whether its rows have unit length:
+///
+/// * an embedding (bge): rows scaled to unit length, the angular distance
+///   (an embedding's magnitude follows depth);
+/// * log θ (topic family): √θ, whose Euclidean distance is the Hellinger
+///   distance, rows of unit length by construction;
+/// * signed scores (svd, vae, masked-vae, rbm): columns z-scored, so no
+///   one component's scale decides the neighbours.
+pub fn euclidean_view(mut table: Mat, cell_space: CellSpace) -> (Mat, bool) {
+    match cell_space {
+        CellSpace::Embedding => {
+            l2_normalize_rows_inplace(&mut table);
+            (table, true)
+        }
+        CellSpace::LogSimplex => {
+            table.iter_mut().for_each(|x| *x = (0.5 * *x).exp());
+            (table, true)
+        }
+        CellSpace::Signed => {
+            let n = table.nrows().max(2) as f32;
+            for mut column in table.column_iter_mut() {
+                let mean = column.sum() / n;
+                column.add_scalar_mut(-mean);
+                let sd = (column.norm_squared() / (n - 1.0)).sqrt().max(1e-12);
+                column /= sd;
+            }
+            (table, false)
+        }
+    }
 }
 
 /// A two-column file: each batch and its donor (tab, comma or spaces; a

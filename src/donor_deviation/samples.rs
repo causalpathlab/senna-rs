@@ -35,7 +35,7 @@ pub struct PbSamples {
     pub donor_index_of_sample: Vec<usize>,
     pub cells_in_sample: Vec<usize>,
     pub sample_of_cell: Vec<usize>,
-    /// `[samples × dims]`, unit rows: where matches are looked up.
+    /// `[samples × dims]`: where matches are looked up.
     pub embedding_of_sample: Mat,
     /// `[samples × width]`, row-major: the cells' mean state coordinates.
     pub state_coordinates_of_sample: Vec<f32>,
@@ -89,7 +89,13 @@ pub fn pb_samples(
             *s += c;
         }
     }
-    l2_normalize_rows_inplace(&mut embedding_of_sample);
+    if cells.unit_rows {
+        l2_normalize_rows_inplace(&mut embedding_of_sample);
+    } else {
+        for (mut row, &n) in embedding_of_sample.row_iter_mut().zip(&cells_in_sample) {
+            row /= n as f32;
+        }
+    }
     for (coordinates, &n) in state_coordinates_of_sample
         .chunks_mut(width)
         .zip(&cells_in_sample)

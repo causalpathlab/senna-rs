@@ -414,6 +414,7 @@ fn six_cells() -> super::inputs::Stage1Cells {
             2,
             &[1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
         ),
+        unit_rows: true,
         finest_pb_of_cell: vec![0, 0, 0, 1, 1, 1],
         batch_of_cell: ["A", "A", "B", "A", "A", "A"].map(Box::from).to_vec(),
         donor_names: ["D0", "D1", "D2"].map(Box::from).to_vec(),
@@ -513,4 +514,23 @@ fn anchors_are_sampled_from_the_eligible_units_only() {
     assert!(anchors.windows(2).all(|w| w[0] < w[1]));
     assert!(anchors.iter().all(|a| eligible.contains(a)));
     assert_eq!(super::sample_anchor_units(&eligible, 1000, 7), eligible);
+}
+
+#[test]
+fn each_cell_space_gets_its_euclidean_view() {
+    use senna::run_manifest::CellSpace;
+    let log_theta = Mat::from_row_slice(1, 2, &[0.25f32.ln(), 0.75f32.ln()]);
+    let (root, unit) = super::inputs::euclidean_view(log_theta, CellSpace::LogSimplex);
+    assert!(unit);
+    assert!((root[(0, 0)] - 0.5).abs() < 1e-6 && (root[(0, 1)] - 0.75f32.sqrt()).abs() < 1e-6);
+    let signed = Mat::from_row_slice(3, 2, &[1.0, 10.0, 2.0, 20.0, 3.0, 60.0]);
+    let (z, unit) = super::inputs::euclidean_view(signed, CellSpace::Signed);
+    assert!(!unit);
+    for column in z.column_iter() {
+        assert!(column.sum().abs() < 1e-5);
+        assert!((column.norm_squared() / 2.0 - 1.0).abs() < 1e-5);
+    }
+    let embedding = Mat::from_row_slice(1, 2, &[3.0, 4.0]);
+    let (e, unit) = super::inputs::euclidean_view(embedding, CellSpace::Embedding);
+    assert!(unit && (e.row(0).norm() - 1.0).abs() < 1e-6);
 }

@@ -1,8 +1,10 @@
-//! Stage 2 on a finished embedding run (`senna donor-deviation`): which of
-//! its states are specific to a donor, and which genes drive them.
+//! Stage 2 on a finished run (`senna donor-deviation`): which of its states
+//! are specific to a donor, and which genes drive them.
 //!
-//! Stage 1 (a `bge` run, or another run whose cells live in a Euclidean
-//! embedding) placed every cell in a space shared by every donor. Stage 2
+//! Stage 1 (a bge, topic-family, svd, vae or rbm run that recorded its
+//! cell → pseudobulk partition) placed every cell in a space shared by every
+//! donor; stage 2 reads that space in a Euclidean view of its kind
+//! (`inputs::euclidean_view`). Stage 2
 //! keeps that space frozen and asks, gene by gene, whether a donor's
 //! pseudobulk samples carry the gene more than the samples of OTHER donors
 //! that stage 1 puts in the same state. It is a contrast with two kinds of
@@ -56,11 +58,13 @@ use senna::embed_common::*;
 
 /// `senna donor-deviation`'s long help.
 pub const DONOR_DEVIATION_LONG_ABOUT: &str =
-    "Stage 2 on a finished bge run: which of its states are specific to a\n\
-     donor, and which genes drive them. (Any run whose cells are a Euclidean\n\
-     embedding and that records its cell → pseudobulk partition qualifies;\n\
-     today that is bge.)\n\n\
-     The run's cell embedding is held fixed. Cells are grouped into pseudobulk\n\
+    "Stage 2 on a finished run: which of its states are specific to a donor,\n\
+     and which genes drive them. Takes bge, topic, masked-topic, svd, vae,\n\
+     masked-vae and rbm runs that recorded their cell → pseudobulk partition\n\
+     (not ode, joint-*, simba or fne). Cells are compared in a Euclidean view\n\
+     of the run's kind: bge's embedding by angle, a topic run's θ by Hellinger\n\
+     distance (√θ), signed scores (svd, vae) z-scored.\n\n\
+     The run's cell table is held fixed. Cells are grouped into pseudobulk\n\
      samples (the run's finest pseudobulk × batch, counts averaged per cell).\n\
      For each gene, every sample is contrasted with its nearest samples of\n\
      OTHER donors in the embedding (the same shared state elsewhere), on raw\n\
