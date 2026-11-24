@@ -19,11 +19,11 @@ pub struct PbTracks {
 }
 
 /// A backend row's (gene column, unspliced?), if it is a track of a gene.
-type Role = Option<(usize, bool)>;
+pub(super) type Role = Option<(usize, bool)>;
 
 /// The genes with both tracks among backend rows `rows`, sorted, and every
 /// row's role among them.
-fn track_rows(rows: &[Box<str>]) -> (Vec<&str>, Vec<Role>) {
+pub(super) fn track_rows(rows: &[Box<str>]) -> (Vec<&str>, Vec<Role>) {
     let mut tracks: HashMap<&str, [Option<usize>; 2]> = HashMap::new();
     for (r, name) in rows.iter().enumerate() {
         if let Some((gene, unspliced)) = split_count_row(name) {

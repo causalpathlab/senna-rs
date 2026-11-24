@@ -242,14 +242,18 @@ impl Open {
                 .run
                 .as_ref()
                 .is_some_and(|(m, _)| velocity::Field::available(m));
-        json!({
+        let mut out = json!({
             "run": self.run,
             "maps": maps,
             "groupings": groupings,
             "time": s.data.times.is_some(),
             "velocity": velocity,
             "view": self.state(),
-        })
+        });
+        if let Some((m, _)) = &s.data.run {
+            super::fit::decision_fields(m, &self.run, &mut out);
+        }
+        out
     }
 
     /// The view as a watcher re-applies it: view_map's own arguments, set

@@ -200,6 +200,36 @@ pub(crate) struct App {
     help_max: std::cell::Cell<usize>,
     /// Manifests to open in `senna view` once the terminal is given back.
     view: Vec<PathBuf>,
+    /// A choice a finished fit left open, put to the user on the Run screen.
+    choice: Option<Choice>,
+}
+
+/// A choice a finished fit left open ([`senna::run_manifest::Decision`]):
+/// the queue's job, the decision, and the option under the cursor.
+struct Choice {
+    job: usize,
+    decision: senna::run_manifest::Decision,
+    row: usize,
+}
+
+/// `argv` (a queued job's, its out given as `--out`) rerun as `out`, with
+/// `args` (flags and their values) set: a flag it has already takes the
+/// new value, any other is added.
+fn rerun_argv(argv: &[String], out: &str, args: &[String]) -> Vec<String> {
+    fn set(argv: &mut Vec<String>, flag: &str, value: &str) {
+        match argv.iter().position(|w| w == flag) {
+            Some(k) if k + 1 < argv.len() => argv[k + 1] = value.to_string(),
+            _ => argv.extend([flag.to_string(), value.to_string()]),
+        }
+    }
+    let mut argv = argv.to_vec();
+    set(&mut argv, "--out", out);
+    for pair in args.chunks(2) {
+        if let [flag, value] = pair {
+            set(&mut argv, flag, value);
+        }
+    }
+    argv
 }
 
 /// How a fit given whole ended, as its job tells it: done with its
@@ -207,7 +237,18 @@ pub(crate) struct App {
 fn fit_end(state: &jobs::State, manifest: &Path) -> legume_mcp::job::End {
     use legume_mcp::job::End;
     match state {
-        jobs::State::Done => End::Done(manifest.display().to_string()),
+        jobs::State::Done => {
+            let open = senna::run_manifest::RunManifest::load(manifest)
+                .is_ok_and(|(m, _)| !m.decisions.is_empty());
+            End::Done(if open {
+                format!(
+                    "{}; the fit left a choice to the user: view_open it for needs_input",
+                    manifest.display()
+                )
+            } else {
+                manifest.display().to_string()
+            })
+        }
         jobs::State::Failed(why) => End::Failed(why.clone()),
         jobs::State::Stopped | jobs::State::Waiting | jobs::State::Running => End::Cancelled,
     }
@@ -495,6 +536,7 @@ impl App {
             help_scroll: 0,
             help_max: std::cell::Cell::new(0),
             view: Vec::new(),
+            choice: None,
         };
         app.refresh_outs();
         Ok(app)
@@ -667,6 +709,8 @@ impl App {
             self.browser_key(k);
         } else if self.confirm.is_some() {
             self.confirm_key(k);
+        } else if self.choice.is_some() {
+            self.choice_key(k);
         } else if self.relabel.is_some() {
             self.relabel_key(k);
         } else if self.asking() {
@@ -975,6 +1019,7 @@ impl App {
         if let Some(b) = self.browser.as_mut() {
             b.poll();
         }
+        self.read_choices();
         while let Ok((path, d)) = self.described.1.try_recv() {
             self.describing = self.describing.saturating_sub(1);
             if let Some(p) = self.pairs.iter_mut().find(|p| p.data == path) {
@@ -1744,6 +1789,71 @@ impl App {
                     self.view = done;
                     self.quit = true;
                 }
+            }
+            _ => {}
+        }
+    }
+
+    /// Once the queue is through, the first open choice a finished fit
+    /// left in its manifest, put to the user.
+    fn read_choices(&mut self) {
+        let Some(q) = &mut self.queue else { return };
+        if q.choices_read || !q.finished() {
+            return;
+        }
+        q.choices_read = true;
+        self.choice = q
+            .jobs
+            .iter()
+            .zip(q.states())
+            .enumerate()
+            .filter(|(_, (j, s))| j.tool == Tool::Senna && *s == jobs::State::Done)
+            .find_map(|(i, (j, _))| {
+                let run = j.result();
+                let (m, _) = senna::run_manifest::RunManifest::load(&run).ok()?;
+                let (decisions, _) = crate::view::typed_decisions(&run, &m.decisions);
+                let decision = decisions.into_iter().next()?;
+                Some(Choice {
+                    job: i,
+                    decision,
+                    row: 0,
+                })
+            });
+        if self.choice.is_some() {
+            self.screen = Screen::Run;
+        }
+    }
+
+    /// Keys while a finished fit's choice is put: pick an option and rerun
+    /// with it, or leave it.
+    fn choice_key(&mut self, k: KeyEvent) {
+        let Some(c) = &mut self.choice else { return };
+        let n = c.decision.options.len();
+        if let Some(row) = legume_tui::keys::list_move(&k, c.row, n, true) {
+            c.row = row;
+            return;
+        }
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                let left = self
+                    .choice
+                    .take()
+                    .and_then(|c| self.queue.as_ref().map(|q| q.jobs[c.job].result()));
+                self.message =
+                    left.map(|m| format!("left open; the choice stays in {}", self.shown(&m)));
+            }
+            KeyCode::Enter => {
+                let Some(c) = self.choice.take() else { return };
+                let Some(q) = &self.queue else { return };
+                let mut job = q.jobs[c.job].clone();
+                let option = &c.decision.options[c.row];
+                let out = format!("{}_{}{}", job.out, c.decision.topic, c.row);
+                job.argv = rerun_argv(&job.argv, &out, &option.rerun_args);
+                job.out = out;
+                job.lane = 0;
+                self.queue = Some(Queue::start(vec![job]));
+                self.log_top = None;
+                self.message = Some(format!("rerunning with {}", option.label));
             }
             _ => {}
         }

@@ -116,7 +116,7 @@ fn share_of(x: f64, lo: f64, hi: f64, edge: f64) -> f64 {
 }
 
 /// `log(p / (1 − p))`, [`sigmoid`]'s inverse.
-fn logit(p: f64) -> f64 {
+pub(super) fn logit(p: f64) -> f64 {
     (p / (1.0 - p)).ln()
 }
 

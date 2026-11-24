@@ -1265,3 +1265,86 @@ fn a_bar_is_a_stage_with_the_times_its_frame_drew() {
     let s = stage_of(&spin, "");
     assert_eq!((s.len, s.eta_s), (None, None));
 }
+
+#[test]
+fn a_rerun_sets_its_out_and_the_options_flags() {
+    let argv = words(&["ode", "d.zarr", "--out", "fit", "--root-cells", "old.txt"]);
+    assert_eq!(
+        rerun_argv(
+            &argv,
+            "fit_root1",
+            &words(&["--root-cells", "r1.txt", "--trunk", "x"])
+        ),
+        words(&[
+            "ode",
+            "d.zarr",
+            "--out",
+            "fit_root1",
+            "--root-cells",
+            "r1.txt",
+            "--trunk",
+            "x"
+        ])
+    );
+}
+
+/// A fit that ends with a choice left open puts it to the user on the Run
+/// screen; enter reruns with the option picked, as its own out.
+#[test]
+fn a_finished_fits_open_choice_is_put_and_reruns_with_the_pick() {
+    use senna::run_manifest::{Decision, DecisionOption, RunKind, RunManifest};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut a = app(tmp.path());
+    a.senna_program = PathBuf::from("true");
+    a.start_fit(&words(&["ode", "data.zarr", "-o", "fit"]))
+        .unwrap();
+    a.queue.as_ref().unwrap().join();
+    // What the fit left: two roots to choose from.
+    let mut m = RunManifest::new(RunKind::Ode, "fit");
+    m.decisions.push(Decision {
+        topic: "root".into(),
+        question: "Which root's cells start it?".into(),
+        hint: String::new(),
+        options: (0..2)
+            .map(|i| DecisionOption {
+                label: format!("root {i}"),
+                rerun_args: words(&["--root-cells", &format!("fit.root_{i}.txt")]),
+                objective: None,
+                cells: None,
+            })
+            .collect(),
+    });
+    m.save(&tmp.path().join("fit.senna.json")).unwrap();
+    a.poll();
+    assert!(a.choice.is_some());
+    let shown = drawn(&a, 110, 30);
+    assert!(shown.contains("Which root's cells start it?"), "{shown}");
+    assert!(shown.contains("root 1"), "{shown}");
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Enter);
+    assert!(a.choice.is_none());
+    let q = a.queue.as_ref().unwrap();
+    assert_eq!(q.jobs[0].out, "fit_root1");
+    assert_eq!(
+        q.jobs[0].argv,
+        words(&[
+            "ode",
+            "data.zarr",
+            "--out",
+            "fit_root1",
+            "--root-cells",
+            "fit.root_1.txt"
+        ])
+    );
+    q.join();
+    // Esc leaves a choice open, as the manifest keeps it.
+    std::fs::copy(
+        tmp.path().join("fit.senna.json"),
+        tmp.path().join("fit_root1.senna.json"),
+    )
+    .unwrap();
+    a.poll();
+    assert!(a.choice.is_some());
+    key(&mut a, KeyCode::Esc);
+    assert!(a.choice.is_none());
+}

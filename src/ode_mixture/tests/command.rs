@@ -278,3 +278,52 @@ fn the_defaults_group_the_genes() {
     assert_eq!(cap(&["--max-coarse-features", "0"]), None);
     assert_eq!(cap(&["--max-coarse-features", "40"]), Some(40));
 }
+
+/// Roots that tie leave the choice to the user: every root's cells, best
+/// first, in a file the rerun names; roots far apart leave nothing.
+#[test]
+fn tied_roots_are_put_to_the_user_with_their_cells() {
+    use crate::ode_mixture::command::root_decision;
+    use crate::ode_mixture::init::TriedRoot;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("run").to_string_lossy().into_owned();
+    let cells: Vec<Box<str>> = ["a", "b", "c", "d"].iter().map(|&c| c.into()).collect();
+    // Cells a, b in pseudobulk 7, c, d in 9; the climb's rows are [7, 9].
+    let member = [7, 7, 9, 9];
+    let pbs = [7, 9];
+    let tied = [
+        TriedRoot {
+            pbs: vec![1],
+            objective: -1000.1,
+        },
+        TriedRoot {
+            pbs: vec![0],
+            objective: -1000.0,
+        },
+    ];
+    let d = root_decision(&out, &tied, &member, &pbs, &cells)
+        .unwrap()
+        .expect("a tie is put to the user");
+    assert_eq!(d.topic, "root");
+    assert_eq!(d.options.len(), 2);
+    // The best root (row 0, pseudobulk 7) first.
+    let first = &d.options[0].rerun_args;
+    assert_eq!(first[0], "--root-cells");
+    let named = std::fs::read_to_string(&first[1]).unwrap();
+    assert_eq!(named.lines().collect::<Vec<_>>(), ["a", "b"]);
+    let apart = [
+        TriedRoot {
+            pbs: vec![1],
+            objective: -2000.0,
+        },
+        TriedRoot {
+            pbs: vec![0],
+            objective: -1000.0,
+        },
+    ];
+    assert!(root_decision(&out, &apart, &member, &pbs, &cells)
+        .unwrap()
+        .is_none());
+    // No root files of the tied run are left beside the one that settled.
+    assert!(!std::path::Path::new(&first[1]).exists());
+}

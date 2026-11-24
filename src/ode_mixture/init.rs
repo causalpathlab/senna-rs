@@ -21,15 +21,17 @@
 //! ([`tree_start_from_roots`]).
 //!
 //! [`climb`] runs Adam from every start and keeps the best: under a trunk
-//! the tree starts alone (a k-means start has no trunk); with the lineages
-//! apart the k-means start, then with each lineage turned round in turn,
-//! keeping a turn that raises the objective (the start fixes the order; the
-//! splicing says which way round fits), then the tree starts too. This is
-//! a search for the climb's basin, not for a root: a lineage's `t = 0` is
-//! a convention.
+//! the tree starts alone (a k-means start has no trunk), each from its own
+//! branch times and from each of [`BRANCH_STARTS`], all of them climbed
+//! together as one batch ([`Fit::from_starts`]); with the lineages apart
+//! the k-means start, then with each lineage turned round in turn, keeping
+//! a turn that raises the objective (the start fixes the order; the
+//! splicing says which way round fits), then the tree starts too. Every
+//! tree's root is returned with where its climb finished, so that roots the
+//! data cannot tell apart ([`ROOT_GAP`]) are left to the user.
 
 use super::blocks::GenePrior;
-use super::fit::{Fit, SHARE_START};
+use super::fit::{starts_per_batch, DeviceReads, Fit, SHARE_START};
 use super::kernel::GridPrior;
 use super::likelihood::Reads;
 use super::model::Params;
@@ -56,7 +58,7 @@ pub struct Climb {
     /// ([`Fit::with_share`]).
     pub jitter: bool,
     /// Every other lineage on lineage 0's trunk until a branch time it
-    /// fits, one clock for all ([`Fit::with_trunk`]).
+    /// fits, one clock for all ([`Fit::with_trunks`]).
     pub trunk: bool,
     /// The pseudobulks at the root of the trajectory, when the user names
     /// its cells: the one tree start grows from them as one root
@@ -531,32 +533,90 @@ pub fn params_from(reads: &Reads, opts: &Climb, places: &Places) -> Params {
     start
 }
 
+/// Under a trunk every tree start is also tried with every lineage parting
+/// here: from its own branch times alone the climb can settle on a branch
+/// far from the truth (on simulated trees, at twice its time).
+const BRANCH_STARTS: [f64; 3] = [0.2, 0.35, 0.5];
+
+/// With no root named, trees from other roots finishing within this share
+/// of the best objective leave the direction to the data's whim: the run
+/// warns, and leaves the root to the user as a decision in its manifest.
+/// A share, not a count of nats: the objective treats a pseudobulk's reads
+/// as independent draws, so its nats overstate the evidence, in proportion
+/// to the reads.
+pub const ROOT_GAP: f32 = 1e-3;
+
+/// The share of a tree start's pseudobulks, earliest first, that stand for
+/// its root ([`TriedRoot::pbs`]).
+const ROOT_REGION: f64 = 0.05;
+
+/// A tree start's root and where its climb finished.
+pub struct TriedRoot {
+    /// The pseudobulks at the root: the start's earliest
+    /// [`ROOT_REGION`], at least one.
+    pub pbs: Vec<usize>,
+    pub objective: f32,
+}
+
+/// The climb's best fit and its objective, and, with no root named, every
+/// tree start's root as it finished.
+pub struct Climbed {
+    pub fit: Fit,
+    pub objective: f32,
+    pub roots: Vec<TriedRoot>,
+}
+
+/// The pseudobulks at a tree start's root: the earliest [`ROOT_REGION`] of
+/// them by their earliest place.
+fn root_region(places: &Places) -> Vec<usize> {
+    let first = |at: &Vec<(usize, f64)>| at.iter().map(|&(_, t)| t).fold(f64::INFINITY, f64::min);
+    let mut order: Vec<usize> = (0..places.len()).collect();
+    order.sort_by(|&a, &b| first(&places[a]).total_cmp(&first(&places[b])));
+    order.truncate(((ROOT_REGION * places.len() as f64).ceil() as usize).max(1));
+    order
+}
+
 /// Whether a start's objective `new` beats the best so far: a NaN (a climb
 /// that diverged) never does, and any finite one beats a NaN best.
 pub fn beats(new: f32, best: f32) -> bool {
     new > best || (best.is_nan() && !new.is_nan())
 }
 
+/// The gap, as a share of the best, from the best of the trees' finished
+/// objectives to the runner-up (from another root); `None` with fewer than
+/// two finite.
+pub fn root_gap(finished: &[f32]) -> Option<f32> {
+    let mut finite: Vec<f32> = finished.iter().copied().filter(|o| o.is_finite()).collect();
+    finite.sort_by(|a, b| b.total_cmp(a));
+    match finite[..] {
+        [best, next, ..] => Some((best - next) / best.abs().max(f32::MIN_POSITIVE)),
+        _ => None,
+    }
+}
+
 /// Adam from every start, the best fit and its objective: under a trunk
 /// the tree starts, one per end taken as the root or the one from the
 /// named root (a k-means start has no trunk, and its lineages turned round
-/// one at a time cannot share one); apart, the k-means start and each
-/// lineage turned round in turn (a turn kept when it raises the
+/// one at a time cannot share one), each from its own branch times and
+/// from every one of [`BRANCH_STARTS`], all climbed to the end together
+/// ([`climb_all`]) and each tree's best kept, with its root; apart, the k-means start
+/// and each lineage turned round in turn (a turn kept when it raises the
 /// objective), then the trees too. With no tree start to be had (one
 /// lineage, the graph falling apart) the k-means starts run either way.
-pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<(Fit, f32)> {
+pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
     let prior = GridPrior::new(opts.points, 1.0, opts.kappa)
         .map_err(|e| legume_numeric::candle::candle_core::Error::Msg(e.to_string()))?;
     let scores = scores_of(reads, opts.dim);
+    let trunk = opts.trunk && opts.lineages > 1;
+    let on_dev = DeviceReads::new(reads, dev)?;
+    let climbed = |starts: &[Params], at: Option<&[Vec<f64>]>| {
+        climb_all(starts, at, &on_dev, &prior, opts, dev)
+    };
+    // A k-means start, on the trunk when one is asked for.
     let run = |places: &Places| -> Result<(Fit, f32)> {
-        let start = params_from(reads, opts, places);
-        let mut fit = Fit::from_params(&start, &prior, dev)?
-            .with_share(opts.jitter.then_some(SHARE_START))?;
-        if opts.trunk && opts.lineages > 1 {
-            fit = fit.with_trunk(&start, &prior, &branch_times(places, opts.lineages))?;
-        }
-        let objective = fit.adam(reads, opts.steps, opts.lr)?;
-        Ok((fit, objective))
+        let at = trunk.then(|| vec![branch_times(places, opts.lineages)]);
+        let mut one = climbed(&[params_from(reads, opts, places)], at.as_deref())?;
+        Ok((one.fits.swap_remove(0), one.objectives[0]))
     };
     let trees: Vec<Places> = if opts.roots.is_empty() {
         tree_places(&scores, opts.lineages)
@@ -570,6 +630,7 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<(Fit, f32)> {
             "ode climb: no tree start grows from the root named (one lineage, or the pseudobulks' graph falls apart); the k-means starts run instead"
         );
     }
+    let mut tried: Vec<TriedRoot> = Vec::with_capacity(trees.len());
     let mut best: Option<(Fit, f32)> = None;
     let mut keep = |other: (Fit, f32)| {
         if best.as_ref().is_none_or(|b| beats(other.1, b.1)) {
@@ -590,16 +651,102 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<(Fit, f32)> {
         }
         keep(best_kmeans);
     }
-    for places in &trees {
-        let climbed = run(places)?;
-        log::debug!("ode climb: a tree start's objective {}", climbed.1);
-        keep(climbed);
+    if !trees.is_empty() {
+        // Every tree's starts side by side: on a trunk from its own branch
+        // times and from each of BRANCH_STARTS; apart, the one.
+        let per_tree = if trunk { 1 + BRANCH_STARTS.len() } else { 1 };
+        let mut starts = Vec::with_capacity(trees.len() * per_tree);
+        let mut at = Vec::new();
+        for places in &trees {
+            if trunk {
+                at.push(branch_times(places, opts.lineages));
+                at.extend(BRANCH_STARTS.iter().map(|&tb| vec![tb; opts.lineages - 1]));
+            }
+            starts.extend(std::iter::repeat_n(
+                params_from(reads, opts, places),
+                per_tree,
+            ));
+        }
+        let all = climbed(&starts, trunk.then_some(at.as_slice()))?;
+        let mut top: Option<usize> = None;
+        for (t, (places, own)) in trees
+            .iter()
+            .zip(all.objectives.chunks(per_tree))
+            .enumerate()
+        {
+            let k = (0..per_tree)
+                .reduce(|a, b| if beats(own[b], own[a]) { b } else { a })
+                .expect("a start a tree");
+            log::info!("ode climb: a tree start finished at {}", own[k]);
+            tried.push(TriedRoot {
+                pbs: root_region(places),
+                objective: own[k],
+            });
+            if top.is_none_or(|b| beats(own[k], all.objectives[b])) {
+                top = Some(t * per_tree + k);
+            }
+        }
+        if let Some(b) = top {
+            keep((all.start(b)?, all.objectives[b]));
+        }
     }
-    let best = best.expect("a start");
-    if best.1.is_nan() {
+    let (fit, objective) = best.expect("a start");
+    if objective.is_nan() {
         return Err(legume_numeric::candle::candle_core::Error::Msg(
             "ode-mixture climb: every start diverged (objective NaN)".into(),
         ));
     }
-    Ok(best)
+    Ok(Climbed {
+        fit,
+        objective,
+        roots: tried,
+    })
+}
+
+/// Starts climbed together ([`climb_all`]): the batches' fits and every
+/// start's objective, in order.
+struct Climbs {
+    fits: Vec<Fit>,
+    per_batch: usize,
+    objectives: Vec<f32>,
+}
+
+impl Climbs {
+    /// Start `b` alone.
+    fn start(&self, b: usize) -> Result<Fit> {
+        self.fits[b / self.per_batch].start(b % self.per_batch)
+    }
+}
+
+/// Every one of `starts` climbed `opts.steps` together, on a trunk from
+/// `branch_at` (a list a start) or apart, in batches of
+/// [`starts_per_batch`].
+fn climb_all(
+    starts: &[Params],
+    branch_at: Option<&[Vec<f64>]>,
+    reads: &DeviceReads,
+    prior: &GridPrior,
+    opts: &Climb,
+    dev: &Device,
+) -> Result<Climbs> {
+    let (p, g) = reads.shape();
+    let positions = (opts.points - 1) * opts.sub.max(1) + 1;
+    let per_batch = starts_per_batch(opts.lineages, positions, p, g);
+    let mut at = branch_at.map(|a| a.chunks(per_batch));
+    let mut fits = Vec::new();
+    let mut objectives = Vec::with_capacity(starts.len());
+    for batch in starts.chunks(per_batch) {
+        let mut fit =
+            Fit::from_starts(batch, prior, dev)?.with_share(opts.jitter.then_some(SHARE_START))?;
+        if let Some(at) = at.as_mut().and_then(Iterator::next) {
+            fit = fit.with_trunks(batch, prior, at)?;
+        }
+        objectives.extend(fit.adam(reads, opts.steps, opts.lr, None)?);
+        fits.push(fit);
+    }
+    Ok(Climbs {
+        fits,
+        per_batch,
+        objectives,
+    })
 }

@@ -5,7 +5,7 @@
 
 use super::coarsen::{coarse_reads, coarsen_genes};
 use super::counts::{for_cell_blocks, pb_tracks, select_genes, two_track_genes};
-use super::init::{climb, root_pseudobulks, Climb};
+use super::init::{climb, root_gap, root_pseudobulks, Climb, TriedRoot, ROOT_GAP};
 use super::likelihood::Reads;
 use super::model::lineage_label;
 use super::output::MapBasis;
@@ -30,6 +30,18 @@ const GROUPS_HELP: &str = "Fit on at most N groups of genes that share kinetics,
      \n\
      --no-feature-coarsening fits every gene on its own instead; so\n\
      does 0 here.";
+
+/// How `senna ode` groups cells into pseudobulks.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum PbGraph {
+    /// The collapse every senna fit makes.
+    Collapse,
+    /// The kNN graph of the cells' splicing residuals, coarsened.
+    Ratio,
+}
 
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]
@@ -85,6 +97,20 @@ pub struct OdeArgs {
         help = "Fewest reads a fitted gene has on each track, over all cells"
     )]
     pub min_reads: f32,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = PbGraph::Collapse,
+        help = "How cells are grouped into the pseudobulks fitted",
+        long_help = "How cells are grouped into the pseudobulks fitted.\n\
+                     collapse: the collapse every senna fit makes (cells alike in counts).\n\
+                     ratio:    cells alike in splicing and levels: each gene's unspliced share\n\
+                               against its own (the cell's overall share taken out) sketched\n\
+                               next to the cell's levels (the two tracks summed), the sketch's\n\
+                               kNN graph coarsened into as many pseudobulks."
+    )]
+    pub pb_graph: PbGraph,
 
     #[arg(
         long,
@@ -236,30 +262,38 @@ fn lineage_index(probs: &[f64]) -> Option<usize> {
         .map(|(l, _)| l)
 }
 
-/// What the fit is run on, from the collapse.
+/// Every one of `n` cells: is it among the cells QC `keep`s (all, with no
+/// QC)?
+fn keep_mask(keep: Option<&[usize]>, n: usize) -> Vec<bool> {
+    let mut m = vec![keep.is_none(); n];
+    keep.into_iter().flatten().for_each(|&c| m[c] = true);
+    m
+}
+
+/// What the fit is run on.
 struct Finest {
     /// The pseudobulks' reads on the genes fitted.
     reads: Reads,
     /// The genes' names.
     names: Vec<Box<str>>,
-    /// Every row's pseudobulk in the collapse's finest level, and its cells.
+    /// Every row's pseudobulk (its id in the partition), and its cells.
     pbs: Vec<usize>,
     sizes: Vec<f32>,
     /// `[D × batches]` the batch effects the cells are read with.
     delta: Option<DMatrix<f32>>,
 }
 
-/// The finest pseudobulks' reads on the genes fitted, the genes' names and
-/// the batch effects the cells are read with. The reads are the
-/// collapse's own rates (batch-adjusted when there are batches; the data
-/// alone, no prior's mass) times the cells; the pseudobulks with none are
-/// left out, of the gene selection too.
-fn finest_reads(
+/// The collapse's finest pseudobulks: every row's reads `[D × pbs]`, the
+/// pseudobulks with cells `pbs`, cells per pseudobulk (by id) and the batch
+/// folds `[D × batches]`. The reads are the collapse's own rates
+/// (batch-adjusted when there are batches; the data alone, no prior's
+/// mass) times the cells.
+type CollapseCounts = (DMatrix<f32>, Vec<usize>, Vec<f32>, Option<DMatrix<f32>>);
+
+fn collapse_counts(
     collapsed: Vec<data_beans::alg::collapse_data::CollapsedOut>,
     member: &[usize],
-    row_names: &[Box<str>],
-    args: &OdeArgs,
-) -> anyhow::Result<Finest> {
+) -> anyhow::Result<CollapseCounts> {
     use legume_numeric::param::traits::Inference;
     let finest = collapsed.last().expect("at least one level");
     anyhow::ensure!(
@@ -277,9 +311,21 @@ fn finest_reads(
         rates.evidence_mean(r, pbs[c]) * n_cells[pbs[c]]
     });
     let delta = finest.delta.as_ref().map(|d| d.posterior_mean().clone());
-    drop(collapsed);
-    let tracks = pb_tracks(row_names, &counts)?;
-    drop(counts);
+    Ok((counts, pbs, n_cells, delta))
+}
+
+/// [`Finest`] from every row's reads `counts` `[D × pbs]` in the pseudobulks
+/// `pbs` (of `n_cells` cells each, by their ids): the genes fitted, and
+/// their names.
+fn finest_of_counts(
+    counts: &DMatrix<f32>,
+    pbs: Vec<usize>,
+    n_cells: &[f32],
+    delta: Option<DMatrix<f32>>,
+    row_names: &[Box<str>],
+    args: &OdeArgs,
+) -> anyhow::Result<Finest> {
+    let tracks = pb_tracks(row_names, counts)?;
     let genes = select_genes(&tracks, args.min_reads, args.max_genes);
     anyhow::ensure!(!genes.is_empty(), "no gene with --min-reads on both tracks");
     let names = genes.iter().map(|&j| tracks.genes[j].clone()).collect();
@@ -336,6 +382,11 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         inherited.as_ref(),
         &crate::refine_weighting::partition_settings(args),
     )?;
+    anyhow::ensure!(
+        prebuilt_partition.is_none() || args.pb_graph == PbGraph::Collapse,
+        "--pb-graph ratio groups the cells by their splicing, so it takes no partition \
+         from another run (--pb-from, or the one --from inherits)"
+    );
     let hvg = crate::hvg::resolve_multiome_with_hvg(false, inputs.data_files.len(), &args.hvg);
     let crate::topic::common::PreparedData {
         data_vec: data,
@@ -383,18 +434,56 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let all_cells = data.column_names()?;
     let row_names = data.row_names()?;
 
+    let collapsed = cell_to_pb.last().expect("at least one level");
+    let (counts, pbs, n_cells, delta) = collapse_counts(collapsed_levels, collapsed)?;
+    let (cell_to_pb, pb_tree, finest) = match args.pb_graph {
+        PbGraph::Collapse => {
+            let finest = finest_of_counts(&counts, pbs, &n_cells, delta, &row_names, args)?;
+            drop(counts);
+            (cell_to_pb, pb_tree, finest)
+        }
+        PbGraph::Ratio => {
+            let included = keep_mask(keep.as_deref(), all_cells.len());
+            // As many pseudobulks as the collapse made of the grouped cells;
+            // every row's reads over the cells, from the collapse's.
+            let n_pbs = collapsed
+                .iter()
+                .zip(&included)
+                .filter(|(_, &i)| i)
+                .map(|(&p, _)| p)
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            let row_totals: Vec<f64> = counts
+                .row_iter()
+                .map(|r| r.iter().map(|&x| f64::from(x)).sum())
+                .collect();
+            drop(counts);
+            let ratio = super::ratio_pbs::ratio_pbs(
+                &data,
+                delta.as_ref(),
+                &included,
+                collapsed,
+                &row_totals,
+                super::ratio_pbs::RatioArgs {
+                    n_pbs,
+                    block_size: args.block_size,
+                    seed: args.seed,
+                },
+            )?;
+            let pbs = (0..ratio.n_cells.len()).collect();
+            let finest =
+                finest_of_counts(&ratio.counts, pbs, &ratio.n_cells, delta, &row_names, args)?;
+            // One level, the ratio's; the collapse's tree does not hold.
+            (vec![ratio.member], None, finest)
+        }
+    };
     let Finest {
         reads,
         names,
         pbs,
         sizes,
         delta,
-    } = finest_reads(
-        collapsed_levels,
-        cell_to_pb.last().expect("at least one level"),
-        &row_names,
-        args,
-    )?;
+    } = finest;
     let (p, g) = (reads.u.nrows(), reads.u.ncols());
     info!(
         "ode: {} cells from {} files; {p} pseudobulks, {g} genes",
@@ -464,7 +553,10 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         trunk: args.trunk,
         roots,
     };
-    let (fit, objective) = climb(fit_reads, &opts, &dev)?;
+    let climbed = climb(fit_reads, &opts, &dev)?;
+    let member = cell_to_pb.last().expect("at least one level");
+    let decision = root_decision(&args.out, &climbed.roots, member, &pbs, &all_cells)?;
+    let (fit, objective) = (climbed.fit, climbed.objective);
     info!("ode: the climb's objective {objective:.4}");
     let start_at = fit.params()?;
     let share = fit.share_sd()?;
@@ -522,7 +614,14 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     if !branch.is_empty() {
         write_branch_times(&args.out, &branch)?;
     }
-    write_manifest(args, &inputs, pb_tree.is_some(), !branch.is_empty())?;
+    write_manifest(
+        args,
+        &inputs,
+        pb_tree.is_some(),
+        !branch.is_empty(),
+        decision,
+        f64::from(objective),
+    )?;
     info!(
         "Wrote {0}.{{cell_time,cell_embedding,cell_velocity,gene_rates,pb_time}}.parquet and {0}.senna.json (and {0}.branch_time.tsv on a trunk)",
         args.out
@@ -574,11 +673,7 @@ fn read_out_cells(
 ) -> anyhow::Result<CellTable> {
     let lineages = mode.params.path.len();
     let all_cells = data.column_names()?;
-    let kept_cell: Option<Vec<bool>> = keep.map(|k| {
-        let mut m = vec![false; all_cells.len()];
-        k.iter().for_each(|&i| m[i] = true);
-        m
-    });
+    let kept_cell = keep.map(|k| keep_mask(Some(k), all_cells.len()));
     let mut t = CellTable {
         cells: Vec::new(),
         lineage: Vec::new(),
@@ -755,12 +850,106 @@ fn write_branch_times(out: &str, branch: &[f64]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `{out}.senna.json`: the run as `senna view` and the layouts open it.
+/// With trees from other roots finishing within [`ROOT_GAP`] of the best
+/// (no root named), the root left to the user: every root's cells, best
+/// first, in `{out}.root_{i}.txt` (`member` every cell's pseudobulk, `pbs`
+/// the pseudobulk of every row the climb read), and the decision whose
+/// answers rerun from each.
+pub(crate) fn root_decision(
+    out: &str,
+    roots: &[TriedRoot],
+    member: &[usize],
+    pbs: &[usize],
+    cells: &[Box<str>],
+) -> anyhow::Result<Option<senna::run_manifest::Decision>> {
+    use senna::run_manifest::{Decision, DecisionOption};
+    clear_root_lists(out)?;
+    let finished: Vec<f32> = roots.iter().map(|r| r.objective).collect();
+    let Some(gap) = root_gap(&finished).filter(|&g| g < ROOT_GAP) else {
+        return Ok(None);
+    };
+    log::warn!(
+        "ode: trees from different roots finish within {:.3}% of one another, so the data barely tell where the trajectory starts (or which way it runs); the root is left to you ({out}.root_*.txt, rerun with --root-cells)",
+        100.0 * gap
+    );
+    let mut ranked: Vec<&TriedRoot> = roots.iter().filter(|r| r.objective.is_finite()).collect();
+    ranked.sort_by(|a, b| b.objective.total_cmp(&a.objective));
+    let best = ranked[0].objective;
+    let mut options = Vec::with_capacity(ranked.len());
+    for (i, root) in ranked.iter().enumerate() {
+        let at: std::collections::HashSet<usize> = root.pbs.iter().map(|&r| pbs[r]).collect();
+        let named: Vec<Box<str>> = cells
+            .iter()
+            .zip(member)
+            .filter(|(_, p)| at.contains(p))
+            .map(|(c, _)| c.clone())
+            .collect();
+        let path = format!("{out}.root_{i}.txt");
+        legume_numeric::matrix::common_io::write_lines(&named, &path)?;
+        let path = std::path::absolute(&path)?.to_string_lossy().into_owned();
+        let behind = 100.0 * (best - root.objective) / best.abs().max(f32::MIN_POSITIVE);
+        options.push(DecisionOption {
+            label: format!(
+                "root {i}: {} cells in {} pseudobulks, its fit {behind:.4}% behind the best",
+                named.len(),
+                root.pbs.len()
+            ),
+            rerun_args: vec!["--root-cells".into(), path.clone()],
+            objective: Some(f64::from(root.objective)),
+            cells: Some(path),
+        });
+    }
+    Ok(Some(Decision {
+        topic: "root".into(),
+        question: format!(
+            "Trees grown from different roots fit within {:.3}% of one another, so the data barely tell where the trajectory starts (or which way it runs). Which root's cells start it?",
+            100.0 * gap
+        ),
+        hint: "a trajectory's root is its least differentiated cells (stem or progenitor \
+               types and markers: view_markers), and its time runs from them to the known \
+               mature types (view_map with time)"
+            .into(),
+        options,
+    }))
+}
+
+/// Every `{out}.root_{i}.txt` an earlier run into `out` left, removed: what
+/// is there after a run is this run's own.
+fn clear_root_lists(out: &str) -> anyhow::Result<()> {
+    let path = std::path::Path::new(out);
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return Ok(());
+    };
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    let stem = format!("{name}.root_");
+    for entry in entries.flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let is_list = file
+            .strip_prefix(&stem)
+            .and_then(|r| r.strip_suffix(".txt"))
+            .is_some_and(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()));
+        if is_list {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// `{out}.senna.json`: the run as `senna view` and the layouts open it,
+/// with what the fit left to decide.
 fn write_manifest(
     args: &OdeArgs,
     inputs: &Inputs,
     has_pb_tree: bool,
     has_branch: bool,
+    decision: Option<senna::run_manifest::Decision>,
+    objective: f64,
 ) -> anyhow::Result<()> {
     use senna::run_manifest::{
         record_train_args, write_run_manifest_with, RunDescription, RunKind,
@@ -776,6 +965,8 @@ fn write_manifest(
         m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
         m.outputs.pb_time = Some(format!("{base}.pb_time.parquet"));
         m.outputs.branch_time = has_branch.then(|| format!("{base}.branch_time.tsv"));
+        m.decisions.extend(decision);
+        m.objective = Some(objective);
     };
     write_run_manifest_with(
         &RunDescription {

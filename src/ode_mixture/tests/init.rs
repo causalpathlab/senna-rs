@@ -73,7 +73,8 @@ fn from_scratch_the_climb_finds_time_and_its_direction() {
         sub: 1,
         roots: Vec::new(),
     };
-    let (fit, objective) = climb(&train, &opts, &dev).unwrap();
+    let climbed = climb(&train, &opts, &dev).unwrap();
+    let (fit, objective) = (climbed.fit, climbed.objective);
     let at_truth = {
         let prior = crate::ode_mixture::kernel::GridPrior::new(45, 1.0, cfg.kappa).unwrap();
         let f = Fit::from_params(&truth_params(&sim, 133, 45), &prior, &dev).unwrap();
@@ -121,7 +122,8 @@ fn from_scratch_two_lineages_come_apart() {
         sub: 1,
         roots: Vec::new(),
     };
-    let (fit, objective) = climb(&train, &opts, &dev).unwrap();
+    let climbed = climb(&train, &opts, &dev).unwrap();
+    let (fit, objective) = (climbed.fit, climbed.objective);
     let all = first(&sim, sim.n_pb);
     let (weights, time) = fit.posterior(&fit.reads(&all).unwrap()).unwrap();
     let held: Vec<usize> = (n_train..sim.n_pb).collect();
@@ -257,4 +259,12 @@ fn the_axes_are_the_leading_singular_ones() {
         let back = y.tr_mul(&scores.column(d)).dot(&loadings.column(d));
         assert!(back > 0.0, "axis {d} flips between its score and loading");
     }
+}
+
+#[test]
+fn the_root_gap_is_the_runner_ups_share_behind_the_best() {
+    use crate::ode_mixture::init::root_gap;
+    let gap = root_gap(&[-1010.0, -1000.0, f32::NAN]).expect("two finite");
+    assert!((gap - 0.01).abs() < 1e-6, "{gap}");
+    assert_eq!(root_gap(&[-1000.0, f32::NAN]), None);
 }
