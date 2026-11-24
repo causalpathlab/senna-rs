@@ -447,14 +447,11 @@ mod tests {
     /// A stand-in `lupin` that behaves as `relabel --next` does.
     #[cfg(unix)]
     fn fake_lupin(dir: &Path, body: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
         let p = dir.join("lupin");
-        std::fs::write(
+        crate::test_program::write(
             &p,
-            format!("#!/bin/sh\ncat > {}/stdin.txt\n{body}\n", dir.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\ncat > {}/stdin.txt\n{body}\n", dir.display()),
+        );
         p.to_string_lossy().into_owned()
     }
 

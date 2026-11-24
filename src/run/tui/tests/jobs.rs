@@ -27,15 +27,9 @@ fn job(
 #[cfg(unix)]
 #[test]
 fn jobs_run_in_turn_and_leave_their_scripts() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let fake = dir.path().join("fake-senna");
-    std::fs::write(
-        &fake,
-        "#!/bin/sh\necho \"[t INFO x] working on $1\" >&2\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_program::write(&fake, "#!/bin/sh\necho \"[t INFO x] working on $1\" >&2\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n");
     let job = |m: &str| {
         job(
             dir.path(),
@@ -118,13 +112,11 @@ fn a_stopped_queue_is_waited_for_and_its_fit_killed() {
 #[cfg(unix)]
 #[test]
 fn a_stop_reaches_what_a_fit_starts() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     // Not exec'd: the shell waits on its own child, which only a stop sent
     // to the fit's whole process group interrupts.
     let slow = dir.path().join("slow-senna");
-    std::fs::write(&slow, "#!/bin/sh\nsleep 30\necho done >&2\n").unwrap();
-    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_program::write(&slow, "#!/bin/sh\nsleep 30\necho done >&2\n");
     let q = Queue::start(vec![job(
         dir.path(),
         Tool::Senna,
@@ -146,12 +138,10 @@ fn a_stop_reaches_what_a_fit_starts() {
 #[cfg(unix)]
 #[test]
 fn a_failed_fit_says_how_it_ended_and_what_it_was_doing() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let write = |name: &str, body: &str| {
         let p = dir.path().join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_program::write(&p, &format!("#!/bin/sh\n{body}\n"));
         p
     };
     let quiet = write("quiet", "echo \"[t INFO x] epoch 3\" >&2\nexit 1");
@@ -174,16 +164,10 @@ fn a_failed_fit_says_how_it_ended_and_what_it_was_doing() {
 /// `{out}.<end>`.
 #[cfg(unix)]
 fn fake(dir: &std::path::Path, name: &str, end: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let p = dir.join(name);
-    std::fs::write(
-        &p,
-        format!(
+    crate::test_program::write(&p, &format!(
             "#!/bin/sh\necho \"$*\" >> argv.log\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.{end}\"; shift; done\n"
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ));
     p
 }
 
@@ -349,14 +333,13 @@ fn a_fit_collapsing_on_an_unfinished_fit_does_not_start() {
 #[cfg(unix)]
 #[test]
 fn lanes_run_side_by_side_and_a_partition_is_waited_for() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let fake = dir.path().join("fake-senna");
     let log = dir.path().join("log");
     // Logs `start <out>` and `end <out>` around a 1 s sleep.
-    std::fs::write(
+    crate::test_program::write(
         &fake,
-        format!(
+        &format!(
             "#!/bin/sh
 while [ $# -gt 0 ]; do [ \"$1\" = --out ] && out=$2; shift; done
 echo \"start $out\" >> '{log}'
@@ -365,9 +348,7 @@ touch \"$out.senna.json\"
 echo \"end $out\" >> '{log}'\n",
             log = log.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     // The line of the log `line` is: order, unlike timing, holds under load.
     let at = |line: &str| {
         let text = std::fs::read_to_string(&log).unwrap();

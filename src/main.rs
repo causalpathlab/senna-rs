@@ -87,6 +87,8 @@ mod seed_replay_tests;
 mod session_cli_tests;
 mod simba;
 mod svd;
+#[cfg(all(test, unix, feature = "view"))]
+mod test_program;
 mod topic;
 mod training_data;
 #[cfg(feature = "view")]
