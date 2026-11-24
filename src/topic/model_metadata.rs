@@ -164,9 +164,6 @@ pub struct TopicModelMetadata {
     /// [D, H] feature embedding width (`indexed_topic` only)
     #[serde(default)]
     pub embedding_dim: Option<usize>,
-    /// Top-K shortlist size at encoder (`indexed_topic` only)
-    #[serde(default)]
-    pub enc_context_size: Option<usize>,
     /// Mean training topic proportions θ̄ ∈ ℝ^K: a record of the fit, and a
     /// guard against a diverged one (`populate_theta_mean_and_save` refuses
     /// a non-finite mean). Predict no longer reads it; absent in older models.
@@ -386,24 +383,6 @@ pub fn load_feature_mean(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32
     let feature_mean: Vec<f32> = result.mat.column(0).iter().copied().collect();
     log::info!("Loaded {} feature means from {path}", feature_mean.len());
     Ok((result.rows, feature_mean))
-}
-
-/// Load NB-Fisher shortlist weights from disk; returns (`gene_names`, weights).
-///
-/// Read-only: nothing writes this file any more. It ranked the top-K context a
-/// windowed encoder read, and the encoder reads every gene now — so this exists
-/// to keep OLD models (`enc_context_size: Some(k)`) scoring exactly as they did.
-pub fn load_shortlist_weights(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
-    use legume_numeric::matrix::traits::IoOps;
-    let path = format!("{prefix}.shortlist_weights.parquet");
-    let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
-    anyhow::ensure!(
-        result.mat.ncols() >= 1,
-        "shortlist_weights parquet missing column at {path}"
-    );
-    let weights: Vec<f32> = result.mat.column(0).iter().copied().collect();
-    log::info!("Loaded {} shortlist weights from {path}", weights.len());
-    Ok((result.rows, weights))
 }
 
 /// Refuse a model whose checkpoint carries a query decoder.

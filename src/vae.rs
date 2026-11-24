@@ -532,7 +532,6 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         batch_null_in_training: batch_nulls.is_some(),
         has_coarsening: finest_coarsening.is_some(),
         embedding_dim: None,
-        enc_context_size: None,
         theta_mean: None,
         n_train_cells: Some(data_vec.num_columns()),
         // `vae` uses a GaussianEncoder, not the indexed one; the module branch does not apply.

@@ -545,15 +545,6 @@ pub struct MaskedTopicArgs {
     )]
     seed: u64,
 
-    /// The context window an OLD run recorded, kept only so `senna update` can
-    /// replay such a manifest.
-    ///
-    /// Not a flag: the encoder reads every gene now, zeros included, so there
-    /// is no window to size. A recorded value is reported and ignored.
-    #[arg(skip)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    context_size: Option<usize>,
-
     #[arg(
         long,
         default_value_t = graph_embedding_util::EmbeddingDim::Fixed(128),
@@ -728,12 +719,6 @@ pub(crate) fn masked_run_kind(head: LatentHead) -> senna::run_manifest::RunKind 
 pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     args.validate()?;
-    if let Some(k) = args.recorded_context_size() {
-        info!(
-            "this run was recorded with --context-size {k}; the window no longer applies — the \
-             encoder reads every gene, zeros included"
-        );
-    }
     let recorded_query = args.recorded_query_flags();
     if !recorded_query.is_empty() {
         info!(
@@ -798,19 +783,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             args.gene_modules,
             args.add_embedding_dim,
         )?;
-        // A checkpoint fitted under a context window continues here as a
-        // window-free fit. Every encoder variable is shared between the two
-        // reads — ρ, the FC stack, the batch norm, the z heads, `attn.query` —
-        // so the weights transfer; what changes is which genes reach them.
-        if let Ok(src) = crate::topic::model_metadata::TopicModelMetadata::load(prefix) {
-            if let Some(k) = src.enc_context_size {
-                info!(
-                    "--init-from {prefix} was fitted with a context window of {k}; this run \
-                     continues it window-free (every gene read, zeros included) and records no \
-                     window of its own"
-                );
-            }
-        }
     }
 
     // Resolved before H so the pre-trained dictionary's column count
@@ -1268,7 +1240,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             dev: &dev,
             adj_method: &args.adj_method,
             minibatch_size: args.minibatch_size.unwrap_or(100),
-            read: crate::topic::eval_indexed::MaskedRead::Dense,
             feature_mean: &feature_mean,
             head,
             likelihood: args.masked_likelihood.to_lib(),
@@ -1290,7 +1261,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         );
     }
 
-    // Persist trainable weights, model architecture, and shortlist weights
+    // Persist trainable weights and model architecture
     // so `senna predict` (and `--init-from` re-runs) can rebuild this model.
     use crate::topic::model_metadata::{
         masked_decoder_type, masked_model_type, save_feature_mean, save_parameters,
@@ -1314,9 +1285,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         batch_null_in_training: batch_nulls.is_some(),
         has_coarsening,
         embedding_dim: Some(h),
-        // `None` marks a window-free model: every consumer reads it dense. A
-        // value here means an OLD model, which keeps its indexed evaluation.
-        enc_context_size: None,
         theta_mean: None,
         n_train_cells: Some(data_vec.num_columns()),
         // Round-trips the encoder's FC input width; without it every rebuild site
@@ -1370,7 +1338,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         dev: &cpu_dev,
         adj_method: &args.adj_method,
         minibatch_size: args.minibatch_size.unwrap_or(100),
-        read: crate::topic::eval_indexed::MaskedRead::Dense,
         feature_mean: &feature_mean,
         head,
     };
@@ -1611,12 +1578,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 }
 
 impl MaskedTopicArgs {
-    /// The context window a replayed manifest recorded, if any. `None` for
-    /// anything this build wrote.
-    pub(crate) fn recorded_context_size(&self) -> Option<usize> {
-        self.context_size
-    }
-
     /// Which query-decoder flags a replayed manifest recorded, by their old
     /// CLI names. Empty for anything this build wrote.
     pub(crate) fn recorded_query_flags(&self) -> Vec<&'static str> {

@@ -15,9 +15,7 @@
 
 use crate::masked_topic::FeatureNameKindArg;
 use crate::topic::eval::{build_gene_remap_with, GeneRemap, QueryNameOpts};
-use crate::topic::model_metadata::{
-    load_coarsening, load_dictionary, load_shortlist_weights, TopicModelMetadata,
-};
+use crate::topic::model_metadata::{load_coarsening, load_dictionary, TopicModelMetadata};
 use crate::topic::predict_common::{
     decoder_only_inference_dense, predictive_llik_dense, LatentMode,
 };
@@ -101,8 +99,7 @@ pub struct PredictArgs {
                      {model}.dictionary.parquet      gene × topic dictionary\n  \
                      {model}.model.json              model architecture metadata\n  \
                      {model}.safetensors             encoder + decoder weights\n  \
-                     {model}.coarsening.json         (dense only) feature coarsening\n  \
-                     {model}.shortlist_weights.parquet (indexed) NB-Fisher weights"
+                     {model}.coarsening.json         (dense only) feature coarsening"
     )]
     pub(crate) model: Box<str>,
 
@@ -1688,21 +1685,6 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
     crate::topic::model_metadata::ensure_query_head_not_wired(a.metadata.query_rank)?;
     let (training_genes, beta_dk) = load_dictionary(a.model)?;
     let (_fm_genes, feature_mean) = load_feature_mean(a.model)?;
-    // Only an OLD model (one that recorded a context window) has a shortlist,
-    // and only such a model needs one — see `MaskedRead`.
-    let shortlist_weights: Option<Vec<f32>> = a
-        .metadata
-        .enc_context_size
-        .map(|_| load_shortlist_weights(a.model).map(|(_, w)| w))
-        .transpose()?;
-    if let Some(w) = shortlist_weights.as_ref() {
-        anyhow::ensure!(
-            w.len() == training_genes.len(),
-            "shortlist_weights gene count ({}) != dictionary gene count ({})",
-            w.len(),
-            training_genes.len()
-        );
-    }
     anyhow::ensure!(
         feature_mean.len() == training_genes.len(),
         "feature_mean gene count ({}) != dictionary gene count ({})",
@@ -1774,10 +1756,6 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         dev,
         adj_method: &adj_method,
         minibatch_size: a.minibatch_size,
-        read: crate::topic::eval_indexed::MaskedRead::resolve(
-            a.metadata.enc_context_size,
-            shortlist_weights.as_deref(),
-        )?,
         feature_mean: &feature_mean,
         head: a.head,
     };

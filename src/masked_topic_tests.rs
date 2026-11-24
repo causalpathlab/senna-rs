@@ -72,36 +72,11 @@ mod no_kl {
 mod window_free {
     use super::{Cli, MaskedTopicArgs};
     use clap::Parser;
-    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
 
     fn parse(extra: &[&str]) -> MaskedTopicArgs {
         let mut argv = vec!["senna-masked-vae", "d.zarr", "-o", "out"];
         argv.extend_from_slice(extra);
         Cli::try_parse_from(argv).expect("parses").args
-    }
-
-    /// An old run manifest still carries `context_size`, and `senna update` has
-    /// to be able to replay it. The value no longer applies; the record must
-    /// still deserialise.
-    #[test]
-    fn a_fit_recorded_with_a_context_size_still_replays() {
-        let mut m = RunManifest::new(RunKind::MaskedVae, "old");
-        m.train_args = Some(TrainArgsRecord {
-            senna_version: "0.15.5".into(),
-            args: serde_json::json!({
-                "data_files": ["d.zarr"], "out": "old",
-                "context_size": 1000, "n_latent_topics": 9
-            }),
-        });
-        let a: MaskedTopicArgs = m
-            .train_args_as("old")
-            .expect("a recorded context_size still parses");
-        assert_eq!(a.n_latent_topics, 9);
-        assert_eq!(
-            a.recorded_context_size(),
-            Some(1000),
-            "the recorded window must survive the read so the run can say it no longer applies"
-        );
     }
 
     /// Gene modules pool a cell by membership over its CONTEXT SLOTS. With no
