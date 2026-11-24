@@ -1,6 +1,6 @@
 [package]
 name = "senna-rs"
-version = "0.25.31"
+version = "0.25.32"
 edition = "2021"
 rust-version = "1.91"
 license = "MIT"
