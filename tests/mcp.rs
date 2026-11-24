@@ -102,6 +102,7 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
             "run_critique",
             "run_impute",
             "run_deconvolve",
+            "run_donor_deviation",
             "run_layout",
             "run_step",
             "view_open",

@@ -45,6 +45,7 @@ mod counterfactual;
 mod critique;
 mod deconvolve;
 mod docs;
+mod donor_deviation;
 mod embed_diag;
 mod empirical_dict;
 mod feature_embedding_args;
@@ -103,6 +104,7 @@ use clustering::*;
 use critique::{run_critique, CritiqueArgs};
 use deconvolve::DeconvolveArgs;
 use docs::{run_docs, DocsArgs};
+use donor_deviation::{run_donor_deviation, DonorDeviationArgs, DONOR_DEVIATION_LONG_ABOUT};
 use embed_diag::*;
 use fne::{fit_fne, FneArgs};
 use impute::{impute_model, ImputeArgs};
@@ -841,6 +843,13 @@ enum Commands {
     )]
     Deconvolve(DeconvolveArgs),
 
+    #[command(
+        name = "donor-deviation",
+        about = "Stage 2 on an embedding run: which states are donor-specific, and which genes drive them",
+        long_about = DONOR_DEVIATION_LONG_ABOUT
+    )]
+    DonorDeviation(DonorDeviationArgs),
+
     // ─────────── 4. Layout ───────────
     #[command(
         about = "2D layout of cells (umap / phate / tsne / lle / stress / forceatlas2 / diffusion / radial / sugiyama over pseudobulks of the cell graph).",
@@ -1153,6 +1162,9 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Deconvolve(args) => {
             deconvolve::run(args)?;
+        }
+        Commands::DonorDeviation(args) => {
+            run_donor_deviation(args)?;
         }
         Commands::Predict(args) => {
             predict_model(args)?;
