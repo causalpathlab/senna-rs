@@ -534,3 +534,28 @@ fn each_cell_space_gets_its_euclidean_view() {
     let (e, unit) = super::inputs::euclidean_view(embedding, CellSpace::Embedding);
     assert!(unit && (e.row(0).norm() - 1.0).abs() < 1e-6);
 }
+
+#[test]
+fn a_block_s_entries_merge_into_the_sums_already_held() {
+    // sums held after one block, then the next block's entries appended
+    let mut entries = vec![(0, 2.0), (3, 1.0)];
+    entries.extend([(3, 4.0), (1, 1.0), (0, 1.0)]);
+    super::samples::merge_by_sample(&mut entries);
+    assert_eq!(entries, vec![(0, 3.0), (1, 1.0), (3, 5.0)]);
+}
+
+#[test]
+fn only_runs_with_a_partition_and_one_gene_axis_are_taken() {
+    use senna::run_manifest::RunKind;
+    for kind in [RunKind::Bge, RunKind::Topic, RunKind::Svd, RunKind::Vae] {
+        assert!(super::inputs::unsupported(kind).is_none(), "{kind:?}");
+    }
+    for kind in [
+        RunKind::Ode,
+        RunKind::JointSvd,
+        RunKind::Simba,
+        RunKind::Fne,
+    ] {
+        assert!(super::inputs::unsupported(kind).is_some(), "{kind:?}");
+    }
+}

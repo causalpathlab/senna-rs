@@ -38,11 +38,13 @@ pub struct Stage1Inputs {
 
 pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inputs> {
     let (manifest, dir) = run_manifest::load_for(&args.from)?;
-    anyhow::ensure!(
-        manifest.kind != RunKind::Ode,
-        "{}: an ode run's counts are two tracks (spliced and unspliced), not one gene axis",
-        args.from
-    );
+    if let Some(why) = unsupported(manifest.kind) {
+        anyhow::bail!(
+            "{}: stage 2 does not run on a {} run: {why}",
+            args.from,
+            manifest.kind.as_str()
+        );
+    }
     let resolve = |rel: &str| {
         run_manifest::resolve(&dir, rel)
             .to_string_lossy()
@@ -195,6 +197,29 @@ pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inp
     })
 }
 
+/// Why stage 2 does not run on a kind, or `None` when it does. A full match:
+/// a new kind must say whether it qualifies before it compiles.
+pub(super) fn unsupported(kind: RunKind) -> Option<&'static str> {
+    match kind {
+        RunKind::Bge
+        | RunKind::Topic
+        | RunKind::Itopic
+        | RunKind::MaskedVae
+        | RunKind::Svd
+        | RunKind::Vae
+        | RunKind::Rbm => None,
+        RunKind::Ode => {
+            Some("its counts are two tracks (spliced and unspliced), not one gene axis")
+        }
+        RunKind::JointTopic | RunKind::JointSvd => {
+            Some("a joint fit records no cell → pseudobulk partition")
+        }
+        RunKind::Simba | RunKind::Fne | RunKind::ResolveEmbeddingSpace => {
+            Some("it builds no pseudobulks, so it has no partition to pool cells by")
+        }
+    }
+}
+
 /// The run's cell table in a space where Euclidean distance compares cells
 /// the way the run's kind calls for (as `senna critique` compares them), and
 /// whether its rows have unit length:
@@ -216,11 +241,13 @@ pub fn euclidean_view(mut table: Mat, cell_space: CellSpace) -> (Mat, bool) {
             (table, true)
         }
         CellSpace::Signed => {
-            let n = table.nrows().max(2) as f32;
+            let n = table.nrows().max(1) as f32;
             for mut column in table.column_iter_mut() {
                 let mean = column.sum() / n;
                 column.add_scalar_mut(-mean);
-                let sd = (column.norm_squared() / (n - 1.0)).sqrt().max(1e-12);
+                let sd = (column.norm_squared() / (n - 1.0).max(1.0))
+                    .sqrt()
+                    .max(1e-12);
                 column /= sd;
             }
             (table, false)

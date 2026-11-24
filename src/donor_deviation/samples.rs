@@ -120,6 +120,19 @@ pub struct SampleCountsByGene {
     pub nonzero_samples_of_gene: Vec<Vec<(u32, f32)>>,
 }
 
+/// Sort a gene's `(sample, count)` entries by sample and sum each sample's
+/// into one, in place.
+pub(super) fn merge_by_sample(entries: &mut Vec<(u32, f32)>) {
+    entries.sort_unstable_by_key(|&(sample, _)| sample);
+    entries.dedup_by(|later, kept| {
+        let same = later.0 == kept.0;
+        if same {
+            kept.1 += later.1;
+        }
+        same
+    });
+}
+
 /// Pool the raw counts of every embedded cell into its sample, gene by gene,
 /// reading the data once in blocks of cells.
 pub fn pool_sample_counts_by_gene(
@@ -129,7 +142,9 @@ pub fn pool_sample_counts_by_gene(
 ) -> anyhow::Result<SampleCountsByGene> {
     let gene_names = data.row_names()?;
     let number_of_columns = cell_of_column.len();
-    // per gene, (sample, a cell's count) for each cell with the gene; merged below
+    // per gene, (sample, summed count), merged after every block, so what is
+    // held is the distinct (gene, sample) sums plus one block's entries, not
+    // every nonzero of the data
     let mut pooled: Vec<Vec<(u32, f32)>> = vec![Vec::new(); gene_names.len()];
     for block_start in (0..number_of_columns).step_by(CELLS_PER_READ_BLOCK) {
         let block_end = (block_start + CELLS_PER_READ_BLOCK).min(number_of_columns);
@@ -143,22 +158,16 @@ pub fn pool_sample_counts_by_gene(
                 pooled[gene].push((sample, count));
             }
         }
+        pooled.par_iter_mut().for_each(merge_by_sample);
     }
     let nonzero_samples_of_gene = pooled
         .into_par_iter()
-        .map(|mut entries| {
-            entries.sort_unstable_by_key(|&(sample, _)| sample);
-            let mut merged: Vec<(u32, f32)> = Vec::with_capacity(entries.len());
-            for (sample, count) in entries {
-                match merged.last_mut() {
-                    Some(last) if last.0 == sample => last.1 += count,
-                    _ => merged.push((sample, count)),
-                }
-            }
+        .map(|mut merged| {
             merged.retain(|&(_, count)| count > 0.0);
             for (sample, count) in &mut merged {
                 *count /= samples.cells_in_sample[*sample as usize] as f32;
             }
+            merged.shrink_to_fit();
             merged
         })
         .collect();

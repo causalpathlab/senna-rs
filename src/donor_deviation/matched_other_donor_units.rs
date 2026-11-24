@@ -123,7 +123,7 @@ pub fn find_matched_other_donor_units(
             anyhow::ensure!(
                 candidates.len() >= matched_per_unit,
                 "unit {unit}: only {} units in the other donors, fewer than \
-                 --matched-units {matched_per_unit}",
+                 --matched-samples {matched_per_unit}",
                 candidates.len()
             );
             candidates.truncate(matched_per_unit);
