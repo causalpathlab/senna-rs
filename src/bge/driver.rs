@@ -165,7 +165,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
 
     // Single-pass fit over the full feature axis (no post-hoc null-drop / refit).
     let (cfg, pb_args) = build_config(&plan.unified)?;
-    let pseudobulks =
+    let mut pseudobulks =
         data_beans::bipartite_graph_embedding_input::build_bipartite_embedding_pseudobulks(
             &mut plan.unified,
             &pb_args,
@@ -205,7 +205,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // The partition outlives the collapse: it is written with the run, for
     // `--pb-from` / `--from` chains and for readers that pool the cells'
     // counts by pseudobulk sample (finest pseudobulk × batch).
-    let cell_to_pb_per_level = pseudobulks.cell_to_pb_per_level.clone();
+    let cell_to_pb_per_level = std::mem::take(&mut pseudobulks.cell_to_pb_per_level);
     drop(pseudobulks);
 
     /////////////////////////////

@@ -59,11 +59,10 @@ use senna::embed_common::*;
 /// `senna donor-deviation`'s long help.
 pub const DONOR_DEVIATION_LONG_ABOUT: &str =
     "Stage 2 on a finished run: which of its states are specific to a donor,\n\
-     and which genes drive them. Takes bge, topic, masked-topic, svd, vae,\n\
-     masked-vae and rbm runs that recorded their cell → pseudobulk partition\n\
-     (not ode, joint-*, simba or fne). Cells are compared in a Euclidean view\n\
-     of the run's kind: bge's embedding by angle, a topic run's θ by Hellinger\n\
-     distance (√θ), signed scores (svd, vae) z-scored.\n\n\
+     and which genes drive them. Takes any run that recorded its cell →\n\
+     pseudobulk partition, except ode (two tracks of counts). Cells are\n\
+     compared as `senna critique` compares them: an embedding by angle, θ by\n\
+     Hellinger distance, signed scores z-scored.\n\n\
      The run's cell table is held fixed. Cells are grouped into pseudobulk\n\
      samples (the run's finest pseudobulk × batch, counts averaged per cell).\n\
      For each gene, every sample is contrasted with its nearest samples of\n\
@@ -80,8 +79,9 @@ pub const DONOR_DEVIATION_LONG_ABOUT: &str =
      Outputs (no cutoffs; everything else is derived from them):\n\
      \x20 {out}.donor_gene_deviation.parquet  per (gene, donor): intercept and\n\
      \x20     state_axis_1.. coefficients\n\
-     \x20 {out}.donor_gene_deviation_without_batch.parquet  the same, per\n\
-     \x20     left-out batch: jackknife replicates; a quantity's variance is\n\
+     \x20 {out}.donor_gene_deviation_without_batch.parquet  per (gene, donor),\n\
+     \x20     the coefficients without each batch b ({coef}.without_{b}):\n\
+     \x20     jackknife replicates; a quantity's variance is\n\
      \x20     (B - 1) / B · Σ_b (q_b - mean)²\n\
      \x20 {out}.donor_sample_states.parquet  per sample: batch, donor, cells,\n\
      \x20     anchor, matched_other_donors, matched distances, state_axis_1..\n\
@@ -113,8 +113,12 @@ pub struct DonorDeviationArgs {
     )]
     pub donor_of_batch: Option<Box<str>>,
 
-    #[arg(long, short = 'o', help = "Output prefix")]
-    pub out: Box<str>,
+    #[arg(
+        long,
+        short = 'o',
+        help = "Output prefix [default: the run's prefix with .stage2]"
+    )]
+    pub out: Option<Box<str>>,
 
     #[arg(
         long,
@@ -204,13 +208,23 @@ pub struct DonorDeviationArgs {
     pub gpu_mem_fraction: f32,
 }
 
+/// The default output prefix: the run's, with `.stage2` (the CLI's and the
+/// MCP tool's, so both name the same files).
+pub fn default_out(from: &str) -> String {
+    format!("{}.stage2", senna::run_manifest::derive_out_prefix(from))
+}
+
 pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
+    let out: String = match args.out.as_deref() {
+        Some(out) => out.to_string(),
+        None => default_out(&args.from),
+    };
     anyhow::ensure!(
         args.matched_samples >= 1 && args.max_anchor_samples >= 1,
         "--matched-samples and --max-anchor-samples must be at least 1"
     );
     let inputs::Stage1Inputs {
-        cells,
+        mut cells,
         data,
         cell_of_column,
     } = inputs::read_stage1_inputs(args)?;
@@ -219,7 +233,10 @@ pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
     // state coordinates on the cells; a sample sits at its cells' mean
     let (state_coordinates_of_cell, width) =
         matched_other_donor_units::state_coordinates_of_units(&cells.embedding, args.state_axes);
-    let samples = samples::pb_samples(&cells, &state_coordinates_of_cell, width);
+    let mut samples = samples::pb_samples(&cells, &state_coordinates_of_cell, width);
+    // the cells' table has given their coordinates and samples; only the
+    // read-out (names, batches, donors, coordinates) is needed from here on
+    cells.embedding = Mat::zeros(0, 0);
     let counts = samples::pool_sample_counts_by_gene(&data, &cell_of_column, &samples)?;
     drop(data);
     let number_of_samples = samples.number_of_samples();
@@ -236,6 +253,7 @@ pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
         number_of_donors,
         args.matched_samples,
     )?;
+    samples.embedding_of_sample = Mat::zeros(0, 0);
     let eligible = matched
         .anchors_spanning_other_donors(&samples.donor_index_of_sample, args.min_other_donors);
     if eligible.len() < number_of_samples {
@@ -278,35 +296,14 @@ pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
         units_matching_unit: &units_matching_unit,
         sections: &sections,
     };
-    let fitted_genes = match args.device {
-        ComputeDevice::Cpu => fit_genes::fit_genes_on_cpu_threads(
-            &counts.nonzero_samples_of_gene,
-            &activity_inputs,
-            &anchor_samples,
-            &sample_states,
-            &settings,
-        ),
-        ComputeDevice::Cuda | ComputeDevice::Metal => {
-            let device = args.device.to_device(args.device_no)?;
-            let shared = batched_contrast_fit::SharedContrastTensors::new(
-                &anchor_samples,
-                &matched,
-                &sample_states,
-                &sections.section_index_of_unit,
-                sections.section_names.len(),
-                &device,
-            )?;
-            let genes_per_block = fit_genes::genes_per_block(&shared, args.gpu_mem_fraction);
-            info!("On {}: {genes_per_block} genes per block", args.device);
-            fit_genes::fit_genes_in_blocks(
-                &counts.nonzero_samples_of_gene,
-                &activity_inputs,
-                &shared,
-                &settings,
-                genes_per_block,
-            )?
-        }
-    };
+    let fitted_genes = fit_all_genes(
+        args,
+        &counts.nonzero_samples_of_gene,
+        &activity_inputs,
+        &anchor_samples,
+        &sample_states,
+        &settings,
+    )?;
     let fits_at_cap: usize = fitted_genes
         .iter()
         .map(|fit| fit.fits_at_iteration_cap)
@@ -320,7 +317,7 @@ pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
     }
 
     outputs::write_donor_deviation_outputs(
-        &args.out,
+        &out,
         &outputs::DonorDeviationResults {
             gene_names: &counts.gene_names,
             section_names: &sections.section_names,
@@ -334,6 +331,7 @@ pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
         },
     )?;
     outputs::write_settings_record(
+        &out,
         args,
         &cells.donor_names,
         &settings,
@@ -341,6 +339,48 @@ pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
         anchor_samples.len(),
     )?;
     Ok(())
+}
+
+/// Every gene's full fit and batch jackknife, on CPU threads or in blocks of
+/// genes on a device.
+fn fit_all_genes(
+    args: &DonorDeviationArgs,
+    nonzero_samples_of_gene: &[Vec<(u32, f32)>],
+    activity_inputs: &fit_genes::ActivityInputs,
+    anchor_samples: &[u32],
+    sample_states: &UnitStates,
+    settings: &ContrastFitSettings,
+) -> anyhow::Result<Vec<fit_genes::FittedGene>> {
+    Ok(match args.device {
+        ComputeDevice::Cpu => fit_genes::fit_genes_on_cpu_threads(
+            nonzero_samples_of_gene,
+            activity_inputs,
+            anchor_samples,
+            sample_states,
+            settings,
+        ),
+        ComputeDevice::Cuda | ComputeDevice::Metal => {
+            let device = args.device.to_device(args.device_no)?;
+            let sections = activity_inputs.sections;
+            let shared = batched_contrast_fit::SharedContrastTensors::new(
+                anchor_samples,
+                activity_inputs.matched,
+                sample_states,
+                &sections.section_index_of_unit,
+                sections.section_names.len(),
+                &device,
+            )?;
+            let genes_per_block = fit_genes::genes_per_block(&shared, args.gpu_mem_fraction);
+            info!("On {}: {genes_per_block} genes per block", args.device);
+            fit_genes::fit_genes_in_blocks(
+                nonzero_samples_of_gene,
+                activity_inputs,
+                &shared,
+                settings,
+                genes_per_block,
+            )?
+        }
+    })
 }
 
 fn median_cells(cells_in_sample: &[usize]) -> usize {

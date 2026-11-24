@@ -39,6 +39,18 @@ impl MatchedOtherDonorUnits {
         self.matched_per_unit + 1
     }
 
+    /// How many donors (other than its own) `unit`'s matched units come from.
+    pub fn other_donors_of(&self, unit: usize, donor_index_of_unit: &[usize]) -> usize {
+        let mut donors: Vec<usize> = self
+            .matched_of(unit)
+            .iter()
+            .map(|&m| donor_index_of_unit[m as usize])
+            .collect();
+        donors.sort_unstable();
+        donors.dedup();
+        donors.len()
+    }
+
     /// The units whose matched set spans at least `min_other_donors` donors
     /// (other than their own): the anchors the contrast may use. A set drawn
     /// from one other donor compares two donors, not a donor with the shared
@@ -49,19 +61,8 @@ impl MatchedOtherDonorUnits {
         donor_index_of_unit: &[usize],
         min_other_donors: usize,
     ) -> Vec<u32> {
-        let mut donors: Vec<usize> = Vec::with_capacity(self.matched_per_unit);
         (0..donor_index_of_unit.len())
-            .filter(|&unit| {
-                donors.clear();
-                donors.extend(
-                    self.matched_of(unit)
-                        .iter()
-                        .map(|&m| donor_index_of_unit[m as usize]),
-                );
-                donors.sort_unstable();
-                donors.dedup();
-                donors.len() >= min_other_donors
-            })
+            .filter(|&unit| self.other_donors_of(unit, donor_index_of_unit) >= min_other_donors)
             .map(|unit| unit as u32)
             .collect()
     }

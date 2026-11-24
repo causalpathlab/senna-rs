@@ -454,6 +454,46 @@ pub enum CellSpace {
     Signed,
 }
 
+impl CellSpace {
+    /// Put a table of rows (cells or pseudobulks) in place into the space
+    /// where Euclidean distance compares rows as this space calls for, and
+    /// say whether its rows then have unit length (so a mean of rows is
+    /// renormalized to stay in it):
+    ///
+    /// * [`CellSpace::LogSimplex`]: rows of θ (probabilities, not log θ)
+    ///   become √θ, whose Euclidean distance is the Hellinger distance;
+    /// * [`CellSpace::Embedding`]: rows scaled to unit length, the angular
+    ///   distance (an embedding's magnitude follows depth);
+    /// * [`CellSpace::Signed`]: columns z-scored (population sd), so no one
+    ///   component's scale decides the neighbours.
+    ///
+    /// The one metric policy for every reader that compares cells of a run
+    /// (`senna critique`, `senna donor-deviation`).
+    pub fn to_euclidean(self, x: &mut Mat) -> bool {
+        match self {
+            CellSpace::LogSimplex => {
+                x.apply(|v| *v = v.max(0.0).sqrt());
+                true
+            }
+            CellSpace::Embedding => {
+                legume_numeric::matrix::dense_mat_io::l2_normalize_rows_inplace(x);
+                true
+            }
+            CellSpace::Signed => {
+                for mut col in x.column_iter_mut() {
+                    let n = col.len().max(1) as f32;
+                    let mean = col.sum() / n;
+                    let sd = (col.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n)
+                        .sqrt()
+                        .max(1e-12);
+                    col.apply(|v| *v = (*v - mean) / sd);
+                }
+                false
+            }
+        }
+    }
+}
+
 impl RunKind {
     /// The space of this kind's per-cell geometry table.
     ///

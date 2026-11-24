@@ -55,8 +55,14 @@ impl ActivityInputs<'_> {
 
     /// Write a gene's activity into the scratch at its `nonzero_units`: the
     /// pooled count divided by the exp of its section's log factor.
-    /// `clear_activity_of_gene` puts the scratch back to 0.
-    fn write_activity_of_gene(&self, nonzero_units: &[(u32, f32)], scratch: &mut GeneScratch) {
+    /// `clear_activity_of_gene` puts the scratch back to 0. Returns the units
+    /// with signal (a count of their own or among their matches): the only
+    /// anchors whose set can hold any activity.
+    fn write_activity_of_gene(
+        &self,
+        nonzero_units: &[(u32, f32)],
+        scratch: &mut GeneScratch,
+    ) -> Vec<u32> {
         for &(unit, count) in nonzero_units {
             scratch.activity_of_unit[unit as usize] = count;
         }
@@ -73,6 +79,7 @@ impl ActivityInputs<'_> {
             scratch.activity_of_unit[unit] /=
                 log_factor_of_section[self.sections.section_index_of_unit[unit]].exp();
         }
+        units_with_signal
     }
 
     /// The units whose log ratio to their matches is not exactly 0 for a
@@ -116,15 +123,26 @@ pub(super) fn fit_genes_on_cpu_threads(
     states: &UnitStates,
     settings: &ContrastFitSettings,
 ) -> Vec<FittedGene> {
+    let mut is_anchor = vec![false; inputs.number_of_units()];
+    for &anchor in anchor_units {
+        is_anchor[anchor as usize] = true;
+    }
     nonzero_units_of_gene
         .par_iter()
         .progress_count(nonzero_units_of_gene.len() as u64)
         .map_init(
             || inputs.new_scratch(),
             |scratch, nonzero_units| {
-                inputs.write_activity_of_gene(nonzero_units, scratch);
-                let sets =
-                    contrast_sets_of_gene(&scratch.activity_of_unit, anchor_units, inputs.matched);
+                // only the anchors near the gene's counts, in anchor order: the
+                // sets of every other anchor have no activity
+                let mut anchors_with_signal = inputs.write_activity_of_gene(nonzero_units, scratch);
+                anchors_with_signal.retain(|&u| is_anchor[u as usize]);
+                anchors_with_signal.sort_unstable();
+                let sets = contrast_sets_of_gene(
+                    &scratch.activity_of_unit,
+                    &anchors_with_signal,
+                    inputs.matched,
+                );
                 clear_activity_of_gene(nonzero_units, scratch);
                 let full_fit = fit_deviation_of_gene(&sets, states, None, None, settings);
                 let refits = section_jackknife::deviation_without_each_section(

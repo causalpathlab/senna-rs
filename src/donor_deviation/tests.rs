@@ -488,7 +488,7 @@ fn sample_counts_are_averaged_per_cell_and_skip_cells_not_embedded() {
 fn donor_of_batch_skips_a_header_and_refuses_a_batch_given_two_donors() {
     let dir = tempfile::tempdir().unwrap();
     let ok = dir.path().join("ok.tsv");
-    std::fs::write(&ok, "batch\tdonor\nB0\tD0\nB1,D0\n\nB2 D1\n").unwrap();
+    std::fs::write(&ok, "batch\tdonor\nB0\tD0\nB1,D0\n\nB2\tD1\n").unwrap();
     let map = super::inputs::read_donor_of_batch(ok.to_str().unwrap()).unwrap();
     assert_eq!(map.len(), 3);
     assert_eq!(map.get("B1").map(AsRef::as_ref), Some("D0"));
@@ -528,7 +528,7 @@ fn each_cell_space_gets_its_euclidean_view() {
     assert!(!unit);
     for column in z.column_iter() {
         assert!(column.sum().abs() < 1e-5);
-        assert!((column.norm_squared() / 2.0 - 1.0).abs() < 1e-5);
+        assert!((column.norm_squared() / 3.0 - 1.0).abs() < 1e-5);
     }
     let embedding = Mat::from_row_slice(1, 2, &[3.0, 4.0]);
     let (e, unit) = super::inputs::euclidean_view(embedding, CellSpace::Embedding);
@@ -542,20 +542,4 @@ fn a_block_s_entries_merge_into_the_sums_already_held() {
     entries.extend([(3, 4.0), (1, 1.0), (0, 1.0)]);
     super::samples::merge_by_sample(&mut entries);
     assert_eq!(entries, vec![(0, 3.0), (1, 1.0), (3, 5.0)]);
-}
-
-#[test]
-fn only_runs_with_a_partition_and_one_gene_axis_are_taken() {
-    use senna::run_manifest::RunKind;
-    for kind in [RunKind::Bge, RunKind::Topic, RunKind::Svd, RunKind::Vae] {
-        assert!(super::inputs::unsupported(kind).is_none(), "{kind:?}");
-    }
-    for kind in [
-        RunKind::Ode,
-        RunKind::JointSvd,
-        RunKind::Simba,
-        RunKind::Fne,
-    ] {
-        assert!(super::inputs::unsupported(kind).is_some(), "{kind:?}");
-    }
 }

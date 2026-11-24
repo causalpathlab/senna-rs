@@ -121,9 +121,11 @@ pub struct SampleCountsByGene {
 }
 
 /// Sort a gene's `(sample, count)` entries by sample and sum each sample's
-/// into one, in place.
+/// into one, in place. The sort is stable (a merge sort that finds runs): the
+/// sums already held are one sorted run, so adding a block's entries costs
+/// near-linear time, not a fresh sort of everything held.
 pub(super) fn merge_by_sample(entries: &mut Vec<(u32, f32)>) {
-    entries.sort_unstable_by_key(|&(sample, _)| sample);
+    entries.sort_by_key(|&(sample, _)| sample);
     entries.dedup_by(|later, kept| {
         let same = later.0 == kept.0;
         if same {
@@ -148,17 +150,22 @@ pub fn pool_sample_counts_by_gene(
     let mut pooled: Vec<Vec<(u32, f32)>> = vec![Vec::new(); gene_names.len()];
     for block_start in (0..number_of_columns).step_by(CELLS_PER_READ_BLOCK) {
         let block_end = (block_start + CELLS_PER_READ_BLOCK).min(number_of_columns);
-        let counts = data.read_columns_csc(block_start..block_end)?;
-        for (offset, cell_counts) in counts.col_iter().enumerate() {
-            let Some(cell) = cell_of_column[block_start + offset] else {
-                continue;
-            };
-            let sample = samples.sample_of_cell[cell] as u32;
-            for (&gene, &count) in cell_counts.row_indices().iter().zip(cell_counts.values()) {
-                pooled[gene].push((sample, count));
-            }
-        }
-        pooled.par_iter_mut().for_each(merge_by_sample);
+        // genes × cells by row, so each gene's entries are appended on its own
+        let by_gene =
+            nalgebra_sparse::CsrMatrix::from(&data.read_columns_csc(block_start..block_end)?);
+        pooled
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(gene, entries)| {
+                let row = by_gene.row(gene);
+                entries.extend(row.col_indices().iter().zip(row.values()).filter_map(
+                    |(&offset, &count)| {
+                        cell_of_column[block_start + offset]
+                            .map(|cell| (samples.sample_of_cell[cell] as u32, count))
+                    },
+                ));
+                merge_by_sample(entries);
+            });
     }
     let nonzero_samples_of_gene = pooled
         .into_par_iter()

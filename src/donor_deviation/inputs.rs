@@ -38,13 +38,15 @@ pub struct Stage1Inputs {
 
 pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inputs> {
     let (manifest, dir) = run_manifest::load_for(&args.from)?;
-    if let Some(why) = unsupported(manifest.kind) {
-        anyhow::bail!(
-            "{}: stage 2 does not run on a {} run: {why}",
-            args.from,
-            manifest.kind.as_str()
-        );
-    }
+    // Any run that records its partition qualifies (joint fits, simba and
+    // fne record none and stop below); ode's counts are two tracks, not one
+    // gene axis.
+    anyhow::ensure!(
+        manifest.kind != RunKind::Ode,
+        "{}: stage 2 does not run on an ode run: its counts are two tracks (spliced and \
+         unspliced), not one gene axis",
+        args.from
+    );
     let resolve = |rel: &str| {
         run_manifest::resolve(&dir, rel)
             .to_string_lossy()
@@ -57,8 +59,8 @@ pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inp
         .ok_or_else(|| anyhow::anyhow!("{}: the run records no cell embedding", args.from))?;
     let partition_path = manifest.cell_to_pb_path(&dir).ok_or_else(|| {
         anyhow::anyhow!(
-            "{}: the run records no cell → pseudobulk partition (refit it with this senna, \
-             which writes {{out}}.cell_to_pb.parquet)",
+            "{}: the run records no cell → pseudobulk partition (joint fits, simba and fne \
+             never write one; a bge run from before senna wrote it needs a refit)",
             args.from
         )
     })?;
@@ -159,17 +161,24 @@ pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inp
             None
         }
     };
-    let donor_of_cell = batch_of_cell
-        .iter()
-        .map(|batch| match &donor_of_batch {
+    // donors are resolved per distinct batch, then looked up per cell
+    let mut batch_index: HashMap<&str, usize> = HashMap::default();
+    let mut donor_of_distinct_batch: Vec<Box<str>> = Vec::new();
+    for batch in &batch_of_cell {
+        if batch_index.contains_key(batch.as_ref()) {
+            continue;
+        }
+        let donor = match &donor_of_batch {
             Some(map) => map
                 .get(batch)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("batch {batch} has no donor in --donor-of-batch")),
-            None => Ok(batch.clone()),
-        })
-        .collect::<anyhow::Result<Vec<Box<str>>>>()?;
-    let mut donor_names = donor_of_cell.clone();
+                .ok_or_else(|| anyhow::anyhow!("batch {batch} has no donor in --donor-of-batch"))?,
+            None => batch.clone(),
+        };
+        batch_index.insert(batch, donor_of_distinct_batch.len());
+        donor_of_distinct_batch.push(donor);
+    }
+    let mut donor_names = donor_of_distinct_batch.clone();
     donor_names.sort_unstable();
     donor_names.dedup();
     anyhow::ensure!(
@@ -177,9 +186,13 @@ pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inp
         "{} donors; stage 2 needs at least three (a donor is contrasted with the others)",
         donor_names.len()
     );
-    let donor_index_of_cell = donor_of_cell
+    let donor_index_of_distinct_batch: Vec<usize> = donor_of_distinct_batch
         .iter()
         .map(|d| donor_names.binary_search(d).expect("a listed donor"))
+        .collect();
+    let donor_index_of_cell = batch_of_cell
+        .iter()
+        .map(|batch| donor_index_of_distinct_batch[batch_index[batch.as_ref()]])
         .collect();
 
     Ok(Stage1Inputs {
@@ -197,95 +210,41 @@ pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inp
     })
 }
 
-/// Why stage 2 does not run on a kind, or `None` when it does. A full match:
-/// a new kind must say whether it qualifies before it compiles.
-pub(super) fn unsupported(kind: RunKind) -> Option<&'static str> {
-    match kind {
-        RunKind::Bge
-        | RunKind::Topic
-        | RunKind::Itopic
-        | RunKind::MaskedVae
-        | RunKind::Svd
-        | RunKind::Vae
-        | RunKind::Rbm => None,
-        RunKind::Ode => {
-            Some("its counts are two tracks (spliced and unspliced), not one gene axis")
-        }
-        RunKind::JointTopic | RunKind::JointSvd => {
-            Some("a joint fit records no cell → pseudobulk partition")
-        }
-        RunKind::Simba | RunKind::Fne | RunKind::ResolveEmbeddingSpace => {
-            Some("it builds no pseudobulks, so it has no partition to pool cells by")
-        }
-    }
-}
-
-/// The run's cell table in a space where Euclidean distance compares cells
-/// the way the run's kind calls for (as `senna critique` compares them), and
-/// whether its rows have unit length:
-///
-/// * an embedding (bge): rows scaled to unit length, the angular distance
-///   (an embedding's magnitude follows depth);
-/// * log θ (topic family): √θ, whose Euclidean distance is the Hellinger
-///   distance, rows of unit length by construction;
-/// * signed scores (svd, vae, masked-vae, rbm): columns z-scored, so no
-///   one component's scale decides the neighbours.
+/// The run's cell table in the space its kind compares cells in
+/// ([`CellSpace::to_euclidean`], shared with `senna critique`), and whether
+/// its rows have unit length. A topic run's table is log θ, so it is
+/// exponentiated to θ first.
 pub fn euclidean_view(mut table: Mat, cell_space: CellSpace) -> (Mat, bool) {
-    match cell_space {
-        CellSpace::Embedding => {
-            l2_normalize_rows_inplace(&mut table);
-            (table, true)
-        }
-        CellSpace::LogSimplex => {
-            table.iter_mut().for_each(|x| *x = (0.5 * *x).exp());
-            (table, true)
-        }
-        CellSpace::Signed => {
-            let n = table.nrows().max(1) as f32;
-            for mut column in table.column_iter_mut() {
-                let mean = column.sum() / n;
-                column.add_scalar_mut(-mean);
-                let sd = (column.norm_squared() / (n - 1.0).max(1.0))
-                    .sqrt()
-                    .max(1e-12);
-                column /= sd;
-            }
-            (table, false)
-        }
+    if cell_space == CellSpace::LogSimplex {
+        table.apply(|v| *v = v.exp());
     }
+    let unit_rows = cell_space.to_euclidean(&mut table);
+    (table, unit_rows)
 }
 
-/// A two-column file: each batch and its donor (tab, comma or spaces; a
-/// `batch donor` header is skipped).
+/// A two-column file: each batch and its donor (tab- or comma-separated,
+/// plain or gzipped; a `batch donor` header is skipped).
 pub fn read_donor_of_batch(path: &str) -> anyhow::Result<HashMap<Box<str>, Box<str>>> {
-    let text = std::fs::read_to_string(path)
+    let table = legume_numeric::matrix::common_io::read_two_field_rows(path)
         .map_err(|e| anyhow::anyhow!("--donor-of-batch {path}: {e}"))?;
-    let mut donor_of_batch = HashMap::default();
-    for (line_number, line) in text.lines().enumerate() {
-        let fields: Vec<&str> = line
-            .split(|c: char| c == ',' || c.is_whitespace())
-            .filter(|f| !f.is_empty())
-            .collect();
-        match fields.as_slice() {
-            [] | ["batch", "donor"] => continue,
-            [batch, donor] => {
-                if let Some(earlier) =
-                    donor_of_batch.insert(Box::<str>::from(*batch), Box::<str>::from(*donor))
-                {
-                    anyhow::ensure!(
-                        earlier.as_ref() == *donor,
-                        "--donor-of-batch {path} line {}: batch {batch} is given donor {donor}, \
-                         and donor {earlier} on an earlier line",
-                        line_number + 1
-                    );
-                }
-            }
-            _ => anyhow::bail!(
-                "--donor-of-batch {path} line {}: expected two fields (batch, donor), got {}",
-                line_number + 1,
-                fields.len()
-            ),
+    anyhow::ensure!(
+        table.gapped == 0,
+        "--donor-of-batch {path}: {} rows lack a batch or a donor",
+        table.gapped
+    );
+    let mut donor_of_batch: HashMap<Box<str>, Box<str>> = HashMap::default();
+    for (batch, donor) in table.rows {
+        if (batch.as_ref(), donor.as_ref()) == ("batch", "donor") {
+            continue;
         }
+        if let Some(earlier) = donor_of_batch.get(&batch) {
+            anyhow::ensure!(
+                *earlier == donor,
+                "--donor-of-batch {path}: batch {batch} is given donor {donor} and donor {earlier}"
+            );
+            continue;
+        }
+        donor_of_batch.insert(batch, donor);
     }
     Ok(donor_of_batch)
 }

@@ -5,7 +5,6 @@ use super::jobs::{job_property, start_server, Argv, Task};
 use super::parse;
 use anyhow::Result;
 use legume_mcp::{Call, Content, ToolSpec};
-use senna::run_manifest;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -29,15 +28,14 @@ pub(super) struct DonorDeviationCall {
     background: bool,
 }
 
-/// The default output prefix: the run's, with `.stage2`.
-fn default_out(from: &str) -> String {
-    format!("{}.stage2", run_manifest::derive_out_prefix(from))
-}
-
 /// `senna donor-deviation --from {from} -o {out}`: the per-(gene, donor)
 /// deviations first, then their batch jackknife and the state tables.
 pub(super) fn donor_deviation_task(a: &DonorDeviationCall) -> Task {
-    let out = a.out.clone().unwrap_or_else(|| default_out(&a.from));
+    // senna's own default, named here so the files can be checked.
+    let out = a
+        .out
+        .clone()
+        .unwrap_or_else(|| crate::donor_deviation::default_out(&a.from));
     let made = [
         "donor_gene_deviation",
         "donor_gene_deviation_without_batch",
@@ -64,7 +62,7 @@ fn run_donor_deviation(a: DonorDeviationCall, cx: &Call) -> Result<Vec<Content>>
 pub(super) fn specs() -> Vec<ToolSpec> {
     vec![ToolSpec::new(
         "run_donor_deviation",
-        "Stage 2 on a finished run (bge, topic family, svd, vae, rbm), as `senna donor-deviation \
+        "Stage 2 on a finished run that recorded its cell → pseudobulk partition (not ode), as `senna donor-deviation \
          --from {from} -o {out}`: which of its states are specific to a donor, and which genes \
          drive them. The run's cell embedding is held fixed; cells are pooled into pseudobulk \
          samples (finest pseudobulk × batch) and each sample is contrasted, gene by gene, with \
@@ -79,7 +77,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         json!({
             "type": "object",
             "properties": {
-                "from": {"type": "string", "description": "Run manifest (or prefix) of a bge, topic, masked-topic, svd, vae, masked-vae or rbm run that recorded its cell → pseudobulk partition"},
+                "from": {"type": "string", "description": "Run manifest (or prefix) of a run that recorded its cell → pseudobulk partition (bge, the topic family, svd, vae; not ode)"},
                 "out": {"type": "string", "description": "Output prefix [default: from's prefix with .stage2]"},
                 "donor_of_batch": {"type": "string", "description": "Two-column file, each batch and its donor (--donor-of-batch) [default: each batch is its own donor]"},
                 "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (donor-deviation) lists them, e.g. --device cuda"},

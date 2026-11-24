@@ -17,8 +17,9 @@
 //! * `{out}.donor_gene_deviation.parquet`: a row per (gene, donor), the
 //!   deviation's coefficients (`intercept`, `state_axis_1..`).
 //! * `{out}.donor_gene_deviation_without_batch.parquet`: a row per (gene,
-//!   donor, left-out batch), the coefficients refitted without that batch's
-//!   samples: the jackknife replicates; a quantity's variance is
+//!   donor), and per left-out batch `b` the coefficients refitted without
+//!   its samples (`intercept.without_{b}`, `state_axis_1.without_{b}`, ..):
+//!   the jackknife replicates; a quantity's variance is
 //!   `(B − 1) / B · Σ_b (q_b − mean)²`.
 //! * `{out}.donor_sample_states.parquet`: a row per pseudobulk sample, its
 //!   batch, donor, cells, whether it anchored a contrast set, how many other
@@ -29,7 +30,7 @@
 //!   donor and its own state coordinates (the read-out).
 //! * `{out}.donor_deviation.json`: the settings and donors of the run.
 
-use super::contrast_fit::{ContrastFitSettings, DeviationOfGene};
+use super::contrast_fit::ContrastFitSettings;
 use super::fit_genes::FittedGene;
 use super::inputs::Stage1Cells;
 use super::matched_other_donor_units::MatchedOtherDonorUnits;
@@ -83,14 +84,16 @@ pub(crate) fn write_donor_deviation_outputs(
 /// Which of each gene's fits a gene table holds.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WhichFits {
-    /// The full fit: a row per (gene, donor).
+    /// The full fit: per coefficient, one column.
     FullFits,
-    /// The jackknife refits: a row per (gene, donor, left-out batch).
+    /// The jackknife refits: per left-out batch and coefficient, one column
+    /// (`{coefficient}.without_{batch}`), so the table keeps a row per (gene,
+    /// donor) however many batches there are.
     RefitsWithoutEachBatch,
 }
 
-/// A gene table: per row the gene, the donor, the left-out batch (refits
-/// only) and the deviation's coefficients (`intercept`, `state_axis_1..`).
+/// A gene table: a row per (gene, donor), the deviation's coefficients
+/// (`intercept`, `state_axis_1..`) of the full fit, or of each refit.
 fn write_gene_table(
     path: &str,
     results: &DonorDeviationResults,
@@ -98,52 +101,73 @@ fn write_gene_table(
 ) -> anyhow::Result<()> {
     let width = results.width;
     let donor_names = &results.cells.donor_names;
-    let mut gene = Vec::new();
-    let mut donor = Vec::new();
-    let mut left_out_batch = Vec::new();
-    let mut coefficient_of_column: Vec<Vec<f32>> = vec![Vec::new(); width];
+    let coefficient_names: Vec<Box<str>> = std::iter::once("intercept".into())
+        .chain(state_axis_names(width - 1))
+        .collect();
+    // (column name, which fit: None = full, Some(b) = without batch b, coefficient)
+    let column_specs: Vec<(Box<str>, Option<usize>, usize)> = match which {
+        WhichFits::FullFits => coefficient_names
+            .iter()
+            .enumerate()
+            .map(|(k, name)| (name.clone(), None, k))
+            .collect(),
+        WhichFits::RefitsWithoutEachBatch => results
+            .section_names
+            .iter()
+            .enumerate()
+            .flat_map(|(b, batch)| {
+                coefficient_names
+                    .iter()
+                    .enumerate()
+                    .map(move |(k, name)| (format!("{name}.without_{batch}").into(), Some(b), k))
+            })
+            .collect(),
+    };
+    let number_of_rows = results.gene_names.len() * donor_names.len();
+    let mut gene = Vec::with_capacity(number_of_rows);
+    let mut donor = Vec::with_capacity(number_of_rows);
+    let mut values: Vec<Vec<f32>> = vec![Vec::with_capacity(number_of_rows); column_specs.len()];
     for (gene_name, fit) in results.gene_names.iter().zip(results.fitted_genes) {
-        let deviations: Vec<(Option<&Box<str>>, &DeviationOfGene)> = match which {
-            WhichFits::FullFits => vec![(None, &fit.deviation)],
-            WhichFits::RefitsWithoutEachBatch => results
-                .section_names
-                .iter()
-                .map(Some)
-                .zip(&fit.deviation_without_section)
-                .collect(),
-        };
-        for (batch_name, deviation) in deviations {
-            for (donor_name, row) in donor_names.iter().zip(deviation.chunks(width)) {
-                gene.push(gene_name.clone());
-                donor.push(donor_name.clone());
-                if let Some(batch_name) = batch_name {
-                    left_out_batch.push(batch_name.clone());
-                }
-                for (column, &c) in coefficient_of_column.iter_mut().zip(row) {
-                    column.push(c);
-                }
+        for (d, donor_name) in donor_names.iter().enumerate() {
+            gene.push(gene_name.clone());
+            donor.push(donor_name.clone());
+            for (column, &(_, refit, k)) in values.iter_mut().zip(&column_specs) {
+                let deviation = match refit {
+                    None => &fit.deviation,
+                    Some(b) => &fit.deviation_without_section[b],
+                };
+                column.push(deviation[d * width + k]);
             }
         }
     }
     let mut columns: Vec<(Box<str>, Column)> = vec![("donor".into(), Column::Str(&donor))];
-    if which == WhichFits::RefitsWithoutEachBatch {
-        columns.push(("left_out_batch".into(), Column::Str(&left_out_batch)));
-    }
-    let coefficient_names = std::iter::once("intercept".into()).chain(state_axis_names(width - 1));
-    for (name, column) in coefficient_names.zip(&coefficient_of_column) {
-        columns.push((name, Column::F32(column)));
-    }
+    columns.extend(
+        column_specs
+            .iter()
+            .zip(&values)
+            .map(|((name, _, _), column)| (name.clone(), Column::F32(column))),
+    );
     write_named_table(path, "gene", &gene, &columns)?;
     info!("Wrote {path}");
     Ok(())
 }
 
 /// The coordinates past the intercept of `[rows × width]` (row-major), one
-/// column per state axis.
-fn coordinate_columns(coordinates: &[f32], width: usize) -> Vec<Vec<f32>> {
-    (1..width)
-        .map(|axis| coordinates.chunks(width).map(|row| row[axis]).collect())
+/// named column per state axis.
+fn state_axis_columns(coordinates: &[f32], width: usize) -> Vec<(Box<str>, Vec<f32>)> {
+    state_axis_names(width - 1)
+        .into_iter()
+        .enumerate()
+        .map(|(a, name)| {
+            let column = coordinates.chunks(width).map(|row| row[1 + a]).collect();
+            (name, column)
+        })
         .collect()
+}
+
+/// `names[i]` for each index.
+fn names_at(names: &[Box<str>], indices: &[usize]) -> Vec<Box<str>> {
+    indices.iter().map(|&i| names[i].clone()).collect()
 }
 
 fn write_sample_state_table(path: &str, results: &DonorDeviationResults) -> anyhow::Result<()> {
@@ -155,27 +179,14 @@ fn write_sample_state_table(path: &str, results: &DonorDeviationResults) -> anyh
         width,
         ..
     } = *results;
-    let donor: Vec<Box<str>> = samples
-        .donor_index_of_sample
-        .iter()
-        .map(|&d| cells.donor_names[d].clone())
-        .collect();
+    let donor = names_at(&cells.donor_names, &samples.donor_index_of_sample);
     let number_of_cells: Vec<i32> = samples.cells_in_sample.iter().map(|&n| n as i32).collect();
     let mut is_anchor = vec![0i32; samples.number_of_samples()];
     for &s in anchor_samples {
         is_anchor[s as usize] = 1;
     }
     let other_donors: Vec<i32> = (0..samples.number_of_samples())
-        .map(|s| {
-            let mut donors: Vec<usize> = matched
-                .matched_of(s)
-                .iter()
-                .map(|&m| samples.donor_index_of_sample[m as usize])
-                .collect();
-            donors.sort_unstable();
-            donors.dedup();
-            donors.len() as i32
-        })
+        .map(|s| matched.other_donors_of(s, &samples.donor_index_of_sample) as i32)
         .collect();
     let distances: Vec<&[f32]> = matched
         .distance_to_matched_unit
@@ -186,8 +197,7 @@ fn write_sample_state_table(path: &str, results: &DonorDeviationResults) -> anyh
         .iter()
         .map(|d| d.iter().sum::<f32>() / d.len() as f32)
         .collect();
-    let axes = coordinate_columns(&samples.state_coordinates_of_sample, width);
-    let axis_names = state_axis_names(width - 1);
+    let axes = state_axis_columns(&samples.state_coordinates_of_sample, width);
     let mut columns: Vec<(Box<str>, Column)> = vec![
         ("batch".into(), Column::Str(&samples.batch_of_sample)),
         ("donor".into(), Column::Str(&donor)),
@@ -203,9 +213,7 @@ fn write_sample_state_table(path: &str, results: &DonorDeviationResults) -> anyh
             Column::F32(&mean_matched_distance),
         ),
     ];
-    for (name, column) in axis_names.iter().zip(&axes) {
-        columns.push((name.clone(), Column::F32(column)));
-    }
+    columns.extend(axes.iter().map(|(name, c)| (name.clone(), Column::F32(c))));
     write_named_table(path, "sample", &samples.sample_names, &columns)?;
     info!("Wrote {path}");
     Ok(())
@@ -219,32 +227,22 @@ fn write_cell_state_table(path: &str, results: &DonorDeviationResults) -> anyhow
         width,
         ..
     } = *results;
-    let sample: Vec<Box<str>> = samples
-        .sample_of_cell
-        .iter()
-        .map(|&s| samples.sample_names[s].clone())
-        .collect();
-    let donor: Vec<Box<str>> = cells
-        .donor_index_of_cell
-        .iter()
-        .map(|&d| cells.donor_names[d].clone())
-        .collect();
-    let axes = coordinate_columns(state_coordinates_of_cell, width);
-    let axis_names = state_axis_names(width - 1);
+    let sample = names_at(&samples.sample_names, &samples.sample_of_cell);
+    let donor = names_at(&cells.donor_names, &cells.donor_index_of_cell);
+    let axes = state_axis_columns(state_coordinates_of_cell, width);
     let mut columns: Vec<(Box<str>, Column)> = vec![
         ("sample".into(), Column::Str(&sample)),
         ("batch".into(), Column::Str(&cells.batch_of_cell)),
         ("donor".into(), Column::Str(&donor)),
     ];
-    for (name, column) in axis_names.iter().zip(&axes) {
-        columns.push((name.clone(), Column::F32(column)));
-    }
+    columns.extend(axes.iter().map(|(name, c)| (name.clone(), Column::F32(c))));
     write_named_table(path, "cell", &cells.cell_names, &columns)?;
     info!("Wrote {path}");
     Ok(())
 }
 
 pub(crate) fn write_settings_record(
+    out: &str,
     args: &DonorDeviationArgs,
     donor_names: &[Box<str>],
     settings: &ContrastFitSettings,
@@ -267,7 +265,7 @@ pub(crate) fn write_settings_record(
         "seed": args.seed,
         "batch_jackknife": "each batch left out in turn, refitted from the full fit",
     });
-    let path = format!("{}.donor_deviation.json", args.out);
+    let path = format!("{out}.donor_deviation.json");
     std::fs::write(&path, serde_json::to_string_pretty(&record)?)?;
     info!("Wrote {path}");
     Ok(())

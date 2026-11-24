@@ -592,20 +592,7 @@ impl View {
         }
         let valid: Vec<bool> = count.iter().map(|&c| c > 0).collect();
         let mut view = View::compact(sum, &valid);
-        match space {
-            CellSpace::LogSimplex => view.x.apply(|v| *v = v.max(0.0).sqrt()),
-            CellSpace::Embedding => l2_normalize_rows_inplace(&mut view.x),
-            CellSpace::Signed => {
-                for mut col in view.x.column_iter_mut() {
-                    let n = col.len().max(1) as f32;
-                    let mean = col.sum() / n;
-                    let sd = (col.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n)
-                        .sqrt()
-                        .max(1e-12);
-                    col.apply(|v| *v = (*v - mean) / sd);
-                }
-            }
-        }
+        space.to_euclidean(&mut view.x);
         view
     }
 
