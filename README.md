@@ -89,7 +89,10 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > draws the map with its legend; its arguments stay set until changed, so pass
 > only what changes. `view_markers` lists what sets a group apart, `view_cell`
 > names a point and its groups, and `view_export` writes figures. World
-> coordinates are the layout's, y up. Close with `notebook` (kind
+> coordinates are the layout's, y up. When `run_fit` or `view_open` returns
+> `needs_input`, the fit could not settle something from its data (an ODE's root,
+> say): put each question to the user before reading the result as settled, and
+> rerun with the option they choose. Close with `notebook` (kind
 > `conclusion`) and tell the user where the records are.
 
 | Tool | Does |
@@ -300,7 +303,7 @@ model type and runs the encoder over held-out cells.
 ## Tests
 
 `cargo test` runs the suite optimized, with debug assertions on.
-`cargo test --features slow-tests`, as CI does, adds the slow tests:
-`senna ode` fits recovered from scratch, minutes each. Run it before a
-release or after changing the ODE sampler. `cargo test -- --ignored`
+`cargo test --features slow-tests` adds the slow tests: `senna ode`
+fits recovered from scratch, minutes each. CI only compiles them; run
+them locally before a release or after changing the ODE fit. `cargo test -- --ignored`
 runs every ignored test, the slow ones among them.

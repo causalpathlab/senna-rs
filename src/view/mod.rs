@@ -16,6 +16,7 @@ mod relabel;
 mod render;
 mod review;
 mod rounds;
+pub(crate) use rounds::typed_decisions;
 mod state;
 mod style;
 mod sublayout;

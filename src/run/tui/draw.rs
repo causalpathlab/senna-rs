@@ -88,6 +88,8 @@ impl App {
         } else if self.confirm.is_some() {
             let rows = usize::from(area.height).saturating_sub(4);
             CHROME.popup(f, area, self.confirm_lines(rows), 120, At::Middle);
+        } else if self.choice.is_some() {
+            CHROME.popup(f, area, self.choice_lines(), 100, At::Middle);
         } else if self.asking() {
             let rows = usize::from(area.height).saturating_sub(4);
             CHROME.popup(f, area, self.clones_lines(rows), 100, At::Middle);
@@ -884,6 +886,48 @@ impl App {
         out.push(Line::from(""));
         out.push(Line::from(Span::styled(
             " y keep them (--cnv-clones)   n run without   s stop",
+            hint(),
+        )));
+        out
+    }
+
+    /// A finished fit's open choice: its question, every option, the one
+    /// under the cursor marked.
+    fn choice_lines(&self) -> Vec<Line<'static>> {
+        let (Some(c), Some(q)) = (&self.choice, &self.queue) else {
+            return Vec::new();
+        };
+        let job = &q.jobs[c.job];
+        let mut out = vec![
+            Line::from(Span::styled(
+                format!(
+                    " {} left a choice to you ({})",
+                    job.method, c.decision.topic
+                ),
+                bold(),
+            )),
+            Line::from(""),
+        ];
+        out.extend(
+            legume_tui::text::wrap_words(&c.decision.question, 96)
+                .into_iter()
+                .map(|l| Line::from(format!(" {l}"))),
+        );
+        out.push(Line::from(""));
+        for (i, o) in c.decision.options.iter().enumerate() {
+            let line = format!(" {} {}", if i == c.row { "▶" } else { " " }, o.label);
+            out.push(if i == c.row {
+                Line::from(Span::styled(line, bold()))
+            } else {
+                Line::from(line)
+            });
+        }
+        out.push(Line::from(""));
+        out.push(Line::from(Span::styled(
+            format!(
+                " enter rerun with it (as {}_{}N)   ↑ ↓ pick   esc / q leave it open",
+                job.out, c.decision.topic
+            ),
             hint(),
         )));
         out

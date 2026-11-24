@@ -413,3 +413,36 @@ fn a_feature_has_no_time_even_named_as_a_cell() {
         .unwrap();
     assert!(state(&s).get("time").is_none());
 }
+
+/// What a fit left to decide reaches the agent with how to settle it;
+/// a run with nothing open says nothing.
+#[test]
+fn a_runs_open_decisions_are_put_to_the_agent() {
+    use senna::run_manifest::{Decision, DecisionOption, RunKind, RunManifest};
+    let mut m = RunManifest::new(RunKind::Ode, "run");
+    assert!(super::super::fit::needs_input(&m, Path::new("run.senna.json")).is_none());
+    m.decisions.push(Decision {
+        topic: "root".into(),
+        question: "Which root?".into(),
+        hint: String::new(),
+        options: vec![DecisionOption {
+            label: "root 0".into(),
+            rerun_args: vec!["--root-cells".into(), "run.root_0.txt".into()],
+            objective: Some(-10.0),
+            cells: None,
+        }],
+    });
+    let ask =
+        super::super::fit::needs_input(&m, Path::new("run.senna.json")).expect("an open decision");
+    assert_eq!(ask["decisions"][0]["topic"], "root");
+    assert_eq!(
+        ask["decisions"][0]["options"][0]["rerun_args"][1],
+        "run.root_0.txt"
+    );
+    // A manifest keeps them through a save and a load.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.senna.json");
+    m.save(&path).unwrap();
+    let (back, _) = RunManifest::load(&path).unwrap();
+    assert_eq!(back.decisions.len(), 1);
+}

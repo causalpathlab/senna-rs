@@ -173,10 +173,9 @@ impl PbFromArgs {
         match m.train_args.as_ref() {
             Some(rec) => {
                 let args = &rec.args;
-                anyhow::ensure!(
-                    !cut_by_cnv_clones(args),
-                    "--pb-from {run}: that run cut its partition by CNV clone (--cnv-clones)"
-                );
+                if let Some(why) = own_partition(args) {
+                    anyhow::bail!("--pb-from {run}: that run {why}");
+                }
                 if args.get("from").is_some_and(|v| !v.is_null()) {
                     log::warn!(
                         "--pb-from {run}: that run inherited its partition with --from, so \
@@ -228,6 +227,27 @@ pub(crate) fn cuts_cells(name: &str) -> bool {
 /// The names a fit's number of latent topics goes by. The sketch cells are
 /// partitioned on is `--proj-dim` wide, or this number when larger.
 pub(crate) const LATENT_COUNTS: [&str; 2] = ["n_latent_topics", "n_latent"];
+
+/// Why a recorded fit's partition is its own, which no other run shares
+/// (nor it another's), if it is: cut by CNV clone, or grouped by splicing.
+pub(crate) fn own_partition(recorded_args: &serde_json::Value) -> Option<&'static str> {
+    if cut_by_cnv_clones(recorded_args) {
+        Some("cut its partition by CNV clone (--cnv-clones) into strata of its own")
+    } else if grouped_by_splicing(recorded_args) {
+        Some("grouped its cells by splicing (--pb-graph ratio), not by a collapse")
+    } else {
+        None
+    }
+}
+
+/// Whether a recorded `senna ode` fit grouped its cells by splicing
+/// (`--pb-graph ratio`): its partition is no collapse, so no run shares it.
+pub(crate) fn grouped_by_splicing(recorded_args: &serde_json::Value) -> bool {
+    recorded_args
+        .get("pb_graph")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|g| g != "collapse")
+}
 
 /// Whether a recorded fit was cut by `--cnv-clones`: it built strata of its
 /// own, so no run can share its partition and it can share no other's. The

@@ -84,7 +84,8 @@ fn from_scratch_branching_lineages_keep_their_trunk() {
         sub: 1,
         roots: Vec::new(),
     };
-    let (fit, objective) = climb(&train, &opts, &dev).unwrap();
+    let climbed = climb(&train, &opts, &dev).unwrap();
+    let (fit, objective) = (climbed.fit, climbed.objective);
     let branch_at = fit.branch_at().unwrap().unwrap()[0];
     eprintln!("branch at {branch_at:.3} (truth {tb})");
     let all = first(&sim, sim.n_pb);
@@ -159,4 +160,67 @@ fn from_scratch_branching_lineages_keep_their_trunk() {
     // either lineage but where it sits near the branch.
     assert!(mean_gap < 0.01, "trunk mean gap {mean_gap}");
     assert!((branch_at - tb).abs() < 0.1, "branch at {branch_at}");
+}
+
+/// Cells piled at the ends of time (Beta(0.3, 0.3)) and a branch at 0.3
+/// parting fully: from its tree starts' own branch times the climb settled
+/// late (0.65) and mixed the lineages (purity 0.65); the restarts from
+/// every branch time find the branch and the truth's objective.
+#[test]
+#[ignore = "minutes on a GPU"]
+fn an_early_branch_among_cells_piled_at_the_ends_is_found() {
+    let dev = Device::cuda_if_available(0).unwrap();
+    let tb = 0.3;
+    let cfg = SimConfig {
+        lineages: 2,
+        n_pb: 900,
+        fine: 133,
+        seed: 11,
+        branch_at: Some(tb),
+        part: 1.0,
+        time_shape: 0.3,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let n_train = 700;
+    let train = first(&sim, n_train);
+    let all = first(&sim, sim.n_pb);
+    let truth = &sim.truth;
+    let parted: Vec<usize> = (n_train..sim.n_pb)
+        .filter(|&p| !truth.trunk[p] && truth.time[p] > (tb + 0.25 * (1.0 - tb)) * cfg.t_len)
+        .collect();
+    let prior = GridPrior::new(45, 1.0, cfg.kappa).unwrap();
+    let at_truth = Fit::from_params(&truth_params(&sim, 133, 45), &prior, &dev).unwrap();
+    let truth_objective = at_truth
+        .objective(&at_truth.reads(&train).unwrap())
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    let opts = Climb {
+        trunk: true,
+        jitter: true,
+        lineages: 2,
+        points: 45,
+        dim: 3,
+        kappa: cfg.kappa,
+        steps: 2500,
+        lr: 0.03,
+        sub: 1,
+        roots: Vec::new(),
+    };
+    let climbed = climb(&train, &opts, &dev).unwrap();
+    let (fit, objective) = (climbed.fit, climbed.objective);
+    let (w, _) = fit.posterior(&fit.reads(&all).unwrap()).unwrap();
+    let (_, past) = purity(&parted, &w, &truth.lineage);
+    let branch_at = fit.branch_at().unwrap().expect("a trunk")[0];
+    eprintln!(
+        "objective {objective:.0} (truth's {truth_objective:.0}); purity past a quarter of \
+         the branch {past:.3}; branch at {branch_at:.3}"
+    );
+    assert!(past > 0.9, "purity past the branch {past}");
+    assert!(
+        objective >= truth_objective * (1.0 + 1e-4),
+        "objective {objective}, truth's {truth_objective}"
+    );
+    assert!((branch_at - tb).abs() < 0.15, "branch at {branch_at}");
 }

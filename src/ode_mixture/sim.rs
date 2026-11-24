@@ -20,7 +20,7 @@ use super::kernel::GridPrior;
 use super::kinetics::trajectory;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
-use rand_distr::{Distribution, Gamma, Normal, Poisson, Uniform};
+use rand_distr::{Beta, Distribution, Gamma, Normal, Poisson, Uniform};
 
 #[derive(Clone, Debug)]
 pub struct SimConfig {
@@ -56,6 +56,10 @@ pub struct SimConfig {
     /// by the branch's ramp, so far past the branch the drift is `√2`
     /// this): `0` lets two fates wander back together, as a draw may.
     pub part: f64,
+    /// Every pseudobulk's time as `Beta(a, a)` of its lineage (`a < 1`:
+    /// cells piled up at the start and the end, as steady populations are);
+    /// `1` uniform on the grid.
+    pub time_shape: f64,
     pub seed: u64,
 }
 
@@ -76,6 +80,7 @@ impl Default for SimConfig {
             log_capture: 0.0,
             branch_at: None,
             part: 0.0,
+            time_shape: 1.0,
             seed: 1,
         }
     }
@@ -204,9 +209,19 @@ pub fn simulate(cfg: &SimConfig) -> anyhow::Result<Sim> {
     let mut omega = vec![0f64; p_n];
     let mut jitter_rng = StdRng::seed_from_u64(cfg.seed ^ 0x6a17);
     let jitter = Normal::new(0.0, cfg.share_jitter.max(0.0))?;
+    // Uniform times draw as they always have (the same streams).
+    let time_beta = (cfg.time_shape != 1.0)
+        .then(|| Beta::new(cfg.time_shape, cfg.time_shape))
+        .transpose()?;
     for p in 0..p_n {
         let lin = p % l;
-        let k = rng.random_range(0..n);
+        let k = match &time_beta {
+            None => rng.random_range(0..n),
+            Some(beta) => {
+                let x: f64 = beta.sample(&mut rng);
+                ((x * (n - 1) as f64).round() as usize).min(n - 1)
+            }
+        };
         let t = k as f64 * step;
         omega[p] = jitter.sample(&mut jitter_rng);
         let scale = (omega[p] + cfg.log_capture).exp();

@@ -51,7 +51,10 @@ run opens with `senna view {run}.senna.json`. `view_map` \
 draws the map with its legend; its arguments stay set until changed, so pass \
 only what changes. `view_markers` lists what sets a group apart, `view_cell` \
 names a point and its groups, and `view_export` writes figures. World \
-coordinates are the layout's, y up. Close with `notebook` (kind \
+coordinates are the layout's, y up. When `run_fit` or `view_open` returns \
+`needs_input`, the fit could not settle something from its data (an ODE's root, \
+say): put each question to the user before reading the result as settled, and \
+rerun with the option they choose. Close with `notebook` (kind \
 `conclusion`) and tell the user where the records are.";
 
 /// The tools, and the run they have open.

@@ -46,7 +46,8 @@ struct Climbed {
 fn climbed(cfg: &SimConfig) -> Climbed {
     let sim = simulate(cfg).unwrap();
     let reads = first(&sim, sim.n_pb);
-    let (fit, objective) = climb(&reads, &opts(cfg), &Device::Cpu).unwrap();
+    let climbed = climb(&reads, &opts(cfg), &Device::Cpu).unwrap();
+    let (fit, objective) = (climbed.fit, climbed.objective);
     let (_, time) = fit.posterior(&fit.reads(&reads).unwrap()).unwrap();
     let spearman = spearman(&time, &sim.truth.time);
     eprintln!(

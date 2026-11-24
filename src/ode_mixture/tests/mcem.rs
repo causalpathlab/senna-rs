@@ -91,7 +91,8 @@ fn permute(v: &mut Vec<usize>, k: usize, f: &mut dyn FnMut(&[usize])) {
 
 fn check(l: usize, seed: u64) -> (f64, f64) {
     let (sim, reads) = fates(l, seed);
-    let (fit, objective) = climb(&reads, &opts(l), &Device::Cpu).unwrap();
+    let climbed = climb(&reads, &opts(l), &Device::Cpu).unwrap();
+    let (fit, objective) = (climbed.fit, climbed.objective);
     let (_, time) = fit.posterior(&fit.reads(&reads).unwrap()).unwrap();
     let (rho, pure) = (spearman(&time, &sim.truth.time), purity(&fit, &reads, &sim));
     eprintln!("{l} fates, seed {seed}: objective {objective:.1}, time Spearman {rho:.3}, purity {pure:.3}");

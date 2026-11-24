@@ -232,20 +232,21 @@ impl UpdateArgs {
 
 /// The partition a round collapses on: `--pb-from` when given, else the
 /// parent's own, so the round keeps the pseudobulks it is critiqued on. None
-/// for a parent cut by `--cnv-clones` (its strata are its own to rebuild), for
-/// a kind that does not collapse, and for an update with new data.
+/// for a parent whose partition is its own (cut by `--cnv-clones`, its strata
+/// its own to rebuild), for a kind that does not collapse, and for an update
+/// with new data.
 pub(crate) fn round_partition(
     given: Option<Box<str>>,
     parent: &str,
     kind: RunKind,
     round: bool,
-    cnv_cut: bool,
+    own_partition: bool,
 ) -> Option<Box<str>> {
     let collapses = matches!(kind, RunKind::Topic | RunKind::Vae) || kind.is_masked_family();
     if !round || !collapses {
         return given;
     }
-    given.or_else(|| (!cnv_cut).then(|| Box::from(parent)))
+    given.or_else(|| (!own_partition).then(|| Box::from(parent)))
 }
 
 /// A round replays the recorded inputs as cells, so a lineage that absorbed
@@ -475,31 +476,32 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     ensure_not_recorded(&recorded, &args.data_files)?;
     let reference = select_reference(args, &manifest, &recorded)?;
 
-    // Only the collapsing families take a partition, and a parent cut by
-    // --cnv-clones built strata no other run's partition covers.
-    let cnv_cut = manifest
+    // Only the collapsing families take a partition, and a parent whose
+    // partition is its own (cut by --cnv-clones) shares no other run's.
+    let own_partition = manifest
         .train_args
         .as_ref()
-        .is_some_and(|t| crate::refine_weighting::cut_by_cnv_clones(&t.args));
+        .and_then(|t| crate::refine_weighting::own_partition(&t.args));
     if args.pb_from.is_some() {
         anyhow::ensure!(
             matches!(kind, RunKind::Topic | RunKind::Vae) || kind.is_masked_family(),
             "--pb-from applies to a run that collapses cells into pseudobulks (topic, masked-*, \
              vae), not to a '{kind}' run"
         );
-        anyhow::ensure!(
-            !cnv_cut,
-            "{} was cut by --cnv-clones and built its own strata, which no other run's \
-             partition covers; a round of it collapses on its own",
-            args.model
-        );
+        if let Some(why) = own_partition {
+            anyhow::bail!(
+                "{} {why}, which no other run's partition covers; a round of it collapses \
+                 on its own",
+                args.model
+            );
+        }
     }
     let pb_from = round_partition(
         args.pb_from.clone(),
         &args.model,
         kind,
         args.is_round(),
-        cnv_cut,
+        own_partition.is_some(),
     );
 
     let (data_files, batch_files) = match reference.as_ref() {

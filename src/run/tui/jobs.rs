@@ -203,6 +203,9 @@ pub struct Queue {
     stoppers: Vec<Arc<Stopper>>,
     answers: Sender<Keep>,
     workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Whether its finished fits were read for the choices they left open:
+    /// once a queue.
+    pub choices_read: bool,
 }
 
 impl Queue {
@@ -248,6 +251,7 @@ impl Queue {
             stoppers,
             answers,
             workers: Mutex::new(workers),
+            choices_read: false,
         }
     }
 

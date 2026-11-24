@@ -26,6 +26,100 @@ pub(crate) fn label_key(s: &str) -> String {
         .join("_")
 }
 
+/// The round made from the manifest at `path`, found next to it: a
+/// manifest in the same directory whose `annotate.source` resolves to it.
+pub(crate) fn made_from(path: &Path) -> Option<PathBuf> {
+    // lupin names a round's successor `{stem}.r{N}.senna.json`; prefer
+    // that chain over any other round made from this one.
+    let stem = run_manifest::derive_out_prefix(&files::name(path));
+    let mut found = siblings(path, ".senna.json");
+    found.sort_by_key(|p| !files::name(p).starts_with(&format!("{stem}.r")));
+    found.into_iter().find(|p| {
+        read_json::<Value>(p)
+            .and_then(|v| v.pointer("/annotate/source")?.as_str().map(String::from))
+            .is_some_and(|src| {
+                same_file(
+                    &run_manifest::resolve(run_manifest::manifest_dir(p), &src),
+                    path,
+                )
+            })
+    })
+}
+
+/// The newest round of the run at `run` (a run's manifest), following
+/// [`made_from`] to the end of the chain; `None` when it has none.
+fn newest_round(run: &Path) -> Option<PathBuf> {
+    let mut at = made_from(run)?;
+    // A chain is short; the bound stops a cycle of rounds naming each other.
+    for _ in 0..64 {
+        match made_from(&at) {
+            Some(next) => at = next,
+            None => break,
+        }
+    }
+    Some(at)
+}
+
+/// `cell → type` from the newest round of the run at `run`: lupin's fine
+/// types when it wrote them, else its argmax; `None` with no round or no
+/// labels.
+fn round_cell_types(run: &Path) -> Option<HashMap<Box<str>, Box<str>>> {
+    let round = newest_round(run)?;
+    let (m, dir) = RunManifest::load(&round).ok()?;
+    let table = annotate_str(&m, "fine_argmax")
+        .map(String::from)
+        .or_else(|| m.annotate.argmax.clone())?;
+    read_argmax(&run_manifest::resolve(&dir, &table)).ok()
+}
+
+/// The open choices of the run at `run` (`decisions`, from its manifest),
+/// every option that stands for cells ([`DecisionOption::cells`]) labelled
+/// with what they mostly are by the run's newest lupin round, and whether
+/// the run had one to label them by.
+///
+/// [`DecisionOption::cells`]: run_manifest::DecisionOption::cells
+pub(crate) fn typed_decisions(
+    run: &Path,
+    decisions: &[run_manifest::Decision],
+) -> (Vec<run_manifest::Decision>, bool) {
+    let mut out = decisions.to_vec();
+    let Some(types) = round_cell_types(run) else {
+        return (out, false);
+    };
+    for option in out.iter_mut().flat_map(|d| d.options.iter_mut()) {
+        let Some(list) = &option.cells else {
+            continue;
+        };
+        let Ok(cells) = legume_numeric::matrix::common_io::read_name_list(list) else {
+            continue;
+        };
+        if let Some(mostly) = composition(&cells, &types) {
+            option.label = format!("{}; {mostly}", option.label);
+        }
+    }
+    (out, true)
+}
+
+/// What `cells` mostly are under `types`: the commonest type and its share,
+/// and the next when it holds a tenth or more; `None` when none is typed.
+fn composition(cells: &[Box<str>], types: &HashMap<Box<str>, Box<str>>) -> Option<String> {
+    let mut counts: HashMap<&str, usize> = HashMap::default();
+    for c in cells {
+        if let Some(t) = types.get(c) {
+            *counts.entry(t.as_ref()).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let share = |n: usize| 100.0 * n as f64 / cells.len() as f64;
+    let (top, n) = *ranked.first()?;
+    let mut said = format!("mostly {top} ({:.0}%)", share(n));
+    if let Some(&(next, m)) = ranked.get(1).filter(|(_, m)| share(*m) >= 10.0) {
+        said.push_str(&format!(", then {next} ({:.0}%)", share(m)));
+    }
+    Some(said)
+}
+
 /// Label a round gives a cell it did not assign.
 pub(super) const UNASSIGNED: &str = "unassigned";
 
@@ -254,21 +348,7 @@ impl Round {
     /// directory whose `annotate.source` resolves to this file.
     #[must_use]
     pub fn newer(&self) -> Option<PathBuf> {
-        // lupin names a round's successor `{stem}.r{N}.senna.json`; prefer
-        // that chain over any other round made from this one.
-        let stem = run_manifest::derive_out_prefix(&files::name(&self.path));
-        let mut found = siblings(&self.path, ".senna.json");
-        found.sort_by_key(|p| !files::name(p).starts_with(&format!("{stem}.r")));
-        found.into_iter().find(|p| {
-            read_json::<Value>(p)
-                .and_then(|v| v.pointer("/annotate/source")?.as_str().map(String::from))
-                .is_some_and(|src| {
-                    same_file(
-                        &run_manifest::resolve(run_manifest::manifest_dir(p), &src),
-                        &self.path,
-                    )
-                })
-        })
+        made_from(&self.path)
     }
 
     /// The label the round gives cluster `id`, from the summary.
@@ -731,6 +811,50 @@ mod tests {
         assert_eq!(
             Round::load(&m, &d, &path).cluster_lines("9")[0],
             "C9 · no summary recorded for this round"
+        );
+    }
+
+    /// A root's options say what their cells are by the run's newest lupin
+    /// round (its fine types); a run with no round leaves them as they are.
+    #[test]
+    fn root_options_are_typed_by_the_runs_newest_round() {
+        use senna::run_manifest::{Decision, DecisionOption};
+        let dir = tempfile::tempdir().unwrap();
+        let run = write(
+            dir.path(),
+            "r.senna.json",
+            r#"{"version":2,"kind":"ode","prefix":"r"}"#,
+        );
+        let cells = write(dir.path(), "r.root_0.txt", "a\nb\nc\nd\n");
+        let decisions = vec![Decision {
+            topic: "root".into(),
+            question: "Which root?".into(),
+            hint: String::new(),
+            options: vec![DecisionOption {
+                label: "root 0".into(),
+                rerun_args: Vec::new(),
+                objective: None,
+                cells: Some(cells.to_string_lossy().into_owned()),
+            }],
+        }];
+        let (same, typed) = typed_decisions(&run, &decisions);
+        assert!(!typed);
+        assert_eq!(same[0].options[0].label, "root 0");
+        write(
+            dir.path(),
+            "r.L1.fine.tsv",
+            "cell\tcell_type\tprobability\na\tHSC\t1\nb\tHSC\t1\nc\tHSC\t1\nd\tMk\t1\n",
+        );
+        write(
+            dir.path(),
+            "r.L1.senna.json",
+            r#"{"version":2,"kind":"ode","prefix":"r.L1","annotate":{"source":"r.senna.json","fine_argmax":"r.L1.fine.tsv"}}"#,
+        );
+        let (labelled, typed) = typed_decisions(&run, &decisions);
+        assert!(typed);
+        assert_eq!(
+            labelled[0].options[0].label,
+            "root 0; mostly HSC (75%), then Mk (25%)"
         );
     }
 }

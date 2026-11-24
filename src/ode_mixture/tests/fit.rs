@@ -161,7 +161,9 @@ fn adam_climbs_from_the_prior_rates_to_the_truth() {
         .unwrap()
         .to_scalar::<f32>()
         .unwrap();
-    let after = fit.adam(&reads, 600, 0.03).unwrap();
+    let after = fit
+        .adam(&fit.reads(&reads).unwrap(), 600, 0.03, None)
+        .unwrap()[0];
     let got = fit.params().unwrap();
     let mut err: Vec<f64> = (0..sim.n_genes)
         .map(|g| {
@@ -198,8 +200,13 @@ fn a_stop_ends_adam_at_once() {
         .to_scalar::<f32>()
         .unwrap();
     let after = fit
-        .adam_until(&reads, 1000, 0.03, Some(&AtomicBool::new(true)))
-        .unwrap();
+        .adam(
+            &fit.reads(&reads).unwrap(),
+            1000,
+            0.03,
+            Some(&AtomicBool::new(true)),
+        )
+        .unwrap()[0];
     assert_eq!(before, after);
 }
 
@@ -290,4 +297,58 @@ fn with_a_trunk_the_lineages_levels_agree_before_the_branch() {
     }
     assert!(before < 1e-6, "before the branch {before}");
     assert!(after > 0.05, "after the branch {after}");
+}
+
+/// Starts in one batch climb as each would alone: Adam's steps are
+/// elementwise and every start's objective its own, on a trunk too.
+#[test]
+fn starts_in_a_batch_climb_as_each_alone() {
+    let cfg = SimConfig {
+        lineages: 2,
+        fine: 133,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let prior = GridPrior::new(45, 1.0, cfg.kappa).unwrap();
+    let reads = Reads::new(&sim.u, &sim.s, sim.n_pb, sim.n_genes);
+    let a = truth_params(&sim, 133, 45);
+    let mut b = a.clone();
+    for r in &mut b.base {
+        *r -= 0.3;
+    }
+    let at = [vec![0.3], vec![0.6]];
+    let climb = |fit: Fit| {
+        let on = fit.reads(&reads).unwrap();
+        let got = fit.adam(&on, 40, 0.03, None).unwrap();
+        (fit, got)
+    };
+    let batch = Fit::from_starts(&[a.clone(), b.clone()], &prior, &Device::Cpu)
+        .unwrap()
+        .with_share(Some(0.01))
+        .unwrap()
+        .with_trunks(&[a.clone(), b.clone()], &prior, &at)
+        .unwrap();
+    let (batch, together) = climb(batch);
+    for (i, start) in [a, b].iter().enumerate() {
+        let alone = Fit::from_params(start, &prior, &Device::Cpu)
+            .unwrap()
+            .with_share(Some(0.01))
+            .unwrap()
+            .with_trunk(start, &prior, &at[i])
+            .unwrap();
+        let (alone, by_itself) = climb(alone);
+        assert!(
+            rel(f64::from(together[i]), f64::from(by_itself[0])) < 1e-5,
+            "start {i}: {} together, {} alone",
+            together[i],
+            by_itself[0]
+        );
+        // Taken out of the batch, a start is that fit.
+        let taken = batch.start(i).unwrap();
+        let (p, q) = (taken.params().unwrap(), alone.params().unwrap());
+        assert!(rel(p.branch.unwrap()[0], q.branch.unwrap()[0]) < 1e-3);
+        let on = taken.reads(&reads).unwrap();
+        let mine = taken.objective(&on).unwrap().to_scalar::<f32>().unwrap();
+        assert!(rel(f64::from(mine), f64::from(together[i])) < 1e-5);
+    }
 }

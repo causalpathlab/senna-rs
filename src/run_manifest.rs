@@ -696,10 +696,53 @@ pub struct RunManifest {
     /// no round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<RunHistory>,
+    /// What the fit could not settle from its data and leaves to its user
+    /// (or to an agent, to ask its user), each with the reruns that settle
+    /// it; empty when the data settled everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Decision>,
+    /// The fit's objective at its mode (its log posterior, up to a
+    /// constant): comparable between fits of the same data, genes and
+    /// settings, as reruns with another answer to a decision are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<f64>,
     /// Fields this version does not know, written by another tool or a
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]
     pub unknown: Unknown,
+}
+
+/// A choice a fit left open ([`RunManifest::decisions`]): the question, and
+/// every answer as the arguments to add to the fit's command to rerun it
+/// with that answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Decision {
+    /// A short name for what is to be decided, e.g. `root`.
+    pub topic: String,
+    /// The question, put to a person.
+    pub question: String,
+    /// How to judge between the options, for whoever puts the question
+    /// (an agent, say); empty when there is nothing to add.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hint: String,
+    pub options: Vec<DecisionOption>,
+}
+
+/// One answer to a [`Decision`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionOption {
+    /// The answer, put to a person.
+    pub label: String,
+    /// The arguments that rerun the fit with this answer.
+    pub rerun_args: Vec<String>,
+    /// The objective the fit reached with this answer
+    /// ([`RunManifest::objective`]), when it tried it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<f64>,
+    /// The cells this answer stands for, a list of names a line, when it
+    /// stands for cells: what an annotation can say they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cells: Option<String>,
 }
 
 /// One round's place in a model's history: the version it continued from, the
@@ -1244,6 +1287,8 @@ impl RunManifest {
             defaults: RunDefaults::default(),
             train_args: None,
             history: None,
+            decisions: Vec::new(),
+            objective: None,
             unknown: Unknown::default(),
         }
     }

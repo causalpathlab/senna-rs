@@ -184,3 +184,17 @@ fn a_round_refuses_a_lineage_holding_carried_pseudobulks() {
     let e = check_round_inputs(&carried).unwrap_err().to_string();
     assert!(e.contains("round") && !e.contains("--batch-files"), "{e}");
 }
+
+/// An ODE fit grouped by splicing shares its partition with no run; one by
+/// the collapse (or a fit with no such setting) does.
+#[test]
+fn a_splicing_partition_is_read_off_its_recorded_arguments() {
+    use crate::refine_weighting::grouped_by_splicing;
+    assert!(grouped_by_splicing(
+        &serde_json::json!({ "pb_graph": "ratio" })
+    ));
+    assert!(!grouped_by_splicing(
+        &serde_json::json!({ "pb_graph": "collapse" })
+    ));
+    assert!(!grouped_by_splicing(&serde_json::json!({ "epochs": 10 })));
+}

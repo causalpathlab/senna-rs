@@ -66,9 +66,57 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
     // A background fit's run is not there yet: the agent opens it once
     // the job is done.
     if done.get("job").is_none() {
-        done["kind"] = json!(kind(Path::new(done["run"].as_str().unwrap_or_default()))?);
+        let run = PathBuf::from(done["run"].as_str().unwrap_or_default());
+        let (m, _) = RunManifest::load(&run)?;
+        done["kind"] = serde_json::to_value(m.kind)?;
+        decision_fields(&m, &run, &mut done);
     }
     Ok(vec![Content::Json(done)])
+}
+
+/// The run at `run`'s (`m` its manifest) objective and what its fit left
+/// to its user ([`needs_input`]), set in `out`.
+pub(super) fn decision_fields(m: &RunManifest, run: &Path, out: &mut Value) {
+    if let Some(objective) = m.objective {
+        out["objective"] = json!(objective);
+    }
+    if let Some(ask) = needs_input(m, run) {
+        out["needs_input"] = ask;
+    }
+}
+
+/// What the fit of the run at `run` (`m` its manifest) left to its user
+/// ([`RunManifest::decisions`]), as an agent is to put it to them: every
+/// option that stands for cells labelled with what they are by the run's
+/// newest lupin round ([`crate::view::typed_decisions`]); `None` when
+/// nothing is open.
+pub(super) fn needs_input(m: &RunManifest, run: &Path) -> Option<Value> {
+    if m.decisions.is_empty() {
+        return None;
+    }
+    let (decisions, typed) = crate::view::typed_decisions(run, &m.decisions);
+    let mut ask = json!({
+        "decisions": decisions,
+        "note": "the fit could not settle these from its data: every option's objective is how \
+                 far its fit got (higher is better), and gaps this small are within the data's \
+                 noise, so judge by what the options are (a decision's hint says how). Put each \
+                 question to the user with that evidence and let them choose; rerun with \
+                 run_fit, the chosen option's rerun_args added to its args and a new out (its \
+                 objective comes back with it).",
+    });
+    let for_cells = m
+        .decisions
+        .iter()
+        .flat_map(|d| &d.options)
+        .any(|o| o.cells.is_some());
+    if for_cells && !typed {
+        ask["label_cells"] = json!(
+            "the options name no cell types: the run has no lupin round. Annotate it with \
+             lupin's MCP server (its annotate, on this run, with a marker panel the user names), \
+             then view_open this run again: every option then says what its cells mostly are."
+        );
+    }
+    Some(ask)
 }
 
 /// The fit `senna {argv}` in the background, from this server's folder:
@@ -119,12 +167,6 @@ fn background_fit(
 
 fn check_method(method: &str) -> Result<()> {
     one_of(method, &METHODS).context("senna's fits")
-}
-
-/// The kind of fit the run `manifest` records.
-fn kind(manifest: &Path) -> Result<Value> {
-    let (m, _) = RunManifest::load(manifest)?;
-    Ok(serde_json::to_value(m.kind)?)
 }
 
 #[derive(Deserialize)]
