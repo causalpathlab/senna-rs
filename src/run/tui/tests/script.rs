@@ -93,13 +93,7 @@ fn the_script_runs_the_command_once_and_then_refuses() {
     let dir = tempfile::tempdir().unwrap();
     // A stand-in senna that writes the manifest its --out names.
     let fake = dir.path().join("fake-senna");
-    std::fs::write(
-        &fake,
-        "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_program::write(&fake, "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n");
     let path = dir.path().join("r.cmd.sh");
     write(
         &path,
@@ -150,13 +144,7 @@ fn a_script_for_an_out_in_a_folder_runs_from_where_the_run_started() {
     // A stand-in senna that reads its data where it was given, and
     // writes the manifest its --out names.
     let fake = dir.path().join("fake-senna");
-    std::fs::write(
-        &fake,
-        "#!/bin/sh\n[ -e d.zarr ] || exit 3\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_program::write(&fake, "#!/bin/sh\n[ -e d.zarr ] || exit 3\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n");
     let path = dir.path().join("runs/r.cmd.sh");
     let a = argv(&["svd", "d.zarr", "--out", "runs/r"]);
     write(&path, "runs/r", &a, Tool::Senna).unwrap();
