@@ -202,6 +202,10 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         plan.init_from,
         plan.pb_reference,
     )?;
+    // The partition outlives the collapse: it is written with the run, for
+    // `--pb-from` / `--from` chains and for readers that pool the cells'
+    // counts by pseudobulk sample (finest pseudobulk × batch).
+    let cell_to_pb_per_level = pseudobulks.cell_to_pb_per_level.clone();
     drop(pseudobulks);
 
     /////////////////////////////
@@ -389,6 +393,13 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // separates by batch, this table says whether the separation was already
     // there before phase 2.
     write_pb_embeddings(knobs.out, &out.pb_embeddings, &plan.unified.batch_names)?;
+    // Coarsest → finest, the writer's finest-last order.
+    crate::postprocess::viz_prep::write_cell_to_pb(
+        knobs.out,
+        &cell_to_pb_per_level,
+        &plan.unified.barcodes,
+        qc_keep_idx.as_deref(),
+    )?;
     if let Some(fold) = &out.batch_gene_fold {
         write_batch_gene_fold(knobs.out, fold, &plan.unified.feature_names)?;
     }
@@ -433,7 +444,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         default_colour_by: if resolve_etm { "topic" } else { "cluster" },
         // `latent` is log θ, so it exists only when the ETM actually resolved.
         has_latent: resolve_etm,
-        has_cell_to_pb: false,
+        has_cell_to_pb: true,
         has_pb_tree: false,
     })?;
 

@@ -91,6 +91,8 @@ fn bge_writes_its_documented_output_set_and_manifest_kind() {
         "feature_bias",
         "pb_embedding",
         "pb_batch",
+        // the partition, for `--pb-from` / `--from` and `senna donor-deviation`
+        "cell_to_pb",
     ]
     .into_iter()
     .map(|suffix| format!("run.{suffix}.parquet"))
@@ -106,6 +108,11 @@ fn bge_writes_its_documented_output_set_and_manifest_kind() {
 
     let (manifest, _dir) = run_manifest::load_for(&out).expect("load the manifest back");
     assert_eq!(manifest.kind, RunKind::Bge, "manifest kind must be bge");
+    assert_eq!(
+        manifest.outputs.cell_to_pb.as_deref(),
+        Some("run.cell_to_pb.parquet"),
+        "the manifest must name the partition bge wrote"
+    );
 }
 
 /// A pinned table wider than the data: its unmatched rows come out after the
