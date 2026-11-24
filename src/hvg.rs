@@ -1,8 +1,7 @@
-//! HVG selection has moved to `data_beans::alg::hvg`. This module
-//! re-exports the public surface so existing `crate::hvg::*` call sites
-//! in senna keep compiling unchanged.
+//! How `--multiome` and the HVG settings combine for a run. HVG selection
+//! itself lives in `data_beans::alg::hvg`.
 
-pub use data_beans::alg::hvg::{load_must_train, select_hvg_streaming, HvgCliArgs, HvgSelection};
+use data_beans::alg::hvg::HvgCliArgs;
 
 /// The `--multiome` flag and HVG settings a run will actually use, after the
 /// warn-and-zero rules in [`resolve_multiome_with_hvg`] have been applied.
@@ -23,7 +22,7 @@ impl EffectiveHvg<'_> {
 
 /// Resolve the effective `--multiome` flag and HVG settings against the
 /// caller's CLI args. Mirrors the warn-and-zero rules from senna's
-/// `gbe` and `masked-topic` entry points so both surface identical behavior:
+/// `bge` and `masked-topic` entry points so both surface identical behavior:
 ///
 /// - `--multiome` with a single input file is a no-op (no other backend
 ///   to glue against) → cleared.

@@ -22,7 +22,7 @@ use legume_numeric::matrix::dmatrix_io::DMatrix;
 use legume_numeric::matrix::traits::{IoOps, MatWithNames};
 use log::{info, warn};
 use rustc_hash::{FxHashMap, FxHashSet};
-use senna::cluster::leiden_clustering;
+use senna::cluster::{leiden_clustering_with_metric, LatentMetric};
 use senna::cluster_aggregation::accumulate_gene_sum_multi;
 use senna::embed_common::Mat;
 use senna::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
@@ -332,12 +332,13 @@ impl ArchetypeInputs {
     /// of the full count matrix (`usize::MAX` for cells not in the subset).
     fn partition(&self, target: usize, seed: u64, min_cells: usize) -> Result<Vec<usize>> {
         let target = target.clamp(1, self.rows.len());
-        let clustered = leiden_clustering(
+        let clustered = leiden_clustering_with_metric(
             &self.sub,
             LEIDEN_KNN,
             LEIDEN_RESOLUTION,
             Some(target),
             Some(seed),
+            LatentMetric::ZScoreEuclidean,
         )?;
         let labels_sub = merge_small(
             &clustered.labels,

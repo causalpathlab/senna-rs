@@ -182,7 +182,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     //
     // `--must-train-features` is a curated panel kept in the HVG-weighted set.
     let hvg_enabled = effective_hvg.selection_on();
-    let must_train = crate::hvg::load_must_train(effective_hvg.must_train_file, hvg_enabled)?;
+    let must_train =
+        data_beans::alg::hvg::load_must_train(effective_hvg.must_train_file, hvg_enabled)?;
     let hvg_full: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             unified.count_backend(),

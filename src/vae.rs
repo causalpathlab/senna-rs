@@ -197,7 +197,7 @@ pub struct VaeArgs {
     pub(crate) preload_data: bool,
 
     #[command(flatten)]
-    pub(crate) hvg: crate::hvg::HvgCliArgs,
+    pub(crate) hvg: data_beans::alg::hvg::HvgCliArgs,
 
     #[command(flatten)]
     #[serde(flatten)]

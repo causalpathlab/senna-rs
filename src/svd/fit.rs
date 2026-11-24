@@ -1,5 +1,5 @@
-use crate::hvg::HvgCliArgs;
 use crate::topic::common::{collapse_multilevel, load_and_project, LoadProjectArgs, ProjectedData};
+use data_beans::alg::hvg::HvgCliArgs;
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 use senna::embed_common::*;
 use senna::sparse_output::{write_backend, Entries};

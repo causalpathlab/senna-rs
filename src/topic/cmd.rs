@@ -255,7 +255,7 @@ pub struct TopicArgs {
     pub(crate) feature_name_kind: crate::masked_topic::FeatureNameKindArg,
 
     #[command(flatten)]
-    pub(crate) hvg: crate::hvg::HvgCliArgs,
+    pub(crate) hvg: data_beans::alg::hvg::HvgCliArgs,
 
     #[command(flatten)]
     #[serde(flatten)]

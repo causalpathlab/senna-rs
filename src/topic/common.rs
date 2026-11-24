@@ -1,5 +1,5 @@
-use crate::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
 use crate::logging::new_progress_bar;
+use data_beans::alg::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
 pub use senna::embed_common::preferred_posterior_mean;
 use senna::embed_common::*;
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};

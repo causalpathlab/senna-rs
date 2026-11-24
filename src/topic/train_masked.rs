@@ -4,8 +4,7 @@
 //! This module owns senna-specific bits the legume_numeric::candle trainer does not
 //! see: per-level data assembly from [`CollapsedOut`], bulk-vs-SC delta
 //! estimation, bulk evaluation, and the dictionary / feature-embedding
-//! writers. The `pub(crate) use` re-exports keep existing call sites
-//! (the `masked_topic` command, `train_cell_embedded`) on stable import paths.
+//! writers.
 
 use super::common::{posterior_seed, sample_collapsed_data_dp};
 use senna::embed_common::*;
@@ -13,8 +12,7 @@ use senna::embed_common::*;
 use candle_core::Tensor;
 use legume_numeric::candle::encoder::IndexedEmbeddingEncoder;
 
-// Re-export the generic trainer surface so legacy call sites stay put.
-pub(crate) use legume_numeric::candle::vae::masked_topic::IndexedTrainConfig;
+use legume_numeric::candle::vae::masked_topic::IndexedTrainConfig;
 
 /// Materialize per-level `(mixed, batch, target)` `Mat` triples once
 /// per training run, in the posterior's own `[D, P]` orientation.

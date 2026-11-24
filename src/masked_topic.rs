@@ -3,15 +3,13 @@ use crate::topic::common::{
     PreparedData,
 };
 use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
-use crate::topic::train_masked::{
-    train_masked, write_feature_embedding, write_masked_dictionary, IndexedTrainConfig,
-};
+use crate::topic::train_masked::{train_masked, write_feature_embedding, write_masked_dictionary};
 use senna::embed_common::*;
 
 use legume_numeric::candle::decoder::masked_etm::{log_background_from_mean, pin_background};
 use legume_numeric::candle::decoder::EmbeddedNbTopicDecoder;
 use legume_numeric::candle::encoder::*;
-use legume_numeric::candle::vae::masked_topic::LatentHead;
+use legume_numeric::candle::vae::masked_topic::{IndexedTrainConfig, LatentHead};
 use log::warn;
 
 /// Mask-rate schedule (CLI surface for `MaskSchedule`).
@@ -388,7 +386,7 @@ pub struct MaskedTopicArgs {
     multiome: bool,
 
     #[command(flatten)]
-    hvg: crate::hvg::HvgCliArgs,
+    hvg: data_beans::alg::hvg::HvgCliArgs,
 
     #[arg(
         long,

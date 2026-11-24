@@ -18,7 +18,7 @@ fn names(new: usize, refs: usize) -> Vec<Box<str>> {
 
 fn input(counts: &[f32]) -> ReferenceInput {
     ReferenceInput {
-        backend: "parent.pb_reference.zarr".into(),
+        backend: "parent.pb_reference.zarr.zip".into(),
         batch_file: "parent.pb_reference_batch.txt".into(),
         cell_counts: counts.to_vec(),
     }

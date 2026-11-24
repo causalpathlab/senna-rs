@@ -259,7 +259,7 @@ pub(crate) fn hide_features(
 /// Build a gene remap from training gene names and new-data gene names.
 ///
 /// Tries case-insensitive exact match first; falls back to
-/// `flexible_gene_match` (handles aliases like `ENSG..._GENEJ` ↔ `GENEJ`,
+/// `flexible_name_match` (handles aliases like `ENSG..._GENEJ` ↔ `GENEJ`,
 /// case differences, and `_`-delimited prefixes/suffixes).
 #[cfg(test)]
 pub(crate) fn build_gene_remap(
@@ -278,7 +278,7 @@ pub(crate) fn build_gene_remap_with(
     new_data_genes: &[Box<str>],
     opts: &QueryNameOpts,
 ) -> GeneRemap {
-    use senna::marker_support::flexible_gene_match;
+    use data_beans::utilities::name_matching::flexible_name_match;
 
     use data_beans::aux::feature_names::FeatureNameKind;
     use senna::embed_common::{is_locus, match_key};
@@ -333,7 +333,7 @@ pub(crate) fn build_gene_remap_with(
                 None
             } else if let Some(i) = training_genes
                 .iter()
-                .position(|t| flexible_gene_match(&key, t))
+                .position(|t| flexible_name_match(&key, t))
             {
                 n_flexible += 1;
                 Some(i)
