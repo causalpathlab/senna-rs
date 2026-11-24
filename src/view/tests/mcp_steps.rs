@@ -1,4 +1,5 @@
 use super::*;
+use crate::view::mcp::jobs::senna_parses;
 use std::path::PathBuf;
 
 fn step(v: Value) -> Result<Task> {
@@ -64,11 +65,6 @@ fn each_step_runs_its_command_on_the_run_and_names_what_it_makes() {
             json!({"command": "fne", "data": ["ppi.tsv"], "out": "g"}),
             vec!["fne", "ppi.tsv", "-o", "g"],
             vec![("run", "g.senna.json")],
-        ),
-        (
-            json!({"command": "embed-diag", "from": "r.senna.json"}),
-            vec!["embed-diag", "r.senna.json"],
-            vec![],
         ),
     ];
     for (call, argv, made) in cases {

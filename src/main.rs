@@ -45,7 +45,6 @@ mod critique;
 mod deconvolve;
 mod docs;
 mod donor_deviation;
-mod embed_diag;
 mod empirical_dict;
 mod feature_embedding_args;
 mod feature_preset;
@@ -103,7 +102,6 @@ use critique::{run_critique, CritiqueArgs};
 use deconvolve::DeconvolveArgs;
 use docs::{run_docs, DocsArgs};
 use donor_deviation::{run_donor_deviation, DonorDeviationArgs, DONOR_DEVIATION_LONG_ABOUT};
-use embed_diag::*;
 use fne::{fit_fne, FneArgs};
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
@@ -758,25 +756,6 @@ enum Commands {
     )]
     Impute(ImputeArgs),
 
-    #[command(
-        about = "Effective rank and common-mode readout of a run's embedding tables.",
-        long_about = "Read the cell embedding, the per-gene loading and, when the run\n\
-                      trained gene modules, the module dictionary off a manifest,\n\
-                      and report each table's geometry:\n\
-                      the participation ratio (raw and column-centred),\n\
-                      the signed mean pairwise cosine between rows,\n\
-                      the mean |cos| to the shared mean direction,\n\
-                      and the largest between-dim correlation and VIF.\n\
-                      \n\
-                      READ THE PARTICIPATION RATIO AS VARIANCE CONCENTRATION,\n\
-                      NOT AS USEFUL DIMENSIONALITY. A low value says few directions\n\
-                      carry the variance; it does not say the rest are noise.\n\
-                      Raw far below centred means a mean offset, not a collapse.\n\
-                      \n\
-                      Prints a table to stdout; measures, decides nothing."
-    )]
-    EmbedDiag(EmbedDiagArgs),
-
     // ─────────── 3. Cluster (run on a manifest) ───────────
     #[command(
         about = "Cluster cells on the manifest's latent (kmeans / leiden / hsblock).",
@@ -1159,9 +1138,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Impute(args) => {
             impute_model(args)?;
-        }
-        Commands::EmbedDiag(args) => {
-            embed_diag(args)?;
         }
         Commands::JointSvd(args) => {
             fit_joint_svd(args)?;
