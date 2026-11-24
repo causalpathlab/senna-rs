@@ -16,7 +16,7 @@ pub(crate) struct EmbedKnobs<'a> {
     /// The shared random-projection + multilevel pseudobulk collapse
     /// pipeline (`--proj-dim`, `--sort-dim`, `--knn-cells`, `--num-levels`,
     /// `--iter-opt`, `--pb-refine-*`, `--mixture-batch`,
-    /// `--emit-pb-reference` / `--no-emit-pb-reference`). `build_config`
+    /// `--no-emit-pb-reference`). `build_config`
     /// reads its raw numbers straight off this reference.
     pub collapse: &'a crate::refine_weighting::CollapseArgs,
     /// `--mixture-batch`, resolved off `collapse`.

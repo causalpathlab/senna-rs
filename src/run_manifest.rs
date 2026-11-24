@@ -852,7 +852,7 @@ pub struct RunOutputs {
     pub pb_latent: Option<String>,
     /// `{out}.pb_reference.zarr.zip` — this run's pseudobulks, carried forward so a
     /// later `senna update` can absorb a sample without re-reading every cell
-    /// already seen. `None` unless `--emit-pb-reference` was passed. The
+    /// already seen. `None` under `--no-emit-pb-reference`. The
     /// sidecar `{out}.pb_reference.json` sits beside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_reference: Option<String>,

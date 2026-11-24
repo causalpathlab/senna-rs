@@ -106,7 +106,7 @@ pub fn read_data_on_shared_columns(
             // Use basename (not file index) so the `@<basename>` suffix
             // appended to disambiguate barcodes matches what
             // `data_beans::aux::data_loading::read_data_on_shared_rows`
-            // produces (used by gbe / topic / svd loaders). Without
+            // produces (used by bge / topic / svd loaders). Without
             // this, multi-file annotate runs see `AAA@0` while the
             // training pipeline wrote `AAA@Control0004`, every cell
             // misses the latent lookup, and downstream cluster /

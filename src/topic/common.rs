@@ -1307,7 +1307,7 @@ pub(crate) fn move_varmap_to_cpu(parameters: &candle_nn::VarMap) -> anyhow::Resu
 /// Set up a graceful stop flag for SIGINT/SIGTERM. Re-exported from
 /// `graph-embedding-util` so senna's topic models share the same
 /// handler (and behavior — first Ctrl+C → graceful, second → abort)
-/// as `senna gbe`.
+/// as `senna bge`.
 pub(crate) use graph_embedding_util::setup_stop_handler;
 
 //////////////////////////////////////////////////

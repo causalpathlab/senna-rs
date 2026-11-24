@@ -267,8 +267,7 @@ enum Commands {
                       \n\
                       Writes the same artifacts as `topic`.\n\
                       It adds `{out}.feature_embedding.parquet` (ρ) and `{out}.dispersion.parquet`.",
-        visible_aliases = ["mtm"],
-        aliases = ["itopic", "indexed-topic", "etm"]
+        visible_aliases = ["mtm"]
     )]
     MaskedTopic(MaskedTopicArgs),
 
@@ -419,9 +418,7 @@ enum Commands {
                       The H-space cell embedding Z is always {out}.cell_embedding.parquet.\n\
                       \n\
                       Unless --skip-etm, an ETM is resolved too.\n\
-                      That adds {out}.{latent,topic_embedding}.parquet, with latent = log θ.",
-        alias = "embed-graph",
-        alias = "gbe"
+                      That adds {out}.{latent,topic_embedding}.parquet, with latent = log θ."
     )]
     Bge(BgeArgs),
 

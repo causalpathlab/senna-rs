@@ -18,9 +18,6 @@ pub struct LayoutPhateArgs {
 }
 
 pub fn fit_layout_phate(args: &LayoutPhateArgs) -> anyhow::Result<()> {
-    if args.phate.phate_knn.is_some() || args.phate.phate_alpha.is_some() {
-        log::warn!("--phate-knn and --phate-alpha are deprecated and ignored");
-    }
     if args.common.target == LayoutTarget::Features {
         let phate = (&args.phate).into();
         return feature_pb_layout(&args.common, "phate", |pbs| {

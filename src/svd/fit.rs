@@ -171,7 +171,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     //
     // `collapse_columns_multilevel` would do, but it is a thin wrapper that
     // computes the cell → pb membership and then throws it away — and
-    // `--emit-pb-reference` needs it, to know how many cells each carried
+    // carrying the pseudobulks forward needs it, to know how many cells each carried
     // column stands for. Same work, one more return value.
     //
     // data_beans::alg hands levels back finest-FIRST, and svd consumes only
@@ -236,7 +236,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Borrowed, not moved: `--emit-pb-reference` reads the rest of
+    // Borrowed, not moved: carrying the pseudobulks forward reads the rest of
     // `collapse_out` further down, and a partial move would put it out of reach.
     if let Some(batch_db) = collapse_out.delta.as_ref() {
         let outfile = args.out.to_string() + ".delta.parquet";

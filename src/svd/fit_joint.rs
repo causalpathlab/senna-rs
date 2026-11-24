@@ -94,7 +94,7 @@ pub struct JointSvdArgs {
 pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     args.collapse
-        .reject_pb_reference(senna::run_manifest::RunKind::JointSvd)?;
+        .reject_mixture_batch(senna::run_manifest::RunKind::JointSvd)?;
 
     // 1. Read the data with batch membership
     let SparseStackWithBatch {

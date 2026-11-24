@@ -330,7 +330,7 @@ pub fn write(
 /// fresh fit or an exact re-collapse) — its column count identifies the
 /// carried tail so [`write()`] can pass those columns through instead of
 /// re-summarizing them. It is deliberately separate from `parent`: an update
-/// without `--use-pb-reference` has a parent (for the generation counter) but
+/// that re-collapses from cells has a parent (for the generation counter) but
 /// no carried tail.
 #[allow(clippy::too_many_arguments)] // one slot per provenance source, each documented above
 pub fn emit_if_requested(

@@ -260,15 +260,6 @@ pub struct PhateCliArgs {
     #[arg(long, default_value_t = 20, help = "PHATE diffusion time t")]
     pub phate_t: usize,
 
-    /// Deprecated: no PHATE layout reads it since every target diffuses on
-    /// its PB graph. Kept so old commands still parse; warns when given.
-    #[arg(long, hide = true)]
-    pub phate_knn: Option<usize>,
-
-    /// Deprecated, as `--phate-knn`.
-    #[arg(long, hide = true)]
-    pub phate_alpha: Option<f32>,
-
     #[arg(long, default_value_t = 300, help = "Max SMACOF iterations")]
     pub phate_mds_iter: usize,
 

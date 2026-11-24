@@ -158,9 +158,9 @@ project", PLoS Comput Biol 19(1): e1010786 (2023). doi:10.1371/journal.pcbi.1010
 
 # Stochastic data Embedding with Nearest Neighbourhood Adjustment
 
-## `senna indexed-topic` — Embedded Topic Model
+## `senna masked-topic` — Embedded Topic Model
 
-The per-cell top-K feature window training (`indexed-topic` / `itopic`) factorizes the topic-feature distribution β through a shared per-gene embedding ρ — Dieng et al. (2020)'s ETM, on packed top-K inputs.
+`masked-topic` factorizes the topic-feature distribution β through a shared per-gene embedding ρ — Dieng et al. (2020)'s ETM.
 
 **Parameters**
 - ρ ∈ ℝ^{D×H}: per-gene embedding. **Shared between encoder and decoder.**
@@ -189,7 +189,7 @@ where `log q_S` is the Jean et al. (2015) importance correction for sampled soft
 
 **Why share ρ.** Each gradient step lands on the same `Var` from two paths — the encoder's bag-of-features pool *and* the decoder's α·ρᵀ logits — so feature embeddings are densely supervised even though only top-K features fire per cell. Parameter count drops from K·D to K·H + D·H (H ≪ D in typical configurations).
 
-**Outputs.** In addition to the standard topic-model artifacts (`.dictionary.parquet`, `.latent.parquet`, `.safetensors`, etc.), `indexed-topic` writes:
+**Outputs.** In addition to the standard topic-model artifacts (`.dictionary.parquet`, `.latent.parquet`, `.safetensors`, etc.), `masked-topic` writes:
 
 - `{out}.feature_embedding.parquet` — D × H learned ρ. Directly usable for gene-gene similarity, clustering into programs, or initializing downstream models.
 

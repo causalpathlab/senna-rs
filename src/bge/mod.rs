@@ -5,7 +5,6 @@
 //! feature) graph is *built* internally from expression counts. The
 //! sibling `senna fne` (Feature Network Embedding) is the graph-input
 //! companion that consumes an explicit feature-feature edge list.
-//! `gbe` remains a clap alias for one release cycle.
 //!
 //! All algorithmic work lives in `graph_embedding_util`. This file resolves
 //! the multiome layout, loads the data, and weights the HVG selection — the

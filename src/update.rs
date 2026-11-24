@@ -153,22 +153,8 @@ pub struct UpdateArgs {
     )]
     epochs: Option<usize>,
 
-    /// Explicit form of the default. Kept so existing scripts parse, and so a
-    /// request the update cannot honour is an error rather than a fallback.
     #[arg(
         long,
-        hide = true,
-        requires = "data_files",
-        help = "Reuse the parent's carried pseudobulks (already the default)",
-        long_help = "Already the default. Passing it turns every case where the\n\
-                     substitution is impossible into an error instead of a\n\
-                     re-collapse."
-    )]
-    use_pb_reference: bool,
-
-    #[arg(
-        long,
-        conflicts_with = "use_pb_reference",
         help = "Re-collapse the whole cohort from cells, ignoring any carried pseudobulks",
         long_help = "By default an update substitutes the parent's carried pseudobulks\n\
                      for its cells, so it costs the NEW data only: absorbing S\n\
@@ -224,7 +210,7 @@ pub struct UpdateArgs {
 impl UpdateArgs {
     /// No new data: the parent continues on its own cells. What a round may
     /// and may not set is clap's: `--pb-from` and `--peer-labels` conflict
-    /// with new data, `--batch-files` and `--use-pb-reference` require it.
+    /// with new data, `--batch-files` requires it.
     pub(crate) fn is_round(&self) -> bool {
         self.data_files.is_empty()
     }
@@ -329,9 +315,7 @@ fn union_batches(
 /// whose files load in positional column order (a multiome parent's union
 /// alignment cannot keep the carried columns contiguous, and their weights
 /// apply by position). Any of those missing falls back to the exact
-/// re-collapse, said out loud. An EXPLICIT `--use-pb-reference` errors there
-/// instead: the user has said what they want, and a silent downgrade would
-/// cost them a round to notice.
+/// re-collapse, said out loud.
 ///
 /// One case cannot fall back at all. A lineage that already substituted once
 /// records a carried reference among its inputs in place of the cells it
@@ -404,7 +388,6 @@ fn select_reference(
             args.model
         );
     }
-    anyhow::ensure!(!args.use_pb_reference, "--use-pb-reference: {why}");
     info!("re-collapsing the whole cohort: {why}");
     Ok(None)
 }

@@ -1,6 +1,6 @@
 //! The reference extends across rounds; it is never re-summarized.
 //!
-//! Under `--use-pb-reference` the collapse keeps each carried column in its
+//! When an update reuses the carried pseudobulks, the collapse keeps each carried column in its
 //! own singleton finest group, so emission is append-only: the parent's
 //! columns pass through from their **observed** evidence (their stored,
 //! already-adjusted frame — exactly `y·w / w`), while groups holding new mass
