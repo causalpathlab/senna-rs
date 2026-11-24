@@ -183,6 +183,21 @@ impl Params {
         self.velocities_of(&self.levels())
     }
 
+    /// `d log(ū + s̄)/dt` at every row of `lv` (these parameters' levels),
+    /// from their velocities `du`, `ds` ([`Self::velocities_of`]): on the
+    /// kinetics' scale, `lv.u`'s capture taken off as theirs is.
+    pub fn log_velocities_of(
+        &self,
+        lv: &Levels,
+        du: &DMatrix<f64>,
+        ds: &DMatrix<f64>,
+    ) -> DMatrix<f64> {
+        let capture = self.capture();
+        DMatrix::from_fn(lv.u.nrows(), lv.genes, |r, g| {
+            super::readout::log_rate(du[(r, g)], ds[(r, g)], lv.u[(r, g)] / capture, lv.s[(r, g)])
+        })
+    }
+
     /// [`Params::velocities`] from these parameters' levels `lv` (the
     /// kinetics' `ū`, the capture taken off).
     pub fn velocities_of(&self, lv: &Levels) -> (DMatrix<f64>, DMatrix<f64>) {

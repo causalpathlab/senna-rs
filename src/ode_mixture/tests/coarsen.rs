@@ -261,3 +261,36 @@ fn genes_are_grouped_by_program_and_kinetics() {
     assert!(p >= 0.95, "program purity {p}");
     assert!(c >= 0.95, "kinetic class purity {c}");
 }
+
+/// Genes whose `log(S/U)` runs over ten nats from `from`, twenty bins of
+/// the default width: for each of `caps`, the bins, counted from the
+/// smallest ratio, widen until the groups fit the cap.
+fn groups_fit_the_cap(from: f64, caps: &[usize]) {
+    let (pbs, genes) = (30, 40);
+    let u =
+        nalgebra::DMatrix::<f64>::from_fn(pbs, genes, |p, g| 5.0 + ((p * 7 + g * 3) % 11) as f64);
+    let s = nalgebra::DMatrix::<f64>::from_fn(pbs, genes, |p, g| {
+        u[(p, g)] * (from + 0.25 * g as f64).exp()
+    });
+    let reads = Reads::from_matrices(u, s);
+    let sizes = vec![1f32; pbs];
+    for &cap in caps {
+        let fc = coarsen_genes(&reads, &sizes, cap, 7).unwrap();
+        assert!(
+            fc.num_coarse <= cap,
+            "{} groups for a cap of {cap}",
+            fc.num_coarse
+        );
+    }
+}
+
+#[test]
+fn a_small_cap_widens_the_kinetic_bins_rather_than_failing() {
+    groups_fit_the_cap(0.0, &[4, 10, 16]);
+}
+
+/// Ratios either side of 0 and room for only one or two groups.
+#[test]
+fn bins_either_side_of_zero_still_merge_to_fit_a_tiny_cap() {
+    groups_fit_the_cap(-5.0, &[2, 3]);
+}

@@ -28,8 +28,9 @@ const KINETIC_BIN: f64 = 0.5;
 /// - their transcription's timing: k-means on their pseudobulk profiles,
 ///   both tracks side by side, each track scaled to the gene's mean total
 ///   (else a slow gene's spliced reads drown its unspliced);
-/// - their kinetics: no group crosses a [`KINETIC_BIN`] of `log(S/U)`,
-///   the flat genes' background split by bin as well.
+/// - their kinetics: no group crosses a bin of `log(S/U)` (at least
+///   [`KINETIC_BIN`] wide, see [`kinetic_blocks`]), the flat genes'
+///   background split by bin as well.
 pub fn coarsen_genes(
     reads: &Reads,
     sizes: &[f32],
@@ -55,19 +56,13 @@ pub fn coarsen_genes(
         };
         x as f32
     });
-    let block: Vec<u32> = totals
-        .iter()
-        .map(|&(tu, ts)| ((ts / tu).ln() / KINETIC_BIN).floor() as i64 as u32)
-        .collect();
+    let ratios: Vec<f64> = totals.iter().map(|&(tu, ts)| (ts / tu).ln()).collect();
+    let (block, bins) = kinetic_blocks(&ratios, cap);
     let opts = PartitionOptions {
         block: Some(block.clone()),
         ..PartitionOptions::default()
     };
     // A slot kept for every bin the background may split into.
-    let bins = block
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
     let slots = cap.saturating_sub(bins - 1).max(1);
     let part = partition_features(&counts, &[sizes, sizes].concat(), slots, seed, &opts)?;
     // The background is one group across the blocks: split it by block too.
@@ -88,6 +83,35 @@ pub fn coarsen_genes(
         return FeatureCoarsening::from_fine_to_coarse(labels, last);
     }
     FeatureCoarsening::from_fine_to_coarse(labels, part.num_groups)
+}
+
+/// Every gene's bin of its `log(S/U)` (`ratios`), counted from the
+/// smallest, and how many bins there are: bins of [`KINETIC_BIN`] nats,
+/// widened (doubled) until there are at most half `cap`, so the partition
+/// has a group slot for every bin left after the background's. As wide as
+/// the ratios' range, there is one bin.
+fn kinetic_blocks(ratios: &[f64], cap: usize) -> (Vec<u32>, usize) {
+    let low = ratios.iter().copied().fold(f64::INFINITY, f64::min);
+    let mut width = KINETIC_BIN;
+    loop {
+        let block: Vec<u32> = ratios
+            .iter()
+            .map(|&r| ((r - low) / width).floor() as u32)
+            .collect();
+        let bins = block
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        if bins <= (cap / 2).max(1) {
+            if width > KINETIC_BIN {
+                log::info!(
+                    "coarsening: log(S/U) bins of {width} nats ({bins}), for at most {cap} groups"
+                );
+            }
+            return (block, bins);
+        }
+        width *= 2.0;
+    }
 }
 
 /// Every group's reads, its genes' summed, `[P × K]` per track.

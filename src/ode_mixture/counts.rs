@@ -53,9 +53,32 @@ pub fn two_track_genes(rows: &[Box<str>]) -> (usize, bool) {
     (genes.len(), role.iter().all(Option::is_some))
 }
 
-/// The cells of `data` one block of columns at a time: `f(first column,
-/// unspliced, spliced)` with each block's `[B × G]` reads on the genes
-/// named `genes`, in that order. With `delta` (`[D × batches]`, `data`'s
+/// One block of [`for_cell_blocks`]' cells.
+pub struct CellBlock {
+    /// The block's first column of the data.
+    pub start: usize,
+    /// `[B × G]` reads on the genes asked for, in that order.
+    pub unspliced: DMatrix<f32>,
+    pub spliced: DMatrix<f32>,
+    /// Every cell's raw reads `[spliced, unspliced]` over all genes with both
+    /// tracks, fitted or not, and without any batch fold.
+    pub raw_tracks: Vec<[f32; 2]>,
+}
+
+impl CellBlock {
+    /// Every cell's raw unspliced share (U+1)/(U+S+2): a pseudocount each
+    /// side, so a cell of few reads leans to ½. A guide to the cell, not part
+    /// of the fit.
+    pub fn unspliced_share(&self) -> Vec<f32> {
+        self.raw_tracks
+            .iter()
+            .map(|&[s, u]| (u + 1.0) / (s + u + 2.0))
+            .collect()
+    }
+}
+
+/// The cells of `data` one block of columns at a time, each block's reads
+/// on the genes named `genes`. With `delta` (`[D × batches]`, `data`'s
 /// rows), every cell's reads are divided by its batch's effect and scaled
 /// back to its own reads on these genes.
 pub fn for_cell_blocks(
@@ -63,17 +86,17 @@ pub fn for_cell_blocks(
     genes: &[Box<str>],
     block: usize,
     delta: Option<&DMatrix<f32>>,
-    mut f: impl FnMut(usize, DMatrix<f32>, DMatrix<f32>) -> anyhow::Result<()>,
+    mut f: impl FnMut(CellBlock) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let rows = data.row_names()?;
-    let (all, role) = track_rows(&rows);
+    let (all, track) = track_rows(&rows);
     let column: HashMap<&str, usize> = genes
         .iter()
         .enumerate()
         .map(|(c, g)| (g.as_ref(), c))
         .collect();
     // Backend row → (fitted gene column, unspliced?).
-    let role: Vec<Role> = role
+    let role: Vec<Role> = track
         .iter()
         .map(|r| r.and_then(|(j, u)| column.get(all[j]).map(|&c| (c, u))))
         .collect();
@@ -86,7 +109,11 @@ pub fn for_cell_blocks(
         let mut spliced = DMatrix::<f32>::zeros(end - start, genes.len());
         let batch = delta.map(|_| data.get_batch_membership(start..end));
         let mut raw = vec![0f32; end - start];
+        let mut raw_tracks = vec![[0f32; 2]; end - start];
         data.for_each_triplet(start..end, block, |row, col, v| {
+            if let Some((_, u)) = track[row as usize] {
+                raw_tracks[col as usize][usize::from(u)] += v;
+            }
             let Some((c, u)) = role[row as usize] else {
                 return;
             };
@@ -107,7 +134,12 @@ pub fn for_cell_blocks(
                 }
             }
         }
-        f(start, unspliced, spliced)?;
+        f(CellBlock {
+            start,
+            unspliced,
+            spliced,
+            raw_tracks,
+        })?;
     }
     bar.finish_and_clear();
     Ok(())

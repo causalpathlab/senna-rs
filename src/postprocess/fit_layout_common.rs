@@ -16,7 +16,9 @@ use super::fit_layout_features::{
     LayoutTarget,
 };
 use data_beans::alg::random_projection::binary_sort_columns;
+use legume_numeric::matrix::common_io::read_lines;
 use legume_numeric::matrix::dmatrix_util::winsorize_rows_inplace;
+use legume_numeric::matrix::knn::all_pairs::knn_rows_l2;
 use legume_numeric::matrix::layout::{
     coarsened, fuzzy_graph_of_columns, groups_covering, CoarsenArgs, Coarsened, PhateArgs,
 };
@@ -205,6 +207,37 @@ pub struct LayoutCommonArgs {
 
     #[arg(
         long,
+        default_value_t = OutlierCut::Auto,
+        help = "Drop outlier PBs before the layout: auto, off, or a cut in MADs",
+        long_help = "Leave out the cells of outlier PBs, so a few stray cells cannot pull\n\
+                     the layout. A PB's outlier score is its isolation: the log distance\n\
+                     to its k-th nearest PB (k = --knn), in the features laid out.\n\
+                     \n\
+                     auto: split the scores in two by k-means; the upper group is dropped\n\
+                       when it is a minority and empty space parts it from the rest (a\n\
+                       gap of at least two of the rest's MADs). One mode, however skewed,\n\
+                       has no such gap, so nothing is dropped and clean data stays whole.\n\
+                     off:  keep every PB.\n\
+                     N:    drop PBs whose score is more than N MADs above the median.\n\
+                     \n\
+                     auto needs at least 20 PBs to tell a tail from the rest; with fewer\n\
+                     it keeps every PB. PB layouts only: `umap --joint` lays out every cell.\n\
+                     Dropped cells get no coordinates and are listed in\n\
+                     {out}.layout_outliers.tsv; `senna view` leaves them out."
+    )]
+    pub drop_outliers: OutlierCut,
+
+    #[arg(
+        long,
+        help = "File of cell names to leave out of the layout, one per line",
+        long_help = "Cells to leave out of the layout, one name per line (a first line\n\
+                     `cell`, as a table's header, is skipped): a population to look past,\n\
+                     say. They get no coordinates; `senna view` leaves them out."
+    )]
+    pub drop_cells: Option<Box<str>>,
+
+    #[arg(
+        long,
         default_value_t = 1.0,
         help = "Temperature τ applied to topic θ before Hellinger transform",
         long_help = "Re-softmax the trained log-θ at temperature τ.\n\
@@ -332,7 +365,164 @@ pub(crate) fn cell_table(
         Some(p) => read_latent_features(args, &resolved.resolve(p), m.kind)?,
         None => read_cell_proj(args, &cell_proj_path(resolved)?)?,
     };
-    Ok(CellTable { names, cells_kn })
+    let table = CellTable { names, cells_kn };
+    let Some(path) = args.drop_cells.as_deref() else {
+        return Ok(table);
+    };
+    let drop: std::collections::HashSet<Box<str>> = read_lines(path)
+        .map_err(|e| anyhow::anyhow!("--drop-cells {path}: {e}"))?
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| (i, Box::<str>::from(l.trim())))
+        .filter(|(i, l)| !l.is_empty() && (*i != 0 || &**l != "cell"))
+        .map(|(_, l)| l)
+        .collect();
+    let kept = table.keep(|name| !drop.contains(name));
+    anyhow::ensure!(
+        !kept.names.is_empty(),
+        "--drop-cells {path} leaves no cell to lay out"
+    );
+    info!(
+        "--drop-cells: {} of {} cells left out",
+        table.names.len() - kept.names.len(),
+        table.names.len()
+    );
+    Ok(kept)
+}
+
+impl CellTable {
+    /// The cells `keep` says yes to by name, in order.
+    fn keep(&self, keep: impl Fn(&str) -> bool) -> Self {
+        self.keep_cols(|c| keep(&self.names[c]))
+    }
+
+    /// The cells `keep` says yes to by column, in order.
+    fn keep_cols(&self, keep: impl Fn(usize) -> bool) -> Self {
+        let cols: Vec<usize> = (0..self.names.len()).filter(|&c| keep(c)).collect();
+        Self {
+            names: cols.iter().map(|&c| self.names[c].clone()).collect(),
+            cells_kn: self.cells_kn.select_columns(&cols),
+        }
+    }
+}
+
+/// How `senna layout` drops outlier PBs (`--drop-outliers`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OutlierCut {
+    /// The upper group of a two-means split, when it stands clear.
+    Auto,
+    Off,
+    /// More than this many MADs above the median score.
+    Mads(f32),
+}
+
+impl std::fmt::Display for OutlierCut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Off => f.write_str("off"),
+            Self::Mads(n) => write!(f, "{n}"),
+        }
+    }
+}
+
+impl std::str::FromStr for OutlierCut {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "off" => Ok(Self::Off),
+            n => match n.parse::<f32>() {
+                Ok(v) if v > 0.0 && v.is_finite() => Ok(Self::Mads(v)),
+                _ => Err(format!("`{n}`: auto, off, or a positive number of MADs")),
+            },
+        }
+    }
+}
+
+/// `auto` drops the upper group only when it is at most this share of PBs…
+const OUTLIER_MAX_SHARE: f64 = 0.25;
+/// …and empty space parts it from the rest: its lowest score this many of
+/// the rest's MADs above their highest. Two-means splits any distribution,
+/// one long skewed mode too; only a gap tells a tail apart.
+const OUTLIER_MIN_GAP_MADS: f64 = 2.0;
+/// `auto` keeps every PB of a run with fewer.
+const OUTLIER_MIN_PBS: usize = 20;
+
+fn median_mad(sorted: &[f64]) -> (f64, f64) {
+    let med = sorted[sorted.len() / 2];
+    let mut dev: Vec<f64> = sorted.iter().map(|x| (x - med).abs()).collect();
+    dev.sort_by(f64::total_cmp);
+    (med, dev[dev.len() / 2])
+}
+
+/// Which PBs `cut` calls outliers by their isolation `score` (one per PB).
+pub(crate) fn outlier_pbs(score: &[f64], cut: OutlierCut) -> Vec<bool> {
+    let n = score.len();
+    match cut {
+        OutlierCut::Off => vec![false; n],
+        OutlierCut::Mads(k) => {
+            if n < 3 {
+                return vec![false; n];
+            }
+            let mut sorted = score.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            let (med, mad) = median_mad(&sorted);
+            // Most scores tied: no spread to measure a tail against.
+            if mad <= f64::EPSILON * med.abs().max(1.0) {
+                return vec![false; n];
+            }
+            score
+                .iter()
+                .map(|&s| (s - med) / mad > f64::from(k))
+                .collect()
+        }
+        // Too few to tell a tail from the rest.
+        OutlierCut::Auto if n < OUTLIER_MIN_PBS => vec![false; n],
+        OutlierCut::Auto => {
+            use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
+            let col = nalgebra::DMatrix::<f64>::from_column_slice(n, 1, score);
+            let label = col.kmeans_rows(KmeansArgs::with_clusters(2));
+            let group = |k: usize| -> Vec<f64> {
+                score
+                    .iter()
+                    .zip(&label)
+                    .filter(|(_, &l)| l == k)
+                    .map(|(&x, _)| x)
+                    .collect()
+            };
+            let mean = |g: &[f64]| g.iter().sum::<f64>() / g.len().max(1) as f64;
+            let (g0, g1) = (group(0), group(1));
+            let upper = usize::from(mean(&g1) > mean(&g0));
+            let (mut rest, tail) = if upper == 1 { (g0, g1) } else { (g1, g0) };
+            if tail.is_empty()
+                || rest.is_empty()
+                || tail.len() as f64 > OUTLIER_MAX_SHARE * n as f64
+            {
+                return vec![false; n];
+            }
+            rest.sort_by(f64::total_cmp);
+            let (_, mad) = median_mad(&rest);
+            let top_rest = rest[rest.len() - 1];
+            let low_tail = tail.iter().copied().fold(f64::INFINITY, f64::min);
+            if low_tail - top_rest < OUTLIER_MIN_GAP_MADS * mad {
+                return vec![false; n];
+            }
+            label.iter().map(|&l| l == upper).collect()
+        }
+    }
+}
+
+/// Every PB's isolation: the log distance to its `k`-th nearest PB.
+fn isolation(pbs: &Coarsened, k: usize) -> Vec<f64> {
+    let n = pbs.n_pb();
+    if n < 2 {
+        return vec![0.0; n];
+    }
+    let (_, dist) = knn_rows_l2(&pbs.pb_features.transpose(), k.max(1));
+    dist.iter()
+        .map(|d| f64::from(d.last().copied().unwrap_or(0.0).max(1e-12)).ln())
+        .collect()
 }
 
 /// The run's cached cell projection, which a run without a latent lays out.
@@ -411,6 +601,59 @@ pub(crate) fn preprocess_layout_data(
     resolved: &ResolvedViz,
 ) -> anyhow::Result<PbLayoutPrep> {
     let cells = cell_table(args, resolved)?;
+    let pbs = cell_pbs(&cells, args, resolved)?;
+    let listed = format!(
+        "{}.layout_outliers.tsv",
+        run_manifest::out_prefix(args.out.as_deref(), &args.from)
+    );
+    let out = match args.drop_outliers {
+        OutlierCut::Off => vec![false; pbs.n_pb()],
+        cut => outlier_pbs(&isolation(&pbs, args.knn), cut),
+    };
+    if !out.iter().any(|&o| o) {
+        // No list of an earlier layout's left over to mislead.
+        match std::fs::remove_file(&listed) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                anyhow::bail!("{listed}: {e}")
+            }
+            _ => {}
+        }
+        return Ok(PbLayoutPrep { cells, pbs });
+    }
+    // Their cells out, and the PBs formed again from the rest (a cell of no
+    // PB, `usize::MAX`, stays).
+    let is_out: Vec<bool> = (0..cells.names.len())
+        .map(|c| {
+            pbs.membership
+                .get(c)
+                .is_some_and(|&g| out.get(g) == Some(&true))
+        })
+        .collect();
+    let kept = cells.keep_cols(|c| !is_out[c]);
+    let dropped: Vec<&str> = (0..cells.names.len())
+        .filter(|&c| is_out[c])
+        .map(|c| &*cells.names[c])
+        .collect();
+    info!(
+        "--drop-outliers {}: {} of {} PBs isolated, {} cells left out",
+        args.drop_outliers,
+        out.iter().filter(|&&o| o).count(),
+        out.len(),
+        dropped.len()
+    );
+    std::fs::write(&listed, format!("cell\n{}\n", dropped.join("\n")))
+        .map_err(|e| anyhow::anyhow!("{listed}: {e}"))?;
+    let pbs = cell_pbs(&kept, args, resolved)?;
+    Ok(PbLayoutPrep { cells: kept, pbs })
+}
+
+/// The cells grouped into PBs and the graph between them (see
+/// [`preprocess_layout_data`]).
+fn cell_pbs(
+    cells: &CellTable,
+    args: &LayoutCommonArgs,
+    resolved: &ResolvedViz,
+) -> anyhow::Result<Coarsened> {
     let n_cells = cells.cells_kn.ncols();
     let block_size = args.block_size.unwrap_or(1000);
     let pbs = if resolved.manifest.outputs.geometry_latent().is_some() {
@@ -432,7 +675,7 @@ pub(crate) fn preprocess_layout_data(
         Coarsened::from_membership(&cells.cells_kn, &edges, membership)
     };
     info!("PB graph: {} PBs, {} edges", pbs.n_pb(), pbs.pb_edges.len());
-    Ok(PbLayoutPrep { cells, pbs })
+    Ok(pbs)
 }
 
 /// The columns of `table_kn` (cells or features) as `--n-landmarks` PBs: their
@@ -530,24 +773,35 @@ fn winsorize_cells(feat: &mut Mat, n_mads: f32) {
 /// Load cluster assignments (one-column parquet of cell IDs) and validate length.
 pub(crate) fn load_cluster_assignments(
     path: &str,
-    n_cells_expected: usize,
+    cells: &[Box<str>],
 ) -> anyhow::Result<Vec<usize>> {
     info!("Reading cluster assignments from {path}...");
     let MatWithNames {
-        rows: _cluster_cell_names,
+        rows: names,
         cols: _,
         mat: cluster_mat,
     } = Mat::from_parquet(path)?;
-    if cluster_mat.nrows() != n_cells_expected {
-        anyhow::bail!(
-            "Cluster file has {} cells but data has {} cells",
-            cluster_mat.nrows(),
-            n_cells_expected
-        );
-    }
-    let clusters: Vec<usize> = (0..cluster_mat.nrows())
-        .map(|i| cluster_mat[(i, 0)] as usize)
+    let at: std::collections::HashMap<&str, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_ref(), i))
         .collect();
+    // By name, so cells left out of the layout drop out of the file too;
+    // by position only for a file of exactly these cells under other names.
+    let rows: Vec<usize> = match cells
+        .iter()
+        .map(|c| at.get(c.as_ref()).copied())
+        .collect::<Option<Vec<_>>>()
+    {
+        Some(rows) => rows,
+        None if cluster_mat.nrows() == cells.len() => (0..cells.len()).collect(),
+        None => anyhow::bail!(
+            "Cluster file has {} cells, not named as the layout's {} cells",
+            cluster_mat.nrows(),
+            cells.len()
+        ),
+    };
+    let clusters: Vec<usize> = rows.iter().map(|&i| cluster_mat[(i, 0)] as usize).collect();
     info!("Loaded {} cluster assignments", clusters.len());
     Ok(clusters)
 }
@@ -608,7 +862,7 @@ fn write_viz_outputs_pb(
     )?;
 
     let cluster_ids = match &args.clusters {
-        Some(path) => Some(load_cluster_assignments(path, prep.pbs.membership.len())?),
+        Some(path) => Some(load_cluster_assignments(path, &prep.cells.names)?),
         None => None,
     };
 
@@ -685,7 +939,7 @@ pub(crate) fn write_cell_layout(
     let cell_coords_path = format!("{out}.{method}.cell_coords.parquet");
 
     let cluster_ids = match &args.clusters {
-        Some(path) => Some(load_cluster_assignments(path, n_cells)?),
+        Some(path) => Some(load_cluster_assignments(path, cell_names)?),
         None => None,
     };
 
@@ -741,6 +995,94 @@ pub(crate) fn write_cell_layout(
 mod tests {
     use super::*;
     use senna::run_manifest::RunKind;
+
+    /// `n` scores spread evenly over `[lo, hi]`.
+    fn spread(n: usize, lo: f64, hi: f64) -> Vec<f64> {
+        (0..n)
+            .map(|i| lo + (hi - lo) * i as f64 / (n - 1) as f64)
+            .collect()
+    }
+
+    /// One mode with no tail: `auto` keeps every PB.
+    #[test]
+    fn auto_keeps_a_single_mode_whole() {
+        let score = spread(500, 0.0, 1.0);
+        assert!(!outlier_pbs(&score, OutlierCut::Auto).iter().any(|&o| o));
+    }
+
+    /// One long, right-skewed mode (a log-normal's quantiles): two-means
+    /// splits it, but no empty space parts the halves, so nothing is dropped.
+    #[test]
+    fn auto_keeps_a_skewed_single_mode_whole() {
+        let score: Vec<f64> = (1..1000)
+            .map(|i| {
+                // The standard normal's quantile at i/1000, by its logit approximation.
+                let p = f64::from(i) / 1000.0;
+                (0.551_328_895 * (p / (1.0 - p)).ln() * 0.6).exp()
+            })
+            .collect();
+        assert!(!outlier_pbs(&score, OutlierCut::Auto).iter().any(|&o| o));
+    }
+
+    /// A small group well clear of the rest is what `auto` drops, and only it.
+    #[test]
+    fn auto_drops_a_small_group_standing_clear() {
+        let mut score = spread(475, 0.0, 1.0);
+        score.extend(spread(25, 4.0, 4.5));
+        let out = outlier_pbs(&score, OutlierCut::Auto);
+        assert!(out[..475].iter().all(|&o| !o));
+        assert!(out[475..].iter().all(|&o| o));
+    }
+
+    /// A clear group too large to be outliers (here 40%) is kept: it is a
+    /// population, not a tail.
+    #[test]
+    fn auto_keeps_a_group_too_large_to_be_outliers() {
+        let mut score = spread(300, 0.0, 1.0);
+        score.extend(spread(200, 4.0, 4.5));
+        assert!(!outlier_pbs(&score, OutlierCut::Auto).iter().any(|&o| o));
+    }
+
+    #[test]
+    fn a_mad_cut_and_off_do_as_they_say() {
+        let mut score = spread(99, 0.0, 1.0);
+        score.push(10.0);
+        let out = outlier_pbs(&score, OutlierCut::Mads(5.0));
+        assert_eq!(out.iter().filter(|&&o| o).count(), 1);
+        assert!(out[99]);
+        assert!(!outlier_pbs(&score, OutlierCut::Off).iter().any(|&o| o));
+        assert_eq!("auto".parse::<OutlierCut>(), Ok(OutlierCut::Auto));
+        assert_eq!("off".parse::<OutlierCut>(), Ok(OutlierCut::Off));
+        assert_eq!("3.5".parse::<OutlierCut>(), Ok(OutlierCut::Mads(3.5)));
+        assert!("-1".parse::<OutlierCut>().is_err());
+    }
+
+    #[test]
+    fn one_pb_has_an_isolation_score_and_no_panic() {
+        let pbs = Coarsened {
+            membership: vec![0, 0],
+            pb_edges: Vec::new(),
+            pb_features: Mat::zeros(2, 1),
+            pb_size: vec![2],
+        };
+        assert_eq!(isolation(&pbs, 15), vec![0.0]);
+    }
+
+    /// A MAD cut works on a few PBs too (only auto needs twenty), and finds
+    /// nothing where most scores tie, rather than every PB above the tie.
+    #[test]
+    fn a_mad_cut_works_on_few_pbs_and_not_on_ties() {
+        let out = outlier_pbs(&[0.0, 0.1, 0.2, 0.1, 0.0, 9.0], OutlierCut::Mads(5.0));
+        assert_eq!(out, [false, false, false, false, false, true]);
+        assert!(
+            !outlier_pbs(&[0.0, 0.1, 0.2, 0.1, 0.0, 9.0], OutlierCut::Auto)
+                .iter()
+                .any(|&o| o)
+        );
+        let mut tied = vec![1.0; 30];
+        tied[0] = 1.5;
+        assert!(!outlier_pbs(&tied, OutlierCut::Mads(3.0)).iter().any(|&o| o));
+    }
 
     #[test]
     fn an_embedding_cell_is_laid_out_by_its_direction_alone() {

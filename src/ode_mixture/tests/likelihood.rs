@@ -1,6 +1,6 @@
 use super::model::truth_params;
 use crate::ode_mixture::likelihood::{
-    gene_log_likelihood, jittered_table, share_term, table, Reads,
+    gene_log_likelihood, integrated_table, jittered_table, share_term, table, Reads,
 };
 use crate::ode_mixture::sim::{simulate, SimConfig};
 
@@ -239,4 +239,18 @@ fn a_genes_likelihood_by_rows_is_the_per_pseudobulk_one() {
         let want = gene_log_likelihood(&reads, g, &rows, &lambda, (&u, &s)).abs();
         assert!((a - b).abs() < 1e-9 * want, "gene {g}: offsets {a} vs {b}");
     }
+}
+
+/// A block QC emptied of cells integrates to an empty table, not a panic.
+#[test]
+fn a_block_with_no_cells_integrates_to_an_empty_table() {
+    let cfg = SimConfig {
+        fine: 81,
+        ..SimConfig::default()
+    };
+    let sim = simulate(&cfg).unwrap();
+    let none = nalgebra::DMatrix::<f64>::zeros(0, sim.n_genes);
+    let empty = Reads::from_matrices(none.clone(), none);
+    let levels = truth_params(&sim, 81, 21).levels();
+    assert_eq!(integrated_table(&empty, &levels, 0.4).nrows(), 0);
 }

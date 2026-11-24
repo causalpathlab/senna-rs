@@ -89,6 +89,7 @@ pub struct OdeArgs {
     #[arg(
         long,
         default_value_t = 2,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
         help = "Lineages, each with its own path and its own time (unless --trunk)"
     )]
     pub lineages: usize,
@@ -107,13 +108,23 @@ pub struct OdeArgs {
     )]
     pub no_jitter: bool,
 
-    #[arg(long, default_value_t = 45, help = "Grid points per lineage's path")]
+    #[arg(
+        long,
+        default_value_t = 45,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(2..),
+        help = "Grid points per lineage's path (at least 2)"
+    )]
     pub points: usize,
 
     #[arg(long, default_value_t = 4, help = "Time positions per grid step")]
     pub sub: usize,
 
-    #[arg(long, default_value_t = 3, help = "Dimension of the paths")]
+    #[arg(
+        long,
+        default_value_t = 3,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        help = "Dimension of the paths"
+    )]
     pub dim: usize,
 
     #[arg(
@@ -159,7 +170,12 @@ pub struct OdeArgs {
     #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
     pub device_no: usize,
 
-    #[arg(long, default_value_t = 1024, help = "Cells per readout block")]
+    #[arg(
+        long,
+        default_value_t = 1024,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        help = "Cells per readout block"
+    )]
     pub(crate) block_size: usize,
 
     #[arg(
@@ -283,9 +299,14 @@ fn finest_reads(
 
 pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     senna::embed_common::mkdir_parent(&args.out)?;
+    // Also when the arguments come from a manifest or MCP, not clap.
     anyhow::ensure!(
-        args.lineages > 0 && args.block_size > 0,
-        "--lineages and --block-size must be positive"
+        args.lineages > 0 && args.block_size > 0 && args.dim > 0,
+        "--lineages, --block-size and --dim must be positive"
+    );
+    anyhow::ensure!(
+        args.points >= 2,
+        "--points must be at least 2: a trajectory runs from one point to another"
     );
     let dev = args.device.to_device(args.device_no)?;
 
@@ -482,16 +503,14 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     // The map on the trajectories' own axes, every cell placed by its reads.
     let map = MapBasis::of_trajectories(&mode, args.map_pcs)?;
     // Every cell read once, a block at a time; QC's near-empty cells out.
-    let table = read_out_cells(
-        &data,
-        &names,
-        fc.as_ref(),
-        delta.as_ref(),
-        keep.as_deref(),
-        &mode,
-        &map,
-        args.block_size,
-    )?;
+    let source = CellSource {
+        data: &data,
+        names: &names,
+        fc: fc.as_ref(),
+        delta: delta.as_ref(),
+        keep: keep.as_deref(),
+    };
+    let table = read_out_cells(source, &mode, &map, args.block_size)?;
     table.write(&args.out, map.dim())?;
     let keep = keep.as_deref();
     crate::postprocess::viz_prep::write_cell_proj(&args.out, &proj_kn, &all_cells, keep)?;
@@ -521,21 +540,34 @@ struct CellTable {
     tau_sd: Vec<f32>,
     tau_lo: Vec<f32>,
     tau_hi: Vec<f32>,
+    /// Every cell's raw unspliced share (U+1)/(U+S+2) over all two-track genes.
+    ufrac: Vec<f32>,
     /// `[C × k]` row-major, every cell's place on the map and its velocity.
     place: Vec<f32>,
     velocity: Vec<f32>,
 }
 
+/// What [`read_out_cells`] reads: the data, the fit's genes and their
+/// coarsening and fold, the cells QC kept (`None`: all).
+struct CellSource<'a> {
+    data: &'a data_beans::sparse_io_vector::SparseIoVec,
+    names: &'a [Box<str>],
+    fc: Option<&'a FeatureCoarsening>,
+    delta: Option<&'a DMatrix<f32>>,
+    keep: Option<&'a [usize]>,
+}
+
 /// Every cell of `data` read out at `mode` a block at a time (QC's
 /// near-empty cells, those not in `keep`, left out), placed on `map` with
 /// its velocity there.
-#[allow(clippy::too_many_arguments)]
 fn read_out_cells(
-    data: &data_beans::sparse_io_vector::SparseIoVec,
-    names: &[Box<str>],
-    fc: Option<&FeatureCoarsening>,
-    delta: Option<&DMatrix<f32>>,
-    keep: Option<&[usize]>,
+    CellSource {
+        data,
+        names,
+        fc,
+        delta,
+        keep,
+    }: CellSource<'_>,
     mode: &Mode,
     map: &MapBasis,
     block_size: usize,
@@ -555,14 +587,21 @@ fn read_out_cells(
         tau_sd: Vec::new(),
         tau_lo: Vec::new(),
         tau_hi: Vec::new(),
+        ufrac: Vec::new(),
         place: Vec::new(),
         velocity: Vec::new(),
     };
     let f32s = |v: &[f64]| v.iter().map(|&x| x as f32).collect::<Vec<_>>();
-    for_cell_blocks(data, names, block_size, delta, |start, u, s| {
+    for_cell_blocks(data, names, block_size, delta, |b| {
+        let (start, u, s) = (b.start, &b.unspliced, &b.spliced);
         let rows: Vec<usize> = (0..u.nrows())
             .filter(|i| kept_cell.as_ref().is_none_or(|k| k[start + i]))
             .collect();
+        // A block QC emptied: nothing to read out.
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let share = b.unspliced_share();
         let block = Reads::from_matrices(u.select_rows(&rows).cast(), s.select_rows(&rows).cast());
         let block = match fc {
             Some(fc) => coarse_reads(fc, &block),
@@ -587,6 +626,7 @@ fn read_out_cells(
         t.tau_sd.extend(f32s(&out.time_sd));
         t.tau_lo.extend(f32s(&out.time_lo));
         t.tau_hi.extend(f32s(&out.time_hi));
+        t.ufrac.extend(rows.iter().map(|&i| share[i]));
         let total = &block.u + &block.s;
         for c in 0..rows.len() {
             let x: Vec<f64> = total.row(c).iter().copied().collect();
@@ -615,6 +655,7 @@ impl CellTable {
             ("tau_sd".into(), Column::F32(&self.tau_sd)),
             ("tau_lo".into(), Column::F32(&self.tau_lo)),
             ("tau_hi".into(), Column::F32(&self.tau_hi)),
+            ("ufrac".into(), Column::F32(&self.ufrac)),
         ];
         cols.extend(f32_columns(&p_cols));
         write_named_table(
