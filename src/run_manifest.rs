@@ -39,7 +39,7 @@
 //! | `feature_embedding` | D × H | signed | per-gene embedding `ρ` — MULTIPLIES `Z` in the log-rate `ρ_g·z_n + a_g + b_n` |
 //! | `feature_coembedding` | D × H | signed | where each gene SITS, re-projected onto the cell manifold (SIMBA co-embed) |
 //! | `softmax_dictionary` | D × K | **log**-simplex COLUMNS | topic dictionary `β` — `Σ_g exp(β[g,k]) = 1` |
-//! | `dictionary` | D × K | signed | SVD component loadings; also where pre-split manifests land. ⚠ legacy `bge --skip-etm` puts ρ here |
+//! | `dictionary` | D × K | signed | SVD component loadings; also where pre-split manifests land |
 //! | `dictionary_empirical` | D × K | probability-simplex COLUMNS | empirical `β`, full gene resolution |
 //! | `topic_embedding` | K × H | signed | per-topic embedding `α` |
 //! | `feature_bias` / `cell_bias` | D / N | signed (log-scale offsets) | `a_g` / `b_n` |
@@ -49,14 +49,7 @@
 //!
 //! `feature_embedding` and `feature_coembedding` are NOT interchangeable: the
 //! co-embed is a lossy derived view of ρ (a convex combination of cell
-//! embeddings), so ρ → co-embed is one-way. Before manifest v2 the embedding
-//! commands wrote the co-embed AS `feature_embedding` and ρ as
-//! `feature_loading`; [`RunManifest::load`] moves a v1 manifest's slots onto
-//! the v2 names, so no reader sees the old layout.
-//!
-//! The slot still marked ⚠ is a historical overload that has caused a real
-//! bug. It is read defensively (by content, not by which sibling slots are
-//! populated) and is on the way out; write the unambiguous slot.
+//! embeddings), so ρ → co-embed is one-way.
 
 use legume_numeric::matrix::traits::IoOps;
 use serde::{Deserialize, Serialize};
@@ -121,18 +114,8 @@ pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
     Ok((cell_to_pb_per_level, cell_names_src))
 }
 
-/// Where ρ can live under a run prefix: the v2 name, the v1 name, and the
-/// legacy `bge --skip-etm` slot. Which of the first two a prefix probe
-/// prefers is decided by [`resolve_feature_embedding`] from what else sits
-/// beside them; the last is shared with the topic β and needs the scale check.
-pub const RHO_TABLE_SUFFIXES: [&str; 3] = [
-    ".feature_embedding.parquet",
-    ".feature_loading.parquet",
-    ".dictionary.parquet",
-];
-/// Written only by a v2 embedding run, beside its ρ. Its presence is what
-/// tells a v2 prefix from a v1 one when both ρ names exist.
-const COEMBED_SUFFIX: &str = ".feature_coembedding.parquet";
+/// The suffix of a run's ρ table under its prefix.
+pub const RHO_TABLE_SUFFIX: &str = ".feature_embedding.parquet";
 
 /// Locate a run's per-gene embedding `ρ` from its `--out` prefix (or its ρ
 /// table or manifest; see below).
@@ -142,35 +125,19 @@ const COEMBED_SUFFIX: &str = ".feature_coembedding.parquet";
 /// slot, `annotate` by a fixed field — and every layout change broke each of
 /// them differently. Three separate bugs came out of that.
 ///
-/// Candidates:
-/// 1. `{prefix}.feature_embedding.parquet` — ρ, for every command since v2
-///    (and always for `fne` / `masked-*`). A v1 `bge` put its co-embed here
-///    and nothing in the file tells the two apart, so when a v1
-///    `feature_loading.parquet` also exists, THAT is ρ — unless a
-///    `feature_coembedding.parquet` sits beside them, which only a v2 run
-///    writes, in which case the `feature_loading` is a stale leftover.
-/// 2. `{prefix}.feature_loading.parquet` — a v1 run's ρ; only ever held ρ.
-/// 3. `{prefix}.dictionary.parquet` — legacy `bge --skip-etm`. **Shared with
-///    the topic dictionary β**, so it is accepted only after [`ArtifactScale`]
-///    confirms it is signed rather than a log-simplex.
-///
 /// The run's manifest, when there is one, decides first: the ρ it records
-/// stands while that file exists. Otherwise the candidates are probed under
-/// the prefix as given (else the one the manifest records, for a renamed
-/// manifest), passing over the co-embed it records, and the legacy slot only
-/// for a kind that wrote ρ there ([`RunKind::dictionary_may_hold_rho`]) —
-/// another kind's signed `dictionary` (svd loadings, say) is not ρ.
+/// stands while that file exists. Otherwise `{prefix}.feature_embedding.parquet`
+/// is looked for under the prefix as given (else the one the manifest records,
+/// for a renamed manifest).
 ///
-/// `prefix` may also name the table itself (any of the three) or the run's
-/// manifest, so a path pasted from a listing works as well as the stem. A
-/// named table must be the one its run resolves to, when the run has a
-/// manifest: by name alone a v1 co-embed or a stale `feature_loading`
-/// passes for ρ.
+/// `prefix` may also name the table itself or the run's manifest, so a path
+/// pasted from a listing works as well as the stem. A named table must be the
+/// one its run resolves to, when the run has a manifest.
 ///
 /// Returns `(rho_path, bias_path)`; the bias is `None` when absent (callers
 /// default it to zero).
 pub fn resolve_feature_embedding(prefix: &str) -> anyhow::Result<(String, Option<String>)> {
-    if let Some((stem, suf)) = strip_table_suffix(prefix) {
+    if let Some(stem) = strip_table_suffix(prefix) {
         anyhow::ensure!(
             Path::new(prefix).exists(),
             "no per-gene embedding ρ at `{prefix}`: the file does not exist"
@@ -185,19 +152,12 @@ pub fn resolve_feature_embedding(prefix: &str) -> anyhow::Result<(String, Option
             // The caller's spelling of the same file.
             return Ok((prefix.to_string(), bias));
         }
-        if suf == RHO_TABLE_SUFFIXES[2] {
-            let m = Mat::from_parquet(prefix)?;
-            anyhow::ensure!(
-                ArtifactScale::detect(&m.mat) == ArtifactScale::Signed,
-                "{prefix} holds a log-simplex dictionary, not ρ"
-            );
-        }
         return Ok((prefix.to_string(), bias_beside(stem)));
     }
     let stem = prefix.strip_suffix(".senna.json").unwrap_or(prefix);
     match readable_manifest(&default_path(stem)) {
         Some((m, dir)) => rho_of_run(&m, &dir, Some(stem)),
-        None => probe_feature_embedding(stem, None, true),
+        None => probe_feature_embedding(stem),
     }
 }
 
@@ -223,23 +183,18 @@ fn rho_of_run(
     if let Some(rel) = m.outputs.feature_embedding.as_deref() {
         let rho = resolve(manifest_dir, rel).to_string_lossy().into_owned();
         if Path::new(&rho).exists() {
-            let bias = strip_table_suffix(&rho).and_then(|(stem, _)| bias_beside(stem));
+            let bias = strip_table_suffix(&rho).and_then(bias_beside);
             return Ok((rho, bias));
         }
     }
-    let coembed = m
-        .outputs
-        .feature_coembedding
-        .as_deref()
-        .map(|rel| resolve(manifest_dir, rel));
-    let legacy_slot = m.kind.dictionary_may_hold_rho();
     let own = resolve(manifest_dir, &m.prefix)
         .to_string_lossy()
         .into_owned();
-    let probe = |p: &str| probe_feature_embedding(p, coembed.as_deref(), legacy_slot);
     match given {
-        Some(g) if g != own => probe(g).or_else(|e| probe(&own).map_err(|_| e)),
-        _ => probe(&own),
+        Some(g) if g != own => {
+            probe_feature_embedding(g).or_else(|e| probe_feature_embedding(&own).map_err(|_| e))
+        }
+        _ => probe_feature_embedding(&own),
     }
 }
 
@@ -255,61 +210,15 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Find ρ under `prefix` by which tables sit there (see
-/// [`resolve_feature_embedding`]), passing over `coembed` — a run's recorded
-/// co-embed, which by name alone passes for ρ — and over the legacy
-/// `dictionary` slot unless `legacy_slot`.
-fn probe_feature_embedding(
-    prefix: &str,
-    coembed: Option<&Path>,
-    legacy_slot: bool,
-) -> anyhow::Result<(String, Option<String>)> {
-    let bias = bias_beside(prefix);
-
-    let coembed = coembed.and_then(|c| c.canonicalize().ok());
-    let exists = |suffix: &str| {
-        let cand = format!("{prefix}{suffix}");
-        let found = Path::new(&cand).exists()
-            && coembed
-                .as_ref()
-                .is_none_or(|c| Path::new(&cand).canonicalize().ok().as_ref() != Some(c));
-        found.then_some(cand)
-    };
-    let v2 = exists(RHO_TABLE_SUFFIXES[0]);
-    let v1 = exists(RHO_TABLE_SUFFIXES[1]);
-    let is_v2_run = Path::new(&format!("{prefix}{COEMBED_SUFFIX}")).exists();
-    // Both ρ names hold a signed table, so neither needs the content check;
-    // the question is only which one is ρ. A `feature_loading` beside a
-    // `feature_embedding` means a v1 run (the latter is its co-embed) —
-    // unless the run also wrote a co-embed under its own v2 name, in which
-    // case the `feature_loading` is stale.
-    match (v2, v1) {
-        (Some(rho), None) => return Ok((rho, bias)),
-        (Some(rho), Some(_)) if is_v2_run => return Ok((rho, bias)),
-        (_, Some(rho)) => return Ok((rho, bias)),
-        (None, None) => {}
-    }
-
-    // The legacy slot IS shared with the topic dictionary β, so it must be
-    // verified: loading a log-simplex β as a feature embedding trains on the
-    // wrong object with no shape mismatch to catch it.
-    let mut rejected: Vec<String> = Vec::new();
-    if let Some(cand) = exists(RHO_TABLE_SUFFIXES[2]).filter(|_| legacy_slot) {
-        let m = Mat::from_parquet(&cand)?;
-        if ArtifactScale::detect(&m.mat) == ArtifactScale::Signed {
-            return Ok((cand, bias));
-        }
-        rejected.push(format!("{cand} (holds a log-simplex dictionary, not ρ)"));
-    }
-    anyhow::bail!(
-        "no per-gene embedding ρ found for prefix `{prefix}` — looked for \
-         .feature_embedding.parquet, .feature_loading.parquet, .dictionary.parquet{}",
-        if rejected.is_empty() {
-            String::new()
-        } else {
-            format!("; rejected: {}", rejected.join(", "))
-        }
-    )
+/// `{prefix}.feature_embedding.parquet`, when it exists (see
+/// [`resolve_feature_embedding`]).
+fn probe_feature_embedding(prefix: &str) -> anyhow::Result<(String, Option<String>)> {
+    let rho = format!("{prefix}{RHO_TABLE_SUFFIX}");
+    anyhow::ensure!(
+        Path::new(&rho).exists(),
+        "no per-gene embedding ρ found for prefix `{prefix}` — looked for {rho}"
+    );
+    Ok((rho, bias_beside(prefix)))
 }
 
 /// The types table written beside the run whose ρ is at `rho` (as resolved
@@ -320,16 +229,13 @@ fn probe_feature_embedding(
 pub fn feature_types_beside(
     rho: &str,
 ) -> anyhow::Result<Option<Vec<data_beans::aux::feature_types::FeatureType>>> {
-    let stem = strip_table_suffix(rho).map_or(rho, |(stem, _)| stem);
+    let stem = strip_table_suffix(rho).unwrap_or(rho);
     data_beans::aux::feature_types::read_feature_types(stem)
 }
 
-/// `path` split into its stem and the [`RHO_TABLE_SUFFIXES`] suffix it ends
-/// with, if any.
-fn strip_table_suffix(path: &str) -> Option<(&str, &'static str)> {
-    RHO_TABLE_SUFFIXES
-        .iter()
-        .find_map(|suf| path.strip_suffix(suf).map(|stem| (stem, *suf)))
+/// `path`'s stem, when it ends with [`RHO_TABLE_SUFFIX`].
+fn strip_table_suffix(path: &str) -> Option<&str> {
+    path.strip_suffix(RHO_TABLE_SUFFIX)
 }
 
 /// `{stem}.feature_bias.parquet`, when it exists.
@@ -341,9 +247,7 @@ fn bias_beside(stem: &str) -> Option<String> {
 /// Resolve `ρ` (and its bias) for a run that has a manifest in hand.
 ///
 /// The manifest's `outputs.feature_embedding` is authoritative when present —
-/// a recorded path beats probing (a v1 manifest's `feature_loading` has
-/// already been moved there by [`RunManifest::load`]). A manifest with no ρ
-/// slot, or one whose recorded table is gone, falls through to probing the
+/// a recorded path beats probing. A manifest with no ρ slot, or one whose recorded table is gone, falls through to probing the
 /// run prefix, as [`resolve_feature_embedding`] describes.
 ///
 /// This is the entry point for manifest-holding consumers;
@@ -363,9 +267,7 @@ pub type Unknown = BTreeMap<String, serde_json::Value>;
 /// Readers accept any version and log a warning for newer-than-known.
 ///
 /// - v2: `feature_embedding` is ρ for every command and the SIMBA co-embed
-///   has its own slot, `feature_coembedding`. v1 wrote the co-embed as
-///   `feature_embedding` and ρ as `feature_loading`; see
-///   [`RunManifest::load`].
+///   has its own slot, `feature_coembedding`.
 pub const MANIFEST_VERSION: u32 = 2;
 
 /// Subcommand that produced the run. Serde-encoded as kebab-case strings
@@ -622,28 +524,6 @@ impl RunKind {
             | RunKind::JointSvd
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace => false,
-        }
-    }
-
-    /// Whether a `{prefix}.dictionary.parquet` of this kind can be ρ: only a
-    /// legacy `bge --skip-etm` put it there. Every other kind's is β or
-    /// loadings, signed or not. A full `match`, so a new kind must answer.
-    #[must_use]
-    pub fn dictionary_may_hold_rho(self) -> bool {
-        match self {
-            RunKind::Bge => true,
-            RunKind::Topic
-            | RunKind::Itopic
-            | RunKind::MaskedVae
-            | RunKind::JointTopic
-            | RunKind::Vae
-            | RunKind::Rbm
-            | RunKind::Ode
-            | RunKind::Svd
-            | RunKind::JointSvd
-            | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace
-            | RunKind::Simba => false,
         }
     }
 
@@ -921,10 +801,6 @@ pub struct RunOutputs {
     ///   GENES, so each column exponentiates to 1 (`Σ_g exp(β[g,k]) = 1`). It is
     ///   in LOG space — a frequent source of bugs when read as probabilities.
     /// - SVD family: signed component loadings (no simplex).
-    /// - `bge --skip-etm` (legacy alias): the raw gene embedding ρ. Superseded by
-    ///   [`RunOutputs::feature_embedding`], which every bge run now records on both
-    ///   paths; the alias stays only for consumers that already read it
-    ///   (`masked-topic --freeze-feature-embedding`, `annotate`).
     ///
     /// Anything that needs ρ should read `feature_embedding` and never this slot.
     ///
@@ -939,8 +815,8 @@ pub struct RunOutputs {
     /// ([`ArtifactScale::LogSimplexColumns`]).
     ///
     /// Split out of `dictionary` so the name states both the axis and the scale:
-    /// `dictionary` had meant β, SVD signed loadings, or (legacy `bge
-    /// --skip-etm`) the embedding ρ, and the resulting shape/scale ambiguity
+    /// `dictionary` had meant β, SVD signed loadings, or the embedding ρ,
+    /// and the resulting shape/scale ambiguity
     /// produced real bugs — reading this table as probabilities yields
     /// `ln(negative)`, i.e. silent NaN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1011,10 +887,6 @@ pub struct RunOutputs {
     /// interrupted run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_coembedding: Option<String>,
-    /// v1 name for ρ, read only; [`RunManifest::load`] moves it onto
-    /// `feature_embedding`. Never written.
-    #[serde(default, skip_serializing)]
-    pub(crate) feature_loading: Option<String>,
     /// `{out}.module_membership.parquet`: gene × M learned-module membership
     /// (rows on the simplex with exact zeros). Present only for a run trained with
     /// gene modules; `feature_embedding` still holds the composed row, so a reader
@@ -1409,7 +1281,7 @@ impl RunManifest {
     pub fn load(path: &Path) -> anyhow::Result<(Self, PathBuf)> {
         let raw = fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
-        let mut m: Self = serde_json::from_str(&raw).map_err(|e| {
+        let m: Self = serde_json::from_str(&raw).map_err(|e| {
             // A kind this senna does not know: a retired command's, or a
             // newer senna's.
             let unknown = serde_json::from_str::<serde_json::Value>(&raw)
@@ -1425,7 +1297,6 @@ impl RunManifest {
                 None => anyhow::anyhow!("parse {}: {e}", path.display()),
             }
         })?;
-        m.lift_v1_feature_slots();
         if m.version > MANIFEST_VERSION {
             log::warn!(
                 "manifest {} is v{} but this binary supports up to v{MANIFEST_VERSION}; \
@@ -1436,30 +1307,6 @@ impl RunManifest {
         }
         let dir = manifest_dir(path).to_path_buf();
         Ok((m, dir))
-    }
-
-    /// Move a v1 manifest's feature slots onto the v2 names, so no reader
-    /// has to know the old layout. In v1 the embedding commands (`bge`, `simba`,
-    /// `resolve-embedding-space`) wrote the SIMBA co-embed as
-    /// `feature_embedding` and ρ as `feature_loading`; `fne` and the masked
-    /// family already had ρ in `feature_embedding` and no co-embed. A v1
-    /// embedding run that predates `feature_loading` has only its co-embed,
-    /// which is moved and leaves ρ unrecorded (the prefix probe finds
-    /// `dictionary` under `--skip-etm`).
-    fn lift_v1_feature_slots(&mut self) {
-        if self.version >= 2 {
-            return;
-        }
-        let coembeds = matches!(
-            self.kind,
-            RunKind::Bge | RunKind::Simba | RunKind::ResolveEmbeddingSpace
-        );
-        if coembeds && self.outputs.feature_coembedding.is_none() {
-            self.outputs.feature_coembedding = self.outputs.feature_embedding.take();
-        }
-        if let Some(rho) = self.outputs.feature_loading.take() {
-            self.outputs.feature_embedding = Some(rho);
-        }
     }
 
     /// The run's cell → pb partition, resolved against `manifest_dir`: of
@@ -2546,68 +2393,33 @@ mod tests {
         prefix
     }
 
-    /// Which of `feature_embedding` and `feature_loading` is ρ: the run's
-    /// manifest says when there is one; without it the tables beside them
-    /// decide, and a table named directly is taken as given.
+    /// Where ρ is: the run's manifest says when there is one; without it the
+    /// table under the prefix, and a table named directly is taken as given.
     #[test]
-    fn the_manifest_decides_which_table_is_rho() {
-        let (fe, fl) = (".feature_embedding.parquet", ".feature_loading.parquet");
+    fn the_manifest_decides_where_rho_is() {
+        let fe = RHO_TABLE_SUFFIX;
 
-        // No manifest: a v1 `feature_loading` beside `feature_embedding` is
-        // ρ, unless a v2 co-embed marks it a stale leftover.
+        // No manifest: the table under the prefix, or named directly.
         let dir = tempfile::tempdir().unwrap();
-        let prefix = run_with(dir.path(), &[fe, fl]);
-        let (e, l) = (format!("{prefix}{fe}"), format!("{prefix}{fl}"));
-        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, l);
-        assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
-        write_signed(&format!("{prefix}{COEMBED_SUFFIX}"));
+        let prefix = run_with(dir.path(), &[fe]);
+        let e = format!("{prefix}{fe}");
         assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, e);
+        assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
 
-        // A v1 bge manifest: its co-embed, named directly, is refused and
-        // ρ named instead.
+        // A manifest recording ρ elsewhere: a table named beside it that is
+        // not that ρ is refused, naming the one it records.
         let dir = tempfile::tempdir().unwrap();
-        let prefix = run_with(dir.path(), &[fe, fl]);
-        let (e, l) = (format!("{prefix}{fe}"), format!("{prefix}{fl}"));
-        // `feature_loading` is never written now, so put it in by hand.
-        let mut v1 = RunManifest::new(RunKind::Bge, &prefix);
-        v1.version = 1;
-        v1.outputs.feature_embedding = Some(e.clone());
-        let mut json = serde_json::to_value(&v1).unwrap();
-        json["outputs"]["feature_loading"] = l.clone().into();
-        std::fs::write(default_path(&prefix), json.to_string()).unwrap();
-        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, l);
-        let err = resolve_feature_embedding(&e).unwrap_err().to_string();
-        assert!(err.contains(&l), "{err}");
-        assert_eq!(resolve_feature_embedding(&l).unwrap().0, l);
-
-        // A v2 fne run writes no co-embed; an old `feature_loading` beside
-        // its ρ is a leftover, which the manifest says.
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = run_with(dir.path(), &[fe, fl]);
-        let (e, l) = (format!("{prefix}{fe}"), format!("{prefix}{fl}"));
+        let prefix = run_with(dir.path(), &[fe]);
+        let other = format!("{}/other{fe}", dir.path().display());
+        write_signed(&other);
         let mut fne = RunManifest::new(RunKind::Fne, &prefix);
-        fne.outputs.feature_embedding = Some(e.clone());
+        fne.outputs.feature_embedding = Some(other.clone());
         fne.save(Path::new(&default_path(&prefix))).unwrap();
-        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, e);
-        assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
-        let err = resolve_feature_embedding(&l).unwrap_err().to_string();
-        assert!(err.contains(&e), "{err}");
-
-        // An older v1 bge --skip-etm run: the co-embed as `feature_embedding`,
-        // ρ in `dictionary`. The co-embed is passed over.
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = run_with(dir.path(), &[fe, ".dictionary.parquet"]);
-        let mut v1 = RunManifest::new(RunKind::Bge, &prefix);
-        v1.version = 1;
-        v1.outputs.feature_embedding = Some(format!("{prefix}{fe}"));
-        v1.save(Path::new(&default_path(&prefix))).unwrap();
-        let dict = format!("{prefix}.dictionary.parquet");
-        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, dict);
-        // Named directly, its co-embed is refused for the same reason.
+        assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, other);
         let err = resolve_feature_embedding(&format!("{prefix}{fe}"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains(&dict), "{err}");
+        assert!(err.contains(&other), "{err}");
 
         // A moved run whose manifest records no ρ: probed where it is now,
         // not under the prefix it was trained at.
@@ -2621,10 +2433,10 @@ mod tests {
             format!("{prefix}{fe}")
         );
 
-        // An svd run's signed loadings in `dictionary` are not ρ.
+        // A `dictionary` is never ρ, whatever the kind.
         let dir = tempfile::tempdir().unwrap();
         let prefix = run_with(dir.path(), &[".dictionary.parquet"]);
-        write_kind_only(&prefix, RunKind::Svd).unwrap();
+        write_kind_only(&prefix, RunKind::Bge).unwrap();
         assert!(resolve_feature_embedding(&prefix).is_err());
         assert!(resolve_feature_embedding(&format!("{prefix}.dictionary.parquet")).is_err());
 

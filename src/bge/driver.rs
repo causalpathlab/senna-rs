@@ -434,7 +434,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // lives in `feature_embedding`, so these are additive.
         module_membership_suffix: has_modules.then_some(ge::transfer::MODULE_MEMBERSHIP_SUFFIX),
         module_dictionary_suffix: has_modules.then_some(ge::transfer::MODULE_DICTIONARY_SUFFIX),
-        // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm => it is ρ.
+        // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm writes none.
         softmax_dictionary_suffix: resolve_etm.then_some("dictionary.parquet"),
         // Z always lands in cell_embedding.parquet — on BOTH the ETM and
         // --skip-etm paths — so every geometry consumer finds the H-space

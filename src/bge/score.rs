@@ -8,16 +8,14 @@
 //! then scoring against them. Hence a scorer, in the bge module, rather than an artifact
 //! declaration at the crate root.
 //!
-//! **ρ lives in more than one place, and only one resolver knows the rules.**
+//! **Only one resolver knows where ρ is.**
 //! [`senna::run_manifest::resolve_feature_embedding_for`] exists because three consumers each
 //! probed for ρ independently and each broke differently. Go through it. Note it returns
 //! `(ρ_path, bias_path)` and `deconvolve` discards the second — a probe needs both, since
 //! `(ρ, b_feat)` is exactly the frozen side that [`FrozenProjector`] and
 //! [`graph_embedding_util::loss::multinomial_ll`] consume.
 //!
-//! `--skip-etm` is **not** required. It used to be, before the ρ slot always
-//! carried raw signed ρ; it now does on both paths, which is why `deconvolve` documents
-//! itself as working with or without the flag.
+//! `--skip-etm` is **not** required: the ρ slot carries raw signed ρ on both paths.
 
 use crate::logging::new_progress_bar;
 use crate::topic::eval::{build_gene_remap_with, QueryNameOpts};
@@ -166,8 +164,7 @@ impl BgeEmbedding {
         let (rho_path, bias_path) = run_manifest::resolve_feature_embedding_for(&manifest, &dir)?;
         let rho = DMatrix::<f32>::from_parquet(&rho_path)
             .with_context(|| format!("reading per-gene loading ρ {rho_path}"))?;
-        // Catches a manifest that points at a log-simplex β instead of signed ρ — the exact
-        // confusion `--skip-etm` used to create.
+        // Catches a manifest that points at a log-simplex β instead of signed ρ.
         ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &rho_path)?;
 
         let (d, h) = (rho.mat.nrows(), rho.mat.ncols());

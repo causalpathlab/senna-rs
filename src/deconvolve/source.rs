@@ -4,12 +4,7 @@
 //! supported sources.** What is taken from a run:
 //!
 //! - the gene axis and embedding width, from `feature_embedding.parquet` — the
-//!   per-gene loading ρ. Older runs kept ρ only under `--skip-etm`, where it
-//!   borrowed the `dictionary` slot, so that legacy layout is read as a
-//!   fallback. There the slot must be checked by CONTENT (a β has
-//!   gene-log-simplex columns), never by which cell-side slots are populated,
-//!   since `latent` and `cell_embedding` are interchangeable and have swapped
-//!   roles between versions.
+//!   per-gene loading ρ.
 //! - the cell embedding, which the archetypes are clustered in.
 //! - the input counts and the cell annotation, which the profiles are built from.
 //!
@@ -111,8 +106,7 @@ impl EmbeddingSource {
     /// gene table (ρ, or SIMBA's gene node table).
     ///
     /// Resolution is delegated to [`run_manifest::resolve_feature_embedding_for`],
-    /// the single place that knows where ρ can live and that verifies each
-    /// candidate's scale. Duplicating that probe here is what let the same bug
+    /// the single place that knows where ρ can live. Duplicating that probe here is what let the same bug
     /// recur in three consumers.
     fn from_gene_table(m: &RunManifest, dir: &Path) -> Result<Self> {
         let (rho_path, _) = run_manifest::resolve_feature_embedding_for(m, dir)?;
