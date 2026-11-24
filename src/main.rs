@@ -73,7 +73,6 @@ mod rbm;
 mod rbm_core;
 mod refine_weighting;
 mod resolve_embedding_space;
-mod resolve_topics;
 #[cfg(feature = "view")]
 mod run;
 #[cfg(test)]
@@ -113,7 +112,6 @@ use postprocess::*;
 use predict::{predict_model, PredictArgs};
 use probe::{run_probe, ProbeArgs};
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
-use resolve_topics::{resolve_topics, ResolveTopicsArgs};
 use senna::embed_common::*;
 use senna::multiome_plan;
 use simba::{fit_simba, SimbaArgs};
@@ -556,21 +554,6 @@ enum Commands {
                       H defaults to K, but may exceed it."
     )]
     ResolveEmbeddingSpace(RestArgs),
-
-    #[command(
-        name = "resolve-topics",
-        about = "Topics for an embedding run that has none (simba, bge --skip-etm): one per cell cluster.",
-        long_about = "Resolves topics for a finished embedding run the way `senna bge` does\n\
-                      its own: one topic per cell cluster, no training.\n\
-                      α = each cluster's normalised centroid in the cell embedding Z;\n\
-                      θ = each cell's softmax over ⟨z, α_k⟩;\n\
-                      β = log_softmax over genes of ρ·(α−ᾱ)ᵀ.\n\
-                      Writes {out}.latent (log θ), {out}.softmax_dictionary (β) and\n\
-                      {out}.topic_embedding (α), and records them in the manifest.\n\
-                      Needs the run's cell clusters (`senna clustering --from`).\n\
-                      Topic T{c} is cluster c. `senna view` offers it in the r menu."
-    )]
-    ResolveTopics(ResolveTopicsArgs),
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
@@ -1136,9 +1119,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::ResolveEmbeddingSpace(args) => {
             resolve_embedding_space(args)?;
-        }
-        Commands::ResolveTopics(args) => {
-            resolve_topics(args)?;
         }
         Commands::Topic(args) => {
             fit_topic_model(args)?;

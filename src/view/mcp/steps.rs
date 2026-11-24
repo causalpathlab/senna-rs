@@ -22,7 +22,6 @@ pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Con
 #[serde(rename_all = "kebab-case")]
 enum Command {
     Clustering,
-    ResolveTopics,
     ResolveEmbeddingSpace,
     EmbedDiag,
     JointTopic,
@@ -31,9 +30,8 @@ enum Command {
 }
 
 /// Every command of [`Command`], as senna names them.
-pub(super) const COMMANDS: [&str; 7] = [
+pub(super) const COMMANDS: [&str; 6] = [
     Command::Clustering.name(),
-    Command::ResolveTopics.name(),
     Command::ResolveEmbeddingSpace.name(),
     Command::EmbedDiag.name(),
     Command::JointTopic.name(),
@@ -46,7 +44,6 @@ impl Command {
     const fn name(self) -> &'static str {
         match self {
             Self::Clustering => "clustering",
-            Self::ResolveTopics => "resolve-topics",
             Self::ResolveEmbeddingSpace => "resolve-embedding-space",
             Self::EmbedDiag => "embed-diag",
             Self::JointTopic => "joint-topic",
@@ -59,7 +56,7 @@ impl Command {
     fn on_run(self) -> bool {
         matches!(
             self,
-            Self::Clustering | Self::ResolveTopics | Self::ResolveEmbeddingSpace | Self::EmbedDiag
+            Self::Clustering | Self::ResolveEmbeddingSpace | Self::EmbedDiag
         )
     }
 }
@@ -147,11 +144,6 @@ fn step_task(a: &StepCall) -> Result<Task> {
             vec![("clusters", format!("{out}.feature_clusters.parquet"))]
         }
         Command::Clustering => vec![("clusters", format!("{out}.clusters.parquet"))],
-        Command::ResolveTopics => vec![
-            ("latent", format!("{out}.latent.parquet")),
-            ("dictionary", format!("{out}.softmax_dictionary.parquet")),
-            ("topics", format!("{out}.topic_embedding.parquet")),
-        ],
         Command::ResolveEmbeddingSpace | Command::JointTopic | Command::JointSvd | Command::Fne => {
             vec![("run", run_manifest::default_path(&out))]
         }
@@ -190,8 +182,6 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         "Run one analysis command as `senna {command} …`. On a finished run (from): \
          clustering (-m kmeans|leiden|hsblock in args; writes {out}.clusters.parquet, or with \
          target features {out}.feature_clusters.parquet, and records it in the run), \
-         resolve-topics (one topic per cell cluster for a run with none; writes \
-         {out}.latent, softmax_dictionary and topic_embedding .parquet), \
          resolve-embedding-space (a topic run recast as a shared cell and gene embedding; \
          writes a new run {out}.senna.json) and embed-diag (reports the embedding tables' \
          geometry; writes nothing). On data files: joint-topic and joint-svd (fits across \
@@ -204,7 +194,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                 "command": {"enum": COMMANDS},
                 "from": {"type": "string", "description": "Run manifest the command reads (clustering, resolve-*, embed-diag)"},
                 "data": {"type": "array", "items": {"type": "string"}, "description": "Input files (joint-topic, joint-svd: data files; fne: edge lists)"},
-                "out": {"type": "string", "description": "Output prefix [default for resolve-topics: from's own prefix; required otherwise, and for resolve-embedding-space not from's]"},
+                "out": {"type": "string", "description": "Output prefix (required; for resolve-embedding-space not from's)"},
                 "target": {"enum": ["cells", "features"], "description": "clustering only: the cells, or the run's features [default: cells]"},
                 "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help ({command}) lists them"},
                 "background": job_property(),

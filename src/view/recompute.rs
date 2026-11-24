@@ -18,19 +18,15 @@ pub(crate) enum Step {
     JointLayout,
     CellClusters,
     FeatureClusters,
-    /// One topic per cell cluster, for an embedding run with none
-    /// (`senna resolve-topics`): `T` in the view, not in the `r` menu.
-    Topics,
 }
 
 impl Step {
-    pub const ALL: [Step; 6] = [
+    pub const ALL: [Step; 5] = [
         Step::CellLayout,
         Step::FeatureLayout,
         Step::JointLayout,
         Step::CellClusters,
         Step::FeatureClusters,
-        Step::Topics,
     ];
 
     /// The layout that made a map of `kind` from method `method`: features
@@ -73,7 +69,7 @@ impl Step {
             ],
             Step::FeatureLayout => &["tsne", "umap", "phate"],
             Step::CellClusters | Step::FeatureClusters => &RESOLUTIONS,
-            Step::JointLayout | Step::Topics => &[],
+            Step::JointLayout => &[],
         }
     }
 
@@ -98,7 +94,7 @@ impl Step {
     }
 
     /// The map a layout step makes with `setting`: its method and kind;
-    /// none for a clustering or topics.
+    /// none for a clustering.
     pub fn shows(self, setting: &str) -> Option<(String, crate::view::SpaceKind)> {
         use crate::view::SpaceKind;
         match self {
@@ -116,13 +112,12 @@ impl Step {
             Step::JointLayout => "cells + features (joint)",
             Step::CellClusters => "cell clusters",
             Step::FeatureClusters => "feature clusters",
-            Step::Topics => "topics (one per cell cluster)",
         }
     }
 
     /// The tables the step writes beside `t`'s output prefix, as `argv`
-    /// runs it; none for the joint layout and topics, whose names their
-    /// commands choose.
+    /// runs it; none for the joint layout, whose names its command
+    /// chooses.
     pub fn outputs(self, t: &Target, setting: &str) -> Vec<String> {
         let out = &t.out;
         match self {
@@ -130,7 +125,7 @@ impl Step {
             Step::FeatureLayout => vec![format!("{out}.{setting}.feature_coords.parquet")],
             Step::CellClusters => vec![format!("{out}.clusters.parquet")],
             Step::FeatureClusters => vec![format!("{out}.feature_clusters.parquet")],
-            Step::JointLayout | Step::Topics => Vec::new(),
+            Step::JointLayout => Vec::new(),
         }
     }
 
@@ -138,9 +133,7 @@ impl Step {
     /// method, or a clustering's Leiden resolution (empty: its default).
     pub fn argv(self, t: &Target, setting: &str) -> Vec<String> {
         let (from, out) = (t.from.as_str(), t.out.as_str());
-        let v: Vec<&str> = if self == Step::Topics {
-            vec!["resolve-topics", "--from", from, "-o", out]
-        } else if self.is_clustering() {
+        let v: Vec<&str> = if self.is_clustering() {
             let mut v = vec!["clustering", "--from", from, "-m", "leiden", "-o", out];
             match (self, &t.latent) {
                 (Step::CellClusters, Some(latent)) => v.extend(["--latent", latent]),
@@ -180,8 +173,6 @@ pub(crate) struct Target {
     pub has_features: bool,
     /// Features co-embedded in the cells' space, which a joint layout needs.
     pub has_coembedding: bool,
-    /// A cell and a gene embedding but no latent: topics can be resolved.
-    pub can_resolve_topics: bool,
 }
 
 impl Target {
@@ -211,10 +202,6 @@ impl Target {
             has_features: m.outputs.feature_embedding.is_some(),
             has_coembedding: m.kind.cell_space() == senna::run_manifest::CellSpace::Embedding
                 && m.outputs.feature_coembedding.is_some(),
-            can_resolve_topics: has_cells
-                && m.outputs.latent.is_none()
-                && m.outputs.cell_embedding.is_some()
-                && m.outputs.feature_embedding.is_some(),
         }
     }
 
@@ -227,8 +214,6 @@ impl Target {
                 Step::CellClusters => self.latent.is_some(),
                 Step::FeatureLayout | Step::FeatureClusters => self.has_features,
                 Step::JointLayout => self.has_coembedding,
-                // Its own key, `T`.
-                Step::Topics => false,
             })
             .collect()
     }
@@ -386,22 +371,7 @@ mod tests {
             has_cells: true,
             has_features: true,
             has_coembedding: false,
-            can_resolve_topics: false,
         }
-    }
-
-    #[test]
-    fn topics_are_resolved_by_senna_under_their_own_key() {
-        let t = Target {
-            can_resolve_topics: true,
-            ..target(true)
-        };
-        // `T` makes topics; the `r` menu does not offer them.
-        assert!(!t.offered().contains(&Step::Topics));
-        assert_eq!(
-            Step::Topics.argv(&t, ""),
-            ["resolve-topics", "--from", "run.senna.json", "-o", "run"]
-        );
     }
 
     #[test]
@@ -412,7 +382,6 @@ mod tests {
             ["run.phate.cell_coords.parquet"]
         );
         assert_eq!(Step::CellClusters.outputs(&t, ""), ["run.clusters.parquet"]);
-        assert!(Step::Topics.outputs(&t, "").is_empty());
     }
 
     fn with_coembedding() -> Target {

@@ -37,15 +37,6 @@ fn each_step_runs_its_command_on_the_run_and_names_what_it_makes() {
             vec![("clusters", "k.feature_clusters.parquet")],
         ),
         (
-            json!({"command": "resolve-topics", "from": "r.senna.json"}),
-            vec!["resolve-topics", "--from", "r.senna.json", "-o", "r"],
-            vec![
-                ("latent", "r.latent.parquet"),
-                ("dictionary", "r.softmax_dictionary.parquet"),
-                ("topics", "r.topic_embedding.parquet"),
-            ],
-        ),
-        (
             json!({"command": "resolve-embedding-space", "from": "r.senna.json", "out": "rest"}),
             vec![
                 "resolve-embedding-space",
@@ -98,7 +89,7 @@ fn a_step_missing_its_input_or_writing_over_its_run_is_refused() {
         json!({"command": "joint-svd", "out": "j"}),
         json!({"command": "joint-svd", "data": ["a.zarr"]}),
         json!({"command": "resolve-embedding-space", "from": "r.senna.json"}),
-        json!({"command": "resolve-topics", "from": "r.senna.json", "target": "features"}),
+        json!({"command": "resolve-embedding-space", "from": "r.senna.json", "out": "rest", "target": "features"}),
     ] {
         assert!(step(bad.clone()).is_err(), "{bad}");
     }

@@ -123,8 +123,7 @@ pub(super) fn resolve_etm_topics(
 ///   θ [N,K] = softmax over clusters of ⟨z_i, α_k⟩ (soft assignment),
 ///   β [D,K] = `log_softmax_d(ρ·(α−ᾱ)ᵀ)`: a gene scores high in a topic when
 ///             its embedding `rho [D,H]` aligns with that cluster's cells.
-/// Returns (α, log θ, β). `senna bge` resolves its topics so, and
-/// `senna resolve-topics` does the same for a finished run.
+/// Returns (α, log θ, β). `senna bge` resolves its topics so.
 pub(crate) fn topics_from_clusters(
     z: &Mat,
     rho: &Mat,

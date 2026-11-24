@@ -139,7 +139,6 @@ impl App {
             KeyCode::Char('-' | '_') => {
                 self.with_vp(|v| v.zoom_at(1.0 / 1.4, 0.5 * v.w as f32, 0.5 * v.h as f32, &FREE))
             }
-            KeyCode::Char('T') => self.resolve_topics(),
             KeyCode::Char('H') => {
                 self.change_text(Scene::cycle_chart);
                 self.restart();
@@ -731,7 +730,7 @@ fn search(names: &[Box<str>], lower: &[String], query: &str) -> Vec<Box<str>> {
 fn chart_takes(k: KeyEvent) -> bool {
     matches!(
         k.code,
-        KeyCode::Char('H' | 'c' | '+' | '=' | '-' | '_' | 'T' | '?' | 'q')
+        KeyCode::Char('H' | 'c' | '+' | '=' | '-' | '_' | '?' | 'q')
     )
 }
 
