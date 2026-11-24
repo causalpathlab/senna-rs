@@ -23,15 +23,15 @@ use senna::run_manifest::{self, RunManifest};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-mod groups;
-mod loads;
-mod near;
-mod scores;
-mod tables;
+mod background_loads;
+mod embedding_neighbours;
+mod group_contrasts;
+mod numeric;
+mod sources;
 
-pub(crate) use loads::*;
-pub(super) use scores::*;
-pub(crate) use tables::*;
+pub(crate) use background_loads::*;
+pub(super) use numeric::*;
+pub(crate) use sources::*;
 
 /// Per group, a score per feature; and the features, in column order.
 type GroupContrasts<'a> = (Vec<Vec<f32>>, &'a [Box<str>]);
