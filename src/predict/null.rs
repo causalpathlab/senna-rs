@@ -239,7 +239,7 @@ pub(crate) fn encoder_null(
         num_opt_iter: c.iter_opt,
         refine: c.pb_refine.to_params(),
         bulk_batches: c.mixture_batch.clone(),
-        pb_tree: c.pb_tree_params(),
+        pb_tree: Some(crate::refine_weighting::pb_tree_params()),
         ..MultilevelParams::new(proj_dim)
     };
     info!("Collapsing held-out cells for the encoder's null ...");

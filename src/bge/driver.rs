@@ -42,8 +42,7 @@ pub(crate) struct EmbedKnobs<'a> {
     pub weight_decay: f64,
     pub block_size: Option<usize>,
     pub seed: u64,
-    pub device: &'a ComputeDevice,
-    pub device_no: usize,
+    pub device: &'a senna::embed_common::DeviceArgs,
 
     /// The `--feature-modules` flag group.
     pub modules: &'a ge::FeatureModuleArgs,
@@ -143,7 +142,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 batch_size: knobs.batch_size.unwrap_or(1024),
                 learning_rate: knobs.learning_rate,
                 seed: knobs.seed,
-                device: knobs.device.to_device(knobs.device_no)?,
+                device: knobs.device.to_device()?,
                 weight_decay: knobs.weight_decay,
                 unit_weight_decay: None,
                 phase1_cells_per_pb: knobs.phase1_cells_per_pb,
@@ -625,8 +624,7 @@ impl super::BgeArgs {
             weight_decay: self.weight_decay,
             block_size: self.block_size,
             seed: self.seed,
-            device: &self.compute.device,
-            device_no: self.compute.device_no,
+            device: &self.compute,
             modules: &self.modules,
             out: &self.out,
             batch_files: self.batch_files.as_deref(),

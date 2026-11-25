@@ -436,19 +436,17 @@ pub(crate) struct CollapseArgs {
     pub(crate) pb_refine: PbRefineArgs,
 }
 
-impl CollapseArgs {
-    /// Tree parameters for the multilevel collapse. The finest pseudobulks
-    /// always come from it: cells are reassigned between the coarsest sketch
-    /// nodes by the likelihood of the node profiles, then each leaf is
-    /// bisected on the leading component of its cells' residuals until every
-    /// level reaches its leaf target, each split recorded in
-    /// `{out}.pb_tree.json`. (bge builds its own partition and ignores this.)
-    pub(crate) fn pb_tree_params(&self) -> Option<data_beans::alg::collapse_data::PbTreeParams> {
-        use data_beans::alg::collapse_data::{PbTreeParams, ReassignCellsParams};
-        Some(PbTreeParams {
-            reassign_cells: Some(ReassignCellsParams::default()),
-            ..PbTreeParams::default()
-        })
+/// Tree parameters for the multilevel collapse. The finest pseudobulks
+/// always come from it: cells are reassigned between the coarsest sketch
+/// nodes by the likelihood of the node profiles, then each leaf is bisected
+/// on the leading component of its cells' residuals until every level
+/// reaches its leaf target, each split recorded in `{out}.pb_tree.json`.
+/// (bge builds its own partition and ignores this.)
+pub(crate) fn pb_tree_params() -> data_beans::alg::collapse_data::PbTreeParams {
+    use data_beans::alg::collapse_data::{PbTreeParams, ReassignCellsParams};
+    PbTreeParams {
+        reassign_cells: Some(ReassignCellsParams::default()),
+        ..PbTreeParams::default()
     }
 }
 

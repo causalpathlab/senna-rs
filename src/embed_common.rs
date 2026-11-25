@@ -66,10 +66,11 @@ pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
 }
 
 /// Shared compute device enum for candle-based models
-#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(ValueEnum, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum ComputeDevice {
+    #[default]
     Cpu,
     Cuda,
     Metal,
@@ -98,7 +99,7 @@ impl ComputeDevice {
 /// `--device` / `--device-no`, flattened into every command that runs on a
 /// candle device. Serialized flat, so manifests keep their `device` and
 /// `device_no` keys.
-#[derive(Args, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Args, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct DeviceArgs {
     #[arg(
@@ -114,15 +115,6 @@ pub struct DeviceArgs {
 
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     pub device_no: usize,
-}
-
-impl Default for DeviceArgs {
-    fn default() -> Self {
-        Self {
-            device: ComputeDevice::Cpu,
-            device_no: 0,
-        }
-    }
 }
 
 impl DeviceArgs {

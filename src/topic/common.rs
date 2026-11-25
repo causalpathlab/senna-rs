@@ -33,7 +33,7 @@ pub struct PreparedData {
     /// downstream `--from` chains.
     pub cell_to_pb_per_level: Option<Vec<Vec<usize>>>,
     /// The tree behind the finest partition, when the collapse grew one (see
-    /// `LoadCollapseArgs::pb_tree`); the writer serialises it as
+    /// [`crate::refine_weighting::pb_tree_params`]); the writer serialises it as
     /// `{out}.pb_tree.json`.
     pub pb_tree: Option<data_beans::alg::collapse_data::PbTree>,
     /// Near-empty output keep-mask from cell QC (post-`mask_columns`
@@ -473,8 +473,6 @@ pub struct LoadCollapseArgs<'a> {
     pub must_train_file: Option<&'a str>,
     /// BBKNN + Poisson DC-SBM refinement of the multilevel partition.
     pub refine: data_beans::alg::refine_multilevel::RefineParams,
-    /// Grow the finest partition as a tree — see `MultilevelParams::pb_tree`.
-    pub pb_tree: Option<data_beans::alg::collapse_data::PbTreeParams>,
     /// Treat all cells as a single batch — no per-batch δ estimation.
     pub ignore_batch: bool,
     /// Optional shared cell QC — see [`LoadProjectArgs::qc`].
@@ -663,7 +661,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         // The feature coarsening reads the finest level's counts
         // (`CollapsedOut::observed_counts`).
         keep_finest_stats: true,
-        pb_tree: args.pb_tree.clone(),
+        pb_tree: Some(crate::refine_weighting::pb_tree_params()),
         strata: None,
     };
 

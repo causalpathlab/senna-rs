@@ -121,7 +121,6 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         feature_list_file: hvg.feature_list_file,
         must_train_file: hvg.must_train_file,
         refine: args.collapse.pb_refine.to_params(),
-        pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         qc: args.qc.to_config(),
         qc_block_size: Some(args.block_size),

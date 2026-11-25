@@ -215,7 +215,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         },
         feature_kind: args.feature_name_kind.clone().into(),
         refine: args.collapse.pb_refine.to_params(),
-        pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         want_hierarchy: true,
         prebuilt_partition,

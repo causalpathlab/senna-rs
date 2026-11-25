@@ -274,7 +274,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             // The feature coarsening reads the finest level's counts
             // (`CollapsedOut::observed_counts`).
             keep_finest_stats: true,
-            pb_tree: args.collapse.pb_tree_params(),
+            pb_tree: Some(crate::refine_weighting::pb_tree_params()),
             strata,
         },
     )?;

@@ -279,7 +279,6 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         must_train_file: args.hvg.must_train_features.as_deref(),
         refine: args.collapse.pb_refine.to_params(),
-        pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         qc: args.qc.to_config(),
         qc_block_size: args.block_size,

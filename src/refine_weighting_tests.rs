@@ -10,11 +10,7 @@ struct Cli {
 
 #[test]
 fn the_finest_pseudobulks_come_from_the_residual_tree() {
-    let cli = Cli::try_parse_from(["senna"]).unwrap();
-    let params = cli
-        .collapse
-        .pb_tree_params()
-        .expect("the tree is always grown");
+    let params = pb_tree_params();
     assert!((params.edge_margin - 0.10).abs() < 1e-6);
     assert_eq!(params.below_edge, BelowEdge::Keep);
     assert_eq!(params.max_genes, 2000);
@@ -139,6 +135,5 @@ fn a_fit_recorded_with_a_pb_tree_choice_still_replays() {
         let raw = format!(r#"{{"pb_tree":"{choice}","sort_dim":7}}"#);
         let c: CollapseArgs = serde_json::from_str(&raw).expect("old collapse args");
         assert_eq!(c.sort_dim, 7);
-        assert!(c.pb_tree_params().is_some());
     }
 }
