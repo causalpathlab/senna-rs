@@ -44,6 +44,14 @@ impl Scene {
         self.data.loads.stage2.answer(self.patient)
     }
 
+    /// Stage 2's donors, in its tables' order.
+    pub(crate) fn stage2_donors(&self) -> Result<Vec<Box<str>>, String> {
+        if !self.has_stage2() {
+            return Err(NO_STAGE2.into());
+        }
+        self.stage2().map(|s| s.donors.clone())
+    }
+
     /// The gain map of the gene shown, or back to its activity; with no
     /// gene shown, rank the genes and show the first.
     pub fn toggle_gain(&mut self) {
@@ -263,4 +271,4 @@ impl Scene {
 
 #[cfg(test)]
 #[path = "../tests/stage2.rs"]
-mod tests;
+pub(crate) mod tests;

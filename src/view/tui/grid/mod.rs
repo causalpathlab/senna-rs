@@ -413,6 +413,13 @@ impl Deck {
                 self.grid = true;
                 self.note = None;
             }
+            KeyCode::Char('D') => match self.donor_tiles(self.at) {
+                Ok(()) => {
+                    self.grid = true;
+                    self.note = None;
+                }
+                Err(e) => self.apps[self.at].message = Some(e),
+            },
             KeyCode::Char('s') => self.open_save(Scope::View),
             KeyCode::Char('f') => self.toggle_saved(),
             KeyCode::Char('F') => self.focus_saved(),
@@ -466,6 +473,27 @@ impl Deck {
         // Every tile moves: lay them out again.
         self.tiles.clear();
         self.drawn = None;
+    }
+
+    /// Beside view `k`, showing a gain map, one copy per donor drawing that
+    /// donor's deviation at every cell's state: where each donor departs,
+    /// side by side.
+    fn donor_tiles(&mut self, k: usize) -> Result<(), String> {
+        let scene = &mut self.apps[k].scene;
+        let Some(crate::view::Pick::Gain { gene, .. }) = scene.pick.clone() else {
+            return Err("D tiles a gain map by donor · show one first (i)".into());
+        };
+        let donors = scene.stage2_donors()?;
+        for (j, donor) in donors.into_iter().enumerate() {
+            self.duplicate(k + j);
+            self.apps[k + j + 1]
+                .scene
+                .set_pick(crate::view::Pick::Gain {
+                    gene: gene.clone(),
+                    donor: Some(donor),
+                });
+        }
+        Ok(())
     }
 
     /// Close session `k`, unless it is the last or lupin is working for it.

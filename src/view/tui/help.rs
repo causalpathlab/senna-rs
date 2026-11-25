@@ -152,6 +152,10 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "copy this view beside it (1×2, then 2×2, …) to compare colourings or features",
             ),
             (
+                "D",
+                "on a stage-2 gain map: a copy per donor beside it, each drawing that donor's deviation at every cell's state",
+            ),
+            (
                 "w",
                 "every open view in a grid: point or arrows choose, click or enter opens, 1-9 by number",
             ),
