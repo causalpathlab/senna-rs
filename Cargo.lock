@@ -2719,9 +2719,9 @@ dependencies = [
 
 [[package]]
 name = "legume-tui"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd64c84773506b30dcd0ac2ead357ca946f430d2fcbd686b8e82594b3d612cd5"
+checksum = "5a63f2b2842612ad0cf6aa366ce6b5df652a050173cce2d896230e954de222ac"
 dependencies = [
  "clap",
  "image",
@@ -2729,6 +2729,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "noto-sans-mono-bitmap",
  "pdf-writer",
+ "png",
  "ratatui",
  "ratatui-image",
  "rayon",
