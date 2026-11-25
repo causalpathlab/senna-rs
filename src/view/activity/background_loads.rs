@@ -141,6 +141,9 @@ pub(crate) struct RunLoads {
     /// Every cell's totals in the run's own counts, read once the data
     /// files are, on first asked: a pass over every column.
     pub totals: Arc<CellTotals>,
+    /// Per-cell totals over the rows matching a pattern, by source and
+    /// pattern, each read on first asked.
+    pub row_sums: RowSumLoads,
     /// A data file opened in the view, when one is.
     pub extra: Option<Arc<ExtraFiles>>,
 }
@@ -178,6 +181,7 @@ impl RunLoads {
             })),
             stage2_recorded: !m.stage2.is_empty(),
             stage2: stage2_of(m, dir),
+            row_sums: RowSumLoads::default(),
             extra: None,
         }
     }
@@ -205,6 +209,7 @@ impl RunLoads {
             features: Arc::new(FeatureTables::ready(Err(NO.into()))),
             stage2: Arc::new(Stage2Tables::ready(Err(NO.into()))),
             stage2_recorded: false,
+            row_sums: RowSumLoads::default(),
             extra: None,
         }
     }
@@ -227,6 +232,7 @@ impl RunLoads {
             ("feature embedding", self.features.busy()),
             ("cell totals", self.totals.busy()),
             ("stage 2", self.stage2.busy()),
+            ("row statistics", self.row_sums.busy()),
             (
                 "extra data file",
                 self.extra.as_ref().and_then(|x| x.busy()),
@@ -246,6 +252,7 @@ impl RunLoads {
             + usize::from(self.features.try_get().is_some())
             + usize::from(self.totals.try_get().is_some())
             + usize::from(self.stage2.try_get().is_some())
+            + self.row_sums.answered()
             + usize::from(self.extra.as_ref().is_some_and(|x| x.try_get().is_some()))
     }
 }

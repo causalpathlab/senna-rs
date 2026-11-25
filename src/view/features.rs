@@ -319,37 +319,6 @@ impl Scene {
         self.refresh_activity();
     }
 
-    /// Colour the cells by the next per-cell statistic of the counts shown:
-    /// total, features detected, the focused group's markers' share (when
-    /// it has markers), then back to group colours. The model's expectation
-    /// has none, so the counts come up in its place.
-    pub fn cycle_stat(&mut self) {
-        let share = || {
-            self.focused_name()
-                .filter(|g| !self.marker_features(g).is_empty())
-                .map(Stat::Share)
-        };
-        // After the counts' statistics, stage 2's exclusivity, when the run
-        // has one.
-        let exclusive = || self.has_stage2().then_some(Pick::Exclusive);
-        let next = match &self.pick {
-            Some(Pick::Stat(Stat::Total)) => Some(Pick::Stat(Stat::Detected)),
-            Some(Pick::Stat(Stat::Detected)) => share().map(Pick::Stat).or_else(exclusive),
-            Some(Pick::Stat(Stat::Share(_))) => exclusive(),
-            Some(Pick::Exclusive) => None,
-            _ => Some(Pick::Stat(Stat::Total)),
-        };
-        let Some(next) = next else {
-            self.clear_pick();
-            return;
-        };
-        // The counts' statistics are of counts, never the model's level.
-        if matches!(next, Pick::Stat(_)) && self.source == Source::Expected {
-            self.source = self.count_source();
-        }
-        self.set_pick(next);
-    }
-
     /// The counts to summarise when the model's expectation is shown: the
     /// extra file's when one is open, else the run's own.
     pub(super) fn count_source(&self) -> Source {
@@ -367,9 +336,13 @@ impl Scene {
     pub fn open_extra(&mut self, paths: &[std::path::PathBuf]) {
         let cells = self.cell_names().map(<[_]>::to_vec).unwrap_or_default();
         let paths = paths.to_vec();
-        let extra = std::sync::Arc::new(ExtraFiles::new(move || {
+        self.show_extra(std::sync::Arc::new(ExtraFiles::new(move || {
             read_extra(&paths, &cells).map_err(|e| e.to_string())
-        }));
+        })));
+    }
+
+    /// Show `extra` as the extra source, read on the side if not yet.
+    pub(crate) fn show_extra(&mut self, extra: std::sync::Arc<ExtraFiles>) {
         extra.start();
         self.data.loads.extra = Some(extra.clone());
         if let Some(a) = self.activity.as_mut() {
@@ -380,7 +353,7 @@ impl Scene {
         self.shown = None;
         if !matches!(
             self.pick,
-            Some(Pick::One(_) | Pick::Markers(_) | Pick::Stat(_) | Pick::Time)
+            Some(Pick::One(_) | Pick::Markers(_) | Pick::Stat(_) | Pick::Time | Pick::Values)
         ) {
             self.pick = Some(Pick::Stat(Stat::Total));
         }
@@ -496,6 +469,7 @@ impl Scene {
         }
         let result = match &pick {
             Pick::Time => self.time_levels(space),
+            Pick::Values => self.values_levels(space),
             Pick::Gain { .. } | Pick::Exclusive => self.stage2_levels(&pick, space),
             Pick::One(_) | Pick::Markers(_) | Pick::Stat(_) => {
                 self.activity_levels(&pick, space, source)
@@ -571,7 +545,7 @@ impl Scene {
             Pick::Stat(stat) => activity
                 .stat_levels(stat, &set, source, space, names)
                 .map(|l| (l, format!("{} · {}", stat.name(), source.name()))),
-            Pick::Time | Pick::Gain { .. } | Pick::Exclusive => {
+            Pick::Time | Pick::Values | Pick::Gain { .. } | Pick::Exclusive => {
                 Err("not a feature's activity".into())
             }
         }

@@ -192,8 +192,19 @@ impl Observed {
         if let Some(t) = self.totals.get() {
             return Ok(t);
         }
+        let sums = self.column_sums(None)?;
+        Ok(self.totals.get_or_init(|| sums))
+    }
+
+    /// Each column's total count and number of features detected over the
+    /// rows `keep` marks (every row: `None`), in one pass over the columns.
+    pub(super) fn column_sums(
+        &self,
+        keep: Option<&[bool]>,
+    ) -> Result<(Vec<f32>, Vec<f32>), String> {
         const BLOCK: usize = 4096;
         let blocks: Vec<usize> = (0..self.n_cells).step_by(BLOCK).collect();
+        let kept = |r: &usize| keep.is_none_or(|k| k[*r]);
         let parts = blocks
             .par_iter()
             .map(|&lb| {
@@ -203,11 +214,17 @@ impl Observed {
                 Ok(csc
                     .col_iter()
                     .map(|c| {
-                        let v = c.values();
-                        (
-                            v.iter().sum::<f32>(),
-                            v.iter().filter(|&&x| x > 0.0).count() as f32,
-                        )
+                        let (mut total, mut detected) = (0f32, 0f32);
+                        for (_, &v) in c
+                            .row_indices()
+                            .iter()
+                            .zip(c.values())
+                            .filter(|(r, _)| kept(r))
+                        {
+                            total += v;
+                            detected += f32::from(u8::from(v > 0.0));
+                        }
+                        (total, detected)
                     })
                     .unzip::<_, _, Vec<f32>, Vec<f32>>())
             })
@@ -218,7 +235,7 @@ impl Observed {
             total.extend(t);
             detected.extend(d);
         }
-        Ok(self.totals.get_or_init(|| (total, detected)))
+        Ok((total, detected))
     }
 
     /// `stat` per column.
@@ -227,6 +244,7 @@ impl Observed {
         Ok(match stat {
             Stat::Total => Cow::Owned(total.iter().map(|t| t.ln_1p()).collect()),
             Stat::Detected => Cow::Borrowed(detected),
+            Stat::Rows(_) => return Err("a row statistic is read on the side".into()),
             Stat::Share(_) => {
                 let rows: std::collections::BTreeSet<usize> = set
                     .iter()

@@ -1,6 +1,8 @@
 //! `senna view`: a run's layouts, coloured by its groupings, in the terminal.
 
 mod activity;
+mod cell_colour;
+pub use cell_colour::CellStat;
 mod chart;
 mod color;
 mod data;
@@ -198,12 +200,8 @@ pub struct ViewArgs {
     )]
     pub extra: Vec<std::path::PathBuf>,
 
-    #[arg(
-        long,
-        value_enum,
-        help = "Start coloured by a per-cell statistic of the counts shown (the extra file's, with --extra; `u` in the view)"
-    )]
-    pub cell_stat: Option<CellStat>,
+    #[command(flatten)]
+    pub cells: cell_colour::CellArgs,
 
     #[arg(
         long,
@@ -224,15 +222,6 @@ pub struct ViewArgs {
 
     #[command(flatten)]
     pub session: legume_tui::cli::SessionArgs,
-}
-
-/// A per-cell statistic to start on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum CellStat {
-    /// `ln(1 + total count)`.
-    Total,
-    /// How many features have a count.
-    Detected,
 }
 
 /// Features suggested for one view, best first.
@@ -260,6 +249,8 @@ pub(crate) enum Pick {
     Markers(Box<str>),
     /// A run's time of each cell, from its `cell_time` table.
     Time,
+    /// A number per cell from a table ([`cell_colour::CellValues`]).
+    Values,
     /// A summary of each cell over a count source's features.
     Stat(Stat),
     /// A gene's stage-2 log gain: each cell's own donor's deviation, or
@@ -406,6 +397,8 @@ pub(crate) struct Scene {
     /// Streamlines' density: lanes across the visible map (`{` `}`).
     pub stream_lanes: f32,
     velocity_moved: std::cell::RefCell<Option<Moved>>,
+    /// The `u` cycle's statistic and table the flags or the agent set.
+    cell_colour: cell_colour::CellColour,
 }
 
 impl Scene {
@@ -458,6 +451,7 @@ impl Scene {
             velocity_style: None,
             stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
             velocity_moved: std::cell::RefCell::new(None),
+            cell_colour: Default::default(),
         };
         // `--colour-by tau` (or `time`) colours a run's cells by
         // their time; any other name is a grouping.
@@ -480,15 +474,7 @@ impl Scene {
         if !args.extra.is_empty() {
             scene.open_extra(&args.extra);
         }
-        if let Some(stat) = args.cell_stat {
-            if scene.source == Source::Expected {
-                scene.source = scene.count_source();
-            }
-            scene.set_pick(Pick::Stat(match stat {
-                CellStat::Total => Stat::Total,
-                CellStat::Detected => Stat::Detected,
-            }));
-        }
+        scene.apply_cell_args(&args.cells);
         if let Some(want) = args.focus.as_ref().or(args.zoom_into.as_ref()) {
             scene.focus = scene
                 .levels()
@@ -582,6 +568,7 @@ impl Scene {
             velocity_style: self.velocity_style,
             stream_lanes: self.stream_lanes,
             velocity_moved: std::cell::RefCell::new(self.velocity_moved.borrow().clone()),
+            cell_colour: self.cell_colour.clone(),
         };
         s.refresh_groups();
         s
