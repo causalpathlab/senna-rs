@@ -10,17 +10,15 @@ fn step(v: Value) -> Result<Task> {
 fn each_step_runs_its_command_on_the_run_and_names_what_it_makes() {
     let cases = [
         (
-            json!({"command": "clustering", "from": "d/r.senna.json", "out": "d/k8", "args": ["-m", "kmeans", "-k", "8"]}),
+            json!({"command": "clustering", "from": "d/r.senna.json", "out": "d/k8", "flags": {"m": "kmeans", "num-clusters": 8}}),
             vec![
                 "clustering",
                 "--from",
                 "d/r.senna.json",
                 "-o",
                 "d/k8",
-                "-m",
-                "kmeans",
-                "-k",
-                "8",
+                "--method=kmeans",
+                "--num-clusters=8",
             ],
             vec![("clusters", "d/k8.clusters.parquet")],
         ),
@@ -49,15 +47,14 @@ fn each_step_runs_its_command_on_the_run_and_names_what_it_makes() {
             vec![("run", "rest.senna.json")],
         ),
         (
-            json!({"command": "joint-topic", "data": ["rna.zarr", "atac.zarr"], "out": "j", "args": ["--modalities", "2"]}),
+            json!({"command": "joint-topic", "data": ["rna.zarr", "atac.zarr"], "out": "j", "flags": {"modalities": 2}}),
             vec![
                 "joint-topic",
                 "rna.zarr",
                 "atac.zarr",
                 "-o",
                 "j",
-                "--modalities",
-                "2",
+                "--modalities=2",
             ],
             vec![("run", "j.senna.json")],
         ),

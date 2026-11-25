@@ -1,14 +1,14 @@
 //! `run_fit` and `run_help`: senna's fits, run to their end, and the
 //! flags of every command the run tools start.
 
+use super::flags::{self, helped};
 use super::jobs::{one_of, planned, senna, start, Task};
 use super::parse;
-use crate::view::recompute::Step;
 use anyhow::{ensure, Context, Result};
 use legume_mcp::{Call, Content, ToolSpec};
 use senna::run_manifest::{self, RunManifest};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 // The fits `run_fit` runs: those `senna run` queues.
@@ -30,17 +30,17 @@ struct FitArgs {
     data: Vec<String>,
     out: Option<String>,
     #[serde(default)]
-    args: Vec<String>,
+    flags: Map<String, Value>,
     #[serde(default)]
     background: bool,
 }
 
-/// `senna {method} {data} -o {out} {args}`, making the run's manifest.
-fn fit_task(a: &FitArgs, out: &str) -> Task {
+/// `senna {method} {data} -o {out} {flags}`, making the run's manifest.
+fn fit_task(a: &FitArgs, flags: &[String], out: &str) -> Task {
     let mut argv = vec![a.method.clone()];
     argv.extend(a.data.iter().cloned());
     argv.extend(["-o".into(), out.into()]);
-    argv.extend(a.args.iter().cloned());
+    argv.extend(flags.iter().cloned());
     Task {
         argv,
         made: vec![("run", run_manifest::default_path(out).into())],
@@ -48,14 +48,15 @@ fn fit_task(a: &FitArgs, out: &str) -> Task {
     }
 }
 
-/// `senna {method} {data} -o {out} {args}` as a child, unless the run is
+/// `senna {method} {data} -o {out} {flags}` as a child, unless the run is
 /// there already. Without an out, the run goes in today's results folder,
 /// named by its first data file and method.
 fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
     check_method(&a.method)?;
     ensure!(!a.data.is_empty(), "no data files");
+    let flags = flags::words(&a.method, &a.flags)?;
     let (out, task) = planned(cx, a.out.as_deref(), Some(&a.data[0]), &a.method, |out| {
-        Ok(fit_task(&a, out))
+        Ok(fit_task(&a, &flags, out))
     })?;
     // legume-mcp refuses an out a background fit is still writing (naming
     // its job) until that fit has written the manifest, and fails a fit
@@ -101,8 +102,8 @@ pub(super) fn needs_input(m: &RunManifest, run: &Path) -> Option<Value> {
                  far its fit got (higher is better), and gaps this small are within the data's \
                  noise, so judge by what the options are (a decision's hint says how). Put each \
                  question to the user with that evidence and let them choose; rerun with \
-                 run_fit, the chosen option's rerun_args added to its args and a new out (its \
-                 objective comes back with it).",
+                 run_fit, the chosen option's rerun_args (flag, then value) set in its flags \
+                 and a new out (its objective comes back with it).",
     });
     let for_cells = m
         .decisions
@@ -175,47 +176,11 @@ struct HelpArgs {
     method: String,
 }
 
-/// The commands `run_help` covers: the fits, and those the other run
-/// tools start.
-fn helped() -> Vec<String> {
-    let others = [
-        "predict",
-        "probe",
-        "update",
-        "critique",
-        "impute",
-        "deconvolve",
-        "donor-deviation",
-    ]
-    .into_iter()
-    .chain(super::steps::COMMANDS)
-    .map(String::from);
-    let layouts = Step::CellLayout
-        .settings()
-        .iter()
-        .map(|m| format!("layout {m}"));
-    METHODS
-        .iter()
-        .map(|m| m.to_string())
-        .chain(others)
-        .chain(layouts)
-        .collect()
-}
-
-/// The command's help, read here: nothing runs, so the session script
-/// records no step.
+/// The flags of one command a run tool starts, read here from senna's
+/// command line: nothing runs, so the session script records no step.
 fn run_help(a: HelpArgs) -> Result<Vec<Content>> {
-    use clap::CommandFactory;
     one_of(&a.method, &helped())?;
-    let mut cli = crate::Cli::command();
-    cli.build();
-    let mut sub = &mut cli;
-    for word in a.method.split(' ') {
-        sub = sub
-            .find_subcommand_mut(word)
-            .with_context(|| format!("no subcommand {}", a.method))?;
-    }
-    Ok(vec![Content::Text(sub.render_long_help().to_string())])
+    Ok(vec![Content::Json(flags::listed(&a.method)?)])
 }
 
 pub(super) fn specs() -> Vec<ToolSpec> {
@@ -223,7 +188,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     vec![
         spec(
             "run_fit",
-            "Fit a senna embedding as `senna {method} {data} -o {out} {args}` and return \
+            "Fit a senna embedding as `senna {method} {data} -o {out} {flags}` and return \
              the absolute path of its run manifest. An out whose manifest exists is not \
              fitted again; one a background fit is still writing is refused, naming its \
              job (job_wait for it). Fits can take long; progress carries the log.",
@@ -233,7 +198,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "method": {"enum": METHODS, "description": "The fit"},
                     "data": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Data files (.zarr, .zarr.zip, .h5)"},
                     "out": {"type": "string", "description": "Output prefix; the run is {out}.senna.json [default: today's results folder, by data file and method]"},
-                    "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help lists them, e.g. [\"-b\", \"batch.txt\"]"},
+                    "flags": flags::property("the method", r#"{"batch-files": ["batch.txt"], "epochs": 200}"#),
                     "background": {"type": "boolean", "description": "Run the fit as a job and return its id at once, for a fit longer than a call can wait; follow it with job_status or job_wait [default: false]"},
                 },
                 "required": ["method", "data"],
@@ -242,8 +207,10 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "run_help",
-            "Every flag of one fit, or of the command another run tool starts, with its \
-             help, as `senna {method} --help` prints it.",
+            "The flags a run tool takes in its `flags` for one fit, or for the command \
+             another run tool starts, read from senna's command line: each flag's name, \
+             help, default and choices, or that it is a switch; and `own`, the arguments \
+             the tool takes by name instead.",
             json!({
                 "type": "object",
                 "properties": {"method": {"enum": helped()}},

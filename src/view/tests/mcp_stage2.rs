@@ -6,11 +6,11 @@ use std::path::PathBuf;
 fn donor_deviation_runs_on_the_run_and_names_its_gene_table_first() {
     let a: DonorDeviationCall = parse(json!({
         "from": "r.senna.json",
-        "donor_of_batch": "donors.tsv",
-        "args": ["--device", "cuda"],
+        "flags": {"donor-of-batch": "donors.tsv", "device": "cuda"},
     }))
     .unwrap();
-    let t = donor_deviation_task(&a, "r.stage2");
+    let flags = flags::words("donor-deviation", &a.flags).unwrap();
+    let t = donor_deviation_task(&a, &flags, "r.stage2");
     assert_eq!(
         t.argv,
         [
@@ -19,10 +19,8 @@ fn donor_deviation_runs_on_the_run_and_names_its_gene_table_first() {
             "r.senna.json",
             "-o",
             "r.stage2",
-            "--donor-of-batch",
-            "donors.tsv",
-            "--device",
-            "cuda"
+            "--donor-of-batch=donors.tsv",
+            "--device=cuda"
         ]
     );
     senna_parses(&t.argv).unwrap();
@@ -36,7 +34,7 @@ fn donor_deviation_runs_on_the_run_and_names_its_gene_table_first() {
     assert_eq!(t.made.len(), 4);
     let bare: DonorDeviationCall = parse(json!({"from": "r"})).unwrap();
     assert_eq!(
-        donor_deviation_task(&bare, "s2").argv,
+        donor_deviation_task(&bare, &[], "s2").argv,
         ["donor-deviation", "--from", "r", "-o", "s2"]
     );
 }

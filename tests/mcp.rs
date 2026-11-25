@@ -122,8 +122,16 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
         .as_str()
         .unwrap()
         .contains("view_open"));
-    let help = replies[4]["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(help.contains("--out"), "{help}");
+    // run_fit's flags, its own out not among them.
+    let help = &replies[4]["result"]["structuredContent"];
+    let flags: Vec<&str> = help["flags"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{help}"))
+        .iter()
+        .map(|f| f["flag"].as_str().unwrap())
+        .collect();
+    assert!(flags.contains(&"--epochs"), "{help}");
+    assert!(!flags.contains(&"--out"), "{help}");
 }
 
 #[cfg(unix)]
@@ -237,12 +245,13 @@ fn a_predict_with_a_flag_senna_lacks_is_refused_before_it_runs() {
         1,
         "run_predict",
         json!({"model": dir.path().join("m"), "data": ["d.zarr"], "out": dir.path().join("p"),
-               "args": ["--no-such-flag"], "background": true}),
+               "flags": {"no-such-flag": true}, "background": true}),
     )]);
     assert!(status.success());
     let reply = &messages.iter().find(|m| m["id"] == 1).unwrap()["result"];
     assert_eq!(reply["isError"], true, "{reply}");
     assert!(reply.to_string().contains("--no-such-flag"), "{reply}");
+    assert!(reply["structuredContent"].get("job").is_none(), "{reply}");
 }
 
 #[test]

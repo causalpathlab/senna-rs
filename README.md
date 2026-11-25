@@ -79,8 +79,10 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > Use senna's MCP tools to embed single-cell data and look at the result;
 > annotation is lupin's own server. Open the day with `notebook` (kind `plan`):
 > the question, the data, and how the result will be checked. `run_fit` runs a
-> fit to its end (`run_help` lists a method's flags) and returns its run
-> manifest; an existing run is not fitted again. A long fit runs with
+> fit to its end and returns its run manifest; an existing run is not fitted
+> again. Every run tool takes its inputs and out by name and any other flag of
+> its senna command in `flags` (flag name to value); `run_help` lists a
+> command's flags. A long fit runs with
 > `background`, as a job to follow with `job_wait`, in a session of `senna run`
 > the user can watch with `senna attach`. `run_predict` places new cells in a
 > trained model's latent, `run_update` continues a trained model over new data,
@@ -97,9 +99,9 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 
 | Tool | Does |
 |---|---|
-| `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
-| `run_help` | every flag of one method, or of a command another run tool starts (`predict`, `probe`, `update`, `critique`, `impute`, `deconvolve`, `donor-deviation`, a `run_step` command, `layout <method>`), with its help |
-| `run_predict` | new cells placed in a trained model's latent (`senna predict`), with the null, eval features, batches, bulk tables and latent mode as options; returns the latent, the predictive table and the mean held-out and null log-likelihood per count |
+| `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`, the flags given as a `flags` map) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
+| `run_help` | the flags a run tool takes in `flags` for one method, or for a command another run tool starts (`predict`, `probe`, `update`, `critique`, `impute`, `deconvolve`, `donor-deviation`, a `run_step` command, `layout <method>`), read from senna's command line: name, help, default, choices, and the tool's own arguments |
+| `run_predict` | new cells placed in a trained model's latent (`senna predict`), data or bulk tables and the latent mode by name, every other flag (the null, eval features, batches, scoring delta) in `flags`; returns the latent, the predictive table and the mean held-out and null log-likelihood per count |
 | `run_probe` | whether a frozen model explains new cells (`senna probe`): the covered or novel verdict, read from `{out}.probe.json` |
 | `run_update` | a trained model continued into a new run (`senna update`): new samples absorbed, or a round on its own cells taking `run_critique`'s peer labels; returns the new run's manifest |
 | `run_critique` | where fits disagree on which pseudobulks are alike (`senna critique`); with `questions`, the peer labels for an update round |

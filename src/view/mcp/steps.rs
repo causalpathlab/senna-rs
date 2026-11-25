@@ -1,13 +1,14 @@
 //! `run_step`: the analysis commands that share one shape, a senna
 //! command on a run (or on data files) with its own flags.
 
+use super::flags;
 use super::jobs::{job_property, start_server, Argv, Task};
 use super::parse;
 use anyhow::{ensure, Context, Result};
 use legume_mcp::{Call, Content, ToolSpec};
 use senna::run_manifest;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 /// A step tool's call; `None` for another family's.
 pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
@@ -73,7 +74,7 @@ struct StepCall {
     out: Option<String>,
     target: Option<Target>,
     #[serde(default)]
-    args: Vec<String>,
+    flags: Map<String, Value>,
     #[serde(default)]
     background: bool,
 }
@@ -122,7 +123,7 @@ fn step_task(a: &StepCall) -> Result<Task> {
     let argv = argv
         .flag("-o", Some(&out))
         .flag("--target", features.then_some("features"))
-        .rest(&a.args);
+        .rest(&flags::words(name, &a.flags)?);
     let made: Vec<(&'static str, String)> = match c {
         Command::Clustering if features => {
             vec![("clusters", format!("{out}.feature_clusters.parquet"))]
@@ -151,11 +152,11 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     vec![ToolSpec::new(
         "run_step",
         "Run one analysis command as `senna {command} …`. On a finished run (from): \
-         clustering (-m kmeans|leiden|hsblock in args; writes {out}.clusters.parquet, or with \
+         clustering (flags method kmeans|leiden|hsblock; writes {out}.clusters.parquet, or with \
          target features {out}.feature_clusters.parquet, and records it in the run), \
          resolve-embedding-space (a topic run recast as a shared cell and gene embedding; \
          writes a new run {out}.senna.json). On data files: joint-topic and joint-svd (fits across \
-         modalities; --modalities in args) and fne (a feature-graph embedding from edge \
+         modalities; flags modalities) and fne (a feature-graph embedding from edge \
          lists); each writes a run {out}.senna.json. Returns the files made; one whose \
          files exist is not run again, and one with only some of them is refused.",
         json!({
@@ -166,7 +167,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                 "data": {"type": "array", "items": {"type": "string"}, "description": "Input files (joint-topic, joint-svd: data files; fne: edge lists)"},
                 "out": {"type": "string", "description": "Output prefix (required; for resolve-embedding-space not from's)"},
                 "target": {"enum": ["cells", "features"], "description": "clustering only: the cells, or the run's features [default: cells]"},
-                "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help ({command}) lists them"},
+                "flags": flags::property("the command", r#"{"method": "kmeans", "num-clusters": 8}"#),
                 "background": job_property(),
             },
             "required": ["command"],

@@ -235,16 +235,9 @@ impl Argv {
         }
     }
 
-    /// `flag v1 flag v2 …`, a flag given once per value.
-    pub(super) fn each(self, flag: &str, values: &[String]) -> Self {
-        values
-            .iter()
-            .fold(self, |argv, v| argv.args([flag, v.as_str()]))
-    }
-
-    /// The command line, ending with the further flags the agent gave.
-    pub(super) fn rest(self, args: &[String]) -> Vec<String> {
-        self.args(args.iter().cloned()).0
+    /// The command line, ending with the words of the agent's flags.
+    pub(super) fn rest(self, flags: &[String]) -> Vec<String> {
+        self.args(flags.iter().cloned()).0
     }
 }
 

@@ -172,7 +172,7 @@ fn predict_layout_and_update_run_on_a_fit_and_are_recorded() {
         &[
             (
                 "run_fit",
-                json!({"method": "topic", "data": [&data], "out": fit, "args": ["-t", "2", "-i", "2"]}),
+                json!({"method": "topic", "data": [&data], "out": fit, "flags": {"t": 2, "epochs": 2}}),
             ),
             (
                 "run_predict",
@@ -184,7 +184,7 @@ fn predict_layout_and_update_run_on_a_fit_and_are_recorded() {
             ),
             (
                 "run_update",
-                json!({"model": fit, "out": project.join("fit2"), "args": ["--epochs", "1"]}),
+                json!({"model": fit, "out": project.join("fit2"), "flags": {"epochs": 1}}),
             ),
             // Last, so the predict runs beside the layout and the update.
             ("job_wait", json!({"id": "job-1", "seconds": 120})),

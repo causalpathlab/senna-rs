@@ -9,13 +9,21 @@ fn update(v: Value, out: &str) -> Result<Task> {
 #[test]
 fn update_runs_senna_update_and_makes_the_out_s_run() {
     let t = update(
-        json!({"model": "m1", "data": ["new.zarr"], "args": ["-b", "b.txt"]}),
+        json!({"model": "m1", "data": ["new.zarr"], "flags": {"epochs": 3}}),
         "m2",
     )
     .unwrap();
     assert_eq!(
         t.argv,
-        ["update", "new.zarr", "--model", "m1", "-o", "m2", "-b", "b.txt"]
+        [
+            "update",
+            "new.zarr",
+            "--model",
+            "m1",
+            "-o",
+            "m2",
+            "--epochs=3"
+        ]
     );
     assert_eq!(t.made, [("run", PathBuf::from("m2.senna.json"))]);
     // No new data is a round.
@@ -26,20 +34,26 @@ fn update_runs_senna_update_and_makes_the_out_s_run() {
 #[test]
 fn update_absorbs_with_its_batches_or_runs_a_round_on_peer_labels() {
     let t = update(
-        json!({"model": "m1.senna.json", "data": ["n1.zarr", "n2.zarr"], "batch_files": ["b1.txt", "b2.txt"]}),
+        json!({"model": "m1.senna.json", "data": ["n1.zarr", "n2.zarr"], "flags": {"b": ["b1.txt", "b2.txt"]}}),
         "m2",
     )
     .unwrap();
     assert_eq!(
         t.argv,
         [
-            "update", "n1.zarr", "n2.zarr", "--model", "m1", "-o", "m2", "-b", "b1.txt", "-b",
-            "b2.txt"
+            "update",
+            "n1.zarr",
+            "n2.zarr",
+            "--model",
+            "m1",
+            "-o",
+            "m2",
+            "--batch-files=b1.txt,b2.txt"
         ]
     );
     senna_parses(&t.argv).unwrap();
     let t = update(
-        json!({"model": "m1", "pb_from": "p.senna.json", "peer_labels": "c.critique.labels.m1.parquet"}),
+        json!({"model": "m1", "flags": {"pb-from": "p.senna.json", "peer-labels": "c.critique.labels.m1.parquet"}}),
         "m2",
     )
     .unwrap();
@@ -51,18 +65,16 @@ fn update_absorbs_with_its_batches_or_runs_a_round_on_peer_labels() {
             "m1",
             "-o",
             "m2",
-            "--pb-from",
-            "p.senna.json",
-            "--peer-labels",
-            "c.critique.labels.m1.parquet"
+            "--pb-from=p.senna.json",
+            "--peer-labels=c.critique.labels.m1.parquet"
         ]
     );
     senna_parses(&t.argv).unwrap();
     // A round replays the parent's batches, and its partition cannot
     // cover new cells; the parent is kept.
     for bad in [
-        json!({"model": "m1", "batch_files": ["b.txt"]}),
-        json!({"model": "m1", "data": ["n.zarr"], "pb_from": "p.senna.json"}),
+        json!({"model": "m1", "flags": {"batch-files": ["b.txt"]}}),
+        json!({"model": "m1", "data": ["n.zarr"], "flags": {"pb-from": "p.senna.json"}}),
     ] {
         assert!(update(bad.clone(), "m2").is_err(), "{bad}");
     }
@@ -74,13 +86,11 @@ fn critique_compares_the_runs_and_makes_its_tables() {
     let a: CritiqueCall = parse(json!({
         "runs": ["a.senna.json", "b.senna.json", "c.senna.json"],
         "out": "c",
-        "partition": "a.senna.json",
-        "questions": 50,
-        "cell_labels": "labels.tsv",
-        "label_column": "label",
+        "flags": {"partition": "a.senna.json", "questions": 50},
     }))
     .unwrap();
-    let t = critique_task(&a).unwrap();
+    let (t, questions) = critique_task(&a).unwrap();
+    assert!(questions);
     assert_eq!(
         t.argv,
         [
@@ -90,14 +100,8 @@ fn critique_compares_the_runs_and_makes_its_tables() {
             "c.senna.json",
             "-o",
             "c",
-            "--partition",
-            "a.senna.json",
-            "--questions",
-            "50",
-            "--cell-labels",
-            "labels.tsv",
-            "--label-column",
-            "label"
+            "--partition=a.senna.json",
+            "--questions=50"
         ]
     );
     senna_parses(&t.argv).unwrap();
