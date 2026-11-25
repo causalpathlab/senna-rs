@@ -204,6 +204,12 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             ("t", "labels on the map: small, medium, large, largest, off, in turn"),
             ("y", "colour the cells by the run's time (its cell_time table); again to stop"),
+            (
+                "i",
+                "stage 2 (senna donor-deviation): the feature shown as its log gain in each cell's own donor, faded where the jackknife |z| < 2; again for its activity; with no feature shown, rank the genes by |z| over each donor's states in the grouping on screen",
+            ),
+            ("I", "on the gain map: one donor's deviation at every cell's state, the next donor in turn, then each cell's own again"),
+            ("U", "stage 2: colour the cells by exclusivity, their sample's distance to the nearest sample of another donor; again to stop"),
             ("v", "the run's velocity field (its cell_velocity table) over the cells: streamlines, arrows, off, in turn"),
             ("(  )", "streamlines sparser, denser"),
             ("space  b", "sidebar on or off"),

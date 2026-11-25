@@ -90,7 +90,9 @@ impl Paint<'_> {
                 return Some(plain(muted));
             }
             let k = ((ramp.len() - 1) as f32 * t).round() as usize;
-            return Some(plain(ramp[k]));
+            let w = levels.weight_of(i);
+            let colour = std::array::from_fn(|c| muted[c] + w * (ramp[k][c] - muted[c]));
+            return Some(plain(colour));
         }
         let g = self.groups.map_or(NONE, |g| g[i]);
         if g == NONE {
@@ -152,6 +154,14 @@ impl Paint<'_> {
     pub fn draw_order(&self) -> Vec<u32> {
         let order = &self.points.order;
         if let Some((levels, _)) = self.levels {
+            // Signed levels: the strongest departures either way on top,
+            // faded ones beneath.
+            if levels.diverging {
+                return by_level(order, |i| match levels.t(i) {
+                    t if t < 0.0 => t,
+                    t => (t - 0.5).abs() * levels.weight_of(i),
+                });
+            }
             return by_level(order, |i| levels.t(i));
         }
         ranked(order, |i| self.rank(i), 4)

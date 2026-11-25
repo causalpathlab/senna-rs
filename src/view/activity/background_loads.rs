@@ -115,6 +115,9 @@ pub(crate) type ModelTables = legume_tui::work::Loading<Expected>;
 /// A run's feature embedding, read once on a worker thread.
 pub(crate) type FeatureTables = legume_tui::work::Loading<crate::view::features::FeatureEmbedding>;
 
+/// A run's stage 2 (`senna donor-deviation`), read once on a worker thread.
+pub(crate) type Stage2Tables = legume_tui::work::Loading<crate::view::stage2::Stage2>;
+
 /// A run's slow reads, each started once on a worker thread and shared by
 /// every view of the run: its data files, its model of expression, and
 /// its feature embedding.
@@ -123,6 +126,8 @@ pub(crate) struct RunLoads {
     pub files: Arc<RunFiles>,
     pub model: Arc<ModelTables>,
     pub features: Arc<FeatureTables>,
+    /// Stage 2 of the run, when it has one; read on first asked.
+    pub stage2: Arc<Stage2Tables>,
     /// Every cell's totals in the run's own counts, read once the data
     /// files are, on first asked: a pass over every column.
     pub totals: Arc<CellTotals>,
@@ -149,6 +154,7 @@ impl RunLoads {
         let (fm, fd) = run();
         let (mm, md) = run();
         let (em, ed) = run();
+        let (sm, sd) = run();
         let files = Arc::new(RunFiles::new(move || {
             read_run_data(&fm, &fd).map_err(|e| e.to_string())
         }));
@@ -160,6 +166,9 @@ impl RunLoads {
             })),
             features: Arc::new(FeatureTables::new(move || {
                 crate::view::features::FeatureEmbedding::load(Some(&(em, ed)))
+            })),
+            stage2: Arc::new(Stage2Tables::new(move || {
+                crate::view::stage2::Stage2::load(&sm, &sd).map_err(|e| e.to_string())
             })),
             extra: None,
         }
@@ -175,6 +184,7 @@ impl RunLoads {
             files: Arc::new(RunFiles::ready(Err(NO.into()))),
             model: Arc::new(ModelTables::ready(Err(NO.into()))),
             features: Arc::new(FeatureTables::ready(Err(NO.into()))),
+            stage2: Arc::new(Stage2Tables::ready(Err(NO.into()))),
             extra: None,
         }
     }
@@ -193,6 +203,7 @@ impl RunLoads {
             ("data files", self.files.busy()),
             ("feature embedding", self.features.busy()),
             ("cell totals", self.totals.busy()),
+            ("stage 2", self.stage2.busy()),
             (
                 "extra data file",
                 self.extra.as_ref().and_then(|x| x.busy()),
@@ -211,6 +222,7 @@ impl RunLoads {
             + usize::from(self.model.try_get().is_some())
             + usize::from(self.features.try_get().is_some())
             + usize::from(self.totals.try_get().is_some())
+            + usize::from(self.stage2.try_get().is_some())
             + usize::from(self.extra.as_ref().is_some_and(|x| x.try_get().is_some()))
     }
 }

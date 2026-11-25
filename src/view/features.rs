@@ -203,7 +203,7 @@ impl Scene {
             title: format!("matches for “{query}”"),
             list: matches.into_iter().map(|m| (m, f32::NAN)).collect(),
         });
-        self.set_pick(Pick::One(chosen));
+        self.show_feature(chosen);
     }
 
     /// Drop the suggestions. Returns whether there were any.
@@ -213,10 +213,7 @@ impl Scene {
 
     /// The feature shown on the map, when it is one feature.
     fn shown_feature(&self) -> Option<&str> {
-        match &self.pick {
-            Some(Pick::One(f)) => Some(f.as_ref()),
-            _ => None,
-        }
+        self.pick.as_ref().and_then(Pick::feature)
     }
 
     /// Panel rows for the suggestions of the view on screen, the feature
@@ -272,17 +269,24 @@ impl Scene {
             self.note = Some("no marker table in this run; press / to search a feature".into());
             return;
         }
-        let at = match &self.pick {
-            Some(Pick::One(n)) => list.iter().position(|x| x == n),
-            _ => None,
-        };
+        let at = self
+            .pick
+            .as_ref()
+            .and_then(Pick::feature)
+            .and_then(|n| list.iter().position(|x| x.as_ref() == n));
         let n = list.len() as i64;
         let next = match at {
             Some(i) => (i as i64 + delta).rem_euclid(n),
             None if delta > 0 => 0,
             None => n - 1,
         };
-        self.set_pick(Pick::One(list[next as usize].clone()));
+        self.show_feature(list[next as usize].clone());
+    }
+
+    /// Show feature `name` the way the pick shows features: on the gain map
+    /// when one is shown, else as activity.
+    pub fn show_feature(&mut self, name: Box<str>) {
+        self.set_pick(Pick::for_feature(self.pick.as_ref(), name));
     }
 
     pub fn set_pick(&mut self, pick: Pick) {
@@ -499,9 +503,14 @@ impl Scene {
             self.show_time(space, source);
             return;
         }
+        if self.show_stage2(&pick, space, source) {
+            return;
+        }
         let set = match &pick {
             Pick::Markers(group) | Pick::Stat(Stat::Share(group)) => self.marker_features(group),
-            Pick::One(_) | Pick::Time | Pick::Stat(_) => Vec::new(),
+            Pick::One(_) | Pick::Time | Pick::Stat(_) | Pick::Gain { .. } | Pick::Exclusive => {
+                Vec::new()
+            }
         };
         let Some((activity, data)) = self.activity_and_data() else {
             self.note = Some("no manifest to read activity from".into());
@@ -518,7 +527,9 @@ impl Scene {
             Pick::Stat(stat) => activity
                 .stat_levels(stat, &set, source, space, names)
                 .map(|l| (l, format!("{} · {}", stat.name(), source.name()))),
-            Pick::Time => unreachable!("time is shown above"),
+            Pick::Time | Pick::Gain { .. } | Pick::Exclusive => {
+                unreachable!("time and stage 2 are shown above")
+            }
         };
         match result {
             Ok((levels, title)) => {

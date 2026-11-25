@@ -6,6 +6,15 @@ use legume_tui::map::legend::{draw_legend, draw_ramp_key};
 use legume_tui::map::raster::{edge, ring};
 
 impl Scene {
+    /// The ramp `levels` are drawn on: diverging for signed levels.
+    fn ramp_of(&self, levels: &Levels) -> &[Rgb] {
+        if levels.diverging {
+            color::diverging_ramp()
+        } else {
+            &self.ramp
+        }
+    }
+
     /// Layers for the renderer: the backdrop (if any) under the points.
     pub fn layers(&self) -> Vec<Paint<'_>> {
         let space = self.current();
@@ -39,7 +48,7 @@ impl Scene {
             cursor,
             muted: false,
             size: self.scale * if space.backdrop.is_some() { 1.5 } else { 1.0 },
-            levels: shown.map(|s| (&s.levels, self.ramp.as_slice())),
+            levels: shown.map(|s| (&s.levels, self.ramp_of(&s.levels))),
             order: None,
         });
         keys.push((
@@ -354,7 +363,7 @@ impl Scene {
             reserved.push(draw_ramp_key(
                 frame,
                 &s.title,
-                &self.ramp,
+                self.ramp_of(&s.levels),
                 font,
                 color::linear_rgb(color::INK),
             ));

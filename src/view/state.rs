@@ -461,6 +461,11 @@ impl Scene {
             Some(Pick::Stat(stat)) => {
                 format!(" · {} ({}) · x clears", stat.name(), self.source.name())
             }
+            Some(Pick::Gain { gene, donor }) => format!(
+                " · {gene} gain ({}) · I donor · x clears",
+                donor.as_deref().unwrap_or("own donor")
+            ),
+            Some(Pick::Exclusive) => " · exclusivity · x clears".to_string(),
             None => String::new(),
         };
         format!(

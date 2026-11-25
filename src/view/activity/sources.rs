@@ -264,6 +264,12 @@ pub struct Levels {
     /// Observed counts: a zero means "not detected" and is drawn muted rather
     /// than at the bottom of the ramp.
     pub zero_is_off: bool,
+    /// Signed values around 0, drawn on the diverging ramp over `±hi`
+    /// (`lo = −hi`) rather than on the sequential one.
+    pub diverging: bool,
+    /// How much of each point's colour to draw, in `[0, 1]`, the rest muted:
+    /// a value drawn faded where it is not well supported. `None`: all of it.
+    pub weight: Option<Vec<f32>>,
 }
 
 impl Levels {
@@ -303,7 +309,40 @@ impl Levels {
             lo,
             hi,
             zero_is_off,
+            diverging: false,
+            weight: None,
         }
+    }
+
+    /// Signed `values` on the diverging ramp, symmetric about 0 out to their
+    /// 99th percentile in size, each drawn with its `weight`.
+    pub(in crate::view) fn diverging(values: Vec<f32>, weight: Vec<f32>) -> Self {
+        let mut size: Vec<f32> = values
+            .iter()
+            .filter(|v| v.is_finite())
+            .map(|v| v.abs())
+            .collect();
+        let hi = if size.is_empty() {
+            1.0
+        } else {
+            let k = ((size.len() - 1) as f32 * 0.99) as usize;
+            size.select_nth_unstable_by(k, f32::total_cmp).1.max(1e-6)
+        };
+        Self {
+            values,
+            lo: -hi,
+            hi,
+            zero_is_off: false,
+            diverging: true,
+            weight: Some(weight),
+        }
+    }
+
+    /// How much of point `i`'s colour to draw ([`Self::weight`]).
+    #[inline]
+    #[must_use]
+    pub fn weight_of(&self, i: usize) -> f32 {
+        self.weight.as_ref().map_or(1.0, |w| w[i])
     }
 }
 
