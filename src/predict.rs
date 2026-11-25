@@ -746,18 +746,13 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
 
     // Resolved once: building these reads `--ablate-features` from disk.
     let qopts = args.query_name_opts()?;
-    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
-        ReadSharedRowsArgs {
-            data_files: args.data_files.to_vec(),
-            batch_files: args.batch_files.clone(),
-            preload: args.preload_data,
-            feature_kind: qopts.loader_kind.clone(),
-            ..Default::default()
-        },
+    let data_vec = read_query(
+        &args.data_files,
+        args.batch_files.as_deref(),
+        args.preload_data,
+        &qopts,
         &training_genes,
-    )?)?;
-    let mut data_vec = loaded.data;
-    data_vec.register_batch_membership(&loaded.batch);
+    )?;
     // Counts of a batch the run was trained on are divided by its trained δ
     // before they are projected; with `--scoring-delta none` by ones, which
     // keeps the division's rescaling that training applied.
@@ -1001,6 +996,48 @@ fn eval_gene_source(args: &PredictArgs) -> (Option<&str>, &'static str) {
 /// Align query genes onto the model's axis, or `None` when the axes already
 /// match. Coverage is logged and gated by
 /// [`crate::topic::eval::ensure_gene_coverage`].
+/// The model's saved `μ_d`, refused unless it has one entry per dictionary gene.
+fn feature_mean_on(model: &str, training_genes: &[Box<str>]) -> anyhow::Result<Vec<f32>> {
+    let (_, feature_mean) = crate::topic::model_metadata::load_feature_mean(model)?;
+    anyhow::ensure!(
+        feature_mean.len() == training_genes.len(),
+        "feature_mean gene count ({}) != dictionary gene count ({})",
+        feature_mean.len(),
+        training_genes.len()
+    );
+    Ok(feature_mean)
+}
+
+/// Count data read onto the model's gene axis the way every family reads a
+/// query: shared rows under the caller's name rules, batch membership
+/// registered from `batch_files` (one batch per file without them).
+fn read_query(
+    data_files: &[Box<str>],
+    batch_files: Option<&[Box<str>]>,
+    preload: bool,
+    opts: &QueryNameOpts,
+    training_genes: &[Box<str>],
+) -> anyhow::Result<SparseIoVec> {
+    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
+        ReadSharedRowsArgs {
+            data_files: data_files.to_vec(),
+            batch_files: batch_files.map(<[_]>::to_vec),
+            preload,
+            feature_kind: opts.loader_kind.clone(),
+            ..Default::default()
+        },
+        training_genes,
+    )?)?;
+    let mut data_vec = loaded.data;
+    data_vec.register_batch_membership(&loaded.batch);
+    info!(
+        "Query data: {} features × {} cells",
+        data_vec.num_rows(),
+        data_vec.num_columns()
+    );
+    Ok(data_vec)
+}
+
 fn build_remap(
     training_genes: &[Box<str>],
     new_genes: &[Box<str>],
@@ -1231,24 +1268,13 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
             Err(_) => None,
         };
 
-    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
-        ReadSharedRowsArgs {
-            data_files: a.data_files.to_vec(),
-            batch_files: a.batch_files.map(<[_]>::to_vec),
-            preload: a.preload,
-            feature_kind: a.query_name_opts.loader_kind.clone(),
-            ..Default::default()
-        },
+    let mut data_vec = read_query(
+        a.data_files,
+        a.batch_files,
+        a.preload,
+        a.query_name_opts,
         &training_genes,
-    )?)?;
-    let mut data_vec = loaded.data;
-    data_vec.register_batch_membership(&loaded.batch);
-    info!(
-        "Held-out data: {} features × {} cells",
-        data_vec.num_rows(),
-        data_vec.num_columns()
-    );
-
+    )?;
     let new_genes = data_vec.row_names()?;
     let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
@@ -1680,7 +1706,6 @@ pub(crate) struct MaskedScoreArgs<'a> {
 /// predictive log-likelihood (the probe fit score). Writes nothing.
 pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<MaskedScored> {
     use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
-    use crate::topic::model_metadata::load_feature_mean;
 
     let embedding_dim = a
         .metadata
@@ -1691,32 +1716,15 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
     // so the model would be scored at a rate it was never trained at.
     crate::topic::model_metadata::ensure_query_head_not_wired(a.metadata.query_rank)?;
     let (training_genes, beta_dk) = load_dictionary(a.model)?;
-    let (_fm_genes, feature_mean) = load_feature_mean(a.model)?;
-    anyhow::ensure!(
-        feature_mean.len() == training_genes.len(),
-        "feature_mean gene count ({}) != dictionary gene count ({})",
-        feature_mean.len(),
-        training_genes.len()
-    );
+    let feature_mean = feature_mean_on(a.model, &training_genes)?;
 
-    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
-        ReadSharedRowsArgs {
-            data_files: a.data_files.to_vec(),
-            batch_files: a.batch_files.map(<[_]>::to_vec),
-            preload: a.preload,
-            feature_kind: a.query_name_opts.loader_kind.clone(),
-            ..Default::default()
-        },
+    let mut data_vec = read_query(
+        a.data_files,
+        a.batch_files,
+        a.preload,
+        a.query_name_opts,
         &training_genes,
-    )?)?;
-    let mut data_vec = loaded.data;
-    data_vec.register_batch_membership(&loaded.batch);
-    info!(
-        "Held-out data: {} features × {} cells",
-        data_vec.num_rows(),
-        data_vec.num_columns()
-    );
-
+    )?;
     let new_genes = data_vec.row_names()?;
     let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
@@ -2036,8 +2044,6 @@ fn held_out<'a>(args: &PredictArgs, fit: &'a null::RecordedFit) -> null::HeldOut
 /// per-topic simplices. So the parquet shortcut the masked path uses is invalid here and the
 /// score must go through the rebuilt decoder.
 pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored> {
-    use crate::topic::model_metadata::load_feature_mean;
-
     let metadata = a.metadata;
 
     // The coarsening this model trained at, if any: the encoder reads coarse
@@ -2049,32 +2055,15 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
         None
     };
     let (training_genes, loadings_dk) = load_dictionary(a.model)?;
-    let (_fm_genes, feature_mean) = load_feature_mean(a.model)?;
-    anyhow::ensure!(
-        feature_mean.len() == training_genes.len(),
-        "feature_mean gene count ({}) != dictionary gene count ({})",
-        feature_mean.len(),
-        training_genes.len()
-    );
+    let feature_mean = feature_mean_on(a.model, &training_genes)?;
 
-    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
-        ReadSharedRowsArgs {
-            data_files: a.data_files.to_vec(),
-            batch_files: a.batch_files.map(<[_]>::to_vec),
-            preload: a.preload,
-            feature_kind: a.query_name_opts.loader_kind.clone(),
-            ..Default::default()
-        },
+    let mut data_vec = read_query(
+        a.data_files,
+        a.batch_files,
+        a.preload,
+        a.query_name_opts,
         &training_genes,
-    )?)?;
-    let mut data_vec = loaded.data;
-    data_vec.register_batch_membership(&loaded.batch);
-    info!(
-        "Held-out data: {} features × {} cells",
-        data_vec.num_rows(),
-        data_vec.num_columns()
-    );
-
+    )?;
     let new_genes = data_vec.row_names()?;
     let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
@@ -2450,18 +2439,10 @@ fn training_marginal(
     // genes from the floor that the model is being scored on.
     let mut opts = args.query_name_opts()?;
     opts.hide = None;
-    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
-        ReadSharedRowsArgs {
-            data_files: files.to_vec(),
-            preload: args.preload_data,
-            feature_kind: opts.loader_kind.clone(),
-            ..Default::default()
-        },
-        training_genes,
-    )?)?;
-    let remap = build_remap(training_genes, &loaded.data.row_names()?, &opts)?;
+    let train = read_query(files, None, args.preload_data, &opts, training_genes)?;
+    let remap = build_remap(training_genes, &train.row_names()?, &opts)?;
     let comp = crate::topic::predict_eval::empirical_composition(
-        &loaded.data,
+        &train,
         remap.as_ref(),
         eval_genes,
         training_genes.len(),
@@ -2473,7 +2454,7 @@ fn training_marginal(
     );
     info!(
         "Null: gene composition of {} training cells from {}",
-        loaded.data.num_columns(),
+        train.num_columns(),
         files.join(", ")
     );
     Ok(Some(comp))

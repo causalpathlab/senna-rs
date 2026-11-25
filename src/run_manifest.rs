@@ -382,14 +382,7 @@ impl CellSpace {
                 true
             }
             CellSpace::Signed => {
-                for mut col in x.column_iter_mut() {
-                    let n = col.len().max(1) as f32;
-                    let mean = col.sum() / n;
-                    let sd = (col.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n)
-                        .sqrt()
-                        .max(1e-12);
-                    col.apply(|v| *v = (*v - mean) / sd);
-                }
+                crate::embed_common::zscore_columns_inplace(x);
                 false
             }
         }

@@ -2,6 +2,21 @@ pub use log::info;
 pub use std::sync::{Arc, Mutex};
 
 pub type Mat = nalgebra::DMatrix<f32>;
+
+/// Shift and scale each column of `x` to mean 0 and (population) sd 1.
+/// Constant columns, and every column of a one-row matrix, become zero.
+pub fn zscore_columns_inplace(x: &mut Mat) {
+    for mut col in x.column_iter_mut() {
+        let n = col.len().max(1) as f32;
+        let mean = col.sum() / n;
+        let sd = (col.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n).sqrt();
+        if sd > 1e-8 {
+            col.apply(|v| *v = (*v - mean) / sd);
+        } else {
+            col.fill(0.0);
+        }
+    }
+}
 pub type DVec = nalgebra::DVector<f32>;
 
 pub use data_beans::qc_lib::{QcArgs, QcConfig};

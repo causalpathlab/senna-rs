@@ -64,6 +64,20 @@ impl ClusterResult {
         counts
     }
 
+    /// Log the cluster count and the min / median / max cluster size.
+    fn log_sizes(&self, method: &str) {
+        let mut sizes = self.cluster_sizes();
+        sizes.sort_unstable();
+        let (min, max) = (sizes.first(), sizes.last());
+        info!(
+            "{method} done: {} clusters, cluster sizes min={} max={} median={}",
+            self.n_clusters,
+            min.copied().unwrap_or(0),
+            max.copied().unwrap_or(0),
+            sizes.get(sizes.len() / 2).copied().unwrap_or(0)
+        );
+    }
+
     /// Remove clusters smaller than `min_size`.
     ///
     /// Cells in removed clusters get label `usize::MAX` (written as NaN in output).
@@ -231,20 +245,7 @@ pub fn leiden_clustering_with_metric(
         n_clusters,
     };
 
-    let sizes = result.cluster_sizes();
-    let min_size = sizes.iter().copied().min().unwrap_or(0);
-    let max_size = sizes.iter().copied().max().unwrap_or(0);
-    info!(
-        "Leiden done: {} clusters, cluster sizes min={} max={} median={}",
-        result.n_clusters,
-        min_size,
-        max_size,
-        {
-            let mut s = sizes.clone();
-            s.sort_unstable();
-            s[s.len() / 2]
-        }
-    );
+    result.log_sizes("Leiden");
 
     Ok(result)
 }
@@ -330,20 +331,7 @@ pub fn hsblock_clustering(
         labels,
     };
 
-    let sizes = result.cluster_sizes();
-    let min_size = sizes.iter().copied().min().unwrap_or(0);
-    let max_size = sizes.iter().copied().max().unwrap_or(0);
-    info!(
-        "HSBM done: {} clusters, cluster sizes min={} max={} median={}",
-        result.n_clusters,
-        min_size,
-        max_size,
-        {
-            let mut s = sizes.clone();
-            s.sort_unstable();
-            s[s.len() / 2]
-        }
-    );
+    result.log_sizes("HSBM");
 
     Ok(result)
 }
