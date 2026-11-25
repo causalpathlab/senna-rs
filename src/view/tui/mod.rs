@@ -774,8 +774,7 @@ impl App {
     fn pdf_name(&self) -> String {
         let s = self.scene.current();
         let what = match self.scene.chart.as_ref().map(|c| c.kind) {
-            Some(crate::view::chart::Kind::Structure) => "structure".to_string(),
-            Some(crate::view::chart::Kind::Heatmap) => "heatmap".to_string(),
+            Some(kind) => kind.slug().to_string(),
             None => format!("{}.{}", s.method, s.kind.slug()),
         };
         format!("{}.view.{what}", here(&self.scene.data.prefix))

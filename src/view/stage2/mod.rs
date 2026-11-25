@@ -13,9 +13,11 @@
 //!   `|z|` over the donors' states in the grouping on screen, in the
 //!   sidebar; the arrows step through them on the gain map.
 
+mod charts;
 mod gains;
 mod tables;
 
+pub(crate) use charts::{draw_gain_heat, draw_volcano, GainHeat, Volcano};
 pub(crate) use tables::Stage2;
 
 use super::*;
@@ -143,6 +145,54 @@ impl Scene {
             list,
         });
         self.set_pick(Pick::Gain { gene: first, donor });
+    }
+
+    /// The gain heatmap of the feature shown, over the grouping on screen.
+    pub(super) fn gain_heat(&self) -> Result<GainHeat, String> {
+        let gene = self
+            .pick
+            .as_ref()
+            .and_then(Pick::feature)
+            .ok_or("show a gene first (i ranks them, / finds one)")?;
+        let li = self
+            .colour
+            .ok_or("colour the cells by a grouping first (c)")?;
+        let groups = self.groups().ok_or("no grouping on screen")?;
+        let group_of: Vec<Option<u32>> = groups
+            .iter()
+            .map(|&g| (g != data::NONE).then_some(g))
+            .collect();
+        let s = self.stage2()?;
+        let rows = s.cells(&self.current().points.names);
+        charts::gain_heat(
+            s,
+            gene,
+            &rows,
+            &group_of,
+            self.levels(),
+            self.data.labels[li].title().to_string(),
+        )
+    }
+
+    /// The volcano at the focused group's state, else the view's.
+    pub(super) fn volcano(&self) -> Result<Volcano, String> {
+        let s = self.stage2()?;
+        let names = &self.current().points.names;
+        let mut rows = s.cells(names);
+        let at = match (self.focused_name(), self.groups()) {
+            (Some(name), Some(groups)) => {
+                let f = self.focus.expect("a focus named");
+                for (r, &g) in rows.iter_mut().zip(groups) {
+                    if g != f {
+                        *r = None;
+                    }
+                }
+                format!("in {name}")
+            }
+            _ => "over the cells in view ([ ] focuses a group)".to_string(),
+        };
+        let shown = self.pick.as_ref().and_then(Pick::feature);
+        charts::volcano(s, &rows, at, shown)
     }
 
     /// Draw a stage-2 pick on `space`. Returns whether `pick` was one.

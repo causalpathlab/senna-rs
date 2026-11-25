@@ -122,7 +122,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "H",
-                "structure plot (runs with topics, bge included: each cell's topic mixture, a panel per group), heatmap, back to the map",
+                "structure plot (runs with topics, bge included: each cell's topic mixture, a panel per group), heatmap, then with a stage 2 the gain heatmap (the gene shown by group × donor) and the volcano (every gene's gain × |z| per donor, in the focused group), back to the map",
             ),
             (
                 "+  -",
