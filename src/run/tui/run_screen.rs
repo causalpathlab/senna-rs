@@ -1,7 +1,7 @@
 //! The run screen: the clones step, the queue and its log, and choices a fit asks for.
 
 use super::jobs::{Keep, Queue};
-use super::{jobs, rerun_argv, App, Choice, Screen};
+use super::{jobs, rerun_argv, script, App, Choice, Screen};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::Path;
 
@@ -137,11 +137,10 @@ impl App {
                     .filter(|j| j.step.is_some_and(|of| of.fit == c.job))
                     .map(|j| {
                         let mut j = j.clone();
-                        j.argv = j
-                            .argv
-                            .iter()
-                            .map(|w| moved_out(w, &job.out, &out))
-                            .collect();
+                        if let Some(of) = j.step {
+                            let step = &self.rows[j.row].steps[of.step];
+                            j.argv = self.step_argv(step, &out, 0);
+                        }
                         j.out.clone_from(&out);
                         j.lane = 0;
                         j.step = j.step.map(|of| jobs::StepOf { fit: 0, ..of });
@@ -202,12 +201,11 @@ impl App {
                 // A step's fit script refuses to rerun over the fit it made,
                 // so a step is given again as its own command.
                 if j.step.is_some() {
-                    let words: Vec<String> = j.argv.iter().map(|w| shell_word(w)).collect();
                     return format!(
                         "{} {what}; again with: (cd {} && senna {})",
                         j.method,
-                        shell_word(&self.shown(&j.dir)),
-                        words.join(" ")
+                        script::quote(&self.shown(&j.dir)),
+                        script::line(&j.argv)
                     );
                 }
                 let script = j.script();
@@ -222,26 +220,5 @@ impl App {
                 }
             })
             .collect()
-    }
-}
-
-/// `w` as one shell word: as is when it is plain, else single-quoted.
-fn shell_word(w: &str) -> String {
-    let plain = !w.is_empty()
-        && w.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
-    if plain {
-        w.to_string()
-    } else {
-        format!("'{}'", w.replace('\'', "'\\''"))
-    }
-}
-
-/// A step's word `w` with the fit's `old` out moved to `new`: the out
-/// itself, or a file named after it (`{old}.senna.json`, `{old}.latent…`).
-fn moved_out(w: &str, old: &str, new: &str) -> String {
-    match w.strip_prefix(old) {
-        Some(rest) if rest.is_empty() || rest.starts_with('.') => format!("{new}{rest}"),
-        _ => w.to_string(),
     }
 }

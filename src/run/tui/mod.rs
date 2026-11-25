@@ -178,9 +178,8 @@ pub(crate) struct App {
     /// Where the browser opens next.
     browse_dir: PathBuf,
     rows: Vec<Row>,
-    method_row: usize,
-    /// The step of `method_row` under the cursor, on the Methods screen.
-    step_row: Option<usize>,
+    /// The Methods screen's cursor: a method, or one of its steps.
+    methods_cursor: step_rows::Entry,
     /// The method whose flags the parameters screen shows.
     param_method: usize,
     /// The step of `param_method` whose flags it shows instead.
@@ -528,8 +527,7 @@ impl App {
             browser: Some(Browser::open(start.clone(), Pick::Data, None)),
             browse_dir: start,
             rows,
-            method_row: 0,
-            step_row: None,
+            methods_cursor: (0, None),
             param_method: 0,
             param_step: None,
             shared_page: false,

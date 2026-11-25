@@ -60,16 +60,20 @@ impl App {
             self.param_step = None;
             self.field_row = 0;
         }
-        let r = &self.rows[self.method_row];
-        if self.step_row.is_some_and(|s| !r.on || s >= r.steps.len()) {
-            self.step_row = None;
+        let r = &self.rows[self.methods_cursor.0];
+        if self
+            .methods_cursor
+            .1
+            .is_some_and(|s| !r.on || s >= r.steps.len())
+        {
+            self.methods_cursor.1 = None;
         }
     }
 
     /// A key on a step's row of the Methods screen, as on a method's: space
     /// queues it, enter queues it and shows its flags. Whether it was one.
     pub(super) fn step_key(&mut self, k: KeyEvent) -> bool {
-        let (m, Some(s)) = (self.method_row, self.step_row) else {
+        let (m, Some(s)) = self.methods_cursor else {
             return false;
         };
         let step = &mut self.rows[m].steps[s];

@@ -81,7 +81,7 @@ impl App {
         self.shared_rows()
             .into_iter()
             .filter_map(|r| {
-                let f = self.rows[r].form.fields.iter().find(|f| f.long == long)?;
+                let f = self.rows[r].form.field(long)?;
                 Some((self.rows[r].label.clone(), f.value.clone()))
             })
             .collect()

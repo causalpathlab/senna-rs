@@ -69,7 +69,7 @@ pub fn key(form: &Method, clones: bool) -> Option<Vec<(String, String)>> {
     key.push(("proj-dim".into(), sketch_dim(form).to_string()));
     // How row names line up across data files decides the merged feature
     // axis; compared as set, since its default may differ between methods.
-    if let Some(f) = form.fields.iter().find(|f| f.long == "feature-name-kind") {
+    if let Some(f) = form.field("feature-name-kind") {
         key.push((f.long.clone(), f.value.trim().to_string()));
     }
     key.sort();
@@ -79,15 +79,7 @@ pub fn key(form: &Method, clones: bool) -> Option<Vec<(String, String)>> {
 /// The sketch the fit partitions cells on is as wide as `--proj-dim`, or
 /// its number of latent topics when that is larger.
 fn sketch_dim(form: &Method) -> usize {
-    let value = |long: &str| -> Option<usize> {
-        form.fields
-            .iter()
-            .find(|f| f.long == long)?
-            .value
-            .trim()
-            .parse()
-            .ok()
-    };
+    let value = |long: &str| -> Option<usize> { form.field(long)?.value.trim().parse().ok() };
     let k = crate::refine_weighting::LATENT_COUNTS
         .iter()
         .find_map(|n| value(&n.replace('_', "-")))

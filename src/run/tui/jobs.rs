@@ -405,13 +405,23 @@ fn run_lane(
             State::Failed(format!("skipped: {} did not finish", js[k].method))
         } else {
             set(s, i, State::Running);
-            // A fit's record runs its steps after it.
-            let steps: Vec<Vec<String>> = js
-                .iter()
-                .filter(|j| j.step.is_some_and(|of| of.fit == i))
-                .map(Job::command)
-                .collect();
-            run_job(job, &steps, i, lanes > 1, s, st)
+            // A step runs on what its fit left; a fit's record runs its
+            // steps after it.
+            let prepared = match job.step {
+                Some(_) => Ok(()),
+                None => {
+                    let steps: Vec<Vec<String>> = js
+                        .iter()
+                        .filter(|j| j.step.is_some_and(|of| of.fit == i))
+                        .map(Job::command)
+                        .collect();
+                    prepare(job, &steps)
+                }
+            };
+            match prepared {
+                Ok(()) => run_job(job, i, lanes > 1, s, st),
+                Err(why) => State::Failed(why),
+            }
         };
         let done = state == State::Done;
         set(s, i, state);
@@ -479,22 +489,9 @@ fn say(s: &Mutex<Shared>, i: usize, line: String) {
     }
 }
 
-/// Run `job`, its record written first with `steps`, the commands of the
-/// post-fit steps queued after it; a step runs on what its fit left.
-fn run_job(
-    job: &Job,
-    steps: &[Vec<String>],
-    i: usize,
-    tag: bool,
-    s: &Mutex<Shared>,
-    stopper: &Stopper,
-) -> State {
+/// Run `job`, prepared.
+fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper) -> State {
     let argv = job.command();
-    if job.step.is_none() {
-        if let Err(why) = prepare(job, &argv, steps) {
-            return State::Failed(why);
-        }
-    }
     say(
         s,
         i,
@@ -557,8 +554,8 @@ fn run_job(
 }
 
 /// Before a fit runs: refused over its result, its folder made, its batch
-/// labels and its record (`argv`, then its `steps`) written.
-fn prepare(job: &Job, argv: &[String], steps: &[Vec<String>]) -> Result<(), String> {
+/// labels and its record (its command, then its `steps`) written.
+fn prepare(job: &Job, steps: &[Vec<String>]) -> Result<(), String> {
     if job.result().exists() {
         return Err(format!("{} exists", job.result().display()));
     }
@@ -575,7 +572,7 @@ fn prepare(job: &Job, argv: &[String], steps: &[Vec<String>]) -> Result<(), Stri
             return Err(format!("cannot write the batch labels: {e}"));
         }
     }
-    script::write(&job.script(), &job.out, argv, steps, job.tool)
+    script::write(&job.script(), &job.out, &job.command(), steps, job.tool)
         .map_err(|e| format!("cannot write the script: {e}"))
 }
 

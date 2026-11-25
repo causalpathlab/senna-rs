@@ -1,6 +1,7 @@
 //! Planning the queued commands, and the confirm popup that shows them.
 
 use super::jobs::{Job, Queue, StepOf, Tool, CLONES_FLAG};
+use super::steps::Step;
 use super::{batches, form, script, share, App, Builder, Planned, Row, Screen};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::{Path, PathBuf};
@@ -48,7 +49,7 @@ impl App {
     /// How senna fit `r` takes the clone table `table` of the queued
     /// `mung clones`: the table, or a warning that it cannot, or a problem.
     fn clones_for(r: &Row, table: &str) -> (Option<String>, Option<String>, Option<String>) {
-        match r.form.fields.iter().find(|f| f.long == CLONES_FLAG) {
+        match r.form.field(CLONES_FLAG) {
             Some(f) if !f.is_default() => (
                 None,
                 None,
@@ -125,7 +126,7 @@ impl App {
             // `--device-no` given by hand stays): each GPU is a lane, its
             // fits run in turn and the GPUs side by side.
             let mut argv = r.form.argv(&data, &batch_files, &out);
-            let lane = match self.gpu_of(r) {
+            let lane = match self.gpu_of(&r.form) {
                 Some(Some(given)) => given,
                 Some(None) => {
                     let gpu = next_gpu % self.gpus;
@@ -198,25 +199,19 @@ impl App {
             .enumerate()
             .filter(|(_, s)| s.on)
             .map(|(s, step)| {
-                let mut argv = step.argv(&fit.out);
-                // A step runs in its fit's lane, which on several GPUs is a
-                // GPU: one on cuda takes that GPU unless its form names one.
-                let field = |long: &str| step.form.fields.iter().find(|f| f.long == long);
-                if self.gpus > 1
-                    && fit.lane > 0
-                    && field("device").is_some_and(|f| f.value.trim() == "cuda")
-                    && field("device-no").is_none_or(|f| f.is_default())
-                {
-                    argv.extend(["--device-no".to_string(), fit.lane.to_string()]);
-                }
                 let job = Job {
+                    tool: fit.tool,
+                    program: fit.program.clone(),
+                    row: fit.row,
                     method: format!("{} › {}", r.label, step.form.name),
-                    argv,
+                    dir: fit.dir.clone(),
+                    out: fit.out.clone(),
+                    argv: self.step_argv(step, &fit.out, fit.lane),
                     labels: Vec::new(),
                     clones: None,
                     pb_from: None,
+                    lane: fit.lane,
                     step: Some(StepOf { fit: at, step: s }),
-                    ..fit.clone()
                 };
                 let mut blamed = None;
                 let problem = if step.spec.needs_batches && no_batches {
@@ -239,16 +234,30 @@ impl App {
             .collect()
     }
 
-    /// Whether row `r`'s fit runs on a GPU while there are several to
-    /// spread fits over: `Some(Some(d))` when `--device-no d` is given,
-    /// `Some(None)` when it is free to take one; `None` otherwise.
-    fn gpu_of(&self, r: &Row) -> Option<Option<usize>> {
-        let value = |long: &str| r.form.fields.iter().find(|f| f.long == long);
-        if self.gpus < 2 || value("device").is_none_or(|f| f.value.trim() != "cuda") {
+    /// Step `step`'s command line on the fit writing `fit_out` in lane
+    /// `lane`: on several GPUs a lane is a GPU, which a step on cuda takes
+    /// as a fit would, unless its form names one.
+    pub(super) fn step_argv(&self, step: &Step, fit_out: &str, lane: usize) -> Vec<String> {
+        let mut argv = step.argv(fit_out);
+        if lane > 0 && self.gpu_of(&step.form) == Some(None) {
+            argv.extend(["--device-no".to_string(), lane.to_string()]);
+        }
+        argv
+    }
+
+    /// Whether `form` runs on a GPU while there are several to spread fits
+    /// over: `Some(Some(d))` when `--device-no d` is given, `Some(None)`
+    /// when it is free to take one; `None` otherwise.
+    fn gpu_of(&self, form: &form::Method) -> Option<Option<usize>> {
+        if self.gpus < 2
+            || form
+                .field("device")
+                .is_none_or(|f| f.value.trim() != "cuda")
+        {
             return None;
         }
         Some(
-            value("device-no")
+            form.field("device-no")
                 .filter(|f| !f.is_default())
                 .and_then(|f| f.value.trim().parse().ok())
                 .filter(|&d: &usize| d < self.gpus),

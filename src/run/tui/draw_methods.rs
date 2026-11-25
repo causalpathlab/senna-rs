@@ -1,6 +1,7 @@
 //! Drawing the Methods screen: every fit with its `--out`, under the
 //! output header, and under each queued fit the steps offered after it.
 
+use super::form::Method;
 use super::jobs::Tool;
 use super::steps::Step;
 use super::App;
@@ -45,22 +46,15 @@ impl App {
             )));
         }
         for (i, r) in self.rows.iter().enumerate() {
-            let changed = r.form.changed();
+            let (on, changed, about) = told(&r.form, r.on);
             let text = format!(
-                " [{}] {:<13} --out {:<out_w$}{} {:<11} {}",
-                if r.on { "x" } else { " " },
+                " {on} {:<13} --out {:<out_w$}{} {changed:<11} {about}",
                 r.label,
                 short(&r.out, out_w),
                 // Typed by hand: the header leaves it be.
                 if r.typed { " ✎" } else { "  " },
-                if changed == 0 {
-                    "defaults".to_string()
-                } else {
-                    format!("{changed} changed")
-                },
-                r.form.about.lines().next().unwrap_or_default()
             );
-            let here = i == self.method_row && self.step_row.is_none();
+            let here = self.methods_cursor == (i, None);
             let style = if here {
                 selected()
             } else if r.on {
@@ -74,7 +68,7 @@ impl App {
             lines.push(Line::from(Span::styled(short(&text, w), style)));
             if r.on {
                 for (s, step) in r.steps.iter().enumerate() {
-                    let here = i == self.method_row && self.step_row == Some(s);
+                    let here = self.methods_cursor == (i, Some(s));
                     if here {
                         at = lines.len();
                     }
@@ -100,17 +94,10 @@ impl App {
 
 /// A step's row under its fit: queued or not, its flags, what it does.
 fn step_line(step: &Step, here: bool, w: usize) -> Line<'static> {
-    let changed = step.form.changed();
+    let (on, changed, about) = told(&step.form, step.on);
     let text = format!(
-        "     [{}] then {:<16} {:<11} {}",
-        if step.on { "x" } else { " " },
-        step.form.name,
-        if changed == 0 {
-            "defaults".to_string()
-        } else {
-            format!("{changed} changed")
-        },
-        step.form.about.lines().next().unwrap_or_default()
+        "     {on} then {:<16} {changed:<11} {about}",
+        step.form.name
     );
     let style = if here {
         selected()
@@ -120,4 +107,16 @@ fn step_line(step: &Step, here: bool, w: usize) -> Line<'static> {
         hint()
     };
     Line::from(Span::styled(short(&text, w), style))
+}
+
+/// What a fit's or a step's row tells of `form`: queued (`on`) or not, its
+/// flags left at their defaults or how many changed, and the first line of
+/// what it does.
+fn told(form: &Method, on: bool) -> (&'static str, String, &str) {
+    let changed = match form.changed() {
+        0 => "defaults".to_string(),
+        n => format!("{n} changed"),
+    };
+    let about = form.about.lines().next().unwrap_or_default();
+    (if on { "[x]" } else { "[ ]" }, changed, about)
 }

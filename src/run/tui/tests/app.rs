@@ -176,9 +176,9 @@ fn queued_methods_share_the_data_and_write_their_own_out() {
     a.pairs[0].batch = labels(dir.path(), "b1.tsv", &["x", "x", "y"]);
     a.pairs[1].batch = labels(dir.path(), "b2.tsv", &["x", "z", "z"]);
     a.screen = Screen::Methods;
-    a.method_row = METHODS.iter().position(|m| *m == "svd").unwrap();
+    a.methods_cursor.0 = METHODS.iter().position(|m| *m == "svd").unwrap();
     key(&mut a, KeyCode::Char(' '));
-    a.method_row = METHODS.iter().position(|m| *m == "bge").unwrap();
+    a.methods_cursor.0 = METHODS.iter().position(|m| *m == "bge").unwrap();
     key(&mut a, KeyCode::Char(' '));
     let planned = a.plan();
     assert_eq!(planned.len(), 2);
@@ -468,7 +468,7 @@ fn the_parameters_screen_shows_a_queued_method_however_it_is_reached() {
     let mut a = app(dir.path());
     a.screen = Screen::Methods;
     let bge = METHODS.iter().position(|m| *m == "bge").unwrap();
-    a.method_row = bge;
+    a.methods_cursor.0 = bge;
     key(&mut a, KeyCode::Char(' '));
     key(&mut a, KeyCode::Char('3'));
     assert_eq!(a.screen, Screen::Params);
@@ -561,7 +561,7 @@ fn the_output_header_names_every_out_not_typed_by_hand() {
     let svd = METHODS.iter().position(|m| *m == "svd").unwrap();
     let bge = METHODS.iter().position(|m| *m == "bge").unwrap();
     a.screen = Screen::Methods;
-    a.method_row = bge;
+    a.methods_cursor.0 = bge;
     key(&mut a, KeyCode::Char('o'));
     a.editor.as_mut().unwrap().text = "mine".into();
     key(&mut a, KeyCode::Enter);
@@ -715,8 +715,8 @@ fn long_lists_scroll_to_keep_the_cursor_on_a_small_terminal() {
     assert!(text.contains("file30.zarr"), "{text}");
     assert!(text.contains("more"), "{text}");
     a.screen = Screen::Methods;
-    a.method_row = a.rows.len() - 1;
-    let last = a.rows[a.method_row].form.name.clone();
+    a.methods_cursor.0 = a.rows.len() - 1;
+    let last = a.rows[a.methods_cursor.0].form.name.clone();
     let text = drawn(&a, 80, 10);
     assert!(text.contains(&last), "{text}");
     let first = format!("] {} ", a.rows[0].form.name);
@@ -860,7 +860,7 @@ fn a_step_queued_under_its_fit_runs_after_it_from_its_manifest_with_its_form() {
     a.refresh_outs();
     a.pairs = data(dir.path(), &["d.zarr.zip"]);
     a.screen = Screen::Methods;
-    a.method_row = METHODS.iter().position(|m| *m == "svd").unwrap();
+    a.methods_cursor.0 = METHODS.iter().position(|m| *m == "svd").unwrap();
     // No step is queued until asked: space queues the fit, its steps show
     // under it, and enter on the first queues it and opens its flags.
     key(&mut a, KeyCode::Char(' '));

@@ -64,6 +64,12 @@ impl Method {
         }
     }
 
+    /// The field of flag `--{long}`, when the method has it.
+    #[must_use]
+    pub fn field(&self, long: &str) -> Option<&Field> {
+        self.fields.iter().find(|f| f.long == long)
+    }
+
     /// Whether the method reads batch files.
     #[must_use]
     pub fn takes_batches(&self) -> bool {
