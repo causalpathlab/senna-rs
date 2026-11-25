@@ -48,6 +48,31 @@ pub(crate) struct Volcano {
     named: Vec<(usize, String)>,
 }
 
+impl Volcano {
+    /// Where its state is.
+    pub(crate) fn at(&self) -> &str {
+        &self.at
+    }
+
+    /// Its `top` dots of largest `|z|` (`donor`'s only, when given), the
+    /// largest first: `(gene, donor, log gain, z)`.
+    pub(crate) fn strongest(
+        &self,
+        donor: Option<usize>,
+        top: usize,
+    ) -> Vec<(usize, usize, f32, f32)> {
+        let mut dots: Vec<(usize, usize, f32, f32)> = self
+            .dots
+            .iter()
+            .copied()
+            .filter(|d| donor.is_none_or(|want| d.1 == want))
+            .collect();
+        dots.sort_by(|a, b| b.3.abs().total_cmp(&a.3.abs()));
+        dots.truncate(top);
+        dots
+    }
+}
+
 /// The gain heatmap of `gene` over the groups of `groups` (each cell's in
 /// `levels`, beside its stage-2 row in `rows`).
 pub(crate) fn gain_heat(

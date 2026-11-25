@@ -480,3 +480,42 @@ fn stage_2_is_drawn_as_asked_said_back_and_refused_on_a_run_without_it() {
         .to_string();
     assert!(e.contains("no stage 2"), "{e}");
 }
+
+#[test]
+fn stage_2_s_numbers_tiles_and_charts_are_an_agent_s_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = Open::of(
+        crate::view::stage2::tests::scene_with_stage2(dir.path()),
+        PathBuf::from("r.senna.json"),
+    );
+    let stage2 = |o: &mut Open, v: Value| o.stage2(serde_json::from_value(v).unwrap());
+    // Two cells are too few for a donor's state: no genes, no volcano.
+    let out = stage2(&mut o, json!({"what": "genes"})).unwrap();
+    assert_eq!(state(&out)["ranked_by"], "|z|");
+    assert_eq!(state(&out)["genes"].as_array().unwrap().len(), 0);
+    let e = stage2(&mut o, json!({"what": "volcano"}))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("cells"), "{e}");
+    // A tile per donor, each that donor's gain map.
+    let out = stage2(&mut o, json!({"what": "tiles", "gene": "g1", "width": 64})).unwrap();
+    assert!(matches!(&out[0], Content::Png(_)));
+    assert_eq!(state(&out)["donors"], json!(["A", "B", "C"]));
+    let e = stage2(&mut o, json!({"what": "gene"}))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("which gene"), "{e}");
+    // The charts, on and off, said back and carried by a published view.
+    o.map(args(
+        json!({"feature": "g1", "stage2": "gain", "chart": "gains", "width": 32}),
+    ))
+    .unwrap();
+    assert_eq!(o.view_state()["chart"], "gains");
+    let out = o.map(args(json!({"chart": "off", "width": 32}))).unwrap();
+    assert_eq!(state(&out)["chart"], "off");
+    let e = open()
+        .map(args(json!({"chart": "volcano", "width": 16})))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no stage 2"), "{e}");
+}

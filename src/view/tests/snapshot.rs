@@ -184,7 +184,14 @@ fn a_grid_page_is_as_it_was() {
         "run B".to_string(),
         "run C".to_string(),
     ];
-    let page = deck::render_grid(&[&a, &b, &c], &[None, None, None], &titles, (W, H), 16.0);
+    let page = deck::render_grid(
+        &[&a, &b, &c],
+        &[None, None, None],
+        &titles,
+        (W, H),
+        16.0,
+        true,
+    );
     assert_eq!(
         (digest(&page.img), page.text.len(), runs_digest(&page.text)),
         ((240, 180, 17764791235586080237), 9, 2514423851555036642)

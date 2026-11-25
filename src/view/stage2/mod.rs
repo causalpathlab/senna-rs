@@ -15,6 +15,7 @@
 
 mod charts;
 mod gains;
+mod report;
 mod tables;
 
 pub(crate) use charts::{draw_gain_heat, draw_volcano, GainHeat, Volcano};
@@ -141,7 +142,10 @@ impl Scene {
             let d = s.donor(donor.as_deref())?;
             let rows = self.rows_in_stage2(s, space);
             let states = gains::donor_group_states(s, &rows, self.groups(), self.levels().len());
-            Ok(gains::rank_genes(s, &states, d, RANKED))
+            Ok(gains::rank_genes(s, &states, d, RANKED)
+                .into_iter()
+                .map(|r| (s.genes[r.gene].clone(), r.score))
+                .collect::<Vec<_>>())
         });
         let list = match ranked {
             Ok(list) => list,

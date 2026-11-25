@@ -28,6 +28,8 @@ mod reference;
 mod stage2;
 mod steps;
 mod view;
+mod view_chart;
+mod view_stage2;
 
 use anyhow::{bail, Context, Result};
 use legume_mcp::{Call, Content, Handler, ToolSpec};

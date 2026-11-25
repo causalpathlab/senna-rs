@@ -77,14 +77,15 @@ pub(crate) fn view_pages(views: &[(&Scene, Viewport, f32)]) -> Vec<Page> {
 
 /// Every scene's current view in one `w × h` image, a grid of tiles named
 /// at the bottom left. Each tile shows what its camera saw (`cams`, scaled
-/// to the tile), or its whole layout without one. Text comes back as runs
-/// for a PDF, not drawn into the pixels.
+/// to the tile), or its whole layout without one. With `keep_text`, text
+/// comes back as runs for a PDF; else it is drawn into the pixels.
 pub(crate) fn render_grid(
     scenes: &[&Scene],
     cams: &[Option<Viewport>],
     titles: &[String],
     (w, h): (usize, usize),
     cell_px: f32,
+    keep_text: bool,
 ) -> Page {
     let (cols, rows) = export::shape(scenes.len(), w as f32, h as f32);
     let (tw, th) = (w / cols, h / rows);
@@ -93,6 +94,8 @@ pub(crate) fn render_grid(
         .zip(cams)
         .map(|(&s, &cam)| (s, camera(cam, s.current().points.bounds, tw, th), cell_px))
         .collect();
-    let tiles = frames(&views, true).into_iter().zip(titles.iter().cloned());
+    let tiles = frames(&views, keep_text)
+        .into_iter()
+        .zip(titles.iter().cloned());
     export::grid_page(tiles.collect(), (w, h), cell_px, &color::THEME)
 }
