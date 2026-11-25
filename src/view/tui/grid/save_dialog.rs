@@ -170,7 +170,14 @@ impl Deck {
                 let cams: Vec<Option<Viewport>> = self.apps.iter().map(|a| a.vp).collect();
                 let titles: Vec<String> = (0..self.apps.len()).map(|k| self.title(k)).collect();
                 let cell = self.cell.1 * w as f32 / t.grid_px.0.max(1.0);
-                vec![deck::render_grid(&scenes, &cams, &titles, (w, h), cell)]
+                vec![deck::render_grid(
+                    &scenes,
+                    &cams,
+                    &titles,
+                    (w, h),
+                    cell,
+                    true,
+                )]
             }
         };
         legume_tui::export::write_pdf(&pages, dpi as f32, &req.path).map_err(|e| e.to_string())?;

@@ -51,6 +51,8 @@ pub(crate) fn cell_gains(
 pub(crate) struct DonorState {
     pub donor: usize,
     pub group: u32,
+    /// The donor's cells in the group.
+    pub cells: usize,
     pub mean: Vec<f32>,
 }
 
@@ -88,12 +90,24 @@ pub(crate) fn donor_group_states(
         .map(|slot| DonorState {
             donor: slot / n_groups,
             group: (slot % n_groups) as u32,
+            cells: counts[slot],
             mean: sums[slot * width..(slot + 1) * width]
                 .iter()
                 .map(|x| (x / counts[slot] as f64) as f32)
                 .collect(),
         })
         .collect()
+}
+
+/// A ranked gene and where it departs most: its score, and its gain at
+/// that donor-group state.
+pub(crate) struct Ranked {
+    pub gene: usize,
+    /// `|z|`, or `|log gain|` without a jackknife.
+    pub score: f32,
+    pub donor: usize,
+    pub group: u32,
+    pub gain: Gain,
 }
 
 /// Genes by their largest `|z|` over the donor-group states (`donor`'s
@@ -105,33 +119,45 @@ pub(crate) fn rank_genes(
     states: &[DonorState],
     donor: Option<usize>,
     top: usize,
-) -> Vec<(Box<str>, f32)> {
+) -> Vec<Ranked> {
     let states: Vec<&DonorState> = states
         .iter()
         .filter(|st| donor.is_none_or(|want| st.donor == want))
         .collect();
-    let mut ranked: Vec<(usize, f32)> = (0..s.genes.len())
+    let jackknife = s.has_jackknife();
+    let score = |gain: &Gain| {
+        let v = if jackknife {
+            gain.z.abs()
+        } else {
+            gain.log_gain.abs()
+        };
+        // A z without a spread (all refits alike) is no evidence either way.
+        if v.is_finite() {
+            v
+        } else {
+            0.0
+        }
+    };
+    let mut ranked: Vec<Ranked> = (0..s.genes.len())
         .into_par_iter()
         .filter_map(|g| {
-            let best = states
+            let (st, gain, best) = states
                 .iter()
                 .map(|st| {
                     let gain = s.gain(g, st.donor, &st.mean);
-                    if s.has_jackknife() {
-                        gain.z.abs()
-                    } else {
-                        gain.log_gain.abs()
-                    }
+                    (st, gain, score(&gain))
                 })
-                .filter(|v| !v.is_nan())
-                .fold(0f32, f32::max);
-            (best > 0.0).then_some((g, best))
+                .max_by(|a, b| a.2.total_cmp(&b.2))?;
+            (best > 0.0).then_some(Ranked {
+                gene: g,
+                score: best,
+                donor: st.donor,
+                group: st.group,
+                gain,
+            })
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    ranked.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.gene.cmp(&b.gene)));
     ranked.truncate(top);
     ranked
-        .into_iter()
-        .map(|(g, z)| (s.genes[g].clone(), z))
-        .collect()
 }

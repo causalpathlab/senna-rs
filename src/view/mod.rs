@@ -962,7 +962,7 @@ fn headless_page(
     } else {
         let refs: Vec<&Scene> = scenes.iter().collect();
         let cams = vec![None; scenes.len()];
-        deck::render_grid(&refs, &cams, titles, (w, h), cell_px)
+        deck::render_grid(&refs, &cams, titles, (w, h), cell_px, true)
     };
     Ok((page, (w, h)))
 }

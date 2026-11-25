@@ -3,6 +3,7 @@
 
 use super::jobs::senna;
 use super::stage2::{apply_stage2, check_stage2, donor_of, Stage2Arg};
+use super::view_chart::{apply_chart, ChartArg};
 use super::{absolute, parse};
 use crate::view::data::{Axis, Dataset, LabelKind, Labels, NONE};
 use crate::view::recompute::Step;
@@ -22,13 +23,13 @@ use std::path::{Path, PathBuf};
 
 /// Width of a map drawn without one: enough to read a layout by, small
 /// enough to keep the image cheap for the agent.
-const WIDTH: usize = 1024;
+pub(super) const WIDTH: usize = 1024;
 
 /// Largest side of a map drawn or exported.
-const MAX_SIDE: usize = 4096;
+pub(super) const MAX_SIDE: usize = 4096;
 
 /// Text size of a map drawn for the agent, as a terminal cell's height.
-const CELL_PX: f32 = 18.0;
+pub(super) const CELL_PX: f32 = 18.0;
 
 /// Width and resolution of an exported figure.
 const EXPORT_WIDTH: usize = 2400;
@@ -63,6 +64,7 @@ pub(super) fn call(
         "view_markers" => held(open)?.markers(parse(args.clone())?)?,
         "view_cell" => held(open)?.cell(parse(args.clone())?)?,
         "view_export" => held(open)?.export(parse(args.clone())?)?,
+        "view_stage2" => held(open)?.stage2(parse(args.clone())?)?,
         _ => return Ok(None),
     };
     Ok(Some(out))
@@ -76,7 +78,7 @@ fn held(open: &mut Option<Open>) -> Result<&mut Open> {
 
 /// An open run and the view on it.
 pub(super) struct Open {
-    scene: Scene,
+    pub(super) scene: Scene,
     run: PathBuf,
     /// The world window asked for; `None` fits the whole map.
     window: Option<[f32; 4]>,
@@ -85,7 +87,7 @@ pub(super) struct Open {
 }
 
 /// `width`, or `default`, within what a picture may be.
-fn width(width: Option<usize>, default: usize) -> Result<usize> {
+pub(super) fn width(width: Option<usize>, default: usize) -> Result<usize> {
     let width = width.unwrap_or(default);
     ensure!(
         (1..=MAX_SIDE).contains(&width),
@@ -114,6 +116,7 @@ pub(in crate::view) struct MapArgs {
     pub(super) time: Option<bool>,
     pub(super) stage2: Option<Stage2Arg>,
     pub(super) donor: Option<String>,
+    chart: Option<ChartArg>,
     velocity: Option<VelocityArg>,
     pub(in crate::view) bbox: Option<[f32; 4]>,
     fit: Option<bool>,
@@ -278,6 +281,7 @@ impl Open {
             "time": s.pick == Some(Pick::Time),
             "stage2": Stage2Arg::of(s.pick.as_ref()),
             "donor": donor_of(s.pick.as_ref()),
+            "chart": ChartArg::of(s),
             "velocity": VelocityArg::from(s.velocity_style),
             "bbox": self.drawn.map(|vp| vp.window()),
         })
@@ -328,6 +332,7 @@ impl Open {
             "feature": feature,
             "time": s.pick == Some(Pick::Time) && s.current_shown().is_some(),
             "stage2": stage2,
+            "chart": ChartArg::of(s),
             "velocity": VelocityArg::from(s.velocity_drawn()),
             "legend": legend,
         })
@@ -365,6 +370,9 @@ impl Open {
         state["units_per_px"] = json!(vp.upp());
         if let Some(note) = self.scene.note.take() {
             state["note"] = note.into();
+        }
+        if let Some(e) = self.scene.chart_error() {
+            state["chart_error"] = e.into();
         }
         Ok(vec![Content::Png(png), Content::Json(state)])
     }
@@ -634,6 +642,9 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         ensure!(data.times.is_some(), features::NO_TIMES);
     }
     check_stage2(a, s, data)?;
+    if let Some(chart) = a.chart {
+        chart.check(data.has_stage2())?;
+    }
     // The field, read now when it is asked for and the view has none of
     // this run's: the round's run, when a round is swapped in.
     let has_field =
@@ -683,6 +694,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         _ => {}
     }
     apply_stage2(scene, a.stage2, a.donor.as_deref());
+    apply_chart(scene, a.chart);
     if let Some(field) = field {
         scene.velocity = Some(field);
     }
@@ -693,7 +705,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
 }
 
 /// The view_map arguments a published view sets.
-const VIEW_KEYS: [&str; 12] = [
+const VIEW_KEYS: [&str; 13] = [
     "round",
     "map",
     "space",
@@ -704,6 +716,7 @@ const VIEW_KEYS: [&str; 12] = [
     "time",
     "stage2",
     "donor",
+    "chart",
     "velocity",
     "bbox",
 ];
@@ -799,7 +812,7 @@ fn hex(c: color::Rgb) -> String {
 
 /// `img` as an opaque PNG: compressed hard for what goes to the agent
 /// whole, less for a file.
-fn png(img: image::RgbaImage, level: CompressionType) -> Result<Vec<u8>> {
+pub(super) fn png(img: image::RgbaImage, level: CompressionType) -> Result<Vec<u8>> {
     use image::codecs::png::{FilterType, PngEncoder};
     use image::ImageEncoder;
     let rgb = image::DynamicImage::ImageRgba8(img).into_rgb8();
@@ -852,6 +865,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "time": {"type": "boolean", "description": "Colour the cells by the run's time (a run view_open says has time); false shows the groups again"},
                     "stage2": {"enum": ["gain", "exclusivity", "off"], "description": "On a run view_open says has stage2 (senna donor-deviation): gain colours the cells by the feature's log gain in their own donor (diverging; faded where the batch jackknife |z| < 2); exclusivity by their sample's distance to the nearest sample of another donor (large: a state no other donor has); off shows the feature's level again"},
                     "donor": {"type": "string", "description": "With stage2 gain: this donor's deviation drawn at every cell's state; \"\" each cell's own donor"},
+                    "chart": {"enum": ["structure", "heatmap", "gains", "volcano", "off"], "description": "Draw a chart in place of the map, of the cells in the view and the grouping shown: structure (each cell's topic mixture, a panel per group; runs with topics), heatmap (each group's top features), gains (the feature shown, its stage-2 log gain by group × donor) or volcano (every gene's stage-2 log gain × |z| per donor in the focused group); off draws the map again. A chart stays on, made again for what changes, until off"},
                     "velocity": {"enum": ["stream", "arrows", "off"], "description": "Draw the run's velocity field over the cells (a run view_open says has velocity), as streamlines or arrows, or not"},
                     "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "World window [x0, y0, x1, y1]"},
                     "fit": {"type": "boolean", "description": "true: the whole map"},
@@ -907,6 +921,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                 "additionalProperties": false,
             }),
         ),
+        super::view_stage2::spec(),
     ]
 }
 

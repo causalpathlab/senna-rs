@@ -43,6 +43,12 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// Whether it draws a run's stage 2.
+    #[must_use]
+    pub fn needs_stage2(self) -> bool {
+        matches!(self, Kind::Gains | Kind::Volcano)
+    }
+
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -161,6 +167,15 @@ impl Scene {
             Some(k) => format!("{} · H next · c groups by another grouping", k.name()),
             None => "back to the map".into(),
         });
+    }
+
+    /// Why the chart on screen could not be made, when it could not.
+    #[must_use]
+    pub fn chart_error(&self) -> Option<&str> {
+        match self.chart.as_ref()?.made.as_ref()? {
+            (_, Err(e)) => Some(e),
+            _ => None,
+        }
     }
 
     /// Start on chart `kind` (`--chart`), made at once.
