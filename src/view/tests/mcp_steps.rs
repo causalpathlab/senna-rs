@@ -91,19 +91,26 @@ fn a_step_missing_its_input_or_writing_over_its_run_is_refused() {
 
 #[test]
 fn a_clustering_of_cells_leads_to_lupins_annotation_and_nothing_else_does() {
-    let next = |v: Value| step_next(&parse(v).unwrap()).map(|n| (n.tool, n.args));
+    use senna::run_manifest::{RunKind, RunManifest};
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("r.senna.json");
+    let mut m = RunManifest::new(RunKind::Topic, "r");
+    m.outputs.latent = Some("r.latent.parquet".into());
+    m.cluster.clusters = Some("k.clusters.parquet".into());
+    m.save(&run).unwrap();
+    let next = |v: Value| -> Vec<(String, Value)> {
+        let a = parse(v).unwrap();
+        step_next(&a)
+            .into_iter()
+            .map(|n| (n.tool, n.args))
+            .collect()
+    };
+    let run = run.to_string_lossy();
     assert_eq!(
-        next(json!({"command": "clustering", "from": "r.senna.json", "out": "k"})),
-        Some((
-            "lupin annotate_run".to_string(),
-            json!({"from": "r.senna.json"})
-        ))
+        next(json!({"command": "clustering", "from": run, "out": "k"})),
+        [("lupin annotate_run".to_string(), json!({"from": run}))]
     );
-    let features =
-        json!({"command": "clustering", "from": "r.senna.json", "out": "k", "target": "features"});
-    assert_eq!(next(features), None);
-    assert_eq!(
-        next(json!({"command": "fne", "data": ["e.tsv"], "out": "g"})),
-        None
-    );
+    let features = json!({"command": "clustering", "from": run, "out": "k", "target": "features"});
+    assert!(next(features).is_empty());
+    assert!(next(json!({"command": "fne", "data": ["e.tsv"], "out": "g"})).is_empty());
 }

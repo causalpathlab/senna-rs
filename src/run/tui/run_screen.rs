@@ -93,7 +93,8 @@ impl App {
             .find_map(|(i, (j, _))| {
                 let run = j.result();
                 let (m, _) = senna::run_manifest::RunManifest::load(&run).ok()?;
-                let (decisions, _) = crate::view::typed_decisions(&run, &m.decisions);
+                let types = crate::view::CellTypes::of_run(&run, &m);
+                let decisions = crate::view::typed_decisions(types.as_ref(), &m.decisions);
                 let decision = decisions.into_iter().next()?;
                 Some(Choice {
                     job: i,

@@ -1,9 +1,9 @@
 //! `view_cells`: the cells of some groups of the open run written as a
 //! list, one name a line, for a run tool's flag (an ODE's `root-cells`).
 
-use super::view::{group_of, Open};
+use super::view::{group_name, group_of, grouping_named, Open};
 use crate::view::data::{Axis, Labels};
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use legume_mcp::{Call, Content, ToolSpec};
 use senna::run_manifest;
 use serde::Deserialize;
@@ -43,19 +43,14 @@ impl Open {
         let mut text = picked.names.join("\n");
         text.push('\n');
         cx.write_file(&path, &text)?;
-        let groups: Vec<Value> = picked
-            .groups
-            .iter()
-            .map(|(g, n)| json!({"group": g, "cells": n}))
-            .collect();
         // Where the list came from, for a fit given it to say what it is.
-        let source = serde_json::to_string_pretty(&self.source(&picked, &groups))?;
-        cx.write_file(&source_path(&path), &source)?;
+        let source = self.source(&picked);
+        cx.write_file(&source_path(&path), &serde_json::to_string_pretty(&source)?)?;
         Ok(vec![Content::Json(json!({
             "cells": super::absolute(&path),
-            "grouping": picked.grouping,
-            "groups": groups,
-            "total": picked.names.len(),
+            "grouping": source["grouping"],
+            "groups": source["groups"],
+            "total": source["total"],
             "use": "a list of cell names, one a line, for a run tool's flags: root-cells of \
                     run_fit ode (the trajectory's root), drop-cells of run_layout, \
                     archetype-cells of run_deconvolve",
@@ -105,9 +100,14 @@ impl Open {
         })
     }
 
-    /// Where `picked` (its `groups` as the result gives them) came from:
-    /// the run and the round shown, the grouping, each group's count.
-    pub(super) fn source(&self, picked: &Picked, groups: &[Value]) -> Value {
+    /// Where `picked` came from: the run and the round shown, the
+    /// grouping, each group's count.
+    pub(super) fn source(&self, picked: &Picked) -> Value {
+        let groups: Vec<Value> = picked
+            .groups
+            .iter()
+            .map(|(g, n)| json!({"group": g, "cells": n}))
+            .collect();
         let round = self
             .scene
             .data
@@ -123,25 +123,15 @@ impl Open {
         })
     }
 
-    /// The grouping of cells named `colour_by`, else the one shown.
+    /// The grouping of the map's cells named `colour_by`, else the one
+    /// shown.
     fn grouping(&self, colour_by: Option<&str>) -> Result<&Labels> {
-        let data = &self.scene.data;
-        let Some(by) = colour_by else {
-            let li = self
-                .scene
-                .colour
-                .context("no grouping shown: pass colour_by")?;
-            return Ok(&data.labels[li]);
+        let s = &self.scene;
+        let li = match colour_by {
+            Some(by) => grouping_named(&s.data, &s.colour_choices(), by)?,
+            None => s.colour.context("no grouping shown: pass colour_by")?,
         };
-        let cells = || data.labels.iter().filter(|l| l.axis() == Axis::Cells);
-        if let Some(l) = cells().find(|l| l.title().eq_ignore_ascii_case(by)) {
-            return Ok(l);
-        }
-        let names: Vec<&str> = cells().map(Labels::title).collect();
-        bail!(
-            "no {by} grouping of cells; the run has {}",
-            names.join(", ")
-        )
+        Ok(&s.data.labels[li])
     }
 
     /// A list's name in today's results folder, by the run and the groups,
@@ -150,8 +140,7 @@ impl Open {
         let run = run_manifest::derive_out_prefix(&self.run.to_string_lossy());
         let run = Path::new(&run).file_name().unwrap_or_default();
         let groups: Vec<&str> = picked.groups.iter().map(|(g, _)| g.as_str()).collect();
-        let mut base = format!("{}.cells_{}", run.to_string_lossy(), groups.join("+"));
-        base = base
+        let base: String = format!("{}.cells_{}", run.to_string_lossy(), groups.join("+"))
             .chars()
             .map(|c| match c {
                 c if c.is_alphanumeric() || "+-_.".contains(c) => c,
@@ -159,14 +148,11 @@ impl Open {
             })
             .take(100)
             .collect();
+        let list = |out: &str| PathBuf::from(format!("{out}.txt"));
         let (out, _) = cx
-            .free_prefix(
-                &base,
-                |out| Ok(vec![PathBuf::from(format!("{out}.txt"))]),
-                |_| false,
-            )
+            .free_prefix(&base, |out| Ok(vec![list(out)]), |_| false)
             .context("no results folder to write in: pass out")?;
-        Ok(PathBuf::from(format!("{out}.txt")))
+        Ok(list(&out))
     }
 }
 
@@ -179,43 +165,28 @@ pub(super) fn source_path(list: &Path) -> PathBuf {
 }
 
 /// What the `n` cells of the list at `list` are, by the groups view_cells
-/// wrote it from ([`source_path`]): each group with its share, largest
-/// first, and the grouping and round (or run) they are of; `None` when no
-/// source is beside it or it counts other cells than the list holds (the
-/// list changed since).
+/// wrote it from ([`source_path`]), as a round's types say it
+/// ([`crate::view::mostly`]), and the grouping and round (or run) they are
+/// of; `None` when no source is beside it or it counts other cells than
+/// the list holds (the list changed since).
 pub(super) fn source_of(list: &Path, n: usize) -> Option<(String, Value)> {
-    let text = std::fs::read_to_string(source_path(list)).ok()?;
-    let source: Value = serde_json::from_str(&text).ok()?;
-    let total = source["total"].as_u64()?;
-    if total == 0 || total != n as u64 {
+    let source: Value = crate::view::files::read_json(&source_path(list))?;
+    if source["total"].as_u64() != Some(n as u64) {
         return None;
     }
-    let mut groups: Vec<(&str, u64)> = source["groups"]
+    let groups: Vec<(&str, usize)> = source["groups"]
         .as_array()?
         .iter()
-        .filter_map(|g| Some((g["group"].as_str()?, g["cells"].as_u64()?)))
+        .filter_map(|g| Some((g["group"].as_str()?, g["cells"].as_u64()? as usize)))
         .collect();
-    groups.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    let mostly: Vec<String> = groups
-        .iter()
-        .map(|(g, c)| format!("{g} ({:.0}%)", 100.0 * *c as f64 / total as f64))
-        .collect();
+    let mostly = crate::view::mostly(groups, n)?;
     let of = if source["round"].is_string() {
         &source["round"]
     } else {
         &source["run"]
     };
     let by = json!({"grouping": source["grouping"], "of": of});
-    Some((mostly.join(", "), by))
-}
-
-/// A group as the agent names it: its name, or a cluster id.
-fn group_name(v: &Value) -> Result<String> {
-    match v {
-        Value::String(s) => Ok(s.clone()),
-        Value::Number(n) => Ok(n.to_string()),
-        _ => bail!("a group is a name or a cluster id"),
-    }
+    Some((mostly, by))
 }
 
 pub(super) fn spec() -> ToolSpec {

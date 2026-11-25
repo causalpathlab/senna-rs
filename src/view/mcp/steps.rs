@@ -9,6 +9,7 @@ use legume_mcp::{Call, Content, Next, ToolSpec, Why};
 use senna::run_manifest;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use std::path::Path;
 
 /// A step tool's call; `None` for another family's.
 pub(super) fn call(
@@ -152,20 +153,29 @@ fn run_step(a: StepCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     let task = step_task(&a)?;
     let done = start_server(task, a.background, cx, why)?;
     // A step running as a job has made nothing yet to go on from.
-    let next = step_next(&a).filter(|_| done.get("job").is_none());
+    let next = match done.get("job") {
+        None => step_next(&a),
+        Some(_) => Vec::new(),
+    };
     let mut out = vec![Content::Json(done)];
-    out.extend(next.map(|n| Content::Next(vec![n])));
+    if !next.is_empty() {
+        out.push(Content::Next(next));
+    }
     Ok(out)
 }
 
-/// What could follow the step `a`: a clustering of a run's cells (which
-/// the run records) is what lupin annotates.
-fn step_next(a: &StepCall) -> Option<Next> {
-    match (&a.from, a.command, a.target) {
-        (Some(from), Command::Clustering, None | Some(Target::Cells)) => {
-            Some(super::fit::lupin_annotate(from))
-        }
-        _ => None,
+/// What could follow the step `a` once it ran: after a clustering of a
+/// run's cells, which the run records, what follows on the run
+/// ([`next_after`](super::fit::next_after): lupin's annotation).
+fn step_next(a: &StepCall) -> Vec<Next> {
+    let (Some(from), Command::Clustering, None | Some(Target::Cells)) =
+        (&a.from, a.command, a.target)
+    else {
+        return Vec::new();
+    };
+    match run_manifest::load_for(from) {
+        Ok((m, _)) => super::fit::next_after(&m, Path::new(&run_manifest::manifest_path_for(from))),
+        Err(_) => Vec::new(),
     }
 }
 
