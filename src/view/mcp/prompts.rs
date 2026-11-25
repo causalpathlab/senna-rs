@@ -36,7 +36,8 @@ annotate_why which type is least differentiated (stem or progenitor markers).
 3. Fit: senna run_fit ode on the run's data ({data}) with flags root-cells \
 set to that list and a new out, with why (by and cites: the evidence for \
 the root). Its result's root says the cells it grew from are that type (by \
-the list's groups), or that a start with no root beat it (used: false); a \
+the list's groups), or that no tree could grow from it (used: false, with \
+why and what to try); a \
 needs_input is put to the user.
 4. Check: senna view_open the ODE run and view_map time: time should run \
 from the root type to the known mature types; view_map velocity draws the \

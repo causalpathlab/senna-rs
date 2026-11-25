@@ -26,13 +26,20 @@ pub(crate) fn label_key(s: &str) -> String {
         .join("_")
 }
 
-/// The round made from the manifest at `path`, found next to it: a
-/// manifest in the same directory whose `annotate.source` resolves to it.
+/// The round made from the manifest at `path`: a manifest whose
+/// `annotate.source` resolves to it, in the same directory or, named
+/// after it, in a results day folder of its project ([`day_folders`]).
 pub(crate) fn made_from(path: &Path) -> Option<PathBuf> {
+    made_from_in(path, &day_folders(path))
+}
+
+/// [`made_from`], the project's results day folders `days` given.
+fn made_from_in(path: &Path, days: &[PathBuf]) -> Option<PathBuf> {
     // lupin names a round's successor `{stem}.r{N}.senna.json`; prefer
     // that chain over any other round made from this one.
     let stem = run_manifest::derive_out_prefix(&files::name(path));
     let mut found = siblings(path, ".senna.json");
+    found.extend(day_rounds(path, &stem, days));
     found.sort_by_key(|p| !files::name(p).starts_with(&format!("{stem}.r")));
     found.into_iter().find(|p| {
         read_json::<Value>(p)
@@ -46,13 +53,59 @@ pub(crate) fn made_from(path: &Path) -> Option<PathBuf> {
     })
 }
 
+/// The results day folders (`results/*/`) of the project of the manifest
+/// at `path`: the nearest folder above it holding `.legume` (legume-mcp's
+/// mark of a project) and `results/`, else the nearest holding `results/`.
+/// lupin may write a round there while the run sits deeper
+/// (`results/{day}/ode/`).
+fn day_folders(path: &Path) -> Vec<PathBuf> {
+    let Ok(dir) = std::path::absolute(run_manifest::manifest_dir(path)) else {
+        return Vec::new();
+    };
+    let results = |a: &&Path| a.join("results").is_dir();
+    let project = dir
+        .ancestors()
+        .filter(results)
+        .find(|a| a.join(".legume").is_dir())
+        .or_else(|| dir.ancestors().find(results));
+    let Some(Ok(days)) = project.map(|p| std::fs::read_dir(p.join("results"))) else {
+        return Vec::new();
+    };
+    days.flatten()
+        .map(|d| d.path())
+        .filter(|d| d.is_dir())
+        .collect()
+}
+
+/// The manifests named `{stem}.*.senna.json` (as lupin names a run's
+/// rounds, `stem` the run's) in the day folders `days` but that of the
+/// manifest at `path`, sorted.
+fn day_rounds(path: &Path, stem: &str, days: &[PathBuf]) -> Vec<PathBuf> {
+    let own = run_manifest::manifest_dir(path);
+    let named = |p: &PathBuf| {
+        files::name(p)
+            .strip_prefix(&format!("{stem}."))
+            .is_some_and(|rest| rest.ends_with(".senna.json"))
+    };
+    let mut found: Vec<PathBuf> = days
+        .iter()
+        .filter(|d| !same_file(d, own))
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flat_map(|files| files.flatten().map(|f| f.path()).filter(named))
+        .collect();
+    found.sort();
+    found
+}
+
 /// The newest round of the run at `run` (a run's manifest), following
 /// [`made_from`] to the end of the chain; `None` when it has none.
 fn newest_round(run: &Path) -> Option<PathBuf> {
-    let mut at = made_from(run)?;
+    // One project, so its day folders are found once for the whole chain.
+    let days = day_folders(run);
+    let mut at = made_from_in(run, &days)?;
     // A chain is short; the bound stops a cycle of rounds naming each other.
     for _ in 0..64 {
-        match made_from(&at) {
+        match made_from_in(&at, &days) {
             Some(next) => at = next,
             None => break,
         }
@@ -62,27 +115,38 @@ fn newest_round(run: &Path) -> Option<PathBuf> {
 
 /// The cell types the newest lupin round of a run gives its cells:
 /// lupin's fine types when it wrote them, else its argmax.
-pub(crate) struct CellTypes(HashMap<Box<str>, Box<str>>);
+pub(crate) struct CellTypes {
+    types: HashMap<Box<str>, Box<str>>,
+    /// The round's manifest they are read from.
+    round: PathBuf,
+}
 
 impl CellTypes {
     /// Those of the run at `run` (`m` its manifest, read as the round when
     /// it is one with none made from it); `None` with no round or no labels.
     pub(crate) fn of_run(run: &Path, m: &RunManifest) -> Option<Self> {
-        let newer = newest_round(run).and_then(|r| RunManifest::load(&r).ok());
-        let (m, dir) = match &newer {
-            Some((m, dir)) => (m, dir.as_path()),
-            None => (m, run_manifest::manifest_dir(run)),
+        let newer = newest_round(run).and_then(|r| Some((RunManifest::load(&r).ok()?, r)));
+        let (m, dir, round) = match &newer {
+            Some(((m, dir), round)) => (m, dir.as_path(), round.as_path()),
+            None => (m, run_manifest::manifest_dir(run), run),
         };
         let table = annotate_str(m, "fine_argmax").or(m.annotate.argmax.as_deref())?;
-        read_argmax(&run_manifest::resolve(dir, table))
-            .ok()
-            .map(Self)
+        let types = read_argmax(&run_manifest::resolve(dir, table)).ok()?;
+        Some(Self {
+            types,
+            round: round.to_path_buf(),
+        })
+    }
+
+    /// The round's manifest the types are read from.
+    pub(crate) fn round(&self) -> &Path {
+        &self.round
     }
 
     /// What `cells` mostly are ([`mostly`]); `None` when none is typed.
     pub(crate) fn mostly(&self, cells: &[Box<str>]) -> Option<String> {
         let mut counts: HashMap<&str, usize> = HashMap::default();
-        for t in cells.iter().filter_map(|c| self.0.get(c)) {
+        for t in cells.iter().filter_map(|c| self.types.get(c)) {
             *counts.entry(t.as_ref()).or_default() += 1;
         }
         mostly(counts.into_iter().collect(), cells.len())
@@ -869,5 +933,31 @@ mod tests {
             labelled[0].options[0].label,
             "root 0; mostly HSC (75%), then Mk (25%)"
         );
+    }
+
+    /// A round lupin wrote into the project's results day folder, the run
+    /// deeper (`results/{day}/ode/`), is found by the run's stem; another
+    /// run's round, or a file of this stem made from another, is not.
+    #[test]
+    fn a_round_in_the_projects_day_folder_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".legume")).unwrap();
+        let day = dir.path().join("results/2026-11-25");
+        std::fs::create_dir_all(day.join("ode")).unwrap();
+        let run = write(&day.join("ode"), "count.ode.senna.json", "{}");
+        let made = |source: &str| format!(r#"{{"annotate":{{"source":"{source}"}}}}"#);
+        write(&day, "count.ode.L0.senna.json", &made("other.senna.json"));
+        write(
+            &day,
+            "other.L1.senna.json",
+            &made("ode/count.ode.senna.json"),
+        );
+        assert_eq!(made_from(&run), None);
+        let round = write(
+            &day,
+            "count.ode.L1.senna.json",
+            &made("ode/count.ode.senna.json"),
+        );
+        assert!(made_from(&run).is_some_and(|r| same_file(&r, &round)));
     }
 }

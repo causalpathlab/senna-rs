@@ -146,6 +146,7 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
 
     let (m, _) = RunManifest::load(std::path::Path::new(&format!("{out}.senna.json"))).unwrap();
     assert_eq!(m.kind, RunKind::Ode);
+    assert_eq!(m.outputs.cell_time_lineages, Some(1));
     // The root it grew from, when a tree start won, beside the manifest.
     let root = std::path::Path::new(&format!("{out}.root.txt")).exists();
     assert_eq!(
