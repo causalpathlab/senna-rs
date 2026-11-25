@@ -169,25 +169,19 @@ project", PLoS Comput Biol 19(1): e1010786 (2023). doi:10.1371/journal.pcbi.1010
 **Model**
 
 ```text
-encoder (input pooling):
-    v_norm  = anscombe_lite(values, batch_null, μ_d)                   # [N, K]
-    h       = Σ_k v_norm[k] · ρ[idx[k]]                                # [N, H]
-    z       ∼ Gaussian(μ_z(h), σ_z(h)),    log θ = log_softmax(z)      # [N, K_topics]
+encoder (masked, visible-pooled):
+    h       = Σ_{k∈visible} v_norm[k] · ρ[idx[k]]            # bag-of-visible-genes
+    log θ   = log_softmax(W_θ · h)                           # topic proportions
 
-decoder (ETM factorization):
-    β_kd    = log_softmax_d(α_k · ρ_dᵀ)                                # [K_topics, D]
-    log x̂_n = log(Σ_k θ_nk · exp β_k:)                                 # multinomial recon
+decoder (NB ETM head):
+    β_kg    = softmax_d(α_k · ρ_dᵀ)                          # per-topic gene dist (full-vocab Zₖ)
+    μ_g     = ℓ · Σ_t θ_t · β_{t,g}
+    x_g     ∼ NB(μ_g, φ_g)        for masked g
 ```
 
-**Per-batch slice (no [K, D] materialization).** For the union of top-K feature ids across the minibatch, only `ρ_S = ρ[S, :]` is gathered:
+Training is deterministic and KL-free: a random subset of each cell's genes is hidden from the encoder, and the loss scores only the hidden genes. The masking is the regularizer. Inference is encoder-only, on every gene the cell has.
 
-```text
-β̃_kS = log_softmax_S(α · ρ_Sᵀ − log q_S)
-```
-
-where `log q_S` is the Jean et al. (2015) importance correction for sampled softmax (`q_s` = per-feature selection frequency). Per-batch cost is O(K·S·H) on the gradient path; the full β is only built on demand for output / evaluation.
-
-**Why share ρ.** Each gradient step lands on the same `Var` from two paths — the encoder's bag-of-features pool *and* the decoder's α·ρᵀ logits — so feature embeddings are densely supervised even though only top-K features fire per cell. Parameter count drops from K·D to K·H + D·H (H ≪ D in typical configurations).
+**Why share ρ.** Each gradient step lands on the same `Var` from two paths — the encoder's bag-of-features pool *and* the decoder's α·ρᵀ logits — so feature embeddings are supervised from both sides. Parameter count drops from K·D to K·H + D·H (H ≪ D in typical configurations).
 
 **Outputs.** In addition to the standard topic-model artifacts (`.dictionary.parquet`, `.latent.parquet`, `.safetensors`, etc.), `masked-topic` writes:
 

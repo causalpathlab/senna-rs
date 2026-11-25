@@ -216,8 +216,21 @@ impl TopicModelMetadata {
     pub fn load(prefix: &str) -> anyhow::Result<Self> {
         let path = format!("{prefix}.model.json");
         let json = std::fs::read_to_string(&path)?;
-        let metadata: Self = serde_json::from_str(&json)?;
-        Ok(metadata)
+        let value: serde_json::Value = serde_json::from_str(&json)?;
+        // Models trained before 0.25.42 could record an encoder context window
+        // (a top-K shortlist per cell). That read is gone; scoring such a model
+        // densely would silently give a different latent, so refuse it.
+        if value
+            .get("enc_context_size")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|k| k > 0)
+        {
+            anyhow::bail!(
+                "{path}: this model was trained with an encoder context window \
+                 (enc_context_size), which this senna no longer scores; retrain it"
+            );
+        }
+        Ok(serde_json::from_value(value)?)
     }
 
     /// Compute `θ̄_train` from the training-time `[N, K]` **topic-proportion**
@@ -424,3 +437,7 @@ pub fn load_dispersion(prefix: &str) -> anyhow::Result<Option<Vec<f32>>> {
     log::info!("Loaded {} dispersion values from {path}", phi.len());
     Ok(Some(phi))
 }
+
+#[cfg(test)]
+#[path = "model_metadata_tests.rs"]
+mod model_metadata_tests;
