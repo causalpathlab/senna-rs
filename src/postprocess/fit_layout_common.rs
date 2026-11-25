@@ -474,9 +474,9 @@ pub(crate) fn outlier_pbs(score: &[f64], cut: OutlierCut) -> Vec<bool> {
         // Too few to tell a tail from the rest.
         OutlierCut::Auto if n < OUTLIER_MIN_PBS => vec![false; n],
         OutlierCut::Auto => {
-            use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
-            let col = nalgebra::DMatrix::<f64>::from_column_slice(n, 1, score);
-            let label = col.kmeans_rows(KmeansArgs::with_clusters(2));
+            let col =
+                nalgebra::DMatrix::<f32>::from_iterator(n, 1, score.iter().map(|&s| s as f32));
+            let (_, label) = legume_numeric::matrix::kmeans::kmeans_centroids(&col, 2, 100);
             let group = |k: usize| -> Vec<f64> {
                 score
                     .iter()

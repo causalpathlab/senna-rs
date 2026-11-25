@@ -7,8 +7,7 @@ use crate::cluster_bhc::{run_cluster_bhc, ClusterBhcConfig};
 use crate::postprocess::fit_layout_features::{read_feature_rows, FeatureSpace};
 use anyhow::Context;
 use senna::cluster::{
-    hsblock_clustering, kmeans_clustering, leiden_clustering, ClusterMethod, ClusterResult,
-    LatentMetric,
+    hsblock_clustering, kmeans_clustering, leiden_clustering, ClusterResult, LatentMetric,
 };
 use senna::embed_common::*;
 use senna::run_manifest::{RunCluster, RunManifest};
@@ -26,16 +25,6 @@ pub enum ClusterMethodCli {
     Leiden,
     /// Hierarchical Stochastic Block Model (graph-based)
     Hsblock,
-}
-
-impl From<ClusterMethodCli> for ClusterMethod {
-    fn from(cli: ClusterMethodCli) -> Self {
-        match cli {
-            ClusterMethodCli::Kmeans => ClusterMethod::KMeans,
-            ClusterMethodCli::Leiden => ClusterMethod::Leiden,
-            ClusterMethodCli::Hsblock => ClusterMethod::Hsblock,
-        }
-    }
 }
 
 /// What `senna clustering` groups.
@@ -204,7 +193,7 @@ pub struct ClusteringArgs {
     )]
     edge_scale: f64,
 
-    #[arg(long, help = "Random seed for graph-based clustering")]
+    #[arg(long, help = "Random seed for k-means and graph-based clustering")]
     seed: Option<u64>,
 
     #[arg(
@@ -328,7 +317,7 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
                 "Running k-means clustering with k={}, max_iter={}",
                 k, args.max_iter
             );
-            kmeans_clustering(&latent, k, args.max_iter)?
+            kmeans_clustering(&latent, k, args.max_iter, args.seed)?
         }
         ClusterMethodCli::Leiden => {
             info!(
