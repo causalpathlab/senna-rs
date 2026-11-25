@@ -31,8 +31,15 @@ pub struct Method {
 impl Method {
     /// The form for subcommand `name` of `cli`, which must be built.
     pub fn new(cli: &Command, name: &str) -> anyhow::Result<Self> {
-        let cmd = cli
-            .find_subcommand(name)
+        Self::new_with(cli, name, &[])
+    }
+
+    /// [`Method::new`] for the command `name` names, its words a path to a
+    /// nested one (`layout tsne`), without the flags `own` names besides
+    /// [`OWN`]: those the caller fills itself.
+    pub fn new_with(cli: &Command, name: &str, own: &[&str]) -> anyhow::Result<Self> {
+        let path: Vec<&str> = name.split(' ').collect();
+        let cmd = crate::tui::subcommand(cli, &path)
             .ok_or_else(|| anyhow::anyhow!("senna has no `{name}` command"))?;
         let batch = cmd
             .get_arguments()
@@ -43,7 +50,10 @@ impl Method {
         let data = data_flags();
         let (own, shared): (Vec<Field>, Vec<Field>) = cmd
             .get_arguments()
-            .filter(|a| a.get_long().is_some_and(|l| !OWN.contains(&l)))
+            .filter(|a| {
+                a.get_long()
+                    .is_some_and(|l| !OWN.contains(&l) && !own.contains(&l))
+            })
             .filter_map(Field::from_arg)
             .partition(|f| !data.contains(f.long.as_str()));
         Ok(Method {
@@ -86,16 +96,18 @@ impl Method {
 /// Whether clap takes `argv` (without the program); its complaint if not.
 pub fn check(cli: &Command, argv: &[String]) -> Result<(), String> {
     // The method's own command parses its line: no need to copy all of senna.
-    let method = argv
-        .first()
-        .and_then(|m| cli.find_subcommand(m))
-        .ok_or_else(|| {
-            format!(
-                "senna has no `{}` command",
-                argv.first().map_or("", |m| m.as_str())
-            )
-        })?;
-    legume_tui::form::check(method, argv)
+    // Its leading words name it, a nested one (`layout tsne`) by several.
+    let (mut method, mut words) = (cli, 0);
+    while let Some(sub) = argv.get(words).and_then(|w| method.find_subcommand(w)) {
+        (method, words) = (sub, words + 1);
+    }
+    if words == 0 {
+        return Err(format!(
+            "senna has no `{}` command",
+            argv.first().map_or("", |m| m.as_str())
+        ));
+    }
+    legume_tui::form::check(method, &argv[words - 1..])
 }
 
 /// The long names of the data steps' flags (`--from`, `--multiome`, quality

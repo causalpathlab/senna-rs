@@ -1,6 +1,6 @@
 //! The run screen: the clones step, the queue and its log, and choices a fit asks for.
 
-use super::jobs::{Keep, Queue, Tool};
+use super::jobs::{Keep, Queue};
 use super::{jobs, rerun_argv, App, Choice, Screen};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::Path;
@@ -89,7 +89,7 @@ impl App {
             .iter()
             .zip(q.states())
             .enumerate()
-            .filter(|(_, (j, s))| j.tool == Tool::Senna && *s == jobs::State::Done)
+            .filter(|(_, (j, s))| j.is_fit() && *s == jobs::State::Done)
             .find_map(|(i, (j, _))| {
                 let run = j.result();
                 let (m, _) = senna::run_manifest::RunManifest::load(&run).ok()?;

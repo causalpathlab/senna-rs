@@ -1,7 +1,8 @@
 //! Drawing the Methods screen: every fit with its `--out`, under the
-//! output header.
+//! output header, and under each queued fit the steps offered after it.
 
 use super::jobs::Tool;
+use super::steps::Step;
 use super::App;
 use crate::tui::style::{bold, hint, selected, CHROME};
 use legume_tui::chrome::short;
@@ -59,17 +60,27 @@ impl App {
                 },
                 r.form.about.lines().next().unwrap_or_default()
             );
-            let style = if i == self.method_row {
+            let here = i == self.method_row && self.step_row.is_none();
+            let style = if here {
                 selected()
             } else if r.on {
                 bold()
             } else {
                 Style::default()
             };
-            if i == self.method_row {
+            if here {
                 at = lines.len();
             }
             lines.push(Line::from(Span::styled(short(&text, w), style)));
+            if r.on {
+                for (s, step) in r.steps.iter().enumerate() {
+                    let here = i == self.method_row && self.step_row == Some(s);
+                    if here {
+                        at = lines.len();
+                    }
+                    lines.push(step_line(step, here, w));
+                }
+            }
             if r.tool == Tool::Mung {
                 // A note under the row, wrapped by word under its name.
                 let note = "runs first; once it is done you see its clones and choose whether the fits get --cnv-clones";
@@ -85,4 +96,28 @@ impl App {
         lines.extend(CHROME.scrolled(body, at.saturating_sub(HEAD), room));
         f.render_widget(Paragraph::new(lines), area);
     }
+}
+
+/// A step's row under its fit: queued or not, its flags, what it does.
+fn step_line(step: &Step, here: bool, w: usize) -> Line<'static> {
+    let changed = step.form.changed();
+    let text = format!(
+        "     [{}] then {:<16} {:<11} {}",
+        if step.on { "x" } else { " " },
+        step.form.name,
+        if changed == 0 {
+            "defaults".to_string()
+        } else {
+            format!("{changed} changed")
+        },
+        step.form.about.lines().next().unwrap_or_default()
+    );
+    let style = if here {
+        selected()
+    } else if step.on {
+        bold()
+    } else {
+        hint()
+    };
+    Line::from(Span::styled(short(&text, w), style))
 }

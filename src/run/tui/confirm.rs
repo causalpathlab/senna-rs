@@ -1,6 +1,6 @@
 //! Planning the queued commands, and the confirm popup that shows them.
 
-use super::jobs::{Job, Queue, Tool, CLONES_FLAG};
+use super::jobs::{Job, Queue, StepOf, Tool, CLONES_FLAG};
 use super::{batches, form, script, share, App, Builder, Planned, Row, Screen};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::{Path, PathBuf};
@@ -149,6 +149,7 @@ impl App {
                 clones,
                 pb_from,
                 lane,
+                step: None,
             };
             let mut blamed = None;
             let problem = if self.pairs.is_empty() {
@@ -176,14 +177,55 @@ impl App {
                     })
             };
             outs.push(dir.join(&out));
+            let steps = self.plan_steps(i, &job, planned.len(), batch_files.is_empty());
             planned.push(Planned {
                 warning: (!notes.is_empty()).then(|| notes.join("; ")),
                 job,
                 problem,
                 blamed,
             });
+            planned.extend(steps);
         }
         planned
+    }
+
+    /// The queued steps of row `i`, each to run on `fit` (queued as job
+    /// `at`) in its lane once it is done, `--from` its manifest.
+    fn plan_steps(&self, i: usize, fit: &Job, at: usize, no_batches: bool) -> Vec<Planned> {
+        let r = &self.rows[i];
+        r.steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.on)
+            .map(|(s, step)| {
+                let job = Job {
+                    method: format!("{} › {}", r.label, step.form.name),
+                    argv: step.argv(&fit.out),
+                    labels: Vec::new(),
+                    clones: None,
+                    pb_from: None,
+                    step: Some(StepOf { fit: at, step: s }),
+                    ..fit.clone()
+                };
+                let mut blamed = None;
+                let problem = if step.spec.needs_batches && no_batches {
+                    Some(format!(
+                        "{} needs the fit's batch files: label the data on the Data screen",
+                        step.form.name
+                    ))
+                } else {
+                    form::check(&self.cli, &job.argv).err().inspect(|why| {
+                        blamed = form::blamed(why, &step.form.fields).map(str::to_string);
+                    })
+                };
+                Planned {
+                    job,
+                    problem,
+                    blamed,
+                    warning: None,
+                }
+            })
+            .collect()
     }
 
     /// Whether row `r`'s fit runs on a GPU while there are several to
@@ -239,7 +281,7 @@ impl App {
                 };
                 if let Some(p) = planned.iter().find(|p| p.problem.is_some()) {
                     if let Some(flag) = &p.blamed {
-                        self.go_to_flag(p.job.row, flag);
+                        self.go_to_flag(p.job.row, p.job.step.map(|of| of.step), flag);
                     }
                     self.message = Some(format!(
                         "{}: {}",
@@ -257,14 +299,22 @@ impl App {
         }
     }
 
-    /// Show `--flag` of `method` on the parameters screen, the advanced
-    /// rows too when it is one of them.
-    fn go_to_flag(&mut self, m: usize, flag: &str) {
-        let Some(at) = self.rows[m].form.fields.iter().position(|f| f.long == flag) else {
+    /// Show `--flag` of `method` (of its step `step`) on the parameters
+    /// screen, the advanced rows too when it is one of them.
+    fn go_to_flag(&mut self, m: usize, step: Option<usize>, flag: &str) {
+        let form = match step {
+            Some(s) => &self.rows[m].steps[s].form,
+            None => &self.rows[m].form,
+        };
+        let Some(at) = form.fields.iter().position(|f| f.long == flag) else {
             return;
         };
-        self.show_params(m);
-        self.advanced |= self.rows[m].form.fields[at].advanced;
+        let advanced = form.fields[at].advanced;
+        match step {
+            Some(s) => self.show_step(m, s),
+            None => self.show_params(m),
+        }
+        self.advanced |= advanced;
         self.filter.clear();
         self.field_row = self.row_of(at).unwrap_or(0);
     }

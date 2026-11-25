@@ -173,8 +173,17 @@ impl App {
     // ───────────── methods ─────────────
 
     pub(super) fn methods_key(&mut self, k: KeyEvent) {
-        if let Some(row) = legume_tui::keys::list_move(&k, self.method_row, self.rows.len(), true) {
-            self.method_row = row;
+        // The cursor walks the methods and the steps under queued ones.
+        let rows = self.method_entries();
+        let at = rows
+            .iter()
+            .position(|&e| e == (self.method_row, self.step_row))
+            .unwrap_or(0);
+        if let Some(row) = legume_tui::keys::list_move(&k, at, rows.len(), true) {
+            (self.method_row, self.step_row) = rows[row];
+            return;
+        }
+        if self.step_key(k) {
             return;
         }
         match k.code {

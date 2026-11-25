@@ -844,3 +844,57 @@ fn the_view_v_opens_runs_as_this_session_was_asked_to() {
     let no_detach = std::ffi::OsStr::new(legume_tui::NO_DETACH_VAR);
     assert_eq!(env, [(no_detach, Some(std::ffi::OsStr::new("1")))]);
 }
+
+#[test]
+fn a_step_queued_under_its_fit_runs_after_it_from_its_manifest_with_its_form() {
+    use clap::CommandFactory;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cli = crate::Cli::command();
+    cli.build();
+    let mut a = App {
+        here: dir.path().to_path_buf(),
+        ..App::new(cli, Err("no mung".into()), dir.path().to_path_buf()).unwrap()
+    };
+    a.browser = None;
+    a.editor = None;
+    a.refresh_outs();
+    a.pairs = data(dir.path(), &["d.zarr.zip"]);
+    a.screen = Screen::Methods;
+    a.method_row = METHODS.iter().position(|m| *m == "svd").unwrap();
+    // No step is queued until asked: space queues the fit, its steps show
+    // under it, and enter on the first queues it and opens its flags.
+    key(&mut a, KeyCode::Char(' '));
+    assert_eq!(a.plan().len(), 1);
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(a.screen, Screen::Params);
+    assert_eq!(a.page_form().name, "layout tsne");
+    let i = a
+        .page_form()
+        .fields
+        .iter()
+        .position(|f| f.long == "sort-dim")
+        .unwrap();
+    a.field_row = a.row_of(i).unwrap();
+    key(&mut a, KeyCode::Char('e'));
+    a.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    key(&mut a, KeyCode::Char('8'));
+    key(&mut a, KeyCode::Enter);
+    let planned = a.plan();
+    assert_eq!(planned.len(), 2);
+    let (fit, step) = (&planned[0].job, &planned[1]);
+    assert_eq!(step.problem, None);
+    assert_eq!(step.job.step.map(|of| of.fit), Some(0));
+    assert_eq!((step.job.lane, step.job.script()), (fit.lane, fit.script()));
+    assert_eq!(
+        step.job.argv,
+        [
+            "layout",
+            "tsne",
+            "--from",
+            "svd.senna.json",
+            "--sort-dim",
+            "8"
+        ]
+    );
+}

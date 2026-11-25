@@ -116,10 +116,22 @@ pub struct Job {
     /// The lane it runs in: its GPU when the fits are spread over several,
     /// else 0.
     pub lane: usize,
+    /// A post-fit step: the fit it runs on, which it follows in its lane.
+    pub step: Option<StepOf>,
+}
+
+/// Which fit a post-fit step job runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepOf {
+    /// The fit's job in the queue.
+    pub fit: usize,
+    /// The step among its row's ([`super::Row::steps`]).
+    pub step: usize,
 }
 
 impl Job {
-    /// What it leaves when done: `{out}.senna.json`, or mung's clones.
+    /// What it leaves when done: `{out}.senna.json`, or mung's clones; a
+    /// step, its fit's manifest, which it reads and adds to.
     #[must_use]
     pub fn result(&self) -> PathBuf {
         self.dir
@@ -140,12 +152,20 @@ impl Job {
         c
     }
 
+    /// Whether it is a senna fit, not mung's clones or a post-fit step.
+    #[must_use]
+    pub fn is_fit(&self) -> bool {
+        self.tool == Tool::Senna && self.step.is_none()
+    }
+
     /// Whether the queue waits after it for the user to judge its clones.
     #[must_use]
     pub fn asks(&self) -> bool {
         self.tool == Tool::Mung
     }
 
+    /// Its record, `{out}.cmd.sh`: a step's is its fit's, which runs the
+    /// steps after the fit.
     #[must_use]
     pub fn script(&self) -> PathBuf {
         self.dir.join(format!("{}.cmd.sh", self.out))
@@ -330,7 +350,7 @@ impl Queue {
         self.jobs
             .iter()
             .zip(self.states())
-            .filter(|(j, s)| j.tool == Tool::Senna && *s == State::Done && j.result().exists())
+            .filter(|(j, s)| j.is_fit() && *s == State::Done && j.result().exists())
             .map(|(j, _)| j.result())
             .collect()
     }
@@ -380,9 +400,18 @@ fn run_lane(
                 "{} did not finish: no pseudobulks to collapse on",
                 js[k].method
             ))
+        } else if let Some(k) = job.step.map(|of| of.fit).filter(|&k| !is_done(s, k)) {
+            // Its fit ran before it in this lane: what it left is final.
+            State::Failed(format!("skipped: {} did not finish", js[k].method))
         } else {
             set(s, i, State::Running);
-            run_job(job, i, lanes > 1, s, st)
+            // A fit's record runs its steps after it.
+            let steps: Vec<Vec<String>> = js
+                .iter()
+                .filter(|j| j.step.is_some_and(|of| of.fit == i))
+                .map(Job::command)
+                .collect();
+            run_job(job, &steps, i, lanes > 1, s, st)
         };
         let done = state == State::Done;
         set(s, i, state);
@@ -429,6 +458,10 @@ fn ask(s: &Mutex<Shared>, answered: &Receiver<Keep>, told: Told) -> Keep {
     keep
 }
 
+fn is_done(s: &Mutex<Shared>, i: usize) -> bool {
+    s.lock().is_ok_and(|s| s.states[i] == State::Done)
+}
+
 fn set(s: &Mutex<Shared>, i: usize, state: State) {
     if let Ok(mut s) = s.lock() {
         s.states[i] = state;
@@ -446,26 +479,21 @@ fn say(s: &Mutex<Shared>, i: usize, line: String) {
     }
 }
 
-fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper) -> State {
-    if job.result().exists() {
-        return State::Failed(format!("{} exists", job.result().display()));
-    }
-    // Where its script and out go: its folder, or one in it.
-    let folder = job
-        .script()
-        .parent()
-        .map_or(job.dir.clone(), Path::to_path_buf);
-    if let Err(e) = legume_numeric::matrix::common_io::mkdir(&folder.to_string_lossy()) {
-        return State::Failed(format!("cannot make {}: {e}", folder.display()));
-    }
-    for w in &job.labels {
-        if let Err(e) = super::batches::write(w) {
-            return State::Failed(format!("cannot write the batch labels: {e}"));
-        }
-    }
+/// Run `job`, its record written first with `steps`, the commands of the
+/// post-fit steps queued after it; a step runs on what its fit left.
+fn run_job(
+    job: &Job,
+    steps: &[Vec<String>],
+    i: usize,
+    tag: bool,
+    s: &Mutex<Shared>,
+    stopper: &Stopper,
+) -> State {
     let argv = job.command();
-    if let Err(e) = script::write(&job.script(), &job.out, &argv, job.tool) {
-        return State::Failed(format!("cannot write the script: {e}"));
+    if job.step.is_none() {
+        if let Err(why) = prepare(job, &argv, steps) {
+            return State::Failed(why);
+        }
     }
     say(
         s,
@@ -526,6 +554,29 @@ fn run_job(job: &Job, i: usize, tag: bool, s: &Mutex<Shared>, stopper: &Stopper)
         Err(Failed::Start(why) | Failed::Exit(why)) => State::Failed(why),
         Err(other) => State::Failed(format!("{other:?}")),
     }
+}
+
+/// Before a fit runs: refused over its result, its folder made, its batch
+/// labels and its record (`argv`, then its `steps`) written.
+fn prepare(job: &Job, argv: &[String], steps: &[Vec<String>]) -> Result<(), String> {
+    if job.result().exists() {
+        return Err(format!("{} exists", job.result().display()));
+    }
+    // Where its script and out go: its folder, or one in it.
+    let folder = job
+        .script()
+        .parent()
+        .map_or(job.dir.clone(), Path::to_path_buf);
+    if let Err(e) = legume_numeric::matrix::common_io::mkdir(&folder.to_string_lossy()) {
+        return Err(format!("cannot make {}: {e}", folder.display()));
+    }
+    for w in &job.labels {
+        if let Err(e) = super::batches::write(w) {
+            return Err(format!("cannot write the batch labels: {e}"));
+        }
+    }
+    script::write(&job.script(), &job.out, argv, steps, job.tool)
+        .map_err(|e| format!("cannot write the script: {e}"))
 }
 
 #[cfg(test)]

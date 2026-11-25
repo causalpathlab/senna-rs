@@ -86,10 +86,36 @@ pub fn command_lines(argv: &[String], out: &str, tool: Tool) -> Vec<String> {
     script(out, "", tool).command_lines(argv)
 }
 
-/// Write the script for `argv` to `path`, never over an existing file.
-pub fn write(path: &Path, out: &str, argv: &[String], tool: Tool) -> std::io::Result<()> {
+/// A post-fit step's command (senna's) as its fit's script and the confirm
+/// popup write it: the command's words (`layout tsne`) on the program's
+/// line, then one flag and its values per line.
+#[must_use]
+pub fn step_lines(argv: &[String], out: &str) -> Vec<String> {
+    let words = argv.iter().take_while(|w| !w.starts_with('-')).count();
+    script(out, "", Tool::Senna).head(words).command_lines(argv)
+}
+
+/// Write the script for `argv` to `path`, never over an existing file,
+/// then the commands of the post-fit `steps` run after it (senna's, each
+/// laid out as the fit's is).
+pub fn write(
+    path: &Path,
+    out: &str,
+    argv: &[String],
+    steps: &[Vec<String>],
+    tool: Tool,
+) -> std::io::Result<()> {
+    use std::io::Write;
     let name = format!("{out}.cmd.sh");
-    script::write(path, &script(out, &name, tool), argv)
+    script::write(path, &script(out, &name, tool), argv)?;
+    if steps.is_empty() {
+        return Ok(());
+    }
+    let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
+    for step in steps {
+        writeln!(f, "{}", step_lines(step, out).join(" \\\n  "))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
