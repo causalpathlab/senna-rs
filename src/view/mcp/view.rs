@@ -2,7 +2,7 @@
 //! terminal viewer draws it.
 
 use super::jobs::senna;
-use super::stage2::{apply_stage2, donor_of, Stage2Arg};
+use super::stage2::{apply_stage2, check_stage2, donor_of, Stage2Arg};
 use super::{absolute, parse};
 use crate::view::data::{Axis, Dataset, LabelKind, Labels, NONE};
 use crate::view::recompute::Step;
@@ -109,11 +109,11 @@ pub(in crate::view) struct MapArgs {
     space: Option<String>,
     colour_by: Option<String>,
     focus: Option<Value>,
-    feature: Option<String>,
+    pub(super) feature: Option<String>,
     observed: Option<bool>,
-    time: Option<bool>,
-    stage2: Option<Stage2Arg>,
-    donor: Option<String>,
+    pub(super) time: Option<bool>,
+    pub(super) stage2: Option<Stage2Arg>,
+    pub(super) donor: Option<String>,
     velocity: Option<VelocityArg>,
     pub(in crate::view) bbox: Option<[f32; 4]>,
     fit: Option<bool>,
@@ -633,24 +633,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         );
         ensure!(data.times.is_some(), features::NO_TIMES);
     }
-    let asks_stage2 = matches!(a.stage2, Some(Stage2Arg::Gain | Stage2Arg::Exclusivity));
-    if asks_stage2 {
-        ensure!(
-            a.time != Some(true),
-            "colour by time or by stage 2, not both"
-        );
-        ensure!(
-            data.run.as_ref().is_some_and(|(m, _)| !m.stage2.is_empty()),
-            crate::view::stage2::NO_STAGE2
-        );
-    }
-    if a.stage2 == Some(Stage2Arg::Gain) {
-        ensure!(
-            a.feature.as_deref().is_some_and(|f| !f.is_empty())
-                || s.pick.as_ref().and_then(Pick::feature).is_some(),
-            "stage2 gain is of a feature: pass feature too"
-        );
-    }
+    check_stage2(a, s, data)?;
     // The field, read now when it is asked for and the view has none of
     // this run's: the round's run, when a round is swapped in.
     let has_field =
@@ -687,7 +670,8 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         Some("") => {
             scene.clear_pick();
         }
-        Some(f) => scene.set_pick(Pick::One(f.into())),
+        // On a gain map, the new feature's gain map.
+        Some(f) => scene.show_feature(f.into()),
         None if a.observed.is_some() => scene.refresh_activity(),
         None => {}
     }

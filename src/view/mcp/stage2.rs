@@ -4,8 +4,11 @@
 use super::flags;
 use super::jobs::{job_property, planned, start_server, Argv, Task};
 use super::parse;
+use super::view::MapArgs;
+use crate::view::data::Dataset;
+use crate::view::stage2::NO_STAGE2;
 use crate::view::{Pick, Scene};
-use anyhow::Result;
+use anyhow::{anyhow, ensure, Result};
 use legume_mcp::{Call, Content, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -50,31 +53,73 @@ pub(super) fn donor_of(pick: Option<&Pick>) -> &str {
 /// or off (the feature's activity again); `donor` alone changes the donor
 /// of the gain map shown.
 pub(super) fn apply_stage2(scene: &mut Scene, stage2: Option<Stage2Arg>, donor: Option<&str>) {
-    let donor_now = || donor.map(|d| (!d.is_empty()).then(|| d.into()));
+    // `Some(None)`: each cell's own donor.
+    let asked = donor.map(|d| (!d.is_empty()).then(|| d.into()));
     match (stage2, scene.pick.clone()) {
-        (Some(Stage2Arg::Gain), pick) => {
-            let Some(gene) = pick.as_ref().and_then(Pick::feature).map(Into::into) else {
-                return;
-            };
-            let kept = match pick {
-                Some(Pick::Gain { donor, .. }) => donor,
-                _ => None,
-            };
-            let donor = donor_now().unwrap_or(kept);
-            scene.set_pick(Pick::Gain { gene, donor });
-        }
+        (Some(Stage2Arg::Gain), Some(Pick::Gain { gene, donor })) => scene.set_pick(Pick::Gain {
+            gene,
+            donor: asked.unwrap_or(donor),
+        }),
+        (Some(Stage2Arg::Gain), Some(Pick::One(gene))) => scene.set_pick(Pick::Gain {
+            gene,
+            donor: asked.flatten(),
+        }),
         (Some(Stage2Arg::Exclusivity), _) => scene.set_pick(Pick::Exclusive),
         (Some(Stage2Arg::Off), Some(Pick::Gain { gene, .. })) => scene.set_pick(Pick::One(gene)),
         (Some(Stage2Arg::Off), Some(Pick::Exclusive)) => {
             scene.clear_pick();
         }
         (None, Some(Pick::Gain { gene, .. })) => {
-            if let Some(donor) = donor_now() {
+            if let Some(donor) = asked {
                 scene.set_pick(Pick::Gain { gene, donor });
             }
         }
         _ => {}
     }
+}
+
+/// `stage2` and `donor` checked against the run (`data`) and what the
+/// call leaves shown, before anything changes: stage 2 the run has, not at
+/// once with time, a gain map of a feature, and a known donor of one.
+pub(super) fn check_stage2(a: &MapArgs, scene: &Scene, data: &Dataset) -> Result<()> {
+    if matches!(a.stage2, Some(Stage2Arg::Gain | Stage2Arg::Exclusivity)) {
+        ensure!(
+            a.time != Some(true),
+            "colour by time or by stage 2, not both"
+        );
+        ensure!(data.has_stage2(), NO_STAGE2);
+    }
+    let feature = match a.feature.as_deref() {
+        Some("") => None,
+        Some(f) => Some(f),
+        None => scene.pick.as_ref().and_then(Pick::feature),
+    };
+    let gain = match a.stage2 {
+        Some(Stage2Arg::Gain) => {
+            ensure!(
+                feature.is_some(),
+                "stage2 gain is of a feature: pass feature too"
+            );
+            true
+        }
+        Some(_) => false,
+        None => {
+            matches!(scene.pick, Some(Pick::Gain { .. }))
+                && feature.is_some()
+                && a.time != Some(true)
+        }
+    };
+    if let Some(d) = a.donor.as_deref().filter(|d| !d.is_empty()) {
+        ensure!(gain, "donor is a gain map's: pass stage2 gain too");
+        let stage2 = data
+            .loads
+            .stage2
+            .get()
+            .as_ref()
+            .map_err(|e| anyhow!("{e}"))?;
+        stage2.donor(Some(d)).map_err(|e| anyhow!(e))?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -130,7 +175,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
          matched distance marks a state no other donor has) and {out}.donor_cell_states.parquet. \
          Needs at least three donors; without flags donor-of-batch each batch is its own donor. Nothing \
          is cut off: read gains through their jackknife z, not through being nonzero. The run's \
-         manifest records the tables, so view_map's stage2 draws them on its map.",
+         manifest records the tables, so view_map's stage2 draws them on its map once the run is \
+         opened again (view_open).",
         json!({
             "type": "object",
             "properties": {

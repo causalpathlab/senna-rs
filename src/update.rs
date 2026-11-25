@@ -35,7 +35,7 @@
 //! every new cell is. `from` is forced to `None`.
 
 use senna::embed_common::*;
-use senna::run_manifest::{rel_to_manifest, RunHistory, RunKind, RunManifest};
+use senna::run_manifest::{RunHistory, RunKind, RunManifest};
 use std::path::PathBuf;
 
 /// The four things `update` changes about a recorded fit.
@@ -727,17 +727,15 @@ fn dispatch(args: &UpdateArgs, manifest: &RunManifest, rebase: Rebase) -> anyhow
 /// trained against. The family wrote the manifest; this adds to it.
 fn record_history(args: &UpdateArgs, pb_from: Option<&str>) -> anyhow::Result<()> {
     let path = PathBuf::from(senna::run_manifest::default_path(&args.out));
-    let (mut m, out_dir) = RunManifest::load(&path)?;
-    // Relative to the manifest, as every other recorded path is, so a moved
-    // run directory keeps its history.
-    let rel = |p: &str| rel_to_manifest(&out_dir, p);
-    m.history = Some(RunHistory {
-        parent: rel(&args.model),
-        peer_labels: args.peer_labels.as_deref().map(rel),
-        pb_from: pb_from.map(rel),
-        unknown: Default::default(),
-    });
-    m.save(&path)
+    // Relative to the manifest, so a moved run directory keeps its history.
+    RunManifest::update(&path, |m, rel| {
+        m.history = Some(RunHistory {
+            parent: rel(&args.model),
+            peer_labels: args.peer_labels.as_deref().map(rel),
+            pb_from: pb_from.map(rel),
+            unknown: Default::default(),
+        });
+    })
 }
 
 #[cfg(test)]

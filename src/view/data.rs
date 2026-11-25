@@ -658,6 +658,11 @@ impl Dataset {
         })
     }
 
+    /// Whether the run recorded a stage 2 (`senna donor-deviation`).
+    pub fn has_stage2(&self) -> bool {
+        self.run.as_ref().is_some_and(|(m, _)| !m.stage2.is_empty())
+    }
+
     /// Wait for the data files and add the cells' batches to the
     /// groupings, for what needs every grouping at once (a PDF, a batch
     /// colouring asked for on the command line).

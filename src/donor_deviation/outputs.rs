@@ -91,20 +91,19 @@ pub(crate) fn write_donor_deviation_outputs(
 /// Record the tables in the stage-1 run's manifest (`from`), so a viewer of
 /// the run finds them; a later stage 2 on the run takes the slot over.
 pub(crate) fn record_in_stage1_manifest(from: &str, out: &str) -> anyhow::Result<()> {
-    use senna::run_manifest::{manifest_path_for, rel_to_manifest, RunManifest, RunStage2};
+    use senna::run_manifest::{manifest_path_for, RunManifest, RunStage2};
     let path = manifest_path_for(from);
-    let (mut manifest, dir) = RunManifest::load(std::path::Path::new(&path))?;
-    let at = |written: String| Some(rel_to_manifest(&dir, &written));
-    let [genes, without_batch, samples, cells] = TABLES.map(|t| at(table_path(out, t)));
-    manifest.stage2 = RunStage2 {
-        donor_gene_deviation: genes,
-        donor_gene_deviation_without_batch: without_batch,
-        donor_sample_states: samples,
-        donor_cell_states: cells,
-        settings: at(settings_path(out)),
-        unknown: std::mem::take(&mut manifest.stage2.unknown),
-    };
-    manifest.save(std::path::Path::new(&path))?;
+    RunManifest::update(std::path::Path::new(&path), |m, rel| {
+        let [genes, without_batch, samples, cells] = TABLES.map(|t| Some(rel(&table_path(out, t))));
+        m.stage2 = RunStage2 {
+            donor_gene_deviation: genes,
+            donor_gene_deviation_without_batch: without_batch,
+            donor_sample_states: samples,
+            donor_cell_states: cells,
+            settings: Some(rel(&settings_path(out))),
+            unknown: std::mem::take(&mut m.stage2.unknown),
+        };
+    })?;
     info!("Recorded stage 2 in {path}");
     Ok(())
 }

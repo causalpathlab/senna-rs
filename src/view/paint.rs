@@ -6,15 +6,6 @@ use legume_tui::map::legend::{draw_legend, draw_ramp_key};
 use legume_tui::map::raster::{edge, ring};
 
 impl Scene {
-    /// The ramp `levels` are drawn on: diverging for signed levels.
-    fn ramp_of(&self, levels: &Levels) -> &[Rgb] {
-        if levels.diverging {
-            color::diverging_ramp()
-        } else {
-            &self.ramp
-        }
-    }
-
     /// Layers for the renderer: the backdrop (if any) under the points.
     pub fn layers(&self) -> Vec<Paint<'_>> {
         let space = self.current();
@@ -48,7 +39,7 @@ impl Scene {
             cursor,
             muted: false,
             size: self.scale * if space.backdrop.is_some() { 1.5 } else { 1.0 },
-            levels: shown.map(|s| (&s.levels, self.ramp_of(&s.levels))),
+            levels: shown.map(|s| (&s.levels, s.levels.ramp(&self.ramp))),
             order: None,
         });
         keys.push((
@@ -257,9 +248,7 @@ impl Scene {
 
     /// Where the picked feature sits in a feature space, if it is one there.
     pub(super) fn picked_point(&self) -> Option<usize> {
-        let Some(Pick::One(name)) = &self.pick else {
-            return None;
-        };
+        let name = self.pick.as_ref().and_then(Pick::feature)?;
         let space = self.current();
         if space.axis() != Axis::Features {
             return None;
@@ -363,7 +352,7 @@ impl Scene {
             reserved.push(draw_ramp_key(
                 frame,
                 &s.title,
-                self.ramp_of(&s.levels),
+                s.levels.ramp(&self.ramp),
                 font,
                 color::linear_rgb(color::INK),
             ));

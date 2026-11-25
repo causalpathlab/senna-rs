@@ -7,7 +7,8 @@
 //! - **volcano**: every gene's log gain (x) against its `|z|` (y) for each
 //!   donor at the state of its cells in the focused group (in the whole
 //!   view, with none focused), a dot per (gene, donor) in the donor's
-//!   colour; the gene shown ringed, the strongest named.
+//!   colour; the gene shown ringed, the strongest named. It is made again
+//!   when the state changes, not when another gene is shown.
 
 use super::gains;
 use super::Stage2;
@@ -16,6 +17,7 @@ use crate::view::render::Frame;
 use legume_tui::chart::heatmap::{self, Heat, HeatStyle};
 use legume_tui::map::raster::{edge, ring, stamp, Shape};
 use legume_tui::map::text::{self, Font};
+use rayon::prelude::*;
 
 /// Genes named on a volcano, the largest `|z|` first.
 const NAMED: usize = 12;
@@ -42,26 +44,23 @@ pub(crate) struct Volcano {
     donors: Vec<String>,
     /// `(gene, donor, log gain, z)`.
     dots: Vec<(usize, usize, f32, f32)>,
-    genes: Vec<Box<str>>,
-    /// The gene shown, ringed.
-    shown: Option<usize>,
+    /// The strongest dots (by index into `dots`), named.
+    named: Vec<(usize, String)>,
 }
 
-/// The gain heatmap of `gene` over `group_of` (each cell's group in
+/// The gain heatmap of `gene` over the groups of `groups` (each cell's in
 /// `levels`, beside its stage-2 row in `rows`).
 pub(crate) fn gain_heat(
     s: &Stage2,
     gene: &str,
-    rows: &[Option<usize>],
-    group_of: &[Option<u32>],
+    rows: &[Option<u32>],
+    groups: &[u32],
     levels: &[Box<str>],
     grouping: String,
 ) -> Result<GainHeat, String> {
-    let g = s
-        .gene(gene)
-        .ok_or_else(|| format!("{gene} has no stage-2 deviation"))?;
-    let states = gains::donor_group_states(s, rows, group_of);
-    let mut shown: Vec<u32> = states.iter().map(|(_, g, _)| *g).collect();
+    let g = s.gene(gene)?;
+    let states = gains::donor_group_states(s, rows, Some(groups), levels.len());
+    let mut shown: Vec<u32> = states.iter().map(|st| st.group).collect();
     shown.sort_unstable();
     shown.dedup();
     if shown.is_empty() {
@@ -72,10 +71,10 @@ pub(crate) fn gain_heat(
     }
     let d_n = s.donors.len();
     let mut value = vec![f32::NAN; shown.len() * d_n];
-    for (d, group, x) in &states {
-        let row = shown.binary_search(group).expect("a group shown");
-        let gain = s.gain(g, *d, x);
-        value[row * d_n + d] = gain.log_gain * gains::weight(gain.z);
+    for st in &states {
+        let row = shown.binary_search(&st.group).expect("a group shown");
+        let gain = s.gain(g, st.donor, &st.mean);
+        value[row * d_n + st.donor] = gain.log_gain * gains::weight(gain.z);
     }
     let clip = value
         .iter()
@@ -87,12 +86,7 @@ pub(crate) fn gain_heat(
         grouping,
         groups: shown
             .iter()
-            .map(|&g| {
-                levels
-                    .get(g as usize)
-                    .map_or("all", AsRef::as_ref)
-                    .to_string()
-            })
+            .map(|&g| levels[g as usize].to_string())
             .collect(),
         donors: s.donors.iter().map(ToString::to_string).collect(),
         value,
@@ -102,36 +96,50 @@ pub(crate) fn gain_heat(
 
 /// The volcano at the mean state of each donor's cells among `rows` (the
 /// cells of the focused group, or of the view).
-pub(crate) fn volcano(
-    s: &Stage2,
-    rows: &[Option<usize>],
-    at: String,
-    shown: Option<&str>,
-) -> Result<Volcano, String> {
-    let all = vec![Some(0); rows.len()];
-    let states = gains::donor_group_states(s, rows, &all);
+pub(crate) fn volcano(s: &Stage2, rows: &[Option<u32>], at: String) -> Result<Volcano, String> {
+    if !s.has_jackknife() {
+        return Err("stage 2 has one batch: no jackknife, so no |z| to plot".into());
+    }
+    let states = gains::donor_group_states(s, rows, None, 1);
     if states.is_empty() {
         return Err(format!(
             "no donor has {} cells {at}",
             gains::MIN_CELLS_IN_GROUP
         ));
     }
-    let dots = (0..s.genes.len())
-        .flat_map(|g| {
-            states.iter().map(move |(d, _, x)| {
-                let gain = s.gain(g, *d, x);
-                (g, *d, gain.log_gain, gain.z)
+    let dots: Vec<(usize, usize, f32, f32)> = (0..s.genes.len())
+        .into_par_iter()
+        .flat_map_iter(|g| {
+            states.iter().map(move |st| {
+                let gain = s.gain(g, st.donor, &st.mean);
+                (g, st.donor, gain.log_gain, gain.z)
             })
         })
         // A deviation the fit set to 0 sits at the origin: left out.
         .filter(|&(_, _, gain, _)| gain != 0.0)
         .collect();
+    // The strongest few, found without sorting every dot.
+    let mut order: Vec<usize> = (0..dots.len()).collect();
+    let by_z = |&a: &usize, &b: &usize| dots[b].3.abs().total_cmp(&dots[a].3.abs());
+    if order.len() > NAMED {
+        order.select_nth_unstable_by(NAMED, by_z);
+        order.truncate(NAMED);
+    }
+    order.sort_by(by_z);
+    let named = order
+        .into_iter()
+        .map(|i| {
+            (
+                i,
+                format!("{} · {}", s.genes[dots[i].0], s.donors[dots[i].1]),
+            )
+        })
+        .collect();
     Ok(Volcano {
         at,
         donors: s.donors.iter().map(ToString::to_string).collect(),
         dots,
-        genes: s.genes.clone(),
-        shown: shown.and_then(|f| s.gene(f)),
+        named,
     })
 }
 
@@ -162,7 +170,14 @@ pub(crate) fn draw_gain_heat(frame: &mut Frame, h: &GainHeat, font: Font, bold: 
     );
 }
 
-pub(crate) fn draw_volcano(frame: &mut Frame, v: &Volcano, font: Font, bold: Font) {
+/// The volcano, the dots of gene `ring_gene` (the one shown) ringed.
+pub(crate) fn draw_volcano(
+    frame: &mut Frame,
+    v: &Volcano,
+    ring_gene: Option<usize>,
+    font: Font,
+    bold: Font,
+) {
     let ink = color::linear_rgb(color::INK);
     let muted = color::linear_rgb(color::MUTED);
     let bg = frame.background();
@@ -277,23 +292,12 @@ pub(crate) fn draw_volcano(frame: &mut Frame, v: &Volcano, font: Font, bold: Fon
         );
     }
     // The strongest dots, named; the gene shown, ringed.
-    let mut order: Vec<&(usize, usize, f32, f32)> = v.dots.iter().collect();
-    order.sort_by(|a, b| b.3.abs().total_cmp(&a.3.abs()));
-    for &&(g, d, gain, z) in order.iter().take(NAMED) {
-        let name = format!("{} · {}", v.genes[g], v.donors[d]);
-        text::draw(
-            frame,
-            font,
-            &name,
-            (px(gain) + r + 2.0) as i32,
-            (py(z) - lh / 2.0) as i32,
-            ink,
-            bg,
-        );
+    for (i, name) in &v.named {
+        let (_, _, gain, z) = v.dots[*i];
+        let (x, y) = (px(gain) + r + 2.0, py(z) - lh / 2.0);
+        text::draw(frame, font, name, x as i32, y as i32, ink, bg);
     }
-    for &(g, _, gain, z) in &v.dots {
-        if Some(g) == v.shown {
-            ring(frame, px(gain), py(z), 2.0 * r, ink);
-        }
+    for &(_, _, gain, z) in v.dots.iter().filter(|d| Some(d.0) == ring_gene) {
+        ring(frame, px(gain), py(z), 2.0 * r, ink);
     }
 }

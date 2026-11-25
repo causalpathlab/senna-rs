@@ -20,36 +20,55 @@ mod tables;
 pub(crate) use charts::{draw_gain_heat, draw_volcano, GainHeat, Volcano};
 pub(crate) use tables::Stage2;
 
+use super::features::Ask;
 use super::*;
 use activity::Levels;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Genes listed by a ranking.
 const RANKED: usize = 100;
 
 /// What a run without stage 2 is told when asked for it.
-pub(crate) const NO_STAGE2: &str =
-    "this run has no stage 2 (run `senna donor-deviation --from` it first)";
+pub(crate) const NO_STAGE2: &str = "this run has no stage 2 (run `senna donor-deviation --from` \
+     it, then open the run again)";
+
+/// Each point's row in stage 2's per-cell tables, by space: matched once.
+pub(crate) type Stage2Rows = std::cell::RefCell<HashMap<usize, Arc<Vec<Option<u32>>>>>;
 
 impl Scene {
     /// Whether the run recorded a stage 2.
     pub fn has_stage2(&self) -> bool {
-        self.data
-            .run
-            .as_ref()
-            .is_some_and(|(m, _)| !m.stage2.is_empty())
+        self.data.has_stage2()
     }
 
     /// Stage 2, waited for when the scene is patient.
     fn stage2(&self) -> Result<&Stage2, String> {
-        self.data.loads.stage2.answer(self.patient)
-    }
-
-    /// Stage 2's donors, in its tables' order.
-    pub(crate) fn stage2_donors(&self) -> Result<Vec<Box<str>>, String> {
         if !self.has_stage2() {
             return Err(NO_STAGE2.into());
         }
-        self.stage2().map(|s| s.donors.clone())
+        self.data.loads.stage2.answer(self.patient)
+    }
+
+    /// Stage 2's row of each point of `space` (cached).
+    fn rows_in_stage2(&self, s: &Stage2, space: usize) -> Arc<Vec<Option<u32>>> {
+        self.stage2_rows
+            .borrow_mut()
+            .entry(space)
+            .or_insert_with(|| Arc::new(s.cells(&self.data.spaces[space].points.names)))
+            .clone()
+    }
+
+    /// Stage 2's donors, in its tables' order.
+    pub(crate) fn stage2_donors(&self) -> Result<&[Box<str>], String> {
+        self.stage2().map(|s| s.donors.as_slice())
+    }
+
+    /// The gene a volcano rings: the one shown, when stage 2 is read.
+    pub(super) fn ringed_gene(&self) -> Option<usize> {
+        let f = self.pick.as_ref().and_then(Pick::feature)?;
+        let s = self.data.loads.stage2.try_get()?.as_ref().ok()?;
+        s.gene(f).ok()
     }
 
     /// The gain map of the gene shown, or back to its activity; with no
@@ -74,21 +93,22 @@ impl Scene {
             self.note = Some("show a gain map first (i)".into());
             return;
         };
-        let donors = match self.stage2() {
-            Ok(s) => s.donors.clone(),
+        let donor = match self.stage2_donors() {
+            Ok(donors) => {
+                // Position 0 is each cell's own donor, then the donors.
+                let n = donors.len() as i64 + 1;
+                let at = donor
+                    .as_ref()
+                    .and_then(|d| donors.iter().position(|x| x == d))
+                    .map_or(0, |i| i as i64 + 1);
+                let next = (at + delta).rem_euclid(n) as usize;
+                (next > 0).then(|| donors[next - 1].clone())
+            }
             Err(e) => {
                 self.note = Some(e);
                 return;
             }
         };
-        // Position 0 is each cell's own donor, then the donors in order.
-        let n = donors.len() as i64 + 1;
-        let at = donor
-            .as_ref()
-            .and_then(|d| donors.iter().position(|x| x == d))
-            .map_or(0, |i| i as i64 + 1);
-        let next = (at + delta).rem_euclid(n) as usize;
-        let donor = (next > 0).then(|| donors[next - 1].clone());
         self.set_pick(Pick::Gain { gene, donor });
     }
 
@@ -105,40 +125,34 @@ impl Scene {
 
     /// Rank the genes by their largest jackknife `|z|` over each donor's
     /// states in the grouping on screen (`donor`'s only, when given), list
-    /// them in the sidebar and show the first on the gain map.
+    /// them in the sidebar and show the first on the gain map. Done once
+    /// stage 2 is read, when it is not yet.
     pub fn rank_gains(&mut self, donor: Option<Box<str>>) {
         if self.current().axis() != Axis::Cells {
             self.note = Some("stage 2 is drawn on a cell view (tab)".into());
             return;
         }
         let space = self.space;
-        let names = &self.data.spaces[space].points.names;
-        let group_of: Vec<Option<u32>> = match self.groups() {
-            Some(g) => g.iter().map(|&g| (g != data::NONE).then_some(g)).collect(),
-            None => vec![Some(0); names.len()],
-        };
         let over = self.colour.map_or_else(
             || "each donor's cells".to_string(),
             |li| format!("each donor in each {}", self.data.labels[li].title()),
         );
-        let s = match self.stage2() {
-            Ok(s) => s,
+        let ranked = self.stage2().and_then(|s| {
+            let d = s.donor(donor.as_deref())?;
+            let rows = self.rows_in_stage2(s, space);
+            let states = gains::donor_group_states(s, &rows, self.groups(), self.levels().len());
+            Ok(gains::rank_genes(s, &states, d, RANKED))
+        });
+        let list = match ranked {
+            Ok(list) => list,
             Err(e) => {
+                if e == legume_tui::work::LOADING {
+                    self.redo = Some(Ask::RankGains(donor));
+                }
                 self.note = Some(e);
                 return;
             }
         };
-        let d = match donor.as_deref().map(|d| s.donor(d).ok_or(d)) {
-            Some(Err(d)) => {
-                self.note = Some(format!("no donor {d} in stage 2"));
-                return;
-            }
-            Some(Ok(d)) => Some(d),
-            None => None,
-        };
-        let rows = s.cells(names);
-        let states = gains::donor_group_states(s, &rows, &group_of);
-        let list = gains::rank_genes(s, &states, d, RANKED);
         let Some(first) = list.first().map(|(g, _)| g.clone()) else {
             self.note = Some(format!(
                 "no gene departs in {over} (each needs {} of a donor's cells)",
@@ -166,17 +180,13 @@ impl Scene {
             .colour
             .ok_or("colour the cells by a grouping first (c)")?;
         let groups = self.groups().ok_or("no grouping on screen")?;
-        let group_of: Vec<Option<u32>> = groups
-            .iter()
-            .map(|&g| (g != data::NONE).then_some(g))
-            .collect();
         let s = self.stage2()?;
-        let rows = s.cells(&self.current().points.names);
+        let rows = self.rows_in_stage2(s, self.space);
         charts::gain_heat(
             s,
             gene,
             &rows,
-            &group_of,
+            groups,
             self.levels(),
             self.data.labels[li].title().to_string(),
         )
@@ -185,11 +195,9 @@ impl Scene {
     /// The volcano at the focused group's state, else the view's.
     pub(super) fn volcano(&self) -> Result<Volcano, String> {
         let s = self.stage2()?;
-        let names = &self.current().points.names;
-        let mut rows = s.cells(names);
-        let at = match (self.focused_name(), self.groups()) {
-            (Some(name), Some(groups)) => {
-                let f = self.focus.expect("a focus named");
+        let mut rows = self.rows_in_stage2(s, self.space).to_vec();
+        let at = match (self.focus, self.focused_name(), self.groups()) {
+            (Some(f), Some(name), Some(groups)) => {
                 for (r, &g) in rows.iter_mut().zip(groups) {
                     if g != f {
                         *r = None;
@@ -199,27 +207,22 @@ impl Scene {
             }
             _ => "over the cells in view ([ ] focuses a group)".to_string(),
         };
-        let shown = self.pick.as_ref().and_then(Pick::feature);
-        charts::volcano(s, &rows, at, shown)
+        charts::volcano(s, &rows, at)
     }
 
-    /// Draw a stage-2 pick on `space`. Returns whether `pick` was one.
-    pub(super) fn show_stage2(&mut self, pick: &Pick, space: usize, source: Source) -> bool {
-        let names = &self.data.spaces[space].points.names;
-        let made = match pick {
-            Pick::Gain { gene, donor } => self.stage2().and_then(|s| {
-                let g = s
-                    .gene(gene)
-                    .ok_or_else(|| format!("{gene} has no stage-2 deviation"))?;
-                let d = match donor {
-                    Some(name) => Some(
-                        s.donor(name)
-                            .ok_or_else(|| format!("no donor {name} in stage 2"))?,
-                    ),
-                    None => None,
-                };
-                let read = gains::cell_gains(s, g, d, &s.cells(names));
-                let (values, weight) = read
+    /// A stage-2 pick's levels on `space`, and its key's title.
+    pub(super) fn stage2_levels(
+        &self,
+        pick: &Pick,
+        space: usize,
+    ) -> Result<(Levels, String), String> {
+        let s = self.stage2()?;
+        let rows = self.rows_in_stage2(s, space);
+        match pick {
+            Pick::Gain { gene, donor } => {
+                let g = s.gene(gene)?;
+                let d = s.donor(donor.as_deref())?;
+                let (values, weight) = gains::cell_gains(s, g, d, &rows)
                     .iter()
                     .map(|r| r.map_or((f32::NAN, 0.0), |r| (r.log_gain, gains::weight(r.z))))
                     .unzip();
@@ -234,38 +237,18 @@ impl Scene {
                     gains::Z_FULL
                 );
                 Ok((levels, title))
-            }),
-            Pick::Exclusive => self.stage2().map(|s| {
-                let values = s
-                    .cells(names)
+            }
+            _ => {
+                let values = rows
                     .iter()
                     .map(|r| r.map_or(f32::NAN, |c| s.exclusivity_of(c)))
                     .collect();
-                (
+                Ok((
                     Levels::from_values(values, false),
                     "exclusivity · distance to the nearest other donor's sample".to_string(),
-                )
-            }),
-            _ => return false,
-        };
-        match made {
-            Ok((levels, title)) => {
-                self.shown_ids += 1;
-                self.shown = Some(Shown {
-                    id: self.shown_ids,
-                    space,
-                    pick: pick.clone(),
-                    source,
-                    title,
-                    levels,
-                });
-            }
-            Err(e) => {
-                self.shown = None;
-                self.note = Some(e);
+                ))
             }
         }
-        true
     }
 }
 

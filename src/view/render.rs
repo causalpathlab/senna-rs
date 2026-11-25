@@ -154,15 +154,7 @@ impl Paint<'_> {
     pub fn draw_order(&self) -> Vec<u32> {
         let order = &self.points.order;
         if let Some((levels, _)) = self.levels {
-            // Signed levels: the strongest departures either way on top,
-            // faded ones beneath.
-            if levels.diverging {
-                return by_level(order, |i| match levels.t(i) {
-                    t if t < 0.0 => t,
-                    t => (t - 0.5).abs() * levels.weight_of(i),
-                });
-            }
-            return by_level(order, |i| levels.t(i));
+            return by_level(order, |i| levels.draw_key(i));
         }
         ranked(order, |i| self.rank(i), 4)
     }

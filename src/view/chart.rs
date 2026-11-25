@@ -65,15 +65,19 @@ impl Kind {
     }
 }
 
-/// What a chart was made from: the space, the grouping, the features per
-/// group, and for a stage-2 chart the feature shown and the group focused;
-/// made again when any changes.
-type ChartKey = (
-    usize,
-    Option<usize>,
-    usize,
-    Option<(Option<Box<str>>, Option<u32>)>,
-);
+/// What a chart was made from, made again when any of it changes: the
+/// space and the grouping, and what its kind also depends on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChartKey {
+    space: usize,
+    colour: Option<usize>,
+    /// Top features per group (the heatmap).
+    top: usize,
+    /// The feature shown (the gain heatmap).
+    feature: Option<Box<str>>,
+    /// The group focused (the volcano).
+    focus: Option<u32>,
+}
 
 pub struct Chart {
     pub kind: Kind,
@@ -184,11 +188,20 @@ impl Scene {
     /// Make the chart again if the space, grouping or feature count changed.
     pub fn refresh_chart(&mut self) {
         let Some(c) = self.chart.as_ref() else { return };
-        let stage2 = matches!(c.kind, Kind::Gains | Kind::Volcano).then(|| {
-            let shown = self.pick.as_ref().and_then(super::Pick::feature);
-            (shown.map(Into::into), self.focus)
-        });
-        let key = (self.space, self.colour, c.top, stage2);
+        let key = ChartKey {
+            space: self.space,
+            colour: self.colour,
+            top: if c.kind == Kind::Heatmap { c.top } else { 0 },
+            feature: (c.kind == Kind::Gains)
+                .then(|| {
+                    self.pick
+                        .as_ref()
+                        .and_then(super::Pick::feature)
+                        .map(Into::into)
+                })
+                .flatten(),
+            focus: (c.kind == Kind::Volcano).then_some(self.focus).flatten(),
+        };
         if c.made.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
@@ -285,7 +298,7 @@ impl Scene {
         let font = Font::for_cell_height(px, false);
         let bold = Font::for_cell_height(px, true);
         match c.made.as_ref().map(|(_, d)| d) {
-            Some(Ok(d)) => draw(&mut frame, d, font, bold),
+            Some(Ok(d)) => draw(&mut frame, d, self.ringed_gene(), font, bold),
             Some(Err(e)) => chart::note(
                 &mut frame,
                 &format!("no {}: {e}", c.kind.name()),
@@ -385,7 +398,8 @@ fn shown<'a>(v: &'a [f32], n: usize, cols: &'a [usize]) -> ByFn<impl Fn(usize, u
 }
 
 /// A made chart into `frame`, in the page's colours.
-fn draw(frame: &mut Frame, d: &Data, font: Font, bold: Font) {
+/// `ring_gene`: the gene a volcano rings, the one shown.
+fn draw(frame: &mut Frame, d: &Data, ring_gene: Option<usize>, font: Font, bold: Font) {
     match d {
         Data::Structure(s) => {
             let palette: Vec<color::Rgb> = (0..s.k).map(|t| color::category(t, s.k)).collect();
@@ -445,7 +459,7 @@ fn draw(frame: &mut Frame, d: &Data, font: Font, bold: Font) {
             );
         }
         Data::Gains(h) => super::stage2::draw_gain_heat(frame, h, font, bold),
-        Data::Volcano(v) => super::stage2::draw_volcano(frame, v, font, bold),
+        Data::Volcano(v) => super::stage2::draw_volcano(frame, v, ring_gene, font, bold),
     }
 }
 
@@ -569,8 +583,8 @@ mod tests {
             let runs = frame.take_text();
             (digest(&frame.to_image()), runs.len(), runs_digest(&runs))
         };
-        let structure = |f: &mut Frame| draw(f, &s, font, bold);
-        let heatmap = |f: &mut Frame| draw(f, &hm, font, bold);
+        let structure = |f: &mut Frame| draw(f, &s, None, font, bold);
+        let heatmap = |f: &mut Frame| draw(f, &hm, None, font, bold);
         let said = |f: &mut Frame| chart::note(f, "drawing the heatmap…", bold, &color::THEME);
         assert_eq!(
             drawn(&structure, false),
@@ -606,7 +620,7 @@ mod tests {
             Font::for_cell_height(16.0, true),
         );
         let mut frame = Frame::blank(320, 240, color::BACKGROUND);
-        draw(&mut frame, &Data::Structure(s), font, bold);
+        draw(&mut frame, &Data::Structure(s), None, font, bold);
         let img = frame.to_image();
         let at = |y: u32| img.get_pixel(40, y).0;
         let srgb = |c: color::Rgb| {
@@ -701,7 +715,16 @@ mod tests {
                 Data::Gains(_) | Data::Volcano(_) => unreachable!("not made here"),
             };
             let mut c = Chart::new(kind);
-            c.made = Some(((0, Some(0), TOP_START, None), Ok(data)));
+            c.made = Some((
+                ChartKey {
+                    space: 0,
+                    colour: Some(0),
+                    top: TOP_START,
+                    feature: None,
+                    focus: None,
+                },
+                Ok(data),
+            ));
             scene.chart = Some(c);
             let vp = super::super::render::fit([0.0, 0.0, 1.0, 1.0], 320, 240);
             let pages = super::super::deck::view_pages(&[(&scene, vp, 16.0)]);

@@ -3,6 +3,7 @@
 //! per-group sums a contrast is linear in.
 
 use super::*;
+use crate::view::color;
 use rustc_hash::FxHashMap as HashMap;
 use senna::run_manifest::{self, RunManifest};
 use std::borrow::Cow;
@@ -293,15 +294,14 @@ impl Levels {
         let (lo, hi) = if sample.is_empty() {
             (0.0, 1.0)
         } else {
-            // Two linear-time selections, not a full sort.
-            let mut q = |p: f32| {
-                let k = ((sample.len() - 1) as f32 * p) as usize;
-                *sample.select_nth_unstable_by(k, f32::total_cmp).1
-            };
-            let hi = q(0.99);
+            let hi = quantile(&mut sample, 0.99);
             // Counts start the ramp at zero; model levels at a low quantile,
             // since their scale has no natural origin.
-            let lo = if zero_is_off { 0.0 } else { q(0.02) };
+            let lo = if zero_is_off {
+                0.0
+            } else {
+                quantile(&mut sample, 0.02)
+            };
             (lo, hi.max(lo + 1e-6))
         };
         Self {
@@ -325,8 +325,7 @@ impl Levels {
         let hi = if size.is_empty() {
             1.0
         } else {
-            let k = ((size.len() - 1) as f32 * 0.99) as usize;
-            size.select_nth_unstable_by(k, f32::total_cmp).1.max(1e-6)
+            quantile(&mut size, 0.99).max(1e-6)
         };
         Self {
             values,
@@ -338,12 +337,42 @@ impl Levels {
         }
     }
 
+    /// The ramp the levels are drawn on: the diverging one for signed
+    /// levels, else `sequential`.
+    #[must_use]
+    pub fn ramp<'a>(&self, sequential: &'a [color::Rgb]) -> &'a [color::Rgb] {
+        if self.diverging {
+            color::diverging_ramp()
+        } else {
+            sequential
+        }
+    }
+
+    /// Point `i`'s place in the draw order, later on top: by level, or for
+    /// signed levels by the size of the departure either way times its
+    /// weight, so strong departures are not hidden under faded ones.
+    #[inline]
+    #[must_use]
+    pub fn draw_key(&self, i: usize) -> f32 {
+        match self.t(i) {
+            t if t < 0.0 || !self.diverging => t,
+            t => (t - 0.5).abs() * self.weight_of(i),
+        }
+    }
+
     /// How much of point `i`'s colour to draw ([`Self::weight`]).
     #[inline]
     #[must_use]
     pub fn weight_of(&self, i: usize) -> f32 {
         self.weight.as_ref().map_or(1.0, |w| w[i])
     }
+}
+
+/// The `p`-quantile of `sample` (non-empty), by a linear-time selection
+/// that reorders it.
+fn quantile(sample: &mut [f32], p: f32) -> f32 {
+    let k = ((sample.len() - 1) as f32 * p) as usize;
+    *sample.select_nth_unstable_by(k, f32::total_cmp).1
 }
 
 /// The run's model of expression, read the way its kind's decoder reads

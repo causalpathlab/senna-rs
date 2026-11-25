@@ -326,7 +326,12 @@ pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
         number_of_samples,
         anchor_samples.len(),
     )?;
-    outputs::record_in_stage1_manifest(&args.from, &out)
+    // The tables are written: a manifest that cannot be changed (read-only,
+    // say) costs the viewer its link to them, not the run.
+    if let Err(e) = outputs::record_in_stage1_manifest(&args.from, &out) {
+        warn!("stage 2 is written but not recorded in {}: {e}", args.from);
+    }
+    Ok(())
 }
 
 /// Every gene's full fit and batch jackknife, on CPU threads or in blocks of

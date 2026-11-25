@@ -333,6 +333,18 @@ impl RunManifest {
         Some(if Path::new(&all).is_file() { all } else { full })
     }
 
+    /// Change the manifest at `path` in place: load it, let `change` set
+    /// what a later command adds (`rel` makes a written path relative to
+    /// the manifest, as every recorded path is), and save it.
+    pub fn update(
+        path: &Path,
+        change: impl FnOnce(&mut Self, &dyn Fn(&str) -> String),
+    ) -> anyhow::Result<()> {
+        let (mut m, dir) = Self::load(path)?;
+        change(&mut m, &|written| rel_to_manifest(&dir, written));
+        m.save(path)
+    }
+
     /// Write the manifest to `path`, through a link, and on to the disk
     /// before returning: the file keeps its owner, mode and links, and a
     /// read-only one is refused. Each run writes its manifest last, after

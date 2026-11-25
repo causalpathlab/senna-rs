@@ -100,7 +100,7 @@ pub struct ViewArgs {
 
     #[arg(
         long,
-        conflicts_with = "exclusivity",
+        conflicts_with_all = ["exclusivity", "markers_of"],
         help = "Start on the stage-2 gain map (`senna donor-deviation`) of --feature, or of the gene ranked first (`i` in the view)"
     )]
     pub gain: bool,
@@ -114,6 +114,7 @@ pub struct ViewArgs {
 
     #[arg(
         long,
+        conflicts_with_all = ["feature", "markers_of"],
         help = "Start coloured by stage-2 exclusivity: each cell's sample's distance to the nearest sample of another donor (`U` in the view)"
     )]
     pub exclusivity: bool,
@@ -356,6 +357,8 @@ pub(crate) struct Scene {
     pub source: Source,
     activity: Option<Activity>,
     shown: Option<Shown>,
+    /// Each point's stage-2 row, by space ([`stage2::Stage2Rows`]).
+    stage2_rows: stage2::Stage2Rows,
     ramp: Vec<Rgb>,
     suggestions: Option<Suggestions>,
     /// Draw orders computed for recent layer states; see `layers`.
@@ -431,6 +434,7 @@ impl Scene {
             activity: None,
             shown: None,
             ramp: color::activity_ramp(256),
+            stage2_rows: Default::default(),
             geometry: None,
             patient: true,
             suggestions: None,
@@ -554,6 +558,8 @@ impl Scene {
             activity: None,
             shown: self.shown.clone(),
             ramp: self.ramp.clone(),
+            // The same spaces, so the same rows.
+            stage2_rows: self.stage2_rows.clone(),
             suggestions: None,
             orders: std::cell::RefCell::default(),
             shown_ids: self.shown_ids,

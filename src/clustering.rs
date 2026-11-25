@@ -418,11 +418,9 @@ fn update_manifest_cluster_path(
     cluster_path: &str,
     target: ClusterTarget,
 ) -> anyhow::Result<()> {
-    let path = Path::new(manifest_path);
-    let (mut manifest, manifest_dir) = RunManifest::load(path)?;
-    let rel = senna::run_manifest::rel_to_manifest(&manifest_dir, cluster_path);
-    *target.slot(&mut manifest.cluster) = Some(rel);
-    manifest.save(path)?;
+    RunManifest::update(Path::new(manifest_path), |m, rel| {
+        *target.slot(&mut m.cluster) = Some(rel(cluster_path));
+    })?;
     info!("Updated manifest {manifest_path} with cluster path");
     Ok(())
 }

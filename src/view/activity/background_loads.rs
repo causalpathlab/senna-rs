@@ -126,8 +126,10 @@ pub(crate) struct RunLoads {
     pub files: Arc<RunFiles>,
     pub model: Arc<ModelTables>,
     pub features: Arc<FeatureTables>,
-    /// Stage 2 of the run, when it has one; read on first asked.
+    /// Stage 2 of the run, when it has one: read with the rest.
     pub stage2: Arc<Stage2Tables>,
+    /// Whether the run records a stage 2 to read.
+    stage2_recorded: bool,
     /// Every cell's totals in the run's own counts, read once the data
     /// files are, on first asked: a pass over every column.
     pub totals: Arc<CellTotals>,
@@ -167,6 +169,7 @@ impl RunLoads {
             features: Arc::new(FeatureTables::new(move || {
                 crate::view::features::FeatureEmbedding::load(Some(&(em, ed)))
             })),
+            stage2_recorded: !m.stage2.is_empty(),
             stage2: Arc::new(Stage2Tables::new(move || {
                 crate::view::stage2::Stage2::load(&sm, &sd).map_err(|e| e.to_string())
             })),
@@ -185,6 +188,7 @@ impl RunLoads {
             model: Arc::new(ModelTables::ready(Err(NO.into()))),
             features: Arc::new(FeatureTables::ready(Err(NO.into()))),
             stage2: Arc::new(Stage2Tables::ready(Err(NO.into()))),
+            stage2_recorded: false,
             extra: None,
         }
     }
@@ -194,6 +198,9 @@ impl RunLoads {
         self.files.start();
         self.model.start();
         self.features.start();
+        if self.stage2_recorded {
+            self.stage2.start();
+        }
     }
 
     /// What is still being read, and for how long: the longest first.
