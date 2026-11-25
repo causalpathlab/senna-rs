@@ -1,7 +1,7 @@
 //! `view_stage2`: the run's stage 2 as numbers, and its donor tiles, for an
 //! agent; the maps and charts are `view_map`'s (`stage2`, `chart`).
 
-use super::view::{png, Open, CELL_PX, MAX_SIDE, WIDTH};
+use super::view::{png, width as view_width, Open, CELL_PX, MAX_SIDE, WIDTH};
 use crate::view::deck;
 use crate::view::Pick;
 use anyhow::{anyhow, ensure, Result};
@@ -12,9 +12,6 @@ use serde_json::{json, Value};
 
 /// Rows a list gives without `top`.
 const TOP: usize = 30;
-
-/// Donor tiles drawn at most, as `D` draws them.
-const MAX_TILES: usize = 12;
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -39,72 +36,53 @@ impl Open {
     pub(super) fn stage2(&mut self, a: Stage2Args) -> Result<Vec<Content>> {
         let scene = &self.scene;
         ensure!(scene.has_stage2(), crate::view::stage2::NO_STAGE2);
+        ensure!(
+            scene.current().axis() == crate::view::Axis::Cells,
+            "stage 2 is of cells: view_map space cells first"
+        );
         let top = a.top.unwrap_or(TOP).max(1);
-        let gene = || {
-            a.gene
-                .clone()
-                .or_else(|| scene.pick.as_ref().and_then(Pick::feature).map(Into::into))
-                .ok_or_else(|| anyhow!("which gene: pass gene (or show one with view_map)"))
-        };
+        let gene = a
+            .gene
+            .as_deref()
+            .or_else(|| scene.pick.as_ref().and_then(Pick::feature))
+            .ok_or_else(|| anyhow!("which gene: pass gene (or show one with view_map)"));
         let json = match a.what {
             What::Genes => scene.stage2_genes(a.donor.as_deref(), top),
-            What::Gene => scene.stage2_gene(&gene()?),
+            What::Gene => scene.stage2_gene(gene?),
             What::Volcano => scene.stage2_volcano(a.donor.as_deref(), top),
-            What::Tiles => return self.tiles(&gene()?, a.width),
+            What::Tiles => return self.tiles(gene?, a.width),
         };
         Ok(vec![Content::Json(json.map_err(|e| anyhow!(e))?)])
     }
 
-    /// The gain map of `gene` as each donor's deviation drawn at every
-    /// cell's state, a tile per donor (the first [`MAX_TILES`]) in one image.
+    /// `gene`'s gain map as each donor's deviation drawn at every cell's
+    /// state, a tile per donor, in one image (as `D` opens them).
     fn tiles(&self, gene: &str, width: Option<usize>) -> Result<Vec<Content>> {
-        let width = width.unwrap_or(WIDTH);
-        ensure!(
-            (1..=MAX_SIDE).contains(&width),
-            "width must be 1 to {MAX_SIDE}"
-        );
-        let donors = self.scene.stage2_donors().map_err(|e| anyhow!(e))?.to_vec();
-        let mut scenes = Vec::new();
-        for donor in donors.iter().take(MAX_TILES) {
-            let mut s = self.scene.duplicate();
-            s.chart = None;
-            s.set_pick(Pick::Gain {
-                gene: gene.into(),
-                donor: Some(donor.clone()),
-            });
-            if s.current_shown().is_none() {
-                return Err(anyhow!(s
-                    .note
-                    .take()
-                    .unwrap_or_else(|| "nothing to draw".into())));
-            }
-            scenes.push(s);
+        let width = view_width(width, WIDTH)?;
+        let (mut scenes, more) = self.scene.donor_gain_scenes(gene).map_err(|e| anyhow!(e))?;
+        if let Some((_, s)) = scenes.iter_mut().find(|(_, s)| s.current_shown().is_none()) {
+            let why = s.note.take().unwrap_or_else(|| "nothing to draw".into());
+            return Err(anyhow!(why));
         }
-        let refs: Vec<&crate::view::Scene> = scenes.iter().collect();
-        let titles: Vec<String> = donors
-            .iter()
-            .take(MAX_TILES)
-            .map(ToString::to_string)
-            .collect();
-        let height = (width * 3 / 4).min(MAX_SIDE);
+        let (titles, refs): (Vec<String>, Vec<&crate::view::Scene>) =
+            scenes.iter().map(|(d, s)| (d.to_string(), s)).unzip();
         let page = deck::render_grid(
             &refs,
             &vec![None; refs.len()],
             &titles,
-            (width, height),
+            (width, (width * 3 / 4).clamp(1, MAX_SIDE)),
             CELL_PX,
             false,
         );
-        let mut out = vec![Content::Png(png(page.img, CompressionType::Best)?)];
         let mut said = json!({"gene": gene, "donors": titles});
-        if donors.len() > MAX_TILES {
-            said["note"] = Value::from(format!(
-                "the first {MAX_TILES} of {} donors; view_map stage2 gain with donor shows any",
-                donors.len()
-            ));
+        if let Some(more) = more {
+            said["note"] =
+                Value::from(format!("{more}; view_map stage2 gain with donor shows any"));
         }
-        out.push(Content::Json(said));
-        Ok(out)
+        Ok(vec![
+            Content::Png(png(page.img, CompressionType::Best)?),
+            Content::Json(said),
+        ])
     }
 }
 

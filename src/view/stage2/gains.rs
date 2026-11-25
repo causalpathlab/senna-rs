@@ -124,26 +124,30 @@ pub(crate) fn rank_genes(
         .iter()
         .filter(|st| donor.is_none_or(|want| st.donor == want))
         .collect();
+    let jackknife = s.has_jackknife();
     let score = |gain: &Gain| {
-        let v = if s.has_jackknife() {
+        let v = if jackknife {
             gain.z.abs()
         } else {
             gain.log_gain.abs()
         };
-        if v.is_nan() {
-            0.0
-        } else {
+        // A z without a spread (all refits alike) is no evidence either way.
+        if v.is_finite() {
             v
+        } else {
+            0.0
         }
     };
     let mut ranked: Vec<Ranked> = (0..s.genes.len())
         .into_par_iter()
         .filter_map(|g| {
-            let (st, gain) = states
+            let (st, gain, best) = states
                 .iter()
-                .map(|st| (st, s.gain(g, st.donor, &st.mean)))
-                .max_by(|a, b| score(&a.1).total_cmp(&score(&b.1)))?;
-            let best = score(&gain);
+                .map(|st| {
+                    let gain = s.gain(g, st.donor, &st.mean);
+                    (st, gain, score(&gain))
+                })
+                .max_by(|a, b| a.2.total_cmp(&b.2))?;
             (best > 0.0).then_some(Ranked {
                 gene: g,
                 score: best,

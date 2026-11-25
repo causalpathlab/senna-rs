@@ -222,6 +222,9 @@ impl Scene {
         self.feature_index.borrow_mut().take();
         self.name_index.borrow_mut().clear();
         self.medians.borrow_mut().take();
+        self.stage2_rows.borrow_mut().clear();
+        // A chart made from the other data is made again from this.
+        self.chart = self.chart.as_ref().map(super::chart::Chart::like);
         self.space = self
             .data
             .spaces

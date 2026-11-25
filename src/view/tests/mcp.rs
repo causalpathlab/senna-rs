@@ -518,4 +518,19 @@ fn stage_2_s_numbers_tiles_and_charts_are_an_agent_s_too() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("no stage 2"), "{e}");
+    // A chart that cannot be made says why; a mistyped one lists the rest.
+    let out = o
+        .map(args(json!({"chart": "volcano", "width": 16})))
+        .unwrap();
+    assert!(state(&out)["chart_error"]
+        .as_str()
+        .unwrap()
+        .contains("cells"));
+    let e = serde_json::from_value::<MapArgs>(json!({"chart": "heat"}))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(e.contains("gains") && e.contains("off"), "{e}");
+    // A tiny picture is still a picture.
+    stage2(&mut o, json!({"what": "tiles", "gene": "g1", "width": 2})).unwrap();
 }

@@ -43,9 +43,6 @@ enum Screen {
     View(usize),
 }
 
-/// Views `D` opens at most: more are too small to read.
-const MAX_DONOR_TILES: usize = 12;
-
 pub(super) struct Deck {
     apps: Vec<App>,
     /// The view on screen, or last on screen while the grid shows.
@@ -459,9 +456,16 @@ impl Deck {
     /// Put a copy of session `k` right after it: same view, same camera,
     /// its own state from here on.
     fn duplicate(&mut self, k: usize) {
+        let scene = self.apps[k].scene.duplicate();
+        self.insert_copy(k, k + 1, scene);
+    }
+
+    /// Put `scene`, a copy of session `k`'s, at `at` in session `k`'s camera
+    /// and sidebar.
+    fn insert_copy(&mut self, k: usize, at: usize, scene: crate::view::Scene) {
         let app = &self.apps[k];
         let mut copy = App::new(
-            app.scene.duplicate(),
+            scene,
             self.picker.clone(),
             app.from.clone(),
             app.lupin.clone(),
@@ -469,39 +473,27 @@ impl Deck {
         copy.vp = app.vp;
         copy.sidebar = app.sidebar;
         copy.message = None;
-        self.apps.insert(k + 1, copy);
-        self.hover = k + 1;
+        self.apps.insert(at, copy);
+        self.hover = at;
         // Every tile moves: lay them out again.
         self.tiles.clear();
         self.drawn = None;
     }
 
-    /// Beside view `k`, showing a gain map, one copy per donor (the first
-    /// [`MAX_DONOR_TILES`]) drawing that donor's deviation at every cell's
-    /// state: where each donor departs, side by side, in the grid.
+    /// Beside view `k`, showing a gain map, a copy per donor drawing that
+    /// donor's deviation at every cell's state ([`Scene::donor_gain_scenes`]):
+    /// where each donor departs, side by side, in the grid.
+    ///
+    /// [`Scene::donor_gain_scenes`]: crate::view::Scene::donor_gain_scenes
     fn donor_tiles(&mut self, k: usize) -> Result<(), String> {
         let scene = &self.apps[k].scene;
-        let Some(crate::view::Pick::Gain { gene, .. }) = scene.pick.clone() else {
+        let Some(crate::view::Pick::Gain { gene, .. }) = &scene.pick else {
             return Err("D tiles a gain map by donor · show one first (i)".into());
         };
-        let donors = scene.stage2_donors()?.to_vec();
-        if donors.is_empty() {
-            return Err("stage 2 has no donors".into());
-        }
-        self.note = (donors.len() > MAX_DONOR_TILES).then(|| {
-            format!(
-                "the first {MAX_DONOR_TILES} of {} donors · I steps one view through the rest",
-                donors.len()
-            )
-        });
-        for (j, donor) in donors.into_iter().take(MAX_DONOR_TILES).enumerate() {
-            self.duplicate(k + j);
-            self.apps[k + j + 1]
-                .scene
-                .set_pick(crate::view::Pick::Gain {
-                    gene: gene.clone(),
-                    donor: Some(donor),
-                });
+        let (scenes, more) = scene.donor_gain_scenes(gene)?;
+        self.note = more.map(|m| format!("{m} · I steps one view through the rest"));
+        for (j, (_, s)) in scenes.into_iter().enumerate() {
+            self.insert_copy(k, k + j + 1, s);
         }
         self.grid = true;
         Ok(())

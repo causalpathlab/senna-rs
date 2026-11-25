@@ -61,16 +61,27 @@ impl Volcano {
         donor: Option<usize>,
         top: usize,
     ) -> Vec<(usize, usize, f32, f32)> {
-        let mut dots: Vec<(usize, usize, f32, f32)> = self
-            .dots
-            .iter()
-            .copied()
-            .filter(|d| donor.is_none_or(|want| d.1 == want))
-            .collect();
-        dots.sort_by(|a, b| b.3.abs().total_cmp(&a.3.abs()));
-        dots.truncate(top);
-        dots
+        strongest_of(&self.dots, donor, top)
+            .into_iter()
+            .map(|i| self.dots[i])
+            .collect()
     }
+}
+
+/// The indices of `dots`' `top` of largest `|z|` (`donor`'s only, when
+/// given), the largest first, found by a selection, not a sort of them all.
+fn strongest_of(dots: &[(usize, usize, f32, f32)], donor: Option<usize>, top: usize) -> Vec<usize> {
+    // A z without a spread (all refits alike) is no evidence either way.
+    let mut order: Vec<usize> = (0..dots.len())
+        .filter(|&i| dots[i].3.is_finite() && donor.is_none_or(|want| dots[i].1 == want))
+        .collect();
+    let by_z = |&a: &usize, &b: &usize| dots[b].3.abs().total_cmp(&dots[a].3.abs());
+    if order.len() > top {
+        order.select_nth_unstable_by(top, by_z);
+        order.truncate(top);
+    }
+    order.sort_by(by_z);
+    order
 }
 
 /// The gain heatmap of `gene` over the groups of `groups` (each cell's in
@@ -143,15 +154,7 @@ pub(crate) fn volcano(s: &Stage2, rows: &[Option<u32>], at: String) -> Result<Vo
         // A deviation the fit set to 0 sits at the origin: left out.
         .filter(|&(_, _, gain, _)| gain != 0.0)
         .collect();
-    // The strongest few, found without sorting every dot.
-    let mut order: Vec<usize> = (0..dots.len()).collect();
-    let by_z = |&a: &usize, &b: &usize| dots[b].3.abs().total_cmp(&dots[a].3.abs());
-    if order.len() > NAMED {
-        order.select_nth_unstable_by(NAMED, by_z);
-        order.truncate(NAMED);
-    }
-    order.sort_by(by_z);
-    let named = order
+    let named = strongest_of(&dots, None, NAMED)
         .into_iter()
         .map(|i| {
             (

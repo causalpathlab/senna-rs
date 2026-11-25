@@ -87,7 +87,7 @@ pub(super) struct Open {
 }
 
 /// `width`, or `default`, within what a picture may be.
-fn width(width: Option<usize>, default: usize) -> Result<usize> {
+pub(super) fn width(width: Option<usize>, default: usize) -> Result<usize> {
     let width = width.unwrap_or(default);
     ensure!(
         (1..=MAX_SIDE).contains(&width),
@@ -370,6 +370,9 @@ impl Open {
         state["units_per_px"] = json!(vp.upp());
         if let Some(note) = self.scene.note.take() {
             state["note"] = note.into();
+        }
+        if let Some(e) = self.scene.chart_error() {
+            state["chart_error"] = e.into();
         }
         Ok(vec![Content::Png(png), Content::Json(state)])
     }

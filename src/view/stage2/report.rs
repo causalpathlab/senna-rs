@@ -16,7 +16,7 @@ impl Scene {
 
     /// Each donor's mean state in each group on screen (the whole view as
     /// one group, `all`, with no grouping), with stage 2.
-    fn donor_states(&self) -> Result<(&Stage2, Vec<DonorState>), String> {
+    pub(super) fn donor_states(&self) -> Result<(&Stage2, Vec<DonorState>), String> {
         let s = self.stage2()?;
         let rows = self.rows_in_stage2(s, self.space);
         let states = gains::donor_group_states(s, &rows, self.groups(), self.levels().len());
@@ -86,15 +86,15 @@ impl Scene {
         let pairs: Vec<Value> = v
             .strongest(d, top)
             .into_iter()
-            .map(|(g, d, log_gain, z)| {
-                json!({"gene": s.genes[g], "donor": s.donors[d], "log_gain": log_gain, "z": finite(z)})
+            .map(|(g, donor, log_gain, z)| {
+                json!({"gene": s.genes[g], "donor": s.donors[donor], "log_gain": log_gain, "z": finite(z)})
             })
             .collect();
         Ok(json!({"at": v.at(), "pairs": pairs}))
     }
 
     /// The grouping the stage-2 numbers are over.
-    fn grouping_title(&self) -> String {
+    pub(super) fn grouping_title(&self) -> String {
         self.colour.map_or_else(
             || "the cells in view as one group (all)".to_string(),
             |li| self.data.labels[li].title().to_string(),

@@ -30,6 +30,14 @@ use std::sync::Arc;
 /// Genes listed by a ranking.
 const RANKED: usize = 100;
 
+/// Each donor's copy of a view, and what to say when there are more donors
+/// than copies ([`Scene::donor_gain_scenes`]).
+pub(crate) type DonorScenes = (Vec<(Box<str>, Scene)>, Option<String>);
+
+/// Donor views opened side by side at most (`D`, MCP's tiles): more are too
+/// small to read.
+pub(crate) const MAX_DONOR_TILES: usize = 12;
+
 /// What a run without stage 2 is told when asked for it.
 pub(crate) const NO_STAGE2: &str = "this run has no stage 2 (run `senna donor-deviation --from` \
      it, then open the run again)";
@@ -63,6 +71,33 @@ impl Scene {
     /// Stage 2's donors, in its tables' order.
     pub(crate) fn stage2_donors(&self) -> Result<&[Box<str>], String> {
         self.stage2().map(|s| s.donors.as_slice())
+    }
+
+    /// Copies of this view, one per donor (the first [`MAX_DONOR_TILES`]),
+    /// each drawing `gene`'s gain map as that donor's deviation at every
+    /// cell's state (or, when it cannot, saying why in its note); and what
+    /// to say when there are more donors.
+    pub(crate) fn donor_gain_scenes(&self, gene: &str) -> Result<DonorScenes, String> {
+        let donors = self.stage2_donors()?;
+        if donors.is_empty() {
+            return Err("stage 2 has no donors".into());
+        }
+        let more = (donors.len() > MAX_DONOR_TILES)
+            .then(|| format!("the first {MAX_DONOR_TILES} of {} donors", donors.len()));
+        let scenes = donors
+            .iter()
+            .take(MAX_DONOR_TILES)
+            .map(|donor| {
+                let mut s = self.duplicate();
+                s.chart = None;
+                s.set_pick(Pick::Gain {
+                    gene: gene.into(),
+                    donor: Some(donor.clone()),
+                });
+                (donor.clone(), s)
+            })
+            .collect();
+        Ok((scenes, more))
     }
 
     /// The gene a volcano rings: the one shown, when stage 2 is read.
@@ -134,14 +169,9 @@ impl Scene {
             return;
         }
         let space = self.space;
-        let over = self.colour.map_or_else(
-            || "each donor's cells".to_string(),
-            |li| format!("each donor in each {}", self.data.labels[li].title()),
-        );
-        let ranked = self.stage2().and_then(|s| {
+        let over = self.grouping_title();
+        let ranked = self.donor_states().and_then(|(s, states)| {
             let d = s.donor(donor.as_deref())?;
-            let rows = self.rows_in_stage2(s, space);
-            let states = gains::donor_group_states(s, &rows, self.groups(), self.levels().len());
             Ok(gains::rank_genes(s, &states, d, RANKED)
                 .into_iter()
                 .map(|r| (s.genes[r.gene].clone(), r.score))
