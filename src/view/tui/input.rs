@@ -54,6 +54,14 @@ impl App {
                 self.restart();
                 return true;
             }
+            // ↑ ↓ step a sidebar list (the chart follows), never the map
+            // under it.
+            if let Some(d) = legume_tui::keys::list_delta(&k, false) {
+                if !self.step_pane(d) {
+                    self.message = Some("on a chart, ↑ ↓ step a feature list (n, /, i)".into());
+                }
+                return true;
+            }
             if !chart_takes(k) {
                 self.message =
                     Some("on a chart: H next chart or back to the map · esc the map".into());
@@ -728,18 +736,15 @@ fn search(names: &[Box<str>], lower: &[String], query: &str) -> Vec<Box<str>> {
         .collect()
 }
 
+/// The keys a chart takes besides ↑ ↓ through a sidebar list: its own,
+/// and what it is made from (the grouping, the group focused, the feature
+/// shown and stage 2's donor), so stepping them redraws it. The Chart
+/// status line names each.
+pub(super) const CHART_KEYS: &str = "Hc+=-_[]gGiI?q";
+
 /// Whether a chart takes `k`; the map's other keys would act unseen.
-/// Keys a chart takes: its own, and what it is made from (the grouping,
-/// the group focused, the feature shown and stage 2's donor), so stepping
-/// them redraws it.
 fn chart_takes(k: KeyEvent) -> bool {
-    legume_tui::keys::list_delta(&k, true).is_some()
-        || matches!(
-            k.code,
-            KeyCode::Char(
-                'H' | 'c' | '+' | '=' | '-' | '_' | '?' | 'q' | '[' | ']' | 'g' | 'G' | 'i' | 'I'
-            )
-        )
+    matches!(k.code, KeyCode::Char(c) if CHART_KEYS.contains(c))
 }
 
 #[cfg(test)]

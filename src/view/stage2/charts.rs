@@ -160,7 +160,7 @@ pub(crate) fn volcano(s: &Stage2, rows: &[Option<u32>], at: String) -> Result<Vo
         .filter(|&(_, _, gain, _)| gain != 0.0)
         .collect();
     // Drawn in order: the supported dots last, on top of the faint ones.
-    dots.sort_by(|a, b| gains::weight(a.3).total_cmp(&gains::weight(b.3)));
+    dots.par_sort_unstable_by(|a, b| gains::weight(a.3).total_cmp(&gains::weight(b.3)));
     let points = dots
         .iter()
         .map(|&(_, d, gain, z)| Point::new(gain, z.abs(), d, gains::weight(z)))

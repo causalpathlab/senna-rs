@@ -343,14 +343,11 @@ impl Scene {
             self.clear_pick();
             return;
         };
-        let Pick::Stat(stat) = next else {
-            self.set_pick(next);
-            return;
-        };
-        if self.source == Source::Expected {
+        // The counts' statistics are of counts, never the model's level.
+        if matches!(next, Pick::Stat(_)) && self.source == Source::Expected {
             self.source = self.count_source();
         }
-        self.set_pick(Pick::Stat(stat));
+        self.set_pick(next);
     }
 
     /// The counts to summarise when the model's expectation is shown: the

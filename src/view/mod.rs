@@ -519,7 +519,7 @@ impl Scene {
         } else if args.gain {
             scene.rank_gains(args.donor.clone());
         } else if args.exclusivity {
-            scene.toggle_exclusive();
+            scene.show_exclusive();
         } else if let Some(f) = &args.feature {
             scene.set_pick(Pick::One(f.clone()));
         }

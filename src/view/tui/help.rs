@@ -71,8 +71,8 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("tab  shift-tab", "cells, features on cells, features, of this layout"),
             ("m", "next layout method (umap, phate, …)"),
             (
-                "z  Z  0",
-                "lay out the focused group on its own / back up / back to the top",
+                "z  Z ⌫  0",
+                "lay out the focused group on its own / back up (Z or backspace) / back to the top",
             ),
             ("scroll  + -", "zoom the camera in / out"),
             ("arrows  drag", "pan"),
@@ -157,7 +157,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "w",
-                "every open view in a grid: point or arrows choose, click or enter opens, 1-9 by number",
+                "every open view in a grid: point, arrows, h j k l or tab choose, click or enter opens, 1-9 by number",
             ),
             ("{  }", "previous / next view"),
             (
@@ -168,7 +168,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "F",
                 "choose a saved figure (or click one): ↑↓, m moves its PDF, x takes it off the list, X deletes it",
             ),
-            ("X  (grid)", "close the view under the pointer (shift: it cannot be undone)"),
+            ("X  del  (grid)", "close the view under the pointer (shift: it cannot be undone)"),
         ],
     ),
     (
@@ -186,11 +186,11 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("lowercase", "looks: changes what is on screen, never the run's files"),
             (
-                "R A X E",
-                "uppercase that opens a mode or writes: relabel, annotate, close a view for good, move labels",
+                "R A X E H W",
+                "uppercase that opens a mode or writes: relabel, annotate, close a view for good, move labels, charts, follow the agent",
             ),
             (
-                "g G  f F  z Z",
+                "g G  f F  z Z  i I  d D",
                 "other capitals step back, or go further, than their lowercase key",
             ),
             ("r", "recompute opens a menu first; nothing is written until it runs"),
@@ -361,7 +361,7 @@ impl App {
 }
 
 /// The keys that act in `context`: the main ones, then the rest.
-fn keys_of(context: Context) -> [&'static str; 2] {
+pub(super) fn keys_of(context: Context) -> [&'static str; 2] {
     {
         match context {
             Context::Browse => [
@@ -385,8 +385,8 @@ fn keys_of(context: Context) -> [&'static str; 2] {
                 "tab completes a known cell type (while typing the label)",
             ],
             Context::Chart => [
-                "H next chart (structure plot, heatmap, map)   c group by another grouping   + / - features per group (heatmap)",
-                "s save PDF   ctrl+l redraw   ? all keys   q quit",
+                "H next chart (structure plot, heatmap, stage 2's gains and volcano, map)   c group by another grouping   + / - features per group (heatmap)   [ ] focus a group",
+                "↑ ↓ g G step the feature   i I gain map, donor   s save PDF   ctrl+l redraw   ? all keys   q quit",
             ],
             // The popup says what the keys do.
             Context::Submit | Context::Recompute | Context::File => ["", ""],

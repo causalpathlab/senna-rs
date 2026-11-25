@@ -173,14 +173,12 @@ impl Scene {
         self.set_pick(Pick::Gain { gene, donor });
     }
 
-    /// The exclusivity map, or stop.
-    pub fn toggle_exclusive(&mut self) {
-        if self.pick == Some(Pick::Exclusive) {
-            self.clear_pick();
-        } else if !self.has_stage2() {
-            self.note = Some(NO_STAGE2.into());
-        } else {
+    /// The exclusivity map (`--exclusivity`; in the view, `u` steps to it).
+    pub fn show_exclusive(&mut self) {
+        if self.has_stage2() {
             self.set_pick(Pick::Exclusive);
+        } else {
+            self.note = Some(NO_STAGE2.into());
         }
     }
 
