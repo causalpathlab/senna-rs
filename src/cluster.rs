@@ -7,21 +7,12 @@ use crate::embed_common::*;
 use hsblock::{Hsblock, HsbmOptions};
 use hsblock_leiden::leiden::clustering::SimpleClustering;
 use hsblock_leiden::leiden::{Clustering, Network};
-use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
+use legume_numeric::matrix::kmeans::kmeans_centroids_seeded;
 use legume_numeric::matrix::knn_graph::{KnnGraph, KnnGraphArgs};
 use legume_numeric::matrix::traits::MatOps;
 
-/// Clustering method
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClusterMethod {
-    /// K-means clustering
-    KMeans,
-    /// Leiden clustering (graph-based)
-    Leiden,
-    /// Hierarchical Stochastic Block Model (graph-based)
-    Hsblock,
-}
+/// Seed for k-means and HSBM when `--seed` is not given.
+const DEFAULT_SEED: u64 = 42;
 
 /// `graph` with edge weights `weights` as the leiden [`Network`] of the
 /// legume-numeric hsblock is built on, as `KnnGraph::to_leiden_network_with`
@@ -159,8 +150,15 @@ impl ClusterResult {
     }
 }
 
-/// Run k-means clustering on latent representation (cells × features)
-pub fn kmeans_clustering(latent: &Mat, k: usize, max_iter: usize) -> anyhow::Result<ClusterResult> {
+/// Run k-means clustering on latent representation (cells × features):
+/// k-means++ from `seed` ([`DEFAULT_SEED`] when unset), so the same seed gives the same
+/// clusters on any thread count.
+pub fn kmeans_clustering(
+    latent: &Mat,
+    k: usize,
+    max_iter: usize,
+    seed: Option<u64>,
+) -> anyhow::Result<ClusterResult> {
     if k == 0 {
         anyhow::bail!("Number of clusters must be > 0");
     }
@@ -178,13 +176,7 @@ pub fn kmeans_clustering(latent: &Mat, k: usize, max_iter: usize) -> anyhow::Res
         max_iter
     );
 
-    let args = KmeansArgs {
-        num_clusters: k,
-        max_iter,
-    };
-
-    // Cluster rows (cells)
-    let labels = latent.kmeans_rows(args);
+    let (_, labels) = kmeans_centroids_seeded(latent, k, max_iter, seed.unwrap_or(DEFAULT_SEED));
 
     let result = ClusterResult {
         labels,
@@ -308,7 +300,7 @@ pub fn hsblock_clustering(
         tree_depth,
         degree_corrected,
         edge_scale,
-        seed: seed.unwrap_or(42),
+        seed: seed.unwrap_or(DEFAULT_SEED),
         ..Default::default()
     };
 
