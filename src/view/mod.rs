@@ -10,6 +10,7 @@ mod features;
 mod files;
 pub(crate) mod mcp;
 mod paint;
+mod panel;
 mod places;
 mod recompute;
 mod relabel;
@@ -30,7 +31,7 @@ use color::Rgb;
 use data::{Axis, Dataset, LabelKind, SpaceKind, NONE};
 use data_beans::utilities::name_matching::GeneIndex;
 use features::Centre;
-use legume_tui::export::{Page, PageSize, PdfArgs};
+use legume_tui::export::{Page, PageSize, PanelArgs, PdfArgs};
 use legume_tui::map::labels::{Hits, TEXT_SCALES};
 use legume_tui::map::text::Font;
 use render::{group_medians, Frame, Label, Paint, Tier, Viewport};
@@ -88,6 +89,11 @@ pub struct ViewArgs {
     /// with no terminal. Several manifests make one grid page.
     #[command(flatten)]
     pub export: PdfArgs,
+
+    /// `--height`, `--png`, `--point-pt`, `--background`, `--labels`,
+    /// `--legend` and the rest: the starting map saved as a figure panel.
+    #[command(flatten)]
+    pub panel: PanelArgs,
 
     #[arg(
         long,
@@ -716,10 +722,12 @@ impl ViewArgs {
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     let named = args.runs();
     // A PDF or --relabel prints and exits; the rest is on screen.
-    if args.export.pdf.is_some() || args.relabel {
+    let saves =
+        args.export.pdf.is_some() || args.panel.png.is_some() || args.panel.legend.is_some();
+    if saves || args.relabel {
         anyhow::ensure!(
             !named.is_empty(),
-            "--pdf and --relabel need the run: pass <run>.senna.json"
+            "--pdf, --png, --legend and --relabel need the run: pass <run>.senna.json"
         );
         return off_screen(args, &named);
     }
@@ -918,7 +926,9 @@ fn off_screen(args: &ViewArgs, from: &[Box<str>]) -> anyhow::Result<()> {
         return Ok(());
     }
     start_charts(args, &mut scenes);
-
+    if args.panel.wanted() {
+        return panel::from_flags(args, &scenes);
+    }
     if let Some(path) = &args.export.pdf {
         let titles: Vec<String> = from
             .iter()

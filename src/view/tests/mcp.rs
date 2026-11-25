@@ -1,4 +1,5 @@
 use super::*;
+use crate::view::mcp::view_export::ExportArgs;
 use crate::view::mcp::INSTRUCTIONS;
 
 fn open() -> Open {
@@ -139,6 +140,29 @@ fn export_refuses_a_file_that_exists_unless_told() {
     assert_eq!(std::fs::read(&png).unwrap(), b"keep");
     o.export(ask(true)).unwrap();
     assert_eq!(&std::fs::read(&png).unwrap()[1..4], b"PNG");
+}
+
+#[test]
+fn a_panel_is_its_size_on_no_fill_with_its_legend_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (png, key) = (dir.path().join("p.png"), dir.path().join("key.pdf"));
+    let mut o = open();
+    o.map(args(json!({"colour_by": "cluster", "width": 8})))
+        .unwrap();
+    let ask = |hide: &str| -> ExportArgs {
+        serde_json::from_value(json!({
+            "png": png, "legend": key, "width_in": 0.5, "height_in": 0.4, "dpi": 100,
+            "background": "none", "labels": "legend", "hide": [hide],
+        }))
+        .unwrap()
+    };
+    assert!(o.export(ask("C9")).is_err());
+    let out = o.export(ask("C1")).unwrap();
+    assert_eq!(state(&out)["image"], json!([50, 40]));
+    let img = image::open(&png).unwrap().to_rgba8();
+    assert_eq!(img.dimensions(), (50, 40));
+    assert_eq!(img.get_pixel(0, 0)[3], 0);
+    assert!(std::fs::read(&key).unwrap().starts_with(b"%PDF"));
 }
 
 #[test]
