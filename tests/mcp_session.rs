@@ -97,7 +97,7 @@ fn a_background_fit_is_watched_outlives_its_server_and_is_cancelled_by_the_next(
     let mut t = term(&sessions, &["attach", &session]);
     t.wait_screen(PAINTED);
     t.wait_screen("svd");
-    t.type_(b"\x1b\x04");
+    t.type_(&legume_tui::Key::DETACH.bytes());
     assert_eq!(t.exit_code(), 0);
 
     // The next server takes it up, and cancels it.
