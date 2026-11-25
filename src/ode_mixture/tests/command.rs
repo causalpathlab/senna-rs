@@ -307,7 +307,7 @@ fn tied_roots_are_put_to_the_user_with_their_cells() {
             objective: -1000.0,
         },
     ];
-    let d = root_decision(&out, &tied, &member, &pbs, &cells)
+    let d = root_decision(&out, None, &tied, &member, &pbs, &cells)
         .unwrap()
         .expect("a tie is put to the user");
     assert_eq!(d.topic, "root");
@@ -327,9 +327,14 @@ fn tied_roots_are_put_to_the_user_with_their_cells() {
             objective: -1000.0,
         },
     ];
-    assert!(root_decision(&out, &apart, &member, &pbs, &cells)
+    assert!(root_decision(&out, None, &apart, &member, &pbs, &cells)
         .unwrap()
         .is_none());
     // No root files of the tied run are left beside the one that settled.
     assert!(!std::path::Path::new(&first[1]).exists());
+    // But never the list the user named, though it is one of them.
+    let named = std::path::PathBuf::from(format!("{out}.root_1.txt"));
+    std::fs::write(&named, "a\n").unwrap();
+    root_decision(&out, Some(&named), &apart, &member, &pbs, &cells).unwrap();
+    assert!(named.exists());
 }
