@@ -83,7 +83,7 @@ pub(super) fn scene() -> Scene {
         watch: None,
         no_compute: true,
         extra: Vec::new(),
-        cell_stat: None,
+        cells: Default::default(),
         session: Default::default(),
     };
     Scene::new(data, &args)

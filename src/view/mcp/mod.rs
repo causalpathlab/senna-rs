@@ -18,6 +18,7 @@
 //! command line: a run tool takes its own arguments by name and every
 //! other flag in `flags`.
 
+mod cell_colour;
 mod fit;
 mod flags;
 mod jobs;

@@ -117,6 +117,13 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
             "job_cancel"
         ]
     );
+    // view_map colours the cells by a number each: a statistic of an
+    // extra file's counts, or a table's values.
+    let view_map = &replies[1]["result"]["tools"][12]["inputSchema"]["properties"];
+    for arg in ["extra", "cell_stat", "values"] {
+        assert!(view_map.get(arg).is_some(), "view_map lacks {arg}");
+    }
+    assert!(view_map["cell_stat"]["properties"]["per_run_umi"].is_object());
     for r in &replies[2..4] {
         assert_eq!(r["result"]["isError"], true, "{r}");
     }

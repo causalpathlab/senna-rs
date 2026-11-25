@@ -111,7 +111,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "u",
-                "per-cell statistics of the counts shown: total, features detected, the focused group's markers' share; then, with a stage 2, exclusivity (each cell's sample's distance to the nearest sample of another donor)",
+                "per-cell numbers: the counts' total, features detected, the focused group's markers' share; the statistic --cell-stat --rows --per-run-umi set (features matching a pattern, per 1k of the run's UMIs); with a stage 2, exclusivity (each cell's sample's distance to the nearest sample of another donor); the --values table's numbers, unmatched cells grey",
             ),
             ("p", "pin names on the map: those nearest the clicked cell or feature, or the feature on screen (again clears)"),
             ("x  esc", "back to group colours"),
