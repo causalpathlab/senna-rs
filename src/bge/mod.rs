@@ -33,6 +33,13 @@ pub use args::BgeArgs;
 /// [`driver::fit_embed_family`], which trains and writes every output.
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
+    // bge's finest pseudobulks are the hash partition refined by
+    // `--pb-refine-*`; the marginal sketch-sign partition is not built here.
+    anyhow::ensure!(
+        args.collapse.pb_tree != crate::refine_weighting::PbTreeArg::Marginal,
+        "--pb-tree marginal does not apply to bge: its finest pseudobulks are always the \
+         refined hash partition (tune it with --pb-refine-*)"
+    );
     anyhow::ensure!(
         args.pb_reference.is_none() || args.multiome.is_empty(),
         "a pb_reference and --multiome do not compose: multiome loads with union column \

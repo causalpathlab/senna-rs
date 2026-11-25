@@ -268,9 +268,6 @@ pub struct PredictArgs {
     )]
     pub(crate) min_gene_overlap: f32,
 
-    #[arg(short, long, help = "Verbose logging")]
-    pub(crate) verbose: bool,
-
     #[arg(
         long,
         value_parser = check_target,
@@ -438,6 +435,18 @@ pub struct PredictArgs {
 }
 
 impl PredictArgs {
+    /// `--decoder-only` and `--refine-*` re-fit the latent against the
+    /// decoder, which only the topic families do; anywhere else they would be
+    /// dropped without a word, so they are refused, naming what `model` is.
+    fn refuse_latent_refinement(&self, model_is: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.decoder_only && self.refine_steps == 0,
+            "--decoder-only / --refine-steps are for the topic family; {} is {model_is}",
+            self.model
+        );
+        Ok(())
+    }
+
     /// How this run gets its scoring δ.
     fn scoring_spec(&self) -> delta::ScoringSpec {
         delta::ScoringSpec {
@@ -620,12 +629,9 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
 /// on the training run, or `senna probe`, answer "has the model seen this biology" better
 /// than a per-cell fit with H free parameters can.
 fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !args.decoder_only && args.refine_steps == 0,
-        "--decoder-only / --refine-steps are for the topic families; {} is a `senna {kind}` \
-         run, whose only inference is the Poisson-MAP projection onto the frozen ρ.",
-        args.model
-    );
+    args.refuse_latent_refinement(&format!(
+        "a `senna {kind}` run, whose only inference is the Poisson-MAP projection onto the frozen ρ"
+    ))?;
     if args.residual_out.is_some() {
         log::warn!(
             "--residual-out is not available for a {kind} run (no count decoder to regress \
@@ -721,12 +727,9 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
 fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     use legume_numeric::matrix::agreement::agreement_from_rate;
 
-    anyhow::ensure!(
-        !args.decoder_only && args.refine_steps == 0,
-        "--decoder-only / --refine-steps are for the topic families; {} is a `senna svd` run, \
-         whose only inference is the projection onto the frozen dictionary.",
-        args.model
-    );
+    args.refuse_latent_refinement(
+        "a `senna svd` run, whose only inference is the projection onto the frozen dictionary",
+    )?;
     if args.residual_out.is_some() {
         log::warn!("--residual-out is not available for an svd run (no count decoder); ignoring");
     }
@@ -1579,6 +1582,10 @@ fn predict_masked(
 ) -> anyhow::Result<()> {
     use crate::topic::model_metadata::masked_head_label;
 
+    args.refuse_latent_refinement(&format!(
+        "a `senna {}` model, whose inference is encoder-only",
+        masked_head_label(head)
+    ))?;
     let fit = null::RecordedFit::read(&args.model);
     let scored = score_masked_backend(MaskedScoreArgs {
         model: &args.model,
@@ -1906,16 +1913,7 @@ fn predictive_llik_masked(
 /// the encoder (see `null`), like `predict_masked`. The latent is continuous
 /// factors, so there is no decoder refinement to do.
 fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
-    // The vae path is encoder-only: it never calls `resolve_mode`, so the
-    // latent-mode flags have no effect here. Say so instead of ignoring them
-    // silently — a caller passing --decoder-only otherwise gets encoder-only
-    // output with no indication the flag was dropped.
-    if args.decoder_only || args.refine_steps > 0 {
-        log::warn!(
-            "--decoder-only / --refine-* do not apply to vae models (encoder-only \
-             inference); ignoring them for this run"
-        );
-    }
+    args.refuse_latent_refinement("a vae model, whose inference is encoder-only")?;
 
     // The decoder is rebuilt so a vae run is scorable like every other family.
     // It used to be skipped (latent only, no `.predictive.parquet`), which left

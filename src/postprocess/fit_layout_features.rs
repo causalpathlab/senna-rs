@@ -253,6 +253,13 @@ pub(crate) fn feature_pb_layout(
     method: &str,
     layout_pbs: impl FnOnce(&Coarsened) -> anyhow::Result<Mat>,
 ) -> anyhow::Result<()> {
+    let ignored = cell_only_flags_given(args);
+    anyhow::ensure!(
+        ignored.is_empty(),
+        "--target features lays out the run's feature rows, so {} cannot apply; drop {}",
+        ignored.join(", "),
+        if ignored.len() == 1 { "it" } else { "them" }
+    );
     let mut input = load_feature_layout_input(args)?;
     let n = input.feat_kn.ncols();
     anyhow::ensure!(n > 0, "the run's feature table has no rows to lay out");
@@ -271,6 +278,32 @@ pub(crate) fn feature_pb_layout(
     );
     info!("Placed {n} features by Nyström");
     write_feature_layout(&mut input, method, &coords)
+}
+
+/// The cell-side flags a `--target features` layout would ignore, by name,
+/// when set off their defaults: they trim, cut, sort, colour or temper cells,
+/// and a feature layout has none.
+pub(crate) fn cell_only_flags_given(args: &LayoutCommonArgs) -> Vec<&'static str> {
+    use super::fit_layout_common::{
+        OutlierCut, DEFAULT_PB_COVERAGE, DEFAULT_SORT_DIM, DEFAULT_THETA_TEMPERATURE,
+        DEFAULT_TRIM_MADS,
+    };
+    let given = [
+        (args.sort_dim != DEFAULT_SORT_DIM, "--sort-dim"),
+        (args.trim_cell_mads != DEFAULT_TRIM_MADS, "--trim-cell-mads"),
+        (args.pb_coverage != DEFAULT_PB_COVERAGE, "--pb-coverage"),
+        (args.clusters.is_some(), "--clusters"),
+        (args.drop_outliers != OutlierCut::Auto, "--drop-outliers"),
+        (args.drop_cells.is_some(), "--drop-cells"),
+        (
+            args.theta_temperature != DEFAULT_THETA_TEMPERATURE,
+            "--theta-temperature",
+        ),
+    ];
+    given
+        .into_iter()
+        .filter_map(|(set, name)| set.then_some(name))
+        .collect()
 }
 
 /// Write a `--target features` result and record it under
@@ -334,6 +367,25 @@ pub(crate) fn record_cell_layout(
 mod tests {
     use super::*;
     use senna::run_manifest::RunKind;
+
+    fn common(extra: &[&str]) -> LayoutCommonArgs {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            common: LayoutCommonArgs,
+        }
+        let argv = ["layout", "--from", "r.senna.json"].iter().chain(extra);
+        <Cli as clap::Parser>::try_parse_from(argv).unwrap().common
+    }
+
+    /// A feature layout has no cells to trim, cut or colour, so the flags that
+    /// do that are named back to the user instead of being dropped.
+    #[test]
+    fn a_feature_layout_names_the_cell_flags_it_would_ignore() {
+        assert!(cell_only_flags_given(&common(&[])).is_empty());
+        let given = cell_only_flags_given(&common(&["--sort-dim", "4", "--clusters", "c.tsv"]));
+        assert_eq!(given, ["--sort-dim", "--clusters"]);
+    }
 
     #[test]
     fn the_coembedding_is_read_onto_the_cells_unit_sphere() {

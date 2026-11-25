@@ -28,6 +28,9 @@ use std::path::PathBuf;
 
 /// Default winsorization of layout features, in MADs (`--trim-cell-mads`).
 pub(crate) const DEFAULT_TRIM_MADS: f32 = 5.0;
+pub(crate) const DEFAULT_SORT_DIM: usize = 10;
+pub(crate) const DEFAULT_PB_COVERAGE: f32 = 0.95;
+pub(crate) const DEFAULT_THETA_TEMPERATURE: f32 = 1.0;
 
 /// Args shared by `senna layout phate`, `tsne` and `umap`.
 ///
@@ -104,7 +107,7 @@ pub struct LayoutCommonArgs {
     #[arg(
         long,
         short = 'd',
-        default_value_t = 10,
+        default_value_t = DEFAULT_SORT_DIM,
         help = "Top {d} projection bits for PB partitioning (≈ 2^d PBs)"
     )]
     pub sort_dim: usize,
@@ -163,7 +166,7 @@ pub struct LayoutCommonArgs {
 
     #[arg(
         long,
-        default_value_t = 0.95,
+        default_value_t = DEFAULT_PB_COVERAGE,
         help = "Keep smallest PB set covering this fraction of cells (projection-bit PBs)",
         long_help = "Drop PB samples in the long tail,\n\
                      until the remaining set holds at least this fraction of all cells.\n\
@@ -238,7 +241,7 @@ pub struct LayoutCommonArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
+        default_value_t = DEFAULT_THETA_TEMPERATURE,
         help = "Temperature τ applied to topic θ before Hellinger transform",
         long_help = "Re-softmax the trained log-θ at temperature τ.\n\
                      This happens before the latent-path layout:\n\
