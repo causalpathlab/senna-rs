@@ -70,6 +70,10 @@ pub fn run(
     // Log lines written to the terminal would land over the screen: none
     // while it is ours. What matters reaches the status line instead.
     let quiet = legume_tui::logs::quiet();
+    // Nor progress bars: data-beans' column passes, run on the side, draw
+    // on the shared one.
+    legume_numeric::matrix::progress::MULTI_PROGRESS
+        .set_draw_target(indicatif::ProgressDrawTarget::hidden());
     let mut terminal = session.terminal()?;
     let result = (|| {
         // The terminal is fresh: a repaint asked for by now is this one.

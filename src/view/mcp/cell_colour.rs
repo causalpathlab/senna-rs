@@ -48,7 +48,9 @@ pub(super) struct CellColouring {
 
 /// Read and check `a`'s extra file, statistic and table against `data`,
 /// the run as it will be shown.
-pub(super) fn check(a: &MapArgs, data: &Dataset) -> Result<CellColouring> {
+/// What is open already is not read again: a watcher applies the agent's
+/// whole view each time it changes.
+pub(super) fn check(a: &MapArgs, s: &Scene, data: &Dataset) -> Result<CellColouring> {
     let colouring =
         a.cell_stat.as_ref().is_some_and(|c| c.stat != StatArg::Off) || a.values.is_some();
     ensure!(
@@ -56,7 +58,14 @@ pub(super) fn check(a: &MapArgs, data: &Dataset) -> Result<CellColouring> {
         "colour by a feature, the time, a cell statistic or values: one of them"
     );
     let cells = run_cells(data);
+    let open = s
+        .data
+        .loads
+        .extra
+        .as_ref()
+        .and_then(|x| x.try_get()?.as_ref().ok());
     let extra = match a.extra.as_deref() {
+        Some(paths) if open.is_some_and(|x| x.paths == paths) => None,
         Some(paths) => Some(Arc::new(ExtraFiles::ready(Ok(read_extra(paths, cells)?)))),
         None => None,
     };
@@ -68,7 +77,7 @@ pub(super) fn check(a: &MapArgs, data: &Dataset) -> Result<CellColouring> {
     Ok(CellColouring {
         extra,
         stat,
-        values: values_of(a, cells)?,
+        values: values_of(a, s, cells)?,
     })
 }
 
@@ -92,11 +101,51 @@ impl CellStatArg {
     }
 }
 
-fn values_of(a: &MapArgs, cells: &[Box<str>]) -> Result<Option<Arc<CellValues>>> {
-    a.values
+fn values_of(a: &MapArgs, s: &Scene, cells: &[Box<str>]) -> Result<Option<Arc<CellValues>>> {
+    let Some(v) = &a.values else {
+        return Ok(None);
+    };
+    let open = s
+        .cell_colour
+        .values
         .as_ref()
-        .map(|v| CellValues::read(&v.file, v.column.as_deref(), cells).map(Arc::new))
-        .transpose()
+        .filter(|o| o.file == v.file && v.column.as_deref().is_none_or(|c| *c == *o.column));
+    match open {
+        Some(o) => Ok(Some(o.clone())),
+        None => Ok(Some(Arc::new(CellValues::read(
+            &v.file,
+            v.column.as_deref(),
+            cells,
+        )?))),
+    }
+}
+
+/// `state`'s (a published view's) extra files, cell statistic and table,
+/// as view_map takes them.
+pub(super) fn publish(s: &Scene, state: &mut Value) {
+    let extra = s
+        .data
+        .loads
+        .extra
+        .as_ref()
+        .and_then(|x| x.try_get()?.as_ref().ok());
+    state["extra"] = json!(extra.map(|x| &x.paths));
+    let measure = |m: CellStat| match m {
+        CellStat::Total => "total",
+        CellStat::Detected => "detected",
+    };
+    state["cell_stat"] = match &s.pick {
+        Some(Pick::Stat(Stat::Total)) => json!({"stat": "total"}),
+        Some(Pick::Stat(Stat::Detected)) => json!({"stat": "detected"}),
+        Some(Pick::Stat(Stat::Rows(r))) => {
+            json!({"stat": measure(r.measure), "rows": r.rows, "per_run_umi": r.per_run})
+        }
+        _ => Value::Null,
+    };
+    state["values"] = match (&s.pick, &s.cell_colour.values) {
+        (Some(Pick::Values), Some(v)) => json!({"file": v.file, "column": v.column}),
+        _ => Value::Null,
+    };
 }
 
 impl CellColouring {
@@ -145,7 +194,7 @@ pub(super) fn spec(name: &str) -> Value {
         }
         "cell_stat" => json!({"type": "object", "properties": {
                 "stat": {"enum": ["total", "detected", "off"], "description": "Each cell's total count (log1p, or the raw count with per_run_umi) or features detected, of the counts shown (the extra file's when one is open); off shows the groups again"},
-                "rows": {"type": "string", "description": "Over the features whose names match this regular expression only, as \"/methylated$\""},
+                "rows": {"type": "string", "description": "Over the features whose names match this regular expression only (case-insensitive, as data-beans' row_pattern), as \"/methylated$\""},
                 "per_run_umi": {"type": "integer", "minimum": 1, "description": "Divided by each cell's total count in the run's own data, times this: 1000 is per 1k UMIs"}
             }, "required": ["stat"], "additionalProperties": false, "description": "Colour the cells by a per-cell statistic of the counts; the reply's cell_colour gives its key and how many points have a value"}),
         "values" => json!({"type": "object", "properties": {

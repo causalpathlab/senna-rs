@@ -45,4 +45,8 @@ fn a_table_s_values_colour_the_cells_it_matches_and_leave_the_rest_grey() {
     s.cycle_stat();
     assert_eq!(s.pick, None);
     assert!(CellValues::read(&file, Some("note"), &run).is_err());
+    // R's write.table header, one name short, is refused.
+    let r = dir.path().join("r.tsv");
+    std::fs::write(&r, "score\nc1\t1\n").unwrap();
+    assert!(CellValues::read(&r, None, &run).is_err());
 }

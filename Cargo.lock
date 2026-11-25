@@ -4566,7 +4566,6 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "rayon",
- "regex",
  "rustc-hash",
  "rustix 1.1.6",
  "serde",

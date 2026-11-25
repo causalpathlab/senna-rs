@@ -298,7 +298,7 @@ impl Open {
         let s = &self.scene;
         let root = &s.data.spaces[s.root()];
         let feature = s.pick.as_ref().and_then(Pick::feature).unwrap_or_default();
-        json!({
+        let mut state = json!({
             "run": self.run,
             "round": s.data.round.as_ref().map(|r| absolute(&r.path)),
             "map": root.method,
@@ -313,7 +313,9 @@ impl Open {
             "chart": ChartArg::of(s),
             "velocity": VelocityArg::from(s.velocity_style),
             "bbox": self.drawn.map(|vp| vp.window()),
-        })
+        });
+        cell_colour::publish(s, &mut state);
+        state
     }
 
     /// What the view shows: map, grouping, focus, feature and legend.
@@ -662,7 +664,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         ensure!(data.times.is_some(), features::NO_TIMES);
     }
     check_stage2(a, s, data)?;
-    let mut cells = cell_colour::check(a, data)?;
+    let mut cells = cell_colour::check(a, s, data)?;
     if let Some(chart) = a.chart {
         chart.check(data.has_stage2())?;
     }
@@ -728,7 +730,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
 }
 
 /// The view_map arguments a published view sets.
-const VIEW_KEYS: [&str; 13] = [
+const VIEW_KEYS: [&str; 16] = [
     "round",
     "map",
     "space",
@@ -742,6 +744,9 @@ const VIEW_KEYS: [&str; 13] = [
     "chart",
     "velocity",
     "bbox",
+    "extra",
+    "cell_stat",
+    "values",
 ];
 
 /// An agent's published view ([`Open::view_state`]): the manifest it

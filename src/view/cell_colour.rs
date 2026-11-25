@@ -6,8 +6,11 @@
 use super::activity::{RowStat, Source, Stat};
 use super::data::Dataset;
 use super::{Levels, Pick, Scene};
+use crate::critique::read_cell_labels;
 use clap::Args;
-use legume_numeric::matrix::table::TableReader;
+use legume_numeric::matrix::common_io::open_buf_reader;
+use legume_numeric::matrix::table::{is_parquet_path, Delimiter, TableReader};
+use rustc_hash::FxHashMap as HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -34,7 +37,7 @@ pub struct CellArgs {
         long,
         value_name = "REGEX",
         requires = "cell_stat",
-        help = "With --cell-stat: over the features whose names match REGEX only, as '/methylated$'"
+        help = "With --cell-stat: over the features whose names match REGEX only (case-insensitive, as data-beans statistics --row-name-pattern), as '/methylated$'"
     )]
     pub rows: Option<String>,
 
@@ -49,6 +52,7 @@ pub struct CellArgs {
     #[arg(
         long,
         value_name = "FILE[:COLUMN]",
+        conflicts_with = "cell_stat",
         help = "Start coloured by a number per cell from a table (TSV, CSV or parquet): its first column names the cell (matched to the run's as --extra matches), COLUMN (default: the last numeric one) the value; `u` in the view"
     )]
     pub values: Option<String>,
@@ -61,6 +65,17 @@ impl CellArgs {
         self.cell_stat
             .map(|m| cell_stat(m, self.rows.as_deref(), self.per_run_umi))
             .transpose()
+    }
+
+    /// Refuse what cannot work before anything opens: a statistic that is
+    /// not one, a table with no such column.
+    pub fn check(&self) -> anyhow::Result<()> {
+        self.stat().map_err(anyhow::Error::msg)?;
+        if let Some(arg) = &self.values {
+            let (file, column) = file_and_column(arg);
+            read_numbers(&file, column)?;
+        }
+        Ok(())
     }
 }
 
@@ -90,71 +105,107 @@ pub fn file_and_column(arg: &str) -> (PathBuf, Option<&str>) {
     }
 }
 
+/// A table's numbers by cell.
+type CellNumbers = Vec<(Box<str>, f32)>;
+
+/// `column` (else the last numeric column) of the table at `path`, by its
+/// first column: its name and the finite numbers (a missing or non-finite
+/// value is left out). A column with any other text is not numeric.
+pub(crate) fn read_numbers(
+    path: &Path,
+    column: Option<&str>,
+) -> anyhow::Result<(Box<str>, CellNumbers)> {
+    let shown = path.to_string_lossy();
+    let header = TableReader::open(&shown)?.header().to_vec();
+    anyhow::ensure!(
+        is_parquet_path(&shown) || !header_one_short(&shown)?,
+        "{shown}: its rows have one more field than its header names (R's write.table without col.names = NA?): name the cell column too"
+    );
+    let numbers = |c: &str| -> anyhow::Result<Option<CellNumbers>> {
+        let read: Vec<(Box<str>, Box<str>)> = read_cell_labels(&shown, Some(c))?;
+        let parsed: Option<Vec<_>> = read
+            .into_iter()
+            .map(|(cell, v)| Some((cell, v.parse::<f32>().ok()?)))
+            .collect();
+        Ok(parsed
+            .map(|v| {
+                v.into_iter()
+                    .filter(|(_, x)| x.is_finite())
+                    .collect::<CellNumbers>()
+            })
+            .filter(|v| !v.is_empty()))
+    };
+    match column {
+        Some(c) => Ok((
+            c.into(),
+            numbers(c)?.ok_or_else(|| anyhow::anyhow!("{shown}: column {c} is not numeric"))?,
+        )),
+        None => header
+            .iter()
+            .skip(1)
+            .rev()
+            .find_map(|c| Some((c.clone(), numbers(c).ok()??)))
+            .ok_or_else(|| anyhow::anyhow!("{shown}: no numeric column")),
+    }
+}
+
+/// Whether a text table's first row has one field more than its header:
+/// R's write.table names every column but the row names', so the names
+/// would sit one column off.
+fn header_one_short(path: &str) -> anyhow::Result<bool> {
+    use std::io::BufRead;
+    let mut lines = open_buf_reader(path)?
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.trim().is_empty() && !l.starts_with("##"));
+    let (Some(header), Some(row)) = (lines.next(), lines.next()) else {
+        return Ok(false);
+    };
+    let header = header.strip_prefix('#').unwrap_or(&header);
+    let delim = Delimiter::detect(header);
+    Ok(delim.split(&row).len() == delim.split(header).len() + 1)
+}
+
 /// A number per cell of the run, read from a table.
 pub(crate) struct CellValues {
+    /// The table and its column, as asked again.
+    pub file: PathBuf,
+    pub column: Box<str>,
     /// The column and the file, as the key says them.
     pub title: String,
-    pub by_cell: std::collections::HashMap<Box<str>, f32>,
+    pub by_cell: HashMap<Box<str>, f32>,
     /// How many cells the run has.
     pub of: usize,
 }
 
 impl CellValues {
-    /// `column` (else the last numeric column) of the table at `path`, its
-    /// first column matched to `cells` as an extra file's cells are
-    /// ([`senna::senna_input::match_cells`]). Missing values (empty, `NA`,
-    /// `NaN`) are left out; a table with none of the cells is refused.
+    /// [`read_numbers`] of the table at `path`, its first column matched
+    /// to `cells` as an extra file's cells are
+    /// ([`senna::senna_input::match_cells`]). A table with none of the
+    /// cells is refused.
     pub(crate) fn read(
         path: &Path,
         column: Option<&str>,
         cells: &[Box<str>],
     ) -> anyhow::Result<Self> {
-        let shown = path.to_string_lossy();
-        let table = TableReader::open(&shown)?;
-        let width = table.header().len();
-        anyhow::ensure!(
-            width >= 2,
-            "{shown}: a cell column and a value column needed"
-        );
-        let rows: Vec<Vec<Box<str>>> = table
-            .rows(&(0..width).collect::<Vec<_>>())?
-            .collect::<anyhow::Result<_>>()?;
-        let number = |v: &str| match v {
-            "" | "NA" | "NaN" => Some(None),
-            v => v.parse::<f32>().ok().map(Some),
-        };
-        let numeric = |c: usize| {
-            rows.iter().all(|r| number(&r[c]).is_some())
-                && rows.iter().any(|r| number(&r[c]).flatten().is_some())
-        };
-        let at = match column {
-            Some(c) => table.select(&[c])?[0],
-            None => (1..width)
-                .rev()
-                .find(|&c| numeric(c))
-                .ok_or_else(|| anyhow::anyhow!("{shown}: no numeric column"))?,
-        };
-        anyhow::ensure!(
-            numeric(at),
-            "{shown}: column {} is not numeric",
-            table.header()[at]
-        );
-        let names: Vec<Box<str>> = rows.iter().map(|r| r[0].clone()).collect();
-        let by_cell: std::collections::HashMap<Box<str>, f32> =
-            senna::senna_input::match_cells(cells, &names)
-                .into_iter()
-                .filter_map(|(cell, row)| Some((cell, number(&rows[row as usize][at])??)))
-                .collect();
+        let (column, read) = read_numbers(path, column)?;
+        let names: Vec<Box<str>> = read.iter().map(|(cell, _)| cell.clone()).collect();
+        let by_cell: HashMap<Box<str>, f32> = senna::senna_input::match_cells(cells, &names)
+            .into_iter()
+            .map(|(cell, row)| (cell, read[row as usize].1))
+            .collect();
         let file = path
             .file_name()
-            .map_or(shown.clone(), |f| f.to_string_lossy());
+            .map_or(path.to_string_lossy(), |f| f.to_string_lossy());
         anyhow::ensure!(
             !by_cell.is_empty(),
             "none of the run's {} cells have a value in {file}",
             cells.len()
         );
         Ok(Self {
-            title: format!("{} · {file}", table.header()[at]),
+            title: format!("{column} · {file}"),
+            file: path.to_path_buf(),
+            column,
             by_cell,
             of: cells.len(),
         })
@@ -191,16 +242,16 @@ pub(crate) fn run_cells(data: &Dataset) -> &[Box<str>] {
 impl Scene {
     /// Start as the flags say: a per-cell statistic, or a table's values.
     pub(super) fn apply_cell_args(&mut self, args: &CellArgs) {
-        match args.stat() {
-            Ok(Some(stat)) => self.show_stat(stat),
-            Ok(None) => {}
-            Err(e) => log::warn!("view: {e}"),
+        // Checked at the start ([`CellArgs::check`]); what is left to fail
+        // is how the table matches the run, said in the note.
+        if let Ok(Some(stat)) = args.stat() {
+            self.show_stat(stat);
         }
         if let Some(arg) = &args.values {
             let (file, column) = file_and_column(arg);
             match CellValues::read(&file, column, run_cells(&self.data)) {
                 Ok(v) => self.show_values(Arc::new(v)),
-                Err(e) => log::warn!("view: {e}"),
+                Err(e) => self.note = Some(format!("values: {e}")),
             }
         }
     }
@@ -221,6 +272,8 @@ impl Scene {
     pub(crate) fn show_values(&mut self, values: Arc<CellValues>) {
         self.note = Some(values.said());
         self.cell_colour.values = Some(values);
+        // Another table is another colouring, though the pick is the same.
+        self.shown = None;
         self.set_pick(Pick::Values);
     }
 
@@ -232,13 +285,7 @@ impl Scene {
             .values
             .as_ref()
             .ok_or("no values per cell are open (--values FILE[:COLUMN])")?;
-        let values = self.data.spaces[space]
-            .points
-            .names
-            .iter()
-            .map(|n| v.by_cell.get(n).copied().unwrap_or(f32::NAN))
-            .collect();
-        Ok((Levels::from_values(values, false), v.title.clone()))
+        Ok((self.named_levels(space, &v.by_cell), v.title.clone()))
     }
 
     /// Colour the cells by the next per-cell number: the counts' total,

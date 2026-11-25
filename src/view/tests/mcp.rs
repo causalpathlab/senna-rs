@@ -564,3 +564,37 @@ fn a_stage_2_recorded_after_the_run_opened_is_taken_up_without_opening_it_again(
         .unwrap();
     assert_eq!(state(&out)["donors"], json!(["A", "B", "C"]));
 }
+
+#[test]
+fn a_published_view_carries_its_table_of_values_and_a_cell_statistic() {
+    let dir = tempfile::tempdir().unwrap();
+    let table = dir.path().join("v.tsv");
+    std::fs::write(&table, "cell\tscore\nc1\t1\nc3\t3\n").unwrap();
+    let mut agent = open();
+    let out = agent
+        .map(args(json!({"values": {"file": table}, "width": 16})))
+        .unwrap();
+    assert_eq!(state(&out)["cell_colour"]["with_values"], 2);
+    let published = agent.view_state();
+    assert_eq!(published["values"]["column"], "score");
+    let (_, a) = agent_view(&published).unwrap();
+    let mut watcher = open();
+    apply(&mut watcher.scene, &a).unwrap();
+    assert_eq!(watcher.view_state()["values"], published["values"]);
+    // A statistic over rows is published as view_map takes it.
+    agent.scene.cell_colour.values = None;
+    agent.scene.pick = Some(Pick::Stat(crate::view::Stat::Rows(
+        crate::view::activity::RowStat::new(
+            crate::view::CellStat::Detected,
+            Some("/methylated$"),
+            Some(1000),
+        )
+        .unwrap(),
+    )));
+    let published = agent.view_state();
+    assert_eq!(
+        published["cell_stat"],
+        json!({"stat": "detected", "rows": "/methylated$", "per_run_umi": 1000})
+    );
+    assert!(agent_view(&published).is_ok());
+}

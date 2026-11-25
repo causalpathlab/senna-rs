@@ -701,6 +701,7 @@ impl ViewArgs {
 }
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
+    args.cells.check()?;
     let named = args.runs();
     // A PDF or --relabel prints and exits; the rest is on screen.
     if args.export.pdf.is_some() || args.relabel {

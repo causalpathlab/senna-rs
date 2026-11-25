@@ -405,13 +405,21 @@ impl Scene {
     /// The time of every point of `space` on the ramp.
     fn time_levels(&self, space: usize) -> Result<(Levels, String), String> {
         let times = self.data.times.as_ref().ok_or(NO_TIMES)?;
-        let values: Vec<f32> = self.data.spaces[space]
-            .points
-            .names
+        Ok((self.named_levels(space, times), "time".into()))
+    }
+
+    /// The number each point of `space` has by name, on the ramp; grey
+    /// where it has none.
+    pub(super) fn named_levels(
+        &self,
+        space: usize,
+        by_name: &rustc_hash::FxHashMap<Box<str>, f32>,
+    ) -> Levels {
+        let names = &self.data.spaces[space].points.names;
+        let values = names
             .iter()
-            .map(|n| times.get(n).copied().unwrap_or(f32::NAN))
-            .collect();
-        Ok((Levels::from_values(values, false), "time".into()))
+            .map(|n| by_name.get(n).copied().unwrap_or(f32::NAN));
+        Levels::from_values(values.collect(), false)
     }
 
     pub fn clear_pick(&mut self) -> bool {

@@ -5,16 +5,18 @@
 
 use super::*;
 use crate::view::CellStat;
+use data_beans::utilities::name_matching::names_matching;
 use std::sync::Mutex;
 use std::time::Duration;
 
 /// A total or a count of features detected, over the rows whose names
-/// match `rows` (every row: `None`), divided by the run's own total count
-/// per cell and scaled by `per_run` when that is set.
+/// match `rows` (every row: `None`; a regex matched case-insensitively,
+/// as data-beans' `--row-name-pattern` is), divided by the run's own total
+/// count per cell and scaled by `per_run` when that is set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowStat {
     pub measure: CellStat,
-    /// A regular expression over feature names.
+    /// A regular expression over feature names, case-insensitive.
     pub rows: Option<Box<str>>,
     /// Per this many of the cell's counts in the run's own data.
     pub per_run: Option<u32>,
@@ -29,7 +31,7 @@ impl RowStat {
         per_run: Option<u32>,
     ) -> Result<Self, String> {
         if let Some(p) = rows {
-            regex::Regex::new(p).map_err(|e| format!("rows pattern {p}: {e}"))?;
+            names_matching(&[], p).map_err(|e| format!("rows: {e}"))?;
         }
         if per_run == Some(0) {
             return Err("per run UMI is a positive count (1000: per 1k)".into());
@@ -65,55 +67,73 @@ impl RowStat {
 /// Each column's total and features detected over some rows, read once.
 type RowSums = legume_tui::work::Loading<(Vec<f32>, Vec<f32>)>;
 
-/// A source (the extra file by its address) and a pattern.
-type RowKey = (Source, usize, Box<str>);
+/// One read: of the extra file it holds (the run's own counts: `None`),
+/// over the rows matching a pattern.
+struct RowRead {
+    extra: Option<Arc<ExtraFiles>>,
+    pattern: Box<str>,
+    sums: Arc<RowSums>,
+}
 
-/// The reads of [`RowSums`] by [`RowKey`], shared by every view of the run.
+/// The [`RowSums`] reads asked for, shared by every view of the run.
 #[derive(Clone, Default)]
-pub(crate) struct RowSumLoads(Arc<Mutex<HashMap<RowKey, Arc<RowSums>>>>);
+pub(crate) struct RowSumLoads(Arc<Mutex<Vec<RowRead>>>);
 
 impl RowSumLoads {
     /// The read of `source`'s rows matching `pattern`, made on first ask.
-    /// An extra file's read holds the file, so its key's address is never
-    /// another file's.
+    /// Reads of an extra file no longer open are dropped.
     fn of(&self, loads: &RunLoads, source: Source, pattern: &str) -> Result<Arc<RowSums>, String> {
         let extra = match source {
             Source::Observed => None,
             Source::Extra => Some(loads.extra.clone().ok_or("no extra data file is open")?),
             Source::Expected => return Err("the model's expectation is not counts".into()),
         };
-        let at = extra.as_ref().map_or(0, |x| Arc::as_ptr(x) as usize);
-        let mut map = self.0.lock().map_err(|e| e.to_string())?;
-        if let Some(read) = map.get(&(source, at, pattern.into())) {
-            return Ok(read.clone());
+        let same = |a: &Option<Arc<ExtraFiles>>, b: &Option<Arc<ExtraFiles>>| match (a, b) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        let mut reads = self.0.lock().map_err(|e| e.to_string())?;
+        if extra.is_some() {
+            reads.retain(|r| r.extra.is_none() || same(&r.extra, &extra));
         }
-        let re = regex::Regex::new(pattern).map_err(|e| e.to_string())?;
-        let files = loads.files.clone();
+        if let Some(r) = reads
+            .iter()
+            .find(|r| same(&r.extra, &extra) && *r.pattern == *pattern)
+        {
+            return Ok(r.sums.clone());
+        }
+        let (files, pattern_owned) = (loads.files.clone(), pattern.to_string());
+        let held = extra.clone();
         let read = Arc::new(RowSums::new(move || {
-            let o = match &extra {
+            let o = match &held {
                 Some(x) => &x.get().as_ref().map_err(Clone::clone)?.observed,
                 None => &files.get().as_ref().map_err(Clone::clone)?.observed,
             };
-            let keep: Vec<bool> = o.features.names.iter().map(|n| re.is_match(n)).collect();
-            if !keep.contains(&true) {
-                return Err(format!("no feature name matches {re}"));
+            let rows =
+                names_matching(&o.features.names, &pattern_owned).map_err(|e| e.to_string())?;
+            if rows.is_empty() {
+                return Err(format!("no feature name matches {pattern_owned}"));
             }
-            o.column_sums(Some(&keep))
+            o.column_stats(Some(&rows))
         }));
-        map.insert((source, at, pattern.into()), read.clone());
+        reads.push(RowRead {
+            extra,
+            pattern: pattern.into(),
+            sums: read.clone(),
+        });
         Ok(read)
     }
 
     /// The longest a read has been running, while any runs.
     pub(crate) fn busy(&self) -> Option<Duration> {
-        let map = self.0.lock().ok()?;
-        map.values().filter_map(|l| l.busy()).max()
+        let reads = self.0.lock().ok()?;
+        reads.iter().filter_map(|r| r.sums.busy()).max()
     }
 
     /// How many of the reads have answered.
     pub(crate) fn answered(&self) -> usize {
-        self.0.lock().map_or(0, |map| {
-            map.values().filter(|l| l.try_get().is_some()).count()
+        self.0.lock().map_or(0, |reads| {
+            reads.iter().filter(|r| r.sums.try_get().is_some()).count()
         })
     }
 }

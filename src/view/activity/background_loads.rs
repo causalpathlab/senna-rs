@@ -74,6 +74,7 @@ pub(crate) fn read_extra(paths: &[PathBuf], cells: &[Box<str>]) -> anyhow::Resul
     let observed = Observed::new(data, cell_index)?;
     observed.totals().map_err(anyhow::Error::msg)?;
     Ok(ExtraRead {
+        paths: paths.to_vec(),
         name: name.into(),
         observed,
         of: cells.len(),
@@ -83,6 +84,8 @@ pub(crate) fn read_extra(paths: &[PathBuf], cells: &[Box<str>]) -> anyhow::Resul
 /// A data file the run was not fitted on, opened in the view: its counts
 /// with the run's cell names, and how many of the run's cells it has.
 pub(crate) struct ExtraRead {
+    /// The files, as asked again.
+    pub paths: Vec<PathBuf>,
     pub name: Box<str>,
     pub(super) observed: Observed,
     pub of: usize,
