@@ -26,9 +26,12 @@
 //! together as one batch ([`Fit::from_starts`]); with the lineages apart
 //! the k-means start, then with each lineage turned round in turn, keeping
 //! a turn that raises the objective (the start fixes the order; the
-//! splicing says which way round fits), then the tree starts too. Every
-//! tree's root is returned with where its climb finished, so that roots the
-//! data cannot tell apart ([`ROOT_GAP`]) are left to the user.
+//! splicing says which way round fits), then the tree starts too. A root
+//! the user names is theirs, not a candidate: its tree start alone is
+//! climbed, and only when none grows from it ([`NoTree`]) the k-means
+//! starts instead. Every tree's root is returned with where its climb
+//! finished, so that roots the data cannot tell apart ([`ROOT_GAP`]) are
+//! left to the user.
 
 use super::blocks::GenePrior;
 use super::fit::{starts_per_batch, DeviceReads, Fit, SHARE_START};
@@ -268,7 +271,7 @@ pub fn tree_start_from_roots(
     lineages: usize,
     roots: &[usize],
 ) -> Option<Places> {
-    tree_place_from_roots(&scores_of(reads, h), lineages, roots)
+    tree_place_from_roots(&scores_of(reads, h), lineages, roots).ok()
 }
 
 /// A tree needs two lineages and more pseudobulks than its ends.
@@ -302,18 +305,77 @@ fn farthest_ends(
         .collect()
 }
 
+/// Why no tree start grows from the root the user names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoTree {
+    /// One lineage: a tree needs two.
+    OneLineage,
+    /// No more pseudobulks than the tree's ends.
+    TooFew,
+    /// The pseudobulks' neighbour graph falls apart, so the root does not
+    /// reach them all.
+    Apart,
+    /// The tree from the root leaves a lineage without a pseudobulk.
+    EmptyLineage,
+}
+
+impl NoTree {
+    /// What a result says of a root named but not grown from: why, how
+    /// many of the `p` pseudobulks are the root's (`roots`, `mostly`
+    /// whether mostly of its cells, [`root_pseudobulks`]), and what to try
+    /// (`lineages` asked).
+    #[must_use]
+    pub fn note(self, roots: usize, p: usize, mostly: bool, lineages: usize) -> String {
+        let (why, fix) = match self {
+            Self::OneLineage => (
+                "with one lineage there is no tree to grow from a root".to_string(),
+                "ask for two or more lineages",
+            ),
+            Self::TooFew => (
+                format!("{p} pseudobulks are too few for a tree of {lineages} lineages"),
+                "ask for fewer lineages, or fit more pseudobulks",
+            ),
+            Self::Apart => (
+                "the pseudobulks' neighbour graph falls apart, so the root does not reach them all"
+                    .to_string(),
+                "fit on cells that form one trajectory (drop a separate type), or name a root \
+                 inside the part that holds the trajectory",
+            ),
+            Self::EmptyLineage => (
+                format!("a tree from the root leaves one of the {lineages} lineages empty"),
+                "ask for fewer lineages, or name a root nearer an end of the trajectory",
+            ),
+        };
+        let held = if mostly {
+            format!("{roots} of {p} pseudobulks are mostly root cells")
+        } else {
+            format!(
+                "no pseudobulk of {p} is mostly root cells, so the root was the one richest in them"
+            )
+        };
+        format!(
+            "no tree start grows from this root ({why}; {held}), so the k-means starts ran \
+             instead and the trajectory does not grow from these cells, nor need its time run \
+             from them: {fix}, and rerun with the same root-cells"
+        )
+    }
+}
+
 fn tree_place_from_roots(
     scores: &DMatrix<f64>,
     lineages: usize,
     roots: &[usize],
-) -> Option<Places> {
-    if roots.is_empty() || !tree_sized(scores.nrows(), lineages) {
-        return None;
+) -> std::result::Result<Places, NoTree> {
+    if lineages < 2 {
+        return Err(NoTree::OneLineage);
+    }
+    if !tree_sized(scores.nrows(), lineages) {
+        return Err(NoTree::TooFew);
     }
     let adj = knn_graph(scores);
-    let dr = reaching(&adj, roots)?;
+    let dr = reaching(&adj, roots).ok_or(NoTree::Apart)?;
     let tips = farthest_ends(&adj, dr.clone(), lineages);
-    tree_from_root(&dr, &tips)
+    tree_from_root(&dr, &tips).ok_or(NoTree::EmptyLineage)
 }
 
 fn tree_places(scores: &DMatrix<f64>, lineages: usize) -> Vec<Places> {
@@ -567,6 +629,9 @@ pub struct Climbed {
     /// The root of the fit, an index of `roots`: the tree start it grew
     /// from; `None` when a k-means start won.
     pub root: Option<usize>,
+    /// Why no tree start grew from the root the user named, the k-means
+    /// starts run instead; `None` with no root named or one grown from.
+    pub unrooted: Option<NoTree>,
 }
 
 /// The pseudobulks at a tree start's root: the earliest [`ROOT_REGION`] of
@@ -604,8 +669,9 @@ pub fn root_gap(finished: &[f32]) -> Option<f32> {
 /// from every one of [`BRANCH_STARTS`], all climbed to the end together
 /// ([`climb_all`]) and each tree's best kept, with its root; apart, the k-means start
 /// and each lineage turned round in turn (a turn kept when it raises the
-/// objective), then the trees too. With no tree start to be had (one
-/// lineage, the graph falling apart) the k-means starts run either way.
+/// objective), then the trees too. A root the user names is theirs: its
+/// tree start alone climbs. With no tree start to be had (one lineage, the
+/// graph falling apart) the k-means starts run either way.
 pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
     let prior = GridPrior::new(opts.points, 1.0, opts.kappa)
         .map_err(|e| legume_numeric::candle::candle_core::Error::Msg(e.to_string()))?;
@@ -621,18 +687,20 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
         let mut one = climbed(&[params_from(reads, opts, places)], at.as_deref())?;
         Ok((one.fits.swap_remove(0), one.objectives[0]))
     };
-    let trees: Vec<Places> = if opts.roots.is_empty() {
-        tree_places(&scores, opts.lineages)
+    let named = !opts.roots.is_empty();
+    let (trees, unrooted) = if named {
+        match tree_place_from_roots(&scores, opts.lineages, &opts.roots) {
+            Ok(tree) => (vec![tree], None),
+            Err(why) => {
+                log::warn!(
+                    "ode climb: no tree start grows from the root named ({why:?}); the k-means starts run instead"
+                );
+                (Vec::new(), Some(why))
+            }
+        }
     } else {
-        tree_place_from_roots(&scores, opts.lineages, &opts.roots)
-            .into_iter()
-            .collect()
+        (tree_places(&scores, opts.lineages), None)
     };
-    if !opts.roots.is_empty() && trees.is_empty() {
-        log::warn!(
-            "ode climb: no tree start grows from the root named (one lineage, or the pseudobulks' graph falls apart); the k-means starts run instead"
-        );
-    }
     let mut tried: Vec<TriedRoot> = Vec::with_capacity(trees.len());
     let mut best: Option<(Fit, f32)> = None;
     // Whether `other` is the best so far, kept.
@@ -644,7 +712,8 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
         better
     };
     let mut root = None;
-    if !opts.trunk || trees.is_empty() {
+    // A named root's tree start races no k-means start.
+    if trees.is_empty() || (!opts.trunk && !named) {
         let mut reversed = vec![false; opts.lineages];
         let mut best_kmeans = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
         for l in 0..opts.lineages {
@@ -710,6 +779,7 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
         objective,
         roots: tried,
         root,
+        unrooted,
     })
 }
 

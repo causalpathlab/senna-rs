@@ -310,6 +310,10 @@ pub struct RunOutputs {
     /// posteriors (string and number columns, keyed by `cell`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_time: Option<String>,
+    /// The lineages some cell of `cell_time` is most on: fewer than an ode
+    /// fit asked for when a lineage holds no cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_time_lineages: Option<usize>,
     /// `{out}.cell_velocity.parquet`, read by `senna view` when present:
     /// every cell's velocity in the coordinates of `cell_embedding`, row
     /// for row.
@@ -330,10 +334,15 @@ pub struct RunOutputs {
     /// the root it chose; absent when no tree start won (or on older runs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_cells: Option<String>,
-    /// The `--root-cells` list an ode fit was given whose tree start lost
-    /// to a start with no root: the trajectory was not grown from it.
+    /// The `--root-cells` list an ode fit was given that no tree start
+    /// grew from (the k-means starts ran instead): the trajectory was not
+    /// grown from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_cells_unused: Option<String>,
+    /// Why no tree start grew from `root_cells_unused`, with how many
+    /// pseudobulks were the root's and what to try.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_cells_unused_why: Option<String>,
     /// Fields this version does not know, written by another tool or a
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]
