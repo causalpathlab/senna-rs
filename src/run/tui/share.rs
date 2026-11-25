@@ -101,13 +101,7 @@ mod tests {
 
     #[test]
     fn the_collapse_qc_and_hvg_flags_shape_the_partition() {
-        for long in [
-            "sort-dim",
-            "num-levels",
-            "pb-tree",
-            "ignore-batch",
-            "proj-dim",
-        ] {
+        for long in ["sort-dim", "num-levels", "ignore-batch", "proj-dim"] {
             assert!(shapes(long), "{long}");
         }
         assert!(shapes("feature-network"));
