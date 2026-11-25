@@ -28,13 +28,18 @@ pub(crate) fn label_key(s: &str) -> String {
 
 /// The round made from the manifest at `path`: a manifest whose
 /// `annotate.source` resolves to it, in the same directory or, named
-/// after it, in a results day folder of its project ([`project_rounds`]).
+/// after it, in a results day folder of its project ([`day_folders`]).
 pub(crate) fn made_from(path: &Path) -> Option<PathBuf> {
+    made_from_in(path, &day_folders(path))
+}
+
+/// [`made_from`], the project's results day folders `days` given.
+fn made_from_in(path: &Path, days: &[PathBuf]) -> Option<PathBuf> {
     // lupin names a round's successor `{stem}.r{N}.senna.json`; prefer
     // that chain over any other round made from this one.
     let stem = run_manifest::derive_out_prefix(&files::name(path));
     let mut found = siblings(path, ".senna.json");
-    found.extend(project_rounds(path, &stem));
+    found.extend(day_rounds(path, &stem, days));
     found.sort_by_key(|p| !files::name(p).starts_with(&format!("{stem}.r")));
     found.into_iter().find(|p| {
         read_json::<Value>(p)
@@ -48,32 +53,43 @@ pub(crate) fn made_from(path: &Path) -> Option<PathBuf> {
     })
 }
 
-/// The manifests named `{stem}.*.senna.json` (as lupin names a run's
-/// rounds, `stem` the run's) in the results day folders (`results/*/`) of
-/// the project of the manifest at `path` but its own folder: the nearest
-/// folder above it holding `.legume` (legume-mcp's mark of a project),
-/// else the nearest holding `results/`. lupin may write a round there
-/// while the run sits deeper (`results/{day}/ode/`).
-fn project_rounds(path: &Path, stem: &str) -> Vec<PathBuf> {
+/// The results day folders (`results/*/`) of the project of the manifest
+/// at `path`: the nearest folder above it holding `.legume` (legume-mcp's
+/// mark of a project) and `results/`, else the nearest holding `results/`.
+/// lupin may write a round there while the run sits deeper
+/// (`results/{day}/ode/`).
+fn day_folders(path: &Path) -> Vec<PathBuf> {
     let Ok(dir) = std::path::absolute(run_manifest::manifest_dir(path)) else {
         return Vec::new();
     };
+    let results = |a: &&Path| a.join("results").is_dir();
     let project = dir
         .ancestors()
+        .filter(results)
         .find(|a| a.join(".legume").is_dir())
-        .or_else(|| dir.ancestors().find(|a| a.join("results").is_dir()));
+        .or_else(|| dir.ancestors().find(results));
     let Some(Ok(days)) = project.map(|p| std::fs::read_dir(p.join("results"))) else {
         return Vec::new();
     };
+    days.flatten()
+        .map(|d| d.path())
+        .filter(|d| d.is_dir())
+        .collect()
+}
+
+/// The manifests named `{stem}.*.senna.json` (as lupin names a run's
+/// rounds, `stem` the run's) in the day folders `days` but that of the
+/// manifest at `path`, sorted.
+fn day_rounds(path: &Path, stem: &str, days: &[PathBuf]) -> Vec<PathBuf> {
+    let own = run_manifest::manifest_dir(path);
     let named = |p: &PathBuf| {
         files::name(p)
             .strip_prefix(&format!("{stem}."))
             .is_some_and(|rest| rest.ends_with(".senna.json"))
     };
     let mut found: Vec<PathBuf> = days
-        .flatten()
-        .map(|d| d.path())
-        .filter(|d| d.is_dir() && !same_file(d, &dir))
+        .iter()
+        .filter(|d| !same_file(d, own))
         .filter_map(|d| std::fs::read_dir(d).ok())
         .flat_map(|files| files.flatten().map(|f| f.path()).filter(named))
         .collect();
@@ -84,10 +100,12 @@ fn project_rounds(path: &Path, stem: &str) -> Vec<PathBuf> {
 /// The newest round of the run at `run` (a run's manifest), following
 /// [`made_from`] to the end of the chain; `None` when it has none.
 fn newest_round(run: &Path) -> Option<PathBuf> {
-    let mut at = made_from(run)?;
+    // One project, so its day folders are found once for the whole chain.
+    let days = day_folders(run);
+    let mut at = made_from_in(run, &days)?;
     // A chain is short; the bound stops a cycle of rounds naming each other.
     for _ in 0..64 {
-        match made_from(&at) {
+        match made_from_in(&at, &days) {
             Some(next) => at = next,
             None => break,
         }

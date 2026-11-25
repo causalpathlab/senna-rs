@@ -75,4 +75,17 @@ fn an_unused_root_says_why_and_what_its_cells_are() {
     assert_eq!(root["mostly"], "HSC (100%)");
     assert_eq!(root["typed_by"]["grouping"], "cell type");
     assert_eq!(out["lineages"], json!({"asked": 10, "with_cells": 8}));
+
+    // Untyped, it leads to the annotation; unreadable, it still says unused.
+    std::fs::remove_file(dir.path().join("root.txt.source.json")).unwrap();
+    assert!(decision_fields(&m, &Types::new(&run, &m), &mut json!({})).untyped);
+    std::fs::remove_file(dir.path().join("root.txt")).unwrap();
+    let mut out = json!({});
+    decision_fields(&m, &Types::new(&run, &m), &mut out);
+    let root = &out["root"];
+    assert_eq!(
+        (&root["used"], &root["note"]),
+        (&json!(false), &json!("one lineage"))
+    );
+    assert!(root["error"].is_string());
 }

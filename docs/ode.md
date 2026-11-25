@@ -84,8 +84,8 @@ left free. Only the invariants are reported: times, rates and levels.
    type). On a trunk the tree starts alone run. A named root is the
    user's, not a candidate: its tree start alone runs, raced by no other,
    and only when no tree grows from it (one lineage, too few pseudobulks,
-   the graph falling apart, a lineage left empty) the k-means starts run
-   instead, the root recorded as unused with why. The best objective wins;
+   the graph falling apart, a lineage left empty) or its climb diverges
+   the k-means starts run instead, the root recorded as unused with why. The best objective wins;
    a start whose objective is not finite never does.
 2. **Genes at the mode**: every pseudobulk sits at its most probable row
    under the mode, and every gene's rates are the mode of its conditional

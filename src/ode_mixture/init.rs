@@ -28,8 +28,8 @@
 //! a turn that raises the objective (the start fixes the order; the
 //! splicing says which way round fits), then the tree starts too. A root
 //! the user names is theirs, not a candidate: its tree start alone is
-//! climbed, and only when none grows from it ([`NoTree`]) the k-means
-//! starts instead. Every tree's root is returned with where its climb
+//! climbed, and only when none grows from it or its climb diverges
+//! ([`NoTree`]) the k-means starts instead. Every tree's root is returned with where its climb
 //! finished, so that roots the data cannot tell apart ([`ROOT_GAP`]) are
 //! left to the user.
 
@@ -317,6 +317,8 @@ pub enum NoTree {
     Apart,
     /// The tree from the root leaves a lineage without a pseudobulk.
     EmptyLineage,
+    /// The climb from the root's tree start diverged.
+    Diverged,
 }
 
 impl NoTree {
@@ -329,21 +331,27 @@ impl NoTree {
         let (why, fix) = match self {
             Self::OneLineage => (
                 "with one lineage there is no tree to grow from a root".to_string(),
-                "ask for two or more lineages",
+                "ask for two or more lineages and rerun with the same root-cells",
             ),
             Self::TooFew => (
                 format!("{p} pseudobulks are too few for a tree of {lineages} lineages"),
-                "ask for fewer lineages, or fit more pseudobulks",
+                "ask for fewer lineages, or fit more pseudobulks, and rerun with the same \
+                 root-cells",
             ),
             Self::Apart => (
                 "the pseudobulks' neighbour graph falls apart, so the root does not reach them all"
                     .to_string(),
-                "fit on cells that form one trajectory (drop a separate type), or name a root \
-                 inside the part that holds the trajectory",
+                "fit on cells that form one trajectory (drop a separate type) and rerun with the \
+                 same root-cells, or name a root inside the part that holds the trajectory",
             ),
             Self::EmptyLineage => (
                 format!("a tree from the root leaves one of the {lineages} lineages empty"),
-                "ask for fewer lineages, or name a root nearer an end of the trajectory",
+                "ask for fewer lineages and rerun with the same root-cells, or name a root \
+                 nearer an end of the trajectory",
+            ),
+            Self::Diverged => (
+                "the climb from the root's tree start diverged".to_string(),
+                "rerun with the same root-cells and a smaller learning rate (flag lr)",
             ),
         };
         let held = if mostly {
@@ -356,7 +364,7 @@ impl NoTree {
         format!(
             "no tree start grows from this root ({why}; {held}), so the k-means starts ran \
              instead and the trajectory does not grow from these cells, nor need its time run \
-             from them: {fix}, and rerun with the same root-cells"
+             from them: {fix}"
         )
     }
 }
@@ -670,8 +678,9 @@ pub fn root_gap(finished: &[f32]) -> Option<f32> {
 /// ([`climb_all`]) and each tree's best kept, with its root; apart, the k-means start
 /// and each lineage turned round in turn (a turn kept when it raises the
 /// objective), then the trees too. A root the user names is theirs: its
-/// tree start alone climbs. With no tree start to be had (one lineage, the
-/// graph falling apart) the k-means starts run either way.
+/// tree start alone climbs, the k-means starts only when it diverges. With
+/// no tree start to be had (one lineage, the graph falling apart) the
+/// k-means starts run either way.
 pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
     let prior = GridPrior::new(opts.points, 1.0, opts.kappa)
         .map_err(|e| legume_numeric::candle::candle_core::Error::Msg(e.to_string()))?;
@@ -687,8 +696,24 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
         let mut one = climbed(&[params_from(reads, opts, places)], at.as_deref())?;
         Ok((one.fits.swap_remove(0), one.objectives[0]))
     };
+    // The best k-means start: each lineage turned round in turn, a turn
+    // kept when it raises the objective.
+    let kmeans = || -> Result<(Fit, f32)> {
+        let mut reversed = vec![false; opts.lineages];
+        let mut best = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
+        for l in 0..opts.lineages {
+            reversed[l] = true;
+            let other = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
+            if beats(other.1, best.1) {
+                best = other;
+            } else {
+                reversed[l] = false;
+            }
+        }
+        Ok(best)
+    };
     let named = !opts.roots.is_empty();
-    let (trees, unrooted) = if named {
+    let (trees, mut unrooted) = if named {
         match tree_place_from_roots(&scores, opts.lineages, &opts.roots) {
             Ok(tree) => (vec![tree], None),
             Err(why) => {
@@ -702,31 +727,13 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
         (tree_places(&scores, opts.lineages), None)
     };
     let mut tried: Vec<TriedRoot> = Vec::with_capacity(trees.len());
-    let mut best: Option<(Fit, f32)> = None;
-    // Whether `other` is the best so far, kept.
-    let mut keep = |other: (Fit, f32)| {
-        let better = best.as_ref().is_none_or(|b| beats(other.1, b.1));
-        if better {
-            best = Some(other);
-        }
-        better
+    // A named root's tree start races no k-means start.
+    let mut best = if trees.is_empty() || (!opts.trunk && !named) {
+        Some(kmeans()?)
+    } else {
+        None
     };
     let mut root = None;
-    // A named root's tree start races no k-means start.
-    if trees.is_empty() || (!opts.trunk && !named) {
-        let mut reversed = vec![false; opts.lineages];
-        let mut best_kmeans = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
-        for l in 0..opts.lineages {
-            reversed[l] = true;
-            let other = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
-            if beats(other.1, best_kmeans.1) {
-                best_kmeans = other;
-            } else {
-                reversed[l] = false;
-            }
-        }
-        keep(best_kmeans);
-    }
     if !trees.is_empty() {
         // Every tree's starts side by side: on a trunk from its own branch
         // times and from each of BRANCH_STARTS; apart, the one.
@@ -763,7 +770,15 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
             }
         }
         if let Some(b) = top {
-            if keep((all.start(b)?, all.objectives[b])) {
+            let objective = all.objectives[b];
+            if named && !objective.is_finite() {
+                log::warn!(
+                    "ode climb: the root named's tree start diverged; the k-means starts run instead"
+                );
+                unrooted = Some(NoTree::Diverged);
+                best = Some(kmeans()?);
+            } else if best.as_ref().is_none_or(|k| beats(objective, k.1)) {
+                best = Some((all.start(b)?, objective));
                 root = Some(b / per_tree);
             }
         }

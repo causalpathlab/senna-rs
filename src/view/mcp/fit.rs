@@ -174,36 +174,35 @@ fn decision_fields(m: &RunManifest, types: &Types, out: &mut Value) -> Said {
 /// The root an ODE run grew from (`root_cells` in its manifest `m`): the
 /// list, its count, whether the user named it (`from`, by the fit's
 /// arguments), and what its cells are ([`typed_root`]); and whether they
-/// are typed. A named list no tree start grew from (`root_cells_unused`)
-/// is said to be unused, with why and what its cells are, and `None` for
-/// typed. `None` when the run records no root.
+/// are typed (`None` when the list cannot be read). A named list no tree
+/// start grew from (`root_cells_unused`) is said to be unused, with why.
+/// `None` when the run records no root.
 fn root_field(m: &RunManifest, types: &Types) -> Option<(Value, Option<bool>)> {
     let dir = run_manifest::manifest_dir(types.run);
-    let (list, used) = match (&m.outputs.root_cells, &m.outputs.root_cells_unused) {
-        (Some(list), _) => (list, true),
-        (None, Some(list)) => (list, false),
-        (None, None) => return None,
-    };
-    let path = run_manifest::resolve(dir, list);
-    let cells = match legume_numeric::matrix::common_io::read_name_list(&path.to_string_lossy()) {
-        Ok(cells) => cells,
-        Err(e) => return Some((json!({"cells": path, "error": format!("{e:#}")}), None)),
-    };
-    if !used {
+    let used = m.outputs.root_cells.as_deref();
+    let path = run_manifest::resolve(dir, used.or(m.outputs.root_cells_unused.as_deref())?);
+    let mut root = if used.is_some() {
+        let named = m
+            .train_args
+            .as_ref()
+            .is_some_and(|t| !t.args["root_cells"].is_null());
+        let from = if named { "root-cells" } else { "fit" };
+        json!({"cells": path, "from": from})
+    } else {
         let note = m.outputs.root_cells_unused_why.as_deref().unwrap_or(
             "the fit was given this root but did not grow from it, so the trajectory does not \
              grow from these cells and its time need not run from them",
         );
-        let mut root = json!({"named": path, "n": cells.len(), "used": false, "note": note});
-        typed_root(&mut root, &path, &cells, types);
-        return Some((root, None));
-    }
-    let named = m
-        .train_args
-        .as_ref()
-        .is_some_and(|t| !t.args["root_cells"].is_null());
-    let from = if named { "root-cells" } else { "fit" };
-    let mut root = json!({"cells": path, "n": cells.len(), "from": from});
+        json!({"named": path, "used": false, "note": note})
+    };
+    let cells = match legume_numeric::matrix::common_io::read_name_list(&path.to_string_lossy()) {
+        Ok(cells) => cells,
+        Err(e) => {
+            root["error"] = format!("{e:#}").into();
+            return Some((root, None));
+        }
+    };
+    root["n"] = cells.len().into();
     let typed = typed_root(&mut root, &path, &cells, types);
     Some((root, Some(typed)))
 }
