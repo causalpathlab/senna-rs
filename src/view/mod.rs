@@ -16,6 +16,7 @@ mod relabel;
 mod render;
 mod review;
 mod rounds;
+mod stage2;
 pub(crate) use rounds::typed_decisions;
 mod state;
 mod style;
@@ -96,6 +97,27 @@ pub struct ViewArgs {
 
     #[arg(long, help = "Start showing this feature's activity on the cells")]
     pub feature: Option<Box<str>>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["exclusivity", "markers_of"],
+        help = "Start on the stage-2 gain map (`senna donor-deviation`) of --feature, or of the gene ranked first (`i` in the view)"
+    )]
+    pub gain: bool,
+
+    #[arg(
+        long,
+        requires = "gain",
+        help = "With --gain, this donor's deviation drawn at every cell's state (`I` in the view)"
+    )]
+    pub donor: Option<Box<str>>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["feature", "markers_of"],
+        help = "Start coloured by stage-2 exclusivity: each cell's sample's distance to the nearest sample of another donor (`U` in the view)"
+    )]
+    pub exclusivity: bool,
 
     #[arg(
         long,
@@ -240,6 +262,37 @@ pub(crate) enum Pick {
     Time,
     /// A summary of each cell over a count source's features.
     Stat(Stat),
+    /// A gene's stage-2 log gain: each cell's own donor's deviation, or
+    /// `donor`'s at every cell's state.
+    Gain {
+        gene: Box<str>,
+        donor: Option<Box<str>>,
+    },
+    /// Each cell's stage-2 exclusivity: its sample's distance to the
+    /// nearest matched sample of another donor.
+    Exclusive,
+}
+
+impl Pick {
+    /// The one feature the pick shows, on its activity or its gain map.
+    pub(crate) fn feature(&self) -> Option<&str> {
+        match self {
+            Pick::One(f) | Pick::Gain { gene: f, .. } => Some(f),
+            _ => None,
+        }
+    }
+
+    /// The same kind of pick for feature `name`: its gain map with the same
+    /// donor when this is a gain map, else its activity.
+    pub(crate) fn for_feature(this: Option<&Self>, name: Box<str>) -> Self {
+        match this {
+            Some(Pick::Gain { donor, .. }) => Pick::Gain {
+                gene: name,
+                donor: donor.clone(),
+            },
+            _ => Pick::One(name),
+        }
+    }
 }
 
 /// Activity currently drawn: what it is of, where, and its levels.
@@ -304,6 +357,8 @@ pub(crate) struct Scene {
     pub source: Source,
     activity: Option<Activity>,
     shown: Option<Shown>,
+    /// Each point's stage-2 row, by space ([`stage2::Stage2Rows`]).
+    stage2_rows: stage2::Stage2Rows,
     ramp: Vec<Rgb>,
     suggestions: Option<Suggestions>,
     /// Draw orders computed for recent layer states; see `layers`.
@@ -379,6 +434,7 @@ impl Scene {
             activity: None,
             shown: None,
             ramp: color::activity_ramp(256),
+            stage2_rows: Default::default(),
             geometry: None,
             patient: true,
             suggestions: None,
@@ -455,6 +511,15 @@ impl Scene {
         }
         if let Some(g) = &args.markers_of {
             scene.set_pick(Pick::Markers(g.clone()));
+        } else if let (true, Some(f)) = (args.gain, &args.feature) {
+            scene.set_pick(Pick::Gain {
+                gene: f.clone(),
+                donor: args.donor.clone(),
+            });
+        } else if args.gain {
+            scene.rank_gains(args.donor.clone());
+        } else if args.exclusivity {
+            scene.toggle_exclusive();
         } else if let Some(f) = &args.feature {
             scene.set_pick(Pick::One(f.clone()));
         }
@@ -493,6 +558,8 @@ impl Scene {
             activity: None,
             shown: self.shown.clone(),
             ramp: self.ramp.clone(),
+            // The same spaces, so the same rows.
+            stage2_rows: self.stage2_rows.clone(),
             suggestions: None,
             orders: std::cell::RefCell::default(),
             shown_ids: self.shown_ids,

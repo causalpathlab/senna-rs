@@ -44,7 +44,7 @@ mod contrast_fit;
 mod fit_genes;
 mod inputs;
 mod matched_other_donor_units;
-mod outputs;
+pub(crate) mod outputs;
 mod same_section_gene_factor;
 mod samples;
 mod section_jackknife;
@@ -326,6 +326,11 @@ pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
         number_of_samples,
         anchor_samples.len(),
     )?;
+    // The tables are written: a manifest that cannot be changed (read-only,
+    // say) costs the viewer its link to them, not the run.
+    if let Err(e) = outputs::record_in_stage1_manifest(&args.from, &out) {
+        warn!("stage 2 is written but not recorded in {}: {e}", args.from);
+    }
     Ok(())
 }
 

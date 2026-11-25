@@ -432,17 +432,19 @@ impl App {
         let Some(last) = list.len().checked_sub(1) else {
             return false;
         };
-        let at = match &self.scene.pick {
-            Some(Pick::One(f)) => list.iter().position(|x| x == f),
-            _ => None,
-        };
+        let at = self
+            .scene
+            .pick
+            .as_ref()
+            .and_then(Pick::feature)
+            .and_then(|f| list.iter().position(|x| x.as_ref() == f));
         let next = match at {
             Some(i) => legume_tui::keys::moved(i, delta, last),
             None if delta > 0 => 0,
             None => last,
         };
         let name = list[next].clone();
-        self.change(|s| s.set_pick(Pick::One(name)));
+        self.change(|s| s.show_feature(name));
         true
     }
 
@@ -463,7 +465,7 @@ impl App {
             }
             other => {
                 self.modal = other;
-                self.change(|s| s.set_pick(Pick::One(name)));
+                self.change(|s| s.show_feature(name));
             }
         }
         true
@@ -772,8 +774,7 @@ impl App {
     fn pdf_name(&self) -> String {
         let s = self.scene.current();
         let what = match self.scene.chart.as_ref().map(|c| c.kind) {
-            Some(crate::view::chart::Kind::Structure) => "structure".to_string(),
-            Some(crate::view::chart::Kind::Heatmap) => "heatmap".to_string(),
+            Some(kind) => kind.slug().to_string(),
             None => format!("{}.{}", s.method, s.kind.slug()),
         };
         format!("{}.view.{what}", here(&self.scene.data.prefix))

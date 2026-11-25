@@ -80,7 +80,8 @@ pub use paths::{
 pub use run_kind::{CellSpace, ExpressionModel, RunKind};
 pub use sections::{
     record_train_args, ArtifactScale, Decision, DecisionOption, LayoutEntry, RunAnnotate,
-    RunCluster, RunData, RunDefaults, RunHistory, RunLayout, RunOutputs, TrainArgsRecord,
+    RunCluster, RunData, RunDefaults, RunHistory, RunLayout, RunOutputs, RunStage2,
+    TrainArgsRecord,
 };
 pub use write::{write_run_manifest, write_run_manifest_with, RunDescription};
 
@@ -116,6 +117,9 @@ pub struct RunManifest {
     pub cluster: RunCluster,
     #[serde(default)]
     pub annotate: RunAnnotate,
+    /// What `senna donor-deviation` wrote from this run.
+    #[serde(default, skip_serializing_if = "RunStage2::is_empty")]
+    pub stage2: RunStage2,
     #[serde(default)]
     pub defaults: RunDefaults,
     /// The fit configuration this run was trained with — see
@@ -155,6 +159,7 @@ impl RunManifest {
             layout: RunLayout::default(),
             cluster: RunCluster::default(),
             annotate: RunAnnotate::default(),
+            stage2: RunStage2::default(),
             defaults: RunDefaults::default(),
             train_args: None,
             history: None,
@@ -326,6 +331,18 @@ impl RunManifest {
             .into_owned();
         let all = cell_to_pb_all_path(&full);
         Some(if Path::new(&all).is_file() { all } else { full })
+    }
+
+    /// Change the manifest at `path` in place: load it, let `change` set
+    /// what a later command adds (`rel` makes a written path relative to
+    /// the manifest, as every recorded path is), and save it.
+    pub fn update(
+        path: &Path,
+        change: impl FnOnce(&mut Self, &dyn Fn(&str) -> String),
+    ) -> anyhow::Result<()> {
+        let (mut m, dir) = Self::load(path)?;
+        change(&mut m, &|written| rel_to_manifest(&dir, written));
+        m.save(path)
     }
 
     /// Write the manifest to `path`, through a link, and on to the disk

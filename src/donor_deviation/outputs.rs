@@ -61,24 +61,56 @@ pub(crate) struct DonorDeviationResults<'a> {
     pub fitted_genes: &'a [FittedGene],
 }
 
+/// The tables' names, in the order they are written: each is
+/// `{out}.{name}.parquet`.
+pub(crate) const TABLES: [&str; 4] = [
+    "donor_gene_deviation",
+    "donor_gene_deviation_without_batch",
+    "donor_sample_states",
+    "donor_cell_states",
+];
+
+/// `{out}.{table}.parquet`.
+pub(crate) fn table_path(out: &str, table: &str) -> String {
+    format!("{out}.{table}.parquet")
+}
+
 pub(crate) fn write_donor_deviation_outputs(
     out: &str,
     results: &DonorDeviationResults,
 ) -> anyhow::Result<()> {
     mkdir_parent(out)?;
-    write_gene_table(
-        &format!("{out}.donor_gene_deviation.parquet"),
-        results,
-        WhichFits::FullFits,
-    )?;
-    write_gene_table(
-        &format!("{out}.donor_gene_deviation_without_batch.parquet"),
-        results,
-        WhichFits::RefitsWithoutEachBatch,
-    )?;
-    write_sample_state_table(&format!("{out}.donor_sample_states.parquet"), results)?;
-    write_cell_state_table(&format!("{out}.donor_cell_states.parquet"), results)?;
+    let [genes, without_batch, samples, cells] = TABLES.map(|t| table_path(out, t));
+    write_gene_table(&genes, results, WhichFits::FullFits)?;
+    write_gene_table(&without_batch, results, WhichFits::RefitsWithoutEachBatch)?;
+    write_sample_state_table(&samples, results)?;
+    write_cell_state_table(&cells, results)?;
     Ok(())
+}
+
+/// Record the tables in the stage-1 run's manifest (`from`), so a viewer of
+/// the run finds them; a later stage 2 on the run takes the slot over.
+pub(crate) fn record_in_stage1_manifest(from: &str, out: &str) -> anyhow::Result<()> {
+    use senna::run_manifest::{manifest_path_for, RunManifest, RunStage2};
+    let path = manifest_path_for(from);
+    RunManifest::update(std::path::Path::new(&path), |m, rel| {
+        let [genes, without_batch, samples, cells] = TABLES.map(|t| Some(rel(&table_path(out, t))));
+        m.stage2 = RunStage2 {
+            donor_gene_deviation: genes,
+            donor_gene_deviation_without_batch: without_batch,
+            donor_sample_states: samples,
+            donor_cell_states: cells,
+            settings: Some(rel(&settings_path(out))),
+            unknown: std::mem::take(&mut m.stage2.unknown),
+        };
+    })?;
+    info!("Recorded stage 2 in {path}");
+    Ok(())
+}
+
+/// `{out}.donor_deviation.json`.
+fn settings_path(out: &str) -> String {
+    format!("{out}.donor_deviation.json")
 }
 
 /// Which of each gene's fits a gene table holds.
@@ -265,7 +297,7 @@ pub(crate) fn write_settings_record(
         "seed": args.seed,
         "batch_jackknife": "each batch left out in turn, refitted from the full fit",
     });
-    let path = format!("{out}.donor_deviation.json");
+    let path = settings_path(out);
     std::fs::write(&path, serde_json::to_string_pretty(&record)?)?;
     info!("Wrote {path}");
     Ok(())

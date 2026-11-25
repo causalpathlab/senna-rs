@@ -36,6 +36,10 @@ const TOP_RANGE: (usize, usize) = (1, 100);
 pub enum Kind {
     Structure,
     Heatmap,
+    /// Stage 2: the gene shown, its log gain by group × donor.
+    Gains,
+    /// Stage 2: every gene's log gain × |z| per donor at one state.
+    Volcano,
 }
 
 impl Kind {
@@ -44,13 +48,36 @@ impl Kind {
         match self {
             Kind::Structure => "structure plot",
             Kind::Heatmap => "heatmap",
+            Kind::Gains => "gain heatmap",
+            Kind::Volcano => "volcano",
+        }
+    }
+
+    /// The word for it in a file name.
+    #[must_use]
+    pub fn slug(self) -> &'static str {
+        match self {
+            Kind::Structure => "structure",
+            Kind::Heatmap => "heatmap",
+            Kind::Gains => "gains",
+            Kind::Volcano => "volcano",
         }
     }
 }
 
-/// What a chart was made from: the space, the grouping, and the features
-/// per group; made again when any changes.
-type ChartKey = (usize, Option<usize>, usize);
+/// What a chart was made from, made again when any of it changes: the
+/// space and the grouping, and what its kind also depends on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChartKey {
+    space: usize,
+    colour: Option<usize>,
+    /// Top features per group (the heatmap).
+    top: usize,
+    /// The feature shown (the gain heatmap).
+    feature: Option<Box<str>>,
+    /// The group focused (the volcano).
+    focus: Option<u32>,
+}
 
 pub struct Chart {
     pub kind: Kind,
@@ -81,6 +108,8 @@ impl Chart {
 enum Data {
     Structure(Structure),
     Heatmap(Heatmap),
+    Gains(super::stage2::GainHeat),
+    Volcano(super::stage2::Volcano),
 }
 
 /// Cells' topic mixtures, grouped into panels.
@@ -107,17 +136,21 @@ pub struct Heatmap {
 }
 
 impl Scene {
-    /// Map → structure plot (runs with topics) → heatmap → map.
+    /// Map → structure plot (runs with topics) → heatmap → gain heatmap →
+    /// volcano (runs with a stage 2) → map.
     pub fn cycle_chart(&mut self) {
         if self.current().axis() != Axis::Cells {
             self.note = Some("charts are drawn from a cell view (tab)".into());
             return;
         }
         let topic = self.is_topic_run();
+        let stage2 = self.has_stage2();
         let next = match self.chart.as_ref().map(|c| c.kind) {
             None if topic => Some(Kind::Structure),
             None | Some(Kind::Structure) => Some(Kind::Heatmap),
-            Some(Kind::Heatmap) => None,
+            Some(Kind::Heatmap) if stage2 => Some(Kind::Gains),
+            Some(Kind::Gains) => Some(Kind::Volcano),
+            Some(Kind::Heatmap | Kind::Volcano) => None,
         };
         let top = self.chart.as_ref().map_or(TOP_START, |c| c.top);
         self.chart = next.map(|kind| Chart {
@@ -155,7 +188,20 @@ impl Scene {
     /// Make the chart again if the space, grouping or feature count changed.
     pub fn refresh_chart(&mut self) {
         let Some(c) = self.chart.as_ref() else { return };
-        let key = (self.space, self.colour, c.top);
+        let key = ChartKey {
+            space: self.space,
+            colour: self.colour,
+            top: if c.kind == Kind::Heatmap { c.top } else { 0 },
+            feature: (c.kind == Kind::Gains)
+                .then(|| {
+                    self.pick
+                        .as_ref()
+                        .and_then(super::Pick::feature)
+                        .map(Into::into)
+                })
+                .flatten(),
+            focus: (c.kind == Kind::Volcano).then_some(self.focus).flatten(),
+        };
         if c.made.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
@@ -166,6 +212,8 @@ impl Scene {
             }
             Kind::Structure => self.structure().map(Data::Structure),
             Kind::Heatmap => self.heatmap(top).map(Data::Heatmap),
+            Kind::Gains => self.gain_heat().map(Data::Gains),
+            Kind::Volcano => self.volcano().map(Data::Volcano),
         };
         // Not read yet: drawn again once it is, not kept as a failure.
         if crate::view::features::is_loading(&data) {
@@ -250,7 +298,7 @@ impl Scene {
         let font = Font::for_cell_height(px, false);
         let bold = Font::for_cell_height(px, true);
         match c.made.as_ref().map(|(_, d)| d) {
-            Some(Ok(d)) => draw(&mut frame, d, font, bold),
+            Some(Ok(d)) => draw(&mut frame, d, self.ringed_gene(), font, bold),
             Some(Err(e)) => chart::note(
                 &mut frame,
                 &format!("no {}: {e}", c.kind.name()),
@@ -350,7 +398,8 @@ fn shown<'a>(v: &'a [f32], n: usize, cols: &'a [usize]) -> ByFn<impl Fn(usize, u
 }
 
 /// A made chart into `frame`, in the page's colours.
-fn draw(frame: &mut Frame, d: &Data, font: Font, bold: Font) {
+/// `ring_gene`: the gene a volcano rings, the one shown.
+fn draw(frame: &mut Frame, d: &Data, ring_gene: Option<usize>, font: Font, bold: Font) {
     match d {
         Data::Structure(s) => {
             let palette: Vec<color::Rgb> = (0..s.k).map(|t| color::category(t, s.k)).collect();
@@ -409,6 +458,8 @@ fn draw(frame: &mut Frame, d: &Data, font: Font, bold: Font) {
                 &HeatStyle::for_theme(&color::THEME),
             );
         }
+        Data::Gains(h) => super::stage2::draw_gain_heat(frame, h, font, bold),
+        Data::Volcano(v) => super::stage2::draw_volcano(frame, v, ring_gene, font, bold),
     }
 }
 
@@ -532,8 +583,8 @@ mod tests {
             let runs = frame.take_text();
             (digest(&frame.to_image()), runs.len(), runs_digest(&runs))
         };
-        let structure = |f: &mut Frame| draw(f, &s, font, bold);
-        let heatmap = |f: &mut Frame| draw(f, &hm, font, bold);
+        let structure = |f: &mut Frame| draw(f, &s, None, font, bold);
+        let heatmap = |f: &mut Frame| draw(f, &hm, None, font, bold);
         let said = |f: &mut Frame| chart::note(f, "drawing the heatmap…", bold, &color::THEME);
         assert_eq!(
             drawn(&structure, false),
@@ -569,7 +620,7 @@ mod tests {
             Font::for_cell_height(16.0, true),
         );
         let mut frame = Frame::blank(320, 240, color::BACKGROUND);
-        draw(&mut frame, &Data::Structure(s), font, bold);
+        draw(&mut frame, &Data::Structure(s), None, font, bold);
         let img = frame.to_image();
         let at = |y: u32| img.get_pixel(40, y).0;
         let srgb = |c: color::Rgb| {
@@ -661,9 +712,19 @@ mod tests {
             let kind = match data {
                 Data::Structure(_) => Kind::Structure,
                 Data::Heatmap(_) => Kind::Heatmap,
+                Data::Gains(_) | Data::Volcano(_) => unreachable!("not made here"),
             };
             let mut c = Chart::new(kind);
-            c.made = Some(((0, Some(0), TOP_START), Ok(data)));
+            c.made = Some((
+                ChartKey {
+                    space: 0,
+                    colour: Some(0),
+                    top: TOP_START,
+                    feature: None,
+                    focus: None,
+                },
+                Ok(data),
+            ));
             scene.chart = Some(c);
             let vp = super::super::render::fit([0.0, 0.0, 1.0, 1.0], 320, 240);
             let pages = super::super::deck::view_pages(&[(&scene, vp, 16.0)]);
@@ -679,6 +740,7 @@ mod tests {
             let words: &[&str] = match kind {
                 Kind::Structure => &["topic mixture per cell", "CT2", "unassigned", "T3"],
                 Kind::Heatmap => &["top 2 features per cluster", "GENE6", "CT3"],
+                Kind::Gains | Kind::Volcano => unreachable!("not made here"),
             };
             for w in words {
                 assert!(has(w), "{} lacks {w}", kind.name());

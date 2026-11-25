@@ -110,6 +110,9 @@ impl App {
             KeyCode::Char('m') => self.step_method(1, false),
             KeyCode::Char('c') => self.change(Scene::cycle_colour),
             KeyCode::Char('y') => self.change(Scene::toggle_time),
+            KeyCode::Char('i') => self.change(Scene::toggle_gain),
+            KeyCode::Char('I') => self.change(|s| s.step_donor(1)),
+            KeyCode::Char('U') => self.change(Scene::toggle_exclusive),
             KeyCode::Char('u') => self.change_source(Scene::cycle_stat),
             // `{ }` step between views; the streamlines' density has its own.
             KeyCode::Char('(' | ')') => {

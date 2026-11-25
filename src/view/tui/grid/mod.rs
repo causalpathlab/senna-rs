@@ -43,6 +43,9 @@ enum Screen {
     View(usize),
 }
 
+/// Views `D` opens at most: more are too small to read.
+const MAX_DONOR_TILES: usize = 12;
+
 pub(super) struct Deck {
     apps: Vec<App>,
     /// The view on screen, or last on screen while the grid shows.
@@ -413,6 +416,11 @@ impl Deck {
                 self.grid = true;
                 self.note = None;
             }
+            KeyCode::Char('D') => {
+                if let Err(e) = self.donor_tiles(self.at) {
+                    self.apps[self.at].message = Some(e);
+                }
+            }
             KeyCode::Char('s') => self.open_save(Scope::View),
             KeyCode::Char('f') => self.toggle_saved(),
             KeyCode::Char('F') => self.focus_saved(),
@@ -466,6 +474,37 @@ impl Deck {
         // Every tile moves: lay them out again.
         self.tiles.clear();
         self.drawn = None;
+    }
+
+    /// Beside view `k`, showing a gain map, one copy per donor (the first
+    /// [`MAX_DONOR_TILES`]) drawing that donor's deviation at every cell's
+    /// state: where each donor departs, side by side, in the grid.
+    fn donor_tiles(&mut self, k: usize) -> Result<(), String> {
+        let scene = &self.apps[k].scene;
+        let Some(crate::view::Pick::Gain { gene, .. }) = scene.pick.clone() else {
+            return Err("D tiles a gain map by donor · show one first (i)".into());
+        };
+        let donors = scene.stage2_donors()?.to_vec();
+        if donors.is_empty() {
+            return Err("stage 2 has no donors".into());
+        }
+        self.note = (donors.len() > MAX_DONOR_TILES).then(|| {
+            format!(
+                "the first {MAX_DONOR_TILES} of {} donors · I steps one view through the rest",
+                donors.len()
+            )
+        });
+        for (j, donor) in donors.into_iter().take(MAX_DONOR_TILES).enumerate() {
+            self.duplicate(k + j);
+            self.apps[k + j + 1]
+                .scene
+                .set_pick(crate::view::Pick::Gain {
+                    gene: gene.clone(),
+                    donor: Some(donor),
+                });
+        }
+        self.grid = true;
+        Ok(())
     }
 
     /// Close session `k`, unless it is the last or lupin is working for it.

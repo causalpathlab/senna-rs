@@ -20,6 +20,8 @@ pub(crate) enum Ask {
     Near { name: Box<str>, centre: Centre },
     /// Features suggested for the view (`n`).
     Suggest,
+    /// Genes ranked by their stage-2 gains (`i`), of a donor's or any.
+    RankGains(Option<Box<str>>),
 }
 
 /// Whether `r` is an answer not come yet ([`LOADING`]).
@@ -203,7 +205,7 @@ impl Scene {
             title: format!("matches for “{query}”"),
             list: matches.into_iter().map(|m| (m, f32::NAN)).collect(),
         });
-        self.set_pick(Pick::One(chosen));
+        self.show_feature(chosen);
     }
 
     /// Drop the suggestions. Returns whether there were any.
@@ -213,10 +215,7 @@ impl Scene {
 
     /// The feature shown on the map, when it is one feature.
     fn shown_feature(&self) -> Option<&str> {
-        match &self.pick {
-            Some(Pick::One(f)) => Some(f.as_ref()),
-            _ => None,
-        }
+        self.pick.as_ref().and_then(Pick::feature)
     }
 
     /// Panel rows for the suggestions of the view on screen, the feature
@@ -272,17 +271,24 @@ impl Scene {
             self.note = Some("no marker table in this run; press / to search a feature".into());
             return;
         }
-        let at = match &self.pick {
-            Some(Pick::One(n)) => list.iter().position(|x| x == n),
-            _ => None,
-        };
+        let at = self
+            .pick
+            .as_ref()
+            .and_then(Pick::feature)
+            .and_then(|n| list.iter().position(|x| x.as_ref() == n));
         let n = list.len() as i64;
         let next = match at {
             Some(i) => (i as i64 + delta).rem_euclid(n),
             None if delta > 0 => 0,
             None => n - 1,
         };
-        self.set_pick(Pick::One(list[next as usize].clone()));
+        self.show_feature(list[next as usize].clone());
+    }
+
+    /// Show feature `name` the way the pick shows features: on the gain map
+    /// when one is shown, else as activity.
+    pub fn show_feature(&mut self, name: Box<str>) {
+        self.set_pick(Pick::for_feature(self.pick.as_ref(), name));
     }
 
     pub fn set_pick(&mut self, pick: Pick) {
@@ -419,27 +425,15 @@ impl Scene {
     }
 
     /// The time of every point of `space` on the ramp.
-    fn show_time(&mut self, space: usize, source: Source) {
-        let Some(times) = self.data.times.clone() else {
-            self.shown = None;
-            self.note = Some("this run has no cell times".into());
-            return;
-        };
+    fn time_levels(&self, space: usize) -> Result<(Levels, String), String> {
+        let times = self.data.times.as_ref().ok_or(NO_TIMES)?;
         let values: Vec<f32> = self.data.spaces[space]
             .points
             .names
             .iter()
             .map(|n| times.get(n).copied().unwrap_or(f32::NAN))
             .collect();
-        self.shown_ids += 1;
-        self.shown = Some(Shown {
-            id: self.shown_ids,
-            space,
-            pick: Pick::Time,
-            source,
-            title: "time".into(),
-            levels: Levels::from_values(values, false),
-        });
+        Ok((Levels::from_values(values, false), "time".into()))
     }
 
     pub fn clear_pick(&mut self) -> bool {
@@ -495,30 +489,12 @@ impl Scene {
         {
             return;
         }
-        if pick == Pick::Time {
-            self.show_time(space, source);
-            return;
-        }
-        let set = match &pick {
-            Pick::Markers(group) | Pick::Stat(Stat::Share(group)) => self.marker_features(group),
-            Pick::One(_) | Pick::Time | Pick::Stat(_) => Vec::new(),
-        };
-        let Some((activity, data)) = self.activity_and_data() else {
-            self.note = Some("no manifest to read activity from".into());
-            return;
-        };
-        let names = &data.spaces[space].points.names;
         let result = match &pick {
-            Pick::One(f) => activity
-                .levels(f, source, space, names)
-                .map(|(l, spelled)| (l, format!("{spelled} · {}", source.name()))),
-            Pick::Markers(group) => activity
-                .set_levels(&set, source, space, names)
-                .map(|(l, used)| (l, format!("{group} markers ({used}) · {}", source.name()))),
-            Pick::Stat(stat) => activity
-                .stat_levels(stat, &set, source, space, names)
-                .map(|l| (l, format!("{} · {}", stat.name(), source.name()))),
-            Pick::Time => unreachable!("time is shown above"),
+            Pick::Time => self.time_levels(space),
+            Pick::Gain { .. } | Pick::Exclusive => self.stage2_levels(&pick, space),
+            Pick::One(_) | Pick::Markers(_) | Pick::Stat(_) => {
+                self.activity_levels(&pick, space, source)
+            }
         };
         match result {
             Ok((levels, title)) => {
@@ -560,6 +536,38 @@ impl Scene {
                 } else {
                     self.note = Some(e);
                 }
+            }
+        }
+    }
+
+    /// A feature's, a marker set's or a count statistic's levels on
+    /// `space`, from the run's activity.
+    fn activity_levels(
+        &mut self,
+        pick: &Pick,
+        space: usize,
+        source: Source,
+    ) -> Result<(Levels, String), String> {
+        let set = match pick {
+            Pick::Markers(group) | Pick::Stat(Stat::Share(group)) => self.marker_features(group),
+            _ => Vec::new(),
+        };
+        let (activity, data) = self
+            .activity_and_data()
+            .ok_or("no manifest to read activity from")?;
+        let names = &data.spaces[space].points.names;
+        match pick {
+            Pick::One(f) => activity
+                .levels(f, source, space, names)
+                .map(|(l, spelled)| (l, format!("{spelled} · {}", source.name()))),
+            Pick::Markers(group) => activity
+                .set_levels(&set, source, space, names)
+                .map(|(l, used)| (l, format!("{group} markers ({used}) · {}", source.name()))),
+            Pick::Stat(stat) => activity
+                .stat_levels(stat, &set, source, space, names)
+                .map(|l| (l, format!("{} · {}", stat.name(), source.name()))),
+            Pick::Time | Pick::Gain { .. } | Pick::Exclusive => {
+                Err("not a feature's activity".into())
             }
         }
     }
@@ -646,6 +654,7 @@ impl Scene {
                 Centre::None => {}
             },
             Some(Ask::Suggest) => self.suggest(),
+            Some(Ask::RankGains(donor)) => self.rank_gains(donor),
             None => {}
         }
         // A feature shown while its values could not be read yet.
@@ -823,11 +832,16 @@ impl Scene {
             self.locked.push(n);
             return;
         }
-        if let Some(Pick::One(f)) = &self.pick {
+        if let Some(f) = self
+            .pick
+            .as_ref()
+            .and_then(Pick::feature)
+            .map(Box::<str>::from)
+        {
             let pinned = self
                 .locked
                 .iter()
-                .any(|n| n.features.iter().any(|(x, _)| x == f));
+                .any(|n| n.features.iter().any(|(x, _)| *x == f));
             if !pinned {
                 let placed = self
                     .feature_positions()
@@ -835,7 +849,7 @@ impl Scene {
                     .chain(
                         (self.current().axis() == Axis::Features).then(|| &*self.current().points),
                     )
-                    .any(|p| p.names.iter().any(|n| n == f));
+                    .any(|p| p.names.contains(&f));
                 self.note = Some(if placed {
                     format!("pinned {f} · k again clears")
                 } else {

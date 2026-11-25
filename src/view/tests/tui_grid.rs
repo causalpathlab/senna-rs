@@ -318,3 +318,30 @@ fn a_terminal_like_the_last_keeps_the_pictures_and_kitty_s_are_sent_again() {
     assert!(deck.tiles.is_empty() && deck.strip.made() == 0);
     assert_eq!(deck.cell, (8.0, 16.0));
 }
+
+#[test]
+fn d_on_a_gain_map_opens_a_view_per_donor_each_drawing_its_deviation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut first = view();
+    first.scene = crate::view::stage2::tests::scene_with_stage2(dir.path());
+    first.scene.set_pick(crate::view::Pick::One("g1".into()));
+    let mut deck = Deck::new(vec![first], Picker::halfblocks(), gallery(dir.path(), &[]));
+    // Not a gain map yet: said so, nothing opened.
+    assert!(deck.deck_key(key(KeyCode::Char('D'))));
+    assert_eq!(deck.apps.len(), 1);
+    deck.apps[0].scene.toggle_gain();
+    assert!(deck.deck_key(key(KeyCode::Char('D'))));
+    let donors: Vec<Option<String>> = deck
+        .apps
+        .iter()
+        .map(|a| match &a.scene.pick {
+            Some(crate::view::Pick::Gain { donor, .. }) => donor.as_deref().map(String::from),
+            _ => panic!("every view shows the gain map"),
+        })
+        .collect();
+    assert_eq!(
+        donors,
+        [None, Some("A".into()), Some("B".into()), Some("C".into())]
+    );
+    assert!(deck.grid);
+}
