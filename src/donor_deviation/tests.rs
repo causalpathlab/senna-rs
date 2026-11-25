@@ -543,3 +543,24 @@ fn a_block_s_entries_merge_into_the_sums_already_held() {
     super::samples::merge_by_sample(&mut entries);
     assert_eq!(entries, vec![(0, 3.0), (1, 1.0), (3, 5.0)]);
 }
+
+#[test]
+fn stage_2_is_recorded_in_the_stage_1_manifest_relative_to_it() {
+    use senna::run_manifest::{RunKind, RunManifest};
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("s1.senna.json");
+    RunManifest::new(RunKind::Bge, "s1")
+        .save(&manifest)
+        .unwrap();
+    let out = dir.path().join("s2").to_string_lossy().into_owned();
+    super::outputs::record_in_stage1_manifest(&manifest.to_string_lossy(), &out).unwrap();
+    let (m, _) = RunManifest::load(&manifest).unwrap();
+    assert_eq!(
+        m.stage2.donor_gene_deviation.as_deref(),
+        Some("s2.donor_gene_deviation.parquet")
+    );
+    assert_eq!(
+        m.stage2.settings.as_deref(),
+        Some("s2.donor_deviation.json")
+    );
+}

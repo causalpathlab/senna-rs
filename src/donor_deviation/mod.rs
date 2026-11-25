@@ -44,7 +44,7 @@ mod contrast_fit;
 mod fit_genes;
 mod inputs;
 mod matched_other_donor_units;
-mod outputs;
+pub(crate) mod outputs;
 mod same_section_gene_factor;
 mod samples;
 mod section_jackknife;
@@ -326,7 +326,7 @@ pub fn run_donor_deviation(args: &DonorDeviationArgs) -> anyhow::Result<()> {
         number_of_samples,
         anchor_samples.len(),
     )?;
-    Ok(())
+    outputs::record_in_stage1_manifest(&args.from, &out)
 }
 
 /// Every gene's full fit and batch jackknife, on CPU threads or in blocks of

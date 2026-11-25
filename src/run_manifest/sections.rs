@@ -1,5 +1,5 @@
 //! The manifest's sections: history, data, outputs (and their scale),
-//! layout, cluster, annotate, defaults.
+//! layout, cluster, annotate, stage 2, defaults.
 
 use super::{Mat, Unknown};
 use serde::{Deserialize, Serialize};
@@ -502,6 +502,48 @@ pub struct RunAnnotate {
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]
     pub unknown: Unknown,
+}
+
+/// Paths to the tables of `senna donor-deviation` (stage 2) on this run,
+/// recorded by it so a viewer of the run finds them. Empty until it runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunStage2 {
+    /// `{out}.donor_gene_deviation.parquet`: per (gene, donor) the
+    /// deviation's `intercept` and `state_axis_*` coefficients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub donor_gene_deviation: Option<String>,
+    /// `{out}.donor_gene_deviation_without_batch.parquet`: the batch
+    /// jackknife refits of the same coefficients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub donor_gene_deviation_without_batch: Option<String>,
+    /// `{out}.donor_sample_states.parquet`: per pseudobulk sample its donor,
+    /// matched distances and state coordinates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub donor_sample_states: Option<String>,
+    /// `{out}.donor_cell_states.parquet`: per cell its sample, donor and
+    /// state coordinates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub donor_cell_states: Option<String>,
+    /// `{out}.donor_deviation.json`: the run's settings and donors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<String>,
+    /// Fields this version does not know, written by another tool or a
+    /// newer senna; kept so a load/save round trip never drops them.
+    #[serde(flatten, default)]
+    pub unknown: Unknown,
+}
+
+impl RunStage2 {
+    /// Whether nothing is recorded (left out of the manifest).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.donor_gene_deviation.is_none()
+            && self.donor_gene_deviation_without_batch.is_none()
+            && self.donor_sample_states.is_none()
+            && self.donor_cell_states.is_none()
+            && self.settings.is_none()
+            && self.unknown.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

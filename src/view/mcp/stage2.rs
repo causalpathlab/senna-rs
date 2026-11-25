@@ -32,13 +32,8 @@ pub(super) struct DonorDeviationCall {
 /// words of its `flags`: the per-(gene, donor) deviations first, then their
 /// batch jackknife and the state tables.
 pub(super) fn donor_deviation_task(a: &DonorDeviationCall, flags: &[String], out: &str) -> Task {
-    let made = [
-        "donor_gene_deviation",
-        "donor_gene_deviation_without_batch",
-        "donor_sample_states",
-        "donor_cell_states",
-    ]
-    .map(|t| (t, format!("{out}.{t}.parquet").into()));
+    use crate::donor_deviation::outputs::{table_path, TABLES};
+    let made = TABLES.map(|t| (t, table_path(out, t).into()));
     Task {
         argv: Argv::new("donor-deviation")
             .flag("--from", Some(&a.from))
