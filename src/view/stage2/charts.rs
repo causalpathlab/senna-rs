@@ -15,8 +15,8 @@ use super::Stage2;
 use crate::view::color;
 use crate::view::render::Frame;
 use legume_tui::chart::heatmap::{self, Heat, HeatStyle};
-use legume_tui::map::raster::{edge, ring, stamp, Shape};
-use legume_tui::map::text::{self, Font};
+use legume_tui::chart::scatter::{self, Point, Scatter, ScatterStyle};
+use legume_tui::map::text::Font;
 use rayon::prelude::*;
 
 /// Genes named on a volcano, the largest `|z|` first.
@@ -42,8 +42,13 @@ pub(crate) struct Volcano {
     /// Where the state is: the focused group, or the view.
     at: String,
     donors: Vec<String>,
-    /// `(gene, donor, log gain, z)`.
+    /// `(gene, donor, log gain, z)`, the faintest (least supported) first.
     dots: Vec<(usize, usize, f32, f32)>,
+    /// The dots as drawn, beside them: log gain × |z|, by donor.
+    points: Vec<Point>,
+    /// The axes: log gain over `±reach`, |z| over `0..top`.
+    reach: f32,
+    top: f32,
     /// The strongest dots (by index into `dots`), named.
     named: Vec<(usize, String)>,
 }
@@ -143,7 +148,7 @@ pub(crate) fn volcano(s: &Stage2, rows: &[Option<u32>], at: String) -> Result<Vo
             gains::MIN_CELLS_IN_GROUP
         ));
     }
-    let dots: Vec<(usize, usize, f32, f32)> = (0..s.genes.len())
+    let mut dots: Vec<(usize, usize, f32, f32)> = (0..s.genes.len())
         .into_par_iter()
         .flat_map_iter(|g| {
             states.iter().map(move |st| {
@@ -154,6 +159,23 @@ pub(crate) fn volcano(s: &Stage2, rows: &[Option<u32>], at: String) -> Result<Vo
         // A deviation the fit set to 0 sits at the origin: left out.
         .filter(|&(_, _, gain, _)| gain != 0.0)
         .collect();
+    // Drawn in order: the supported dots last, on top of the faint ones.
+    dots.par_sort_unstable_by(|a, b| gains::weight(a.3).total_cmp(&gains::weight(b.3)));
+    let points = dots
+        .iter()
+        .map(|&(_, d, gain, z)| Point::new(gain, z.abs(), d, gains::weight(z)))
+        .collect();
+    let reach = dots
+        .iter()
+        .map(|d| d.2.abs())
+        .fold(0f32, f32::max)
+        .max(1e-3);
+    let top = dots
+        .iter()
+        .map(|d| d.3.abs())
+        .filter(|z| z.is_finite())
+        .fold(gains::Z_FULL * 1.5, f32::max)
+        .min(Z_TOP);
     let named = strongest_of(&dots, None, NAMED)
         .into_iter()
         .map(|i| {
@@ -167,6 +189,9 @@ pub(crate) fn volcano(s: &Stage2, rows: &[Option<u32>], at: String) -> Result<Vo
         at,
         donors: s.donors.iter().map(ToString::to_string).collect(),
         dots,
+        points,
+        reach,
+        top,
         named,
     })
 }
@@ -198,7 +223,9 @@ pub(crate) fn draw_gain_heat(frame: &mut Frame, h: &GainHeat, font: Font, bold: 
     );
 }
 
-/// The volcano, the dots of gene `ring_gene` (the one shown) ringed.
+/// The volcano, the dots of gene `ring_gene` (the one shown) ringed:
+/// legume-tui's scatter of log gain × |z|, a series per donor, each dot as
+/// strong as its support.
 pub(crate) fn draw_volcano(
     frame: &mut Frame,
     v: &Volcano,
@@ -206,126 +233,32 @@ pub(crate) fn draw_volcano(
     font: Font,
     bold: Font,
 ) {
-    let ink = color::linear_rgb(color::INK);
-    let muted = color::linear_rgb(color::MUTED);
-    let bg = frame.background();
-    let lh = font.line_height() as f32;
+    let ringed: Vec<usize> = v
+        .dots
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| Some(d.0) == ring_gene)
+        .map(|(i, _)| i)
+        .collect();
     let title = format!(
         "every gene's log gain × |z| per donor, {} · line at |z| = {}",
         v.at,
         gains::Z_FULL
     );
-    text::draw(frame, bold, &title, lh as i32 / 2, lh as i32 / 2, ink, bg);
-    // The plot: below the title and the donors' key, left of nothing.
-    let (x0, y0) = (4.0 * lh, 3.5 * lh);
-    let (x1, y1) = (frame.w as f32 - lh, frame.h as f32 - 2.5 * lh);
-    if x1 - x0 < 4.0 * lh || y1 - y0 < 4.0 * lh {
-        return;
-    }
-    let d_n = v.donors.len();
-    let mut x = 1.5 * lh;
-    for (d, name) in v.donors.iter().enumerate() {
-        let c = color::category(d, d_n);
-        stamp(frame, x, 2.2 * lh, lh / 3.0, Shape::Circle, c, 1.0);
-        text::draw(
-            frame,
-            font,
-            name,
-            (x + lh / 2.0) as i32,
-            (1.7 * lh) as i32,
-            ink,
-            bg,
-        );
-        x += lh + font.width(name) as f32 + lh;
-    }
-    let reach = v
-        .dots
-        .iter()
-        .map(|d| d.2.abs())
-        .fold(0f32, f32::max)
-        .max(1e-3);
-    let top = v
-        .dots
-        .iter()
-        .map(|d| d.3.abs())
-        .filter(|z| z.is_finite())
-        .fold(gains::Z_FULL * 1.5, f32::max)
-        .min(Z_TOP);
-    let px = |gain: f32| x0 + (gain / reach + 1.0) / 2.0 * (x1 - x0);
-    let py = |z: f32| {
-        let z = if z.is_finite() { z.abs().min(top) } else { top };
-        y1 - z / top * (y1 - y0)
-    };
-    // Axes: |z| = 0 and the support line, and 0 gain.
-    edge(frame, (x0, y1), (x1, y1), (0.0, 0.0), ink, 0.8);
-    edge(frame, (px(0.0), y0), (px(0.0), y1), (0.0, 0.0), muted, 0.8);
-    let line = py(gains::Z_FULL);
-    edge(frame, (x0, line), (x1, line), (0.0, 0.0), muted, 0.8);
-    let ticks = [
-        (format!("{:+.2}", -reach), x0),
-        ("0".to_string(), px(0.0)),
-        (format!("{:+.2}", reach), x1),
-    ];
-    for (t, at) in ticks {
-        let w = font.width(&t) as f32;
-        let left = (at - w / 2.0).clamp(0.0, frame.w as f32 - w);
-        text::draw(
-            frame,
-            font,
-            &t,
-            left as i32,
-            (y1 + lh / 3.0) as i32,
-            ink,
-            bg,
-        );
-    }
-    text::draw(
+    let chart = Scatter::new(&v.points, &v.donors)
+        .with_title(&title)
+        .with_labels("log gain", "|z|")
+        .with_ranges(Some((-v.reach, v.reach)), Some((0.0, v.top)))
+        .with_lines(&[gains::Z_FULL], &[0.0])
+        .with_named(&v.named)
+        .with_ringed(&ringed);
+    // A volcano that cannot be drawn says why in its place.
+    let _ = scatter::draw_scatter(
         frame,
+        &chart,
         font,
-        "log gain",
-        (x1 - 6.0 * lh) as i32,
-        (y1 + 1.2 * lh) as i32,
-        ink,
-        bg,
+        bold,
+        &color::THEME,
+        &ScatterStyle::default(),
     );
-    text::draw(
-        frame,
-        font,
-        &format!("{top:.0}"),
-        (lh / 2.0) as i32,
-        y0 as i32,
-        ink,
-        bg,
-    );
-    text::draw(
-        frame,
-        font,
-        "|z|",
-        (lh / 2.0) as i32,
-        (y0 + lh) as i32,
-        ink,
-        bg,
-    );
-    let r = (lh / 6.0).max(1.5);
-    for &(_, d, gain, z) in &v.dots {
-        let c = color::category(d, d_n);
-        stamp(
-            frame,
-            px(gain),
-            py(z),
-            r,
-            Shape::Circle,
-            c,
-            0.35 + 0.65 * gains::weight(z),
-        );
-    }
-    // The strongest dots, named; the gene shown, ringed.
-    for (i, name) in &v.named {
-        let (_, _, gain, z) = v.dots[*i];
-        let (x, y) = (px(gain) + r + 2.0, py(z) - lh / 2.0);
-        text::draw(frame, font, name, x as i32, y as i32, ink, bg);
-    }
-    for &(_, _, gain, z) in v.dots.iter().filter(|d| Some(d.0) == ring_gene) {
-        ring(frame, px(gain), py(z), 2.0 * r, ink);
-    }
 }

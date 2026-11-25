@@ -123,3 +123,13 @@ pub(super) fn search_ranks_exact_then_symbol_then_prefix_then_substring() {
     assert_eq!(hits.len(), 4);
     assert!(search(&names, &lower, "").is_empty());
 }
+
+#[test]
+fn the_chart_status_line_names_every_key_a_chart_takes() {
+    use crate::view::tui::help::{keys_of, Context};
+    let line = keys_of(Context::Chart).join(" ");
+    // `=` and `_` are `+` and `-` unshifted.
+    for c in CHART_KEYS.chars().filter(|c| !matches!(c, '=' | '_')) {
+        assert!(line.contains(c), "the Chart status line leaves out {c}");
+    }
+}

@@ -130,3 +130,24 @@ fn the_gain_map_shows_each_cell_s_own_donor_then_steps_through_the_donors() {
     scene.toggle_gain();
     assert_eq!(scene.pick, Some(Pick::One("g1".into())));
 }
+
+#[test]
+fn u_steps_through_the_counts_statistics_then_stage_2_s_exclusivity_then_off() {
+    use crate::view::Stat;
+    let dir = tempfile::tempdir().unwrap();
+    let mut scene = scene_with_stage2(dir.path());
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        scene.cycle_stat();
+        seen.push(scene.pick.clone());
+    }
+    assert_eq!(
+        seen,
+        [
+            Some(Pick::Stat(Stat::Total)),
+            Some(Pick::Stat(Stat::Detected)),
+            Some(Pick::Exclusive),
+            None
+        ]
+    );
+}

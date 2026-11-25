@@ -115,7 +115,7 @@ pub struct ViewArgs {
     #[arg(
         long,
         conflicts_with_all = ["feature", "markers_of"],
-        help = "Start coloured by stage-2 exclusivity: each cell's sample's distance to the nearest sample of another donor (`U` in the view)"
+        help = "Start coloured by stage-2 exclusivity: each cell's sample's distance to the nearest sample of another donor (`u` in the view, after the counts' statistics)"
     )]
     pub exclusivity: bool,
 
@@ -519,7 +519,7 @@ impl Scene {
         } else if args.gain {
             scene.rank_gains(args.donor.clone());
         } else if args.exclusivity {
-            scene.toggle_exclusive();
+            scene.show_exclusive();
         } else if let Some(f) = &args.feature {
             scene.set_pick(Pick::One(f.clone()));
         }

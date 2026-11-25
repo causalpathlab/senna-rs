@@ -2719,9 +2719,9 @@ dependencies = [
 
 [[package]]
 name = "legume-tui"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8608bc7c97517aaf2a39845c8bc30bc03ff2539b61fdbdf69d71dd37ea30c33f"
+checksum = "fd64c84773506b30dcd0ac2ead357ca946f430d2fcbd686b8e82594b3d612cd5"
 dependencies = [
  "clap",
  "image",
