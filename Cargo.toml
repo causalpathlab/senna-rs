@@ -64,10 +64,10 @@ image = { version = "0.25", optional = true, default-features = false, features 
 # Detachable sessions for `senna run` and `senna view`, and the map they
 # draw: colour, viewport, points, text, labels and keys, and the frame on
 # the terminal; its PDF pages, the save dialog, and the saved figures.
-legume-tui = { version = "0.4.3", optional = true, features = ["form", "browse", "work", "map", "map-display", "export", "chart", "save", "gallery"] }
+legume-tui = { version = "0.5", optional = true, features = ["form", "browse", "work", "map", "map-display", "export", "chart", "save", "gallery"] }
 # `senna mcp`: the viewer's tools and senna's fits served to an agent, a
 # background fit in a session of `senna run` a person can attach to.
-legume-mcp = { version = "0.6.8", optional = true, features = ["sessions", "clap"] }
+legume-mcp = { version = "0.7", optional = true, features = ["sessions", "clap"] }
 clap = { version = "4.5.20", features = ["derive"] }
 rayon = "1.10.0"
 rand = "0.10.1"
@@ -89,7 +89,7 @@ serde_json = "1.0"
 tempfile = "3.2"
 # The crate's harness, driving `senna run` and `senna view` through
 # pseudo-terminals in tests/detach_session.rs.
-legume-tui = { version = "0.4.3", default-features = false, features = ["testing"] }
+legume-tui = { version = "0.5", default-features = false, features = ["testing"] }
 
 # The terminal size a running program reads, in tests/detach_session.rs.
 [target.'cfg(unix)'.dev-dependencies]
