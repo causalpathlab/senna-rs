@@ -75,8 +75,10 @@ the whole recipes. Open the round here (`view_open` the round, or `view_map` \
 `round`) so its cell types are a grouping. To root an ODE, look at the types \
 (`view_markers`; lupin's `annotate_why` on which type is least \
 differentiated), write the root type's cells with `view_cells`, and `run_fit` \
-ode with flag root-cells set to that list and a new out; every ODE result \
-names its `root`, the cells it grew from and what they mostly are. A \
+ode with flag root-cells set to that list and a new out. An ODE grown from a \
+root says so in its result's `root`: the cells and what they are, by the \
+groups `view_cells` wrote them from or by a lupin round of the run; a named \
+root a start with none beat is said to be unused. A \
 `needs_input` from an ODE labels its options by lupin's types only when the \
 run has a round. A run tool's call that carries a choice (a root, a setting \
 the user picked) says why with `why`, `by` (user, agent or agent_accepted) \

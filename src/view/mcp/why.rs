@@ -6,7 +6,7 @@ use anyhow::{bail, ensure, Context, Result};
 use legume_mcp::{By, ToolSpec, Why};
 use senna::run_manifest::{self, RunManifest};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Whether the tool `name` takes a why: every run tool but `run_help`,
 /// which runs nothing.
@@ -72,8 +72,8 @@ pub(super) fn add_properties(specs: &mut [ToolSpec]) {
 }
 
 /// Refused when the words `flags` of a fit answer a question a fit left to
-/// the user (an option's `rerun_args` in the manifest of a run beside the
-/// file it names) and no `why` says why.
+/// the user (an option's `rerun_args` in the manifest of the run whose
+/// list a flag names, [`run_of_list`]) and no `why` says why.
 pub(super) fn justified(flags: &[String], why: Option<&Why>) -> Result<()> {
     if why.is_some() {
         return Ok(());
@@ -87,9 +87,9 @@ pub(super) fn justified(flags: &[String], why: Option<&Why>) -> Result<()> {
     Ok(())
 }
 
-/// The question the words `flags` answer: a decision recorded in a run
-/// manifest beside a file a flag names, one of whose options reruns with
-/// that flag and file.
+/// The question the words `flags` answer: a decision recorded in the
+/// manifest of the run a flag's list file is of, one of whose options
+/// reruns with that flag and file.
 fn answered(flags: &[String]) -> Option<String> {
     let pairs = flags
         .iter()
@@ -100,32 +100,33 @@ fn answered(flags: &[String]) -> Option<String> {
         });
     for (flag, value) in pairs.filter(|(f, _)| f.starts_with("--")) {
         let file = Path::new(value);
-        if !file.is_file() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(run_manifest::manifest_dir(file)) else {
+        let Some(run) = run_of_list(file).filter(|_| file.is_file()) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.to_string_lossy().ends_with(".senna.json") {
-                continue;
-            }
-            let Ok((m, _)) = RunManifest::load(&path) else {
-                continue;
-            };
-            let hit = m.decisions.iter().find(|d| {
-                d.options.iter().any(|o| match o.rerun_args.as_slice() {
-                    [f, v] => f == flag && run_manifest::same_file(Path::new(v), file),
-                    _ => false,
-                })
-            });
-            if let Some(d) = hit {
-                return Some(d.question.clone());
-            }
+        let Ok((m, _)) = RunManifest::load(&run) else {
+            continue;
+        };
+        let hit = m.decisions.iter().find(|d| {
+            d.options.iter().any(|o| match o.rerun_args.as_slice() {
+                [f, v] => f == flag && run_manifest::same_file(Path::new(v), file),
+                _ => false,
+            })
+        });
+        if let Some(d) = hit {
+            return Some(d.question.clone());
         }
     }
     None
+}
+
+/// The manifest of the run a root list is of, by the list's name, as
+/// `senna ode` names them: `{out}.root_{i}.txt` (a decision's options) or
+/// `{out}.root.txt`, of `{out}.senna.json`; `None` for any other file.
+fn run_of_list(file: &Path) -> Option<PathBuf> {
+    let (prefix, tail) = file.to_str()?.strip_suffix(".txt")?.rsplit_once(".root")?;
+    let numbered = |i: &str| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit());
+    (tail.is_empty() || tail.strip_prefix('_').is_some_and(numbered))
+        .then(|| PathBuf::from(run_manifest::default_path(prefix)))
 }
 
 #[cfg(test)]

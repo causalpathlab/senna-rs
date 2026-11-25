@@ -99,24 +99,47 @@ pub(super) fn decision_fields(m: &RunManifest, run: &Path, out: &mut Value) {
 }
 
 /// The root an ODE run grew from (`root_cells` in its manifest `m`): the
-/// list, its count and what its cells mostly are by the run's newest lupin
-/// round ([`crate::view::cells_by_round`]), or how to have them typed;
-/// `None` when the run records no root.
+/// list, its count, whether the user named it (`from`), and what its cells
+/// mostly are: by the groups view_cells wrote it from
+/// ([`view_cells::source_of`](super::view_cells::source_of)), else by the
+/// run's newest lupin round ([`crate::view::cells_by_round`]), else how to
+/// have them typed. A named list the fit did not grow from is said to be
+/// unused; `None` when the run records no root.
 fn root_field(m: &RunManifest, run: &Path) -> Option<Value> {
+    let dir = run_manifest::manifest_dir(run);
+    if let Some(list) = &m.outputs.root_cells_unused {
+        return Some(json!({
+            "named": run_manifest::resolve(dir, list),
+            "used": false,
+            "note": "the fit was given this root, but a start with no root fit better, so the \
+                     trajectory does not grow from these cells and its time need not run from \
+                     them",
+        }));
+    }
     let list = m.outputs.root_cells.as_deref()?;
-    let path = run_manifest::resolve(run_manifest::manifest_dir(run), list);
+    let path = run_manifest::resolve(dir, list);
     let cells = match legume_numeric::matrix::common_io::read_name_list(&path.to_string_lossy()) {
         Ok(cells) => cells,
         Err(e) => return Some(json!({"cells": path, "error": format!("{e:#}")})),
     };
-    let mut root = json!({"cells": path, "n": cells.len()});
-    match crate::view::cells_by_round(run, &cells) {
-        Some(mostly) => root["mostly"] = mostly.into(),
-        None => {
-            root["label_cells"] = "the run has no lupin round to say what these cells are: \
-                 annotate it with lupin's annotate_run (from: this run) and view_open it again"
-                .into();
-        }
+    // The fit records the root it chose by its name beside the manifest,
+    // a --root-cells list by its absolute path.
+    let from = if Path::new(list).is_absolute() {
+        "root-cells"
+    } else {
+        "fit"
+    };
+    let mut root = json!({"cells": path, "n": cells.len(), "from": from});
+    if let Some((mostly, by)) = super::view_cells::source_of(&path, cells.len()) {
+        root["mostly"] = mostly.into();
+        root["typed_by"] = by;
+    } else if let Some(mostly) = crate::view::cells_by_round(run, &cells) {
+        root["mostly"] = mostly.into();
+    } else {
+        root["label_cells"] = "nothing says what these cells are: write the root with \
+             view_cells from a lupin round, or annotate this run with lupin's annotate_run \
+             (from: this run) and view_open it again"
+            .into();
     }
     Some(root)
 }
@@ -136,13 +159,16 @@ pub(super) fn with_next(said: Value, m: Option<&RunManifest>, run: &Path) -> Vec
 /// its manifest), toward its cell types: a cell fit's clustering or its
 /// annotation with lupin ([`annotate_next`]); an ODE's too while its root
 /// or options name no type, and once they do, a root of the user's
-/// choosing written with view_cells.
+/// choosing written with view_cells, unless the user named the root and
+/// nothing is left open.
 fn next_of(m: &RunManifest, run: &Path, said: &Value) -> Vec<Next> {
     let untyped = said.pointer("/root/label_cells").is_some()
         || said.pointer("/needs_input/label_cells").is_some();
     if m.kind != RunKind::Ode {
-        // A cell fit lupin typed needs nothing more toward its types.
-        if crate::view::has_round(run) {
+        // Only cells can be clustered and typed, and a run lupin typed
+        // needs nothing more toward its types.
+        let cells = m.outputs.cell_embedding.is_some() || m.outputs.latent.is_some();
+        if !cells || crate::view::has_round(run) {
             return Vec::new();
         }
         return vec![annotate_next(m, run)];
@@ -150,7 +176,10 @@ fn next_of(m: &RunManifest, run: &Path, said: &Value) -> Vec<Next> {
     if untyped {
         return vec![annotate_next(m, run)];
     }
-    if said.pointer("/root/mostly").is_none() && said.get("needs_input").is_none() {
+    let open = said.get("needs_input").is_some();
+    let chosen = said.pointer("/root/mostly").is_some()
+        && said.pointer("/root/from").and_then(Value::as_str) == Some("fit");
+    if !open && !chosen {
         return Vec::new();
     }
     vec![Next::new(

@@ -151,8 +151,10 @@ fn step_task(a: &StepCall) -> Result<Task> {
 fn run_step(a: StepCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     let task = step_task(&a)?;
     let done = start_server(task, a.background, cx, why)?;
+    // A step running as a job has made nothing yet to go on from.
+    let next = step_next(&a).filter(|_| done.get("job").is_none());
     let mut out = vec![Content::Json(done)];
-    out.extend(step_next(&a).map(|n| Content::Next(vec![n])));
+    out.extend(next.map(|n| Content::Next(vec![n])));
     Ok(out)
 }
 

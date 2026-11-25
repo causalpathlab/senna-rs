@@ -26,3 +26,26 @@ fn the_cells_of_a_group_are_its_cells_on_the_map() {
     assert!(format!("{e}").contains("CT1"), "{e}");
     assert!(o.pick_cells(&["C0".into()], Some("topic")).is_err());
 }
+
+/// A list's source says what its cells are, by its groups' shares, while
+/// it counts the cells the list holds.
+#[test]
+fn a_lists_source_says_what_its_cells_are() {
+    let o = Open::of(crate::view::tests::scene(), PathBuf::from("r.senna.json"));
+    let picked = o
+        .pick_cells(&["C0".into(), "C1".into()], Some("cluster"))
+        .unwrap();
+    let groups = vec![
+        json!({"group": "C0", "cells": 1}),
+        json!({"group": "C1", "cells": 2}),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("root.txt");
+    let source = o.source(&picked, &groups);
+    std::fs::write(source_path(&list), source.to_string()).unwrap();
+    let (mostly, by) = source_of(&list, 3).unwrap();
+    assert_eq!(mostly, "C1 (67%), C0 (33%)");
+    assert_eq!(by["grouping"], "cluster");
+    assert_eq!(by["of"], "r.senna.json");
+    assert!(source_of(&list, 4).is_none());
+}

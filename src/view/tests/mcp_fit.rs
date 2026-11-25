@@ -1,7 +1,9 @@
 use super::*;
 
-/// A cell fit leads to its clustering, then to lupin's annotation; an ODE
-/// whose root lupin has typed, to a root of the user's choosing.
+/// A cell fit leads to its clustering, then to lupin's annotation; a fit
+/// with no cells to cluster, nowhere; an ODE whose root it chose and lupin
+/// typed, to a root of the user's choosing, and one rooted by the user
+/// with nothing open, nowhere.
 #[test]
 fn a_fit_s_next_call_is_the_next_step_toward_its_cell_types() {
     let run = Path::new("/nowhere/r.senna.json");
@@ -9,6 +11,8 @@ fn a_fit_s_next_call_is_the_next_step_toward_its_cell_types() {
         next_of(m, run, &said).into_iter().map(|n| n.tool).collect()
     };
     let mut m = RunManifest::new(RunKind::Topic, "/nowhere/r");
+    assert!(tool(&m, json!({})).is_empty());
+    m.outputs.latent = Some("r.latent.parquet".into());
     let first = &next_of(&m, run, &json!({}))[0];
     assert_eq!(first.tool, "run_step");
     assert_eq!(first.args["out"], "/nowhere/r_clusters");
@@ -20,6 +24,11 @@ fn a_fit_s_next_call_is_the_next_step_toward_its_cell_types() {
     assert!(tool(&ode, json!({})).is_empty());
     let untyped = json!({"root": {"n": 4, "label_cells": "…"}});
     assert_eq!(tool(&ode, untyped), ["lupin annotate_run"]);
-    let typed = json!({"root": {"n": 4, "mostly": "HSC (75%)"}});
-    assert_eq!(tool(&ode, typed), ["view_cells"]);
+    let chose = json!({"root": {"n": 4, "mostly": "HSC (75%)", "from": "fit"}});
+    assert_eq!(tool(&ode, chose), ["view_cells"]);
+    let named = json!({"root": {"n": 4, "mostly": "HSC (100%)", "from": "root-cells"}});
+    assert!(tool(&ode, named.clone()).is_empty());
+    let mut open = named;
+    open["needs_input"] = json!({});
+    assert_eq!(tool(&ode, open), ["view_cells"]);
 }
