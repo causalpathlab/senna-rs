@@ -25,3 +25,10 @@ fn a_step_is_offered_only_to_the_families_it_runs_on_and_parses_untouched() {
         }
     }
 }
+
+#[test]
+fn every_method_has_a_run_kind() {
+    for m in super::super::METHODS {
+        assert!(kind_of(m).is_some(), "{m}");
+    }
+}

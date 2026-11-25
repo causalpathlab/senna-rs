@@ -134,11 +134,10 @@ impl Step {
     pub fn argv(self, t: &Target, setting: &str) -> Vec<String> {
         let (from, out) = (t.from.as_str(), t.out.as_str());
         let v: Vec<&str> = if self.is_clustering() {
+            // A cell clustering reads the run's cell table from its manifest.
             let mut v = vec!["clustering", "--from", from, "-m", "leiden", "-o", out];
-            match (self, &t.latent) {
-                (Step::CellClusters, Some(latent)) => v.extend(["--latent", latent]),
-                (Step::FeatureClusters, _) => v.extend(["--target", "features"]),
-                _ => {}
+            if self == Step::FeatureClusters {
+                v.extend(["--target", "features"]);
             }
             if !setting.is_empty() {
                 v.extend(["--resolution", setting]);
@@ -431,9 +430,7 @@ mod tests {
                 "-m",
                 "leiden",
                 "-o",
-                "run",
-                "--latent",
-                "./run.latent.parquet"
+                "run"
             ])
         );
         assert_eq!(

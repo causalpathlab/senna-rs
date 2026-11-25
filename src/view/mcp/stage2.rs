@@ -63,7 +63,7 @@ fn run_donor_deviation(a: DonorDeviationCall, cx: &Call) -> Result<Vec<Content>>
 pub(super) fn specs() -> Vec<ToolSpec> {
     vec![ToolSpec::new(
         "run_donor_deviation",
-        "Stage 2 on a finished run that recorded its cell → pseudobulk partition (not ode), as `senna donor-deviation \
+        "Stage 2 on a finished run that recorded its cell → pseudobulk partition on one gene axis, as `senna donor-deviation \
          --from {from} -o {out}`: which of its states are specific to a donor, and which genes \
          drive them. The run's cell embedding is held fixed; cells are pooled into pseudobulk \
          samples (finest pseudobulk × batch) and each sample is contrasted, gene by gene, with \
@@ -78,7 +78,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         json!({
             "type": "object",
             "properties": {
-                "from": {"type": "string", "description": "Run manifest (or prefix) of a run that recorded its cell → pseudobulk partition (bge, the topic family, svd, vae; not ode)"},
+                "from": {"type": "string", "description": "Run manifest (or prefix) of a finished run that recorded its cell → pseudobulk partition on one gene axis"},
                 "out": {"type": "string", "description": "Output prefix [default: today's results folder, by the run's name]"},
                 "flags": flags::property("senna donor-deviation", r#"{"donor-of-batch": "donors.tsv", "device": "cuda"}"#),
                 "background": job_property(),

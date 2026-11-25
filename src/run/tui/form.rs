@@ -29,18 +29,18 @@ pub struct Method {
 }
 
 impl Method {
-    /// The form for subcommand `name` of `cli`, which must be built.
+    /// The form for subcommand `name` of `cli`, which must be built, its
+    /// words a path to a nested one (`layout tsne`).
     pub fn new(cli: &Command, name: &str) -> anyhow::Result<Self> {
-        Self::new_with(cli, name, &[])
-    }
-
-    /// [`Method::new`] for the command `name` names, its words a path to a
-    /// nested one (`layout tsne`), without the flags `own` names besides
-    /// [`OWN`]: those the caller fills itself.
-    pub fn new_with(cli: &Command, name: &str, own: &[&str]) -> anyhow::Result<Self> {
         let path: Vec<&str> = name.split(' ').collect();
         let cmd = crate::tui::subcommand(cli, &path)
             .ok_or_else(|| anyhow::anyhow!("senna has no `{name}` command"))?;
+        Ok(Self::new_with(cmd, name, &[]))
+    }
+
+    /// The form for `cmd`, the command `name` names, without the flags
+    /// `own` names besides [`OWN`]: those the caller fills itself.
+    pub fn new_with(cmd: &Command, name: &str, own: &[&str]) -> Self {
         let batch = cmd
             .get_arguments()
             .find(|a| a.get_long() == Some("batch-files"))
@@ -56,12 +56,12 @@ impl Method {
             })
             .filter_map(Field::from_arg)
             .partition(|f| !data.contains(f.long.as_str()));
-        Ok(Method {
+        Method {
             name: name.to_string(),
             about: cmd.get_about().map(ToString::to_string).unwrap_or_default(),
             fields: own.into_iter().chain(shared).collect(),
             batch,
-        })
+        }
     }
 
     /// Whether the method reads batch files.
@@ -97,17 +97,17 @@ impl Method {
 pub fn check(cli: &Command, argv: &[String]) -> Result<(), String> {
     // The method's own command parses its line: no need to copy all of senna.
     // Its leading words name it, a nested one (`layout tsne`) by several.
-    let (mut method, mut words) = (cli, 0);
-    while let Some(sub) = argv.get(words).and_then(|w| method.find_subcommand(w)) {
-        (method, words) = (sub, words + 1);
-    }
-    if words == 0 {
+    let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let named = (1..=words.len())
+        .map_while(|n| crate::tui::subcommand(cli, &words[..n]).map(|m| (n, m)))
+        .last();
+    let Some((n, method)) = named else {
         return Err(format!(
             "senna has no `{}` command",
-            argv.first().map_or("", |m| m.as_str())
+            words.first().copied().unwrap_or_default()
         ));
-    }
-    legume_tui::form::check(method, &argv[words - 1..])
+    };
+    legume_tui::form::check(method, &argv[n - 1..])
 }
 
 /// The long names of the data steps' flags (`--from`, `--multiome`, quality

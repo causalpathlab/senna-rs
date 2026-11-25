@@ -41,36 +41,13 @@ pub const SPECS: [Spec; 5] = [
     },
     Spec {
         name: "donor-deviation",
-        offered: takes_donor_deviation,
+        offered: RunKind::has_stage2_inputs,
         needs_batches: true,
     },
 ];
 
 /// Flags a step's form leaves out: `senna run` fills them from its fit.
-const OWN: &[&str] = &["from", "out", "latent"];
-
-/// Whether `senna donor-deviation` runs on a fit of `kind`: one gene axis
-/// and a cell → pseudobulk partition recorded. simba, the joint fits, fne
-/// and resolve-embedding-space record no partition; ode's counts are two
-/// tracks. A full match, so a new kind must answer.
-#[must_use]
-pub fn takes_donor_deviation(kind: RunKind) -> bool {
-    match kind {
-        RunKind::Topic
-        | RunKind::Itopic
-        | RunKind::MaskedVae
-        | RunKind::Vae
-        | RunKind::Svd
-        | RunKind::Bge
-        | RunKind::Rbm => true,
-        RunKind::JointTopic
-        | RunKind::JointSvd
-        | RunKind::Fne
-        | RunKind::ResolveEmbeddingSpace
-        | RunKind::Simba
-        | RunKind::Ode => false,
-    }
-}
+const OWN: &[&str] = &["from", "out"];
 
 /// The kind of run fit `method` (a name of [`super::METHODS`]) makes.
 #[must_use]
@@ -89,42 +66,18 @@ pub fn kind_of(method: &str) -> Option<RunKind> {
     })
 }
 
-/// The table a run of `kind` keeps its cells' geometry in, after its
-/// prefix: what the manifest's `geometry_latent` names once it is written.
-fn cell_table(kind: RunKind) -> &'static str {
-    match kind {
-        RunKind::Bge | RunKind::Simba | RunKind::Ode | RunKind::ResolveEmbeddingSpace => {
-            "cell_embedding.parquet"
-        }
-        RunKind::Topic
-        | RunKind::Itopic
-        | RunKind::MaskedVae
-        | RunKind::JointTopic
-        | RunKind::Vae
-        | RunKind::Rbm
-        | RunKind::Svd
-        | RunKind::JointSvd
-        | RunKind::Fne => "latent.parquet",
-    }
-}
-
 /// One step after a fit: its form, and whether it is queued.
 #[derive(Clone, Debug)]
 pub struct Step {
     pub spec: &'static Spec,
     pub form: Method,
     pub on: bool,
-    kind: RunKind,
-    /// Whether it takes `--latent` (the fit's cell table) and needs
-    /// `--out`, as its clap definition says.
-    latent: bool,
-    out: bool,
 }
 
 impl Step {
     /// The command line, without the program: the command's words,
-    /// `--from` the manifest of the fit writing `fit_out`, its cell table
-    /// and `--out` where the command takes them, then every changed flag.
+    /// `--from` the manifest of the fit writing `fit_out` (the step reads
+    /// its cell table there and writes beside it), then every changed flag.
     #[must_use]
     pub fn argv(&self, fit_out: &str) -> Vec<String> {
         let mut argv: Vec<String> = self.spec.name.split(' ').map(String::from).collect();
@@ -132,15 +85,6 @@ impl Step {
             "--from".to_string(),
             senna::run_manifest::default_path(fit_out),
         ]);
-        if self.latent {
-            argv.extend([
-                "--latent".to_string(),
-                format!("{fit_out}.{}", cell_table(self.kind)),
-            ]);
-        }
-        if self.out {
-            argv.extend(["--out".to_string(), fit_out.to_string()]);
-        }
         for f in &self.form.fields {
             argv.extend(f.argv());
         }
@@ -161,14 +105,10 @@ pub fn offered(cli: &clap::Command, method: &str) -> Vec<Step> {
         .filter_map(|spec| {
             let path: Vec<&str> = spec.name.split(' ').collect();
             let cmd = crate::tui::subcommand(cli, &path)?;
-            let arg = |long: &str| cmd.get_arguments().find(|a| a.get_long() == Some(long));
             Some(Step {
                 spec,
-                form: Method::new_with(cli, spec.name, OWN).ok()?,
+                form: Method::new_with(cmd, spec.name, OWN),
                 on: false,
-                kind,
-                latent: arg("latent").is_some(),
-                out: arg("out").is_some_and(clap::Arg::is_required_set),
             })
         })
         .collect()
