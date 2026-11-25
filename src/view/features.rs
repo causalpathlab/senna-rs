@@ -329,14 +329,22 @@ impl Scene {
                 .filter(|g| !self.marker_features(g).is_empty())
                 .map(Stat::Share)
         };
+        // After the counts' statistics, stage 2's exclusivity, when the run
+        // has one.
+        let exclusive = || self.has_stage2().then_some(Pick::Exclusive);
         let next = match &self.pick {
-            Some(Pick::Stat(Stat::Total)) => Some(Stat::Detected),
-            Some(Pick::Stat(Stat::Detected)) => share(),
-            Some(Pick::Stat(Stat::Share(_))) => None,
-            _ => Some(Stat::Total),
+            Some(Pick::Stat(Stat::Total)) => Some(Pick::Stat(Stat::Detected)),
+            Some(Pick::Stat(Stat::Detected)) => share().map(Pick::Stat).or_else(exclusive),
+            Some(Pick::Stat(Stat::Share(_))) => exclusive(),
+            Some(Pick::Exclusive) => None,
+            _ => Some(Pick::Stat(Stat::Total)),
         };
-        let Some(stat) = next else {
+        let Some(next) = next else {
             self.clear_pick();
+            return;
+        };
+        let Pick::Stat(stat) = next else {
+            self.set_pick(next);
             return;
         };
         if self.source == Source::Expected {

@@ -690,6 +690,11 @@ impl Deck {
                     KeyCode::Char('f') => self.toggle_saved(),
                     KeyCode::Char('F') => self.focus_saved(),
                     KeyCode::Char('d') => self.duplicate(h),
+                    KeyCode::Char('D') => {
+                        if let Err(e) = self.donor_tiles(h) {
+                            self.note = Some(e);
+                        }
+                    }
                     KeyCode::Char('X') | KeyCode::Delete => self.note = self.close(h),
                     KeyCode::Char('x') => {
                         self.note =

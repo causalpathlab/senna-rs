@@ -112,7 +112,6 @@ impl App {
             KeyCode::Char('y') => self.change(Scene::toggle_time),
             KeyCode::Char('i') => self.change(Scene::toggle_gain),
             KeyCode::Char('I') => self.change(|s| s.step_donor(1)),
-            KeyCode::Char('U') => self.change(Scene::toggle_exclusive),
             KeyCode::Char('u') => self.change_source(Scene::cycle_stat),
             // `{ }` step between views; the streamlines' density has its own.
             KeyCode::Char('(' | ')') => {
@@ -730,11 +729,17 @@ fn search(names: &[Box<str>], lower: &[String], query: &str) -> Vec<Box<str>> {
 }
 
 /// Whether a chart takes `k`; the map's other keys would act unseen.
+/// Keys a chart takes: its own, and what it is made from (the grouping,
+/// the group focused, the feature shown and stage 2's donor), so stepping
+/// them redraws it.
 fn chart_takes(k: KeyEvent) -> bool {
-    matches!(
-        k.code,
-        KeyCode::Char('H' | 'c' | '+' | '=' | '-' | '_' | '?' | 'q')
-    )
+    legume_tui::keys::list_delta(&k, true).is_some()
+        || matches!(
+            k.code,
+            KeyCode::Char(
+                'H' | 'c' | '+' | '=' | '-' | '_' | '?' | 'q' | '[' | ']' | 'g' | 'G' | 'i' | 'I'
+            )
+        )
 }
 
 #[cfg(test)]

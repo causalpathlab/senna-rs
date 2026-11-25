@@ -6,7 +6,7 @@
 //!   [`gains::Z_FULL`] fade toward muted, so only supported departures
 //!   stand out. `I` steps to one donor's deviation drawn at every cell's
 //!   state ("if this were donor D2"), and back.
-//! - **exclusivity map** (`U`): each cell coloured by its sample's distance
+//! - **exclusivity map** (`u`, after the counts' statistics): each cell coloured by its sample's distance
 //!   to the nearest matched sample of another donor: large where no other
 //!   donor has the state.
 //! - **gene ranking** (`i` with no gene shown): genes by their largest

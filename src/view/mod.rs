@@ -115,7 +115,7 @@ pub struct ViewArgs {
     #[arg(
         long,
         conflicts_with_all = ["feature", "markers_of"],
-        help = "Start coloured by stage-2 exclusivity: each cell's sample's distance to the nearest sample of another donor (`U` in the view)"
+        help = "Start coloured by stage-2 exclusivity: each cell's sample's distance to the nearest sample of another donor (`u` in the view, after the counts' statistics)"
     )]
     pub exclusivity: bool,
 
