@@ -289,6 +289,22 @@ impl Labels {
         self.kind.title()
     }
 
+    /// The level `name` stands for: a level's name (any case), or for
+    /// clusters its id (`3`, `C3` or lupin's `K3`, the ids of the round
+    /// shown).
+    pub fn group(&self, name: &str) -> Option<usize> {
+        let by_name = self
+            .levels
+            .iter()
+            .position(|l| l.eq_ignore_ascii_case(name));
+        by_name.or_else(|| {
+            let id: i64 = name.trim_start_matches(['C', 'c', 'K', 'k']).parse().ok()?;
+            (self.kind == LabelKind::Cluster)
+                .then(|| self.ids.iter().position(|&i| i == id))
+                .flatten()
+        })
+    }
+
     #[must_use]
     pub fn axis(&self) -> Axis {
         self.kind.axis()

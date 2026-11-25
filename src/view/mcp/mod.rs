@@ -32,6 +32,7 @@ mod steps;
 mod view;
 mod view_cells;
 mod view_chart;
+mod view_export;
 mod view_stage2;
 mod why;
 

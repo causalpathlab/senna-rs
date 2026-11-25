@@ -66,6 +66,7 @@ pub(super) fn scene() -> Scene {
             width: 7.0,
             dpi: 300,
         },
+        panel: Default::default(),
         space: None,
         feature: None,
         gain: false,

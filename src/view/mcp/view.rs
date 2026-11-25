@@ -6,7 +6,7 @@ use super::jobs::senna;
 use super::stage2::{apply_stage2, check_stage2, donor_of, Stage2Arg};
 use super::view_chart::{apply_chart, ChartArg};
 use super::{absolute, parse};
-use crate::view::data::{Axis, Dataset, LabelKind, Labels, NONE};
+use crate::view::data::{Axis, Dataset, Labels, NONE};
 use crate::view::recompute::Step;
 use crate::view::render::{self, Viewport};
 use crate::view::{
@@ -16,7 +16,6 @@ use crate::view::{
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use image::codecs::png::CompressionType;
 use legume_mcp::{Call, Content, ToolSpec};
-use legume_tui::export::PageSize;
 use senna::run_manifest::{self, RunManifest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -31,10 +30,6 @@ pub(super) const MAX_SIDE: usize = 4096;
 
 /// Text size of a map drawn for the agent, as a terminal cell's height.
 pub(super) const CELL_PX: f32 = 18.0;
-
-/// Width and resolution of an exported figure.
-const EXPORT_WIDTH: usize = 2400;
-const EXPORT_DPI: u32 = 300;
 
 /// How far from a pixel of the last map `view_cell` looks for a point.
 const REACH_PX: f32 = 12.0;
@@ -89,7 +84,7 @@ pub(super) struct Open {
     pub(super) scene: Scene,
     pub(super) run: PathBuf,
     /// The world window asked for; `None` fits the whole map.
-    window: Option<[f32; 4]>,
+    pub(super) window: Option<[f32; 4]>,
     /// The last map drawn, for `view_cell` pixels.
     drawn: Option<Viewport>,
 }
@@ -200,16 +195,6 @@ struct CellArgs {
     px: Option<[f32; 2]>,
     at: Option<[f32; 2]>,
     name: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExportArgs {
-    png: Option<PathBuf>,
-    pdf: Option<PathBuf>,
-    width: Option<usize>,
-    #[serde(default)]
-    overwrite: bool,
 }
 
 /// The view's arguments as `senna view {run}` would take them.
@@ -438,7 +423,7 @@ impl Open {
     }
 
     /// The camera for an image `width` wide at the window's shape.
-    fn viewport(&self, width: usize) -> Viewport {
+    pub(super) fn viewport(&self, width: usize) -> Viewport {
         let [x0, y0, x1, y1] = self.window.unwrap_or(self.scene.current().points.bounds);
         let aspect = (y1 - y0) / (x1 - x0).max(1e-6);
         let h = ((width as f32 * aspect).round() as usize).clamp(1, MAX_SIDE);
@@ -449,7 +434,12 @@ impl Open {
     }
 
     /// The view through `vp` as a PNG.
-    fn draw(&self, vp: Viewport, cell_px: f32, level: CompressionType) -> Result<Vec<u8>> {
+    pub(super) fn draw(
+        &self,
+        vp: Viewport,
+        cell_px: f32,
+        level: CompressionType,
+    ) -> Result<Vec<u8>> {
         let img = deck::frames(&[(&self.scene, vp, cell_px)], false)
             .remove(0)
             .to_image();
@@ -546,54 +536,6 @@ impl Open {
             out["round"] = json!(s.cluster_info(name));
         }
         Ok(vec![Content::Json(out)])
-    }
-
-    fn export(&mut self, a: ExportArgs) -> Result<Vec<Content>> {
-        ensure!(a.png.is_some() || a.pdf.is_some(), "pass png, pdf or both");
-        // Figures only: no other file is written, overwrite or not.
-        for (path, ext) in a
-            .png
-            .iter()
-            .map(|p| (p, "png"))
-            .chain(a.pdf.iter().map(|p| (p, "pdf")))
-        {
-            ensure!(
-                path.extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(ext)),
-                "{} is not a .{ext} file",
-                path.display()
-            );
-        }
-        for path in a.png.iter().chain(&a.pdf) {
-            ensure!(
-                a.overwrite || !path.exists(),
-                "{} exists; pass overwrite to replace it",
-                path.display()
-            );
-        }
-        let vp = self.viewport(width(a.width, EXPORT_WIDTH)?);
-        legume_tui::export::fits((vp.w, vp.h), EXPORT_DPI as f32).map_err(|e| anyhow!(e))?;
-        // Text as large on the page as `senna view --pdf` sets it.
-        let size = PageSize {
-            width_in: vp.w as f32 / EXPORT_DPI as f32,
-            dpi: EXPORT_DPI,
-        };
-        let cell_px = size.cell_px();
-        let mut wrote = Vec::new();
-        if let Some(path) = &a.png {
-            std::fs::write(path, self.draw(vp, cell_px, CompressionType::Default)?)
-                .with_context(|| format!("writing {}", path.display()))?;
-            wrote.push(absolute(path));
-        }
-        if let Some(path) = &a.pdf {
-            let pages = deck::view_pages(&[(&self.scene, vp, cell_px)]);
-            legume_tui::export::write_pdf(&pages, EXPORT_DPI as f32, path)
-                .with_context(|| format!("writing {}", path.display()))?;
-            wrote.push(absolute(path));
-        }
-        Ok(vec![Content::Json(
-            json!({"wrote": wrote, "image": [vp.w, vp.h]}),
-        )])
     }
 }
 
@@ -796,21 +738,10 @@ fn find_space(data: &Dataset, method: &str, kind: &str) -> Result<usize> {
         .ok_or_else(|| anyhow!("no {method} map of {kind}; view_open lists the maps"))
 }
 
-/// Group `name` of `labels`: a level's name, or for clusters its id (`3`,
-/// `C3` or lupin's `K3`, the ids of the round shown).
+/// Group `name` of `labels` ([`Labels::group`]).
 pub(super) fn group_of(labels: &Labels, name: &str) -> Result<u32> {
-    let by_name = labels
-        .levels
-        .iter()
-        .position(|l| l.eq_ignore_ascii_case(name));
-    let by_id = || {
-        let id: i64 = name.trim_start_matches(['C', 'c', 'K', 'k']).parse().ok()?;
-        (labels.kind == LabelKind::Cluster)
-            .then(|| labels.ids.iter().position(|&i| i == id))
-            .flatten()
-    };
-    by_name
-        .or_else(by_id)
+    labels
+        .group(name)
         .map(|g| g as u32)
         .ok_or_else(|| anyhow!("no group {name} in {}", labels.title()))
 }
@@ -952,21 +883,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                 "additionalProperties": false,
             }),
         ),
-        spec(
-            "view_export",
-            "Write the current view as a PNG and/or a one-page PDF, text sized for print. \
-             Refuses to replace a file unless overwrite.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "png": {"type": "string", "description": "PNG path"},
-                    "pdf": {"type": "string", "description": "PDF path"},
-                    "width": {"type": "integer", "minimum": 1, "maximum": MAX_SIDE, "description": format!("Image width in pixels [default: {EXPORT_WIDTH}]")},
-                    "overwrite": {"type": "boolean", "description": "Replace files that exist"},
-                },
-                "additionalProperties": false,
-            }),
-        ),
+        super::view_export::spec(),
         super::view_stage2::spec(),
         super::view_cells::spec(),
     ]
