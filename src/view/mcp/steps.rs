@@ -5,7 +5,7 @@ use super::flags;
 use super::jobs::{job_property, start_server, Argv, Task};
 use super::parse;
 use anyhow::{ensure, Context, Result};
-use legume_mcp::{Call, Content, ToolSpec};
+use legume_mcp::{Call, Content, Next, ToolSpec};
 use senna::run_manifest;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -146,7 +146,20 @@ fn step_task(a: &StepCall) -> Result<Task> {
 fn run_step(a: StepCall, cx: &Call) -> Result<Vec<Content>> {
     let task = step_task(&a)?;
     let done = start_server(task, a.background, cx)?;
-    Ok(vec![Content::Json(done)])
+    let mut out = vec![Content::Json(done)];
+    out.extend(step_next(&a).map(|n| Content::Next(vec![n])));
+    Ok(out)
+}
+
+/// What could follow the step `a`: a clustering of a run's cells (which
+/// the run records) is what lupin annotates.
+fn step_next(a: &StepCall) -> Option<Next> {
+    match (&a.from, a.command, a.target) {
+        (Some(from), Command::Clustering, None | Some(Target::Cells)) => {
+            Some(super::fit::lupin_annotate(from))
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn specs() -> Vec<ToolSpec> {

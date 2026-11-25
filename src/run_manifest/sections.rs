@@ -325,6 +325,11 @@ pub struct RunOutputs {
     /// trunk at the mode, on `pb_time`'s phase scale; only with `--trunk`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_time: Option<String>,
+    /// The cells at the root an ode fit grew from, one name a line: the
+    /// `--root-cells` list it was given, or `{out}.root.txt`, the cells of
+    /// the root it chose; absent when no tree start won (or on older runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_cells: Option<String>,
     /// Fields this version does not know, written by another tool or a
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]

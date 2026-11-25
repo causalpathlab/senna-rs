@@ -88,3 +88,22 @@ fn a_step_missing_its_input_or_writing_over_its_run_is_refused() {
     }
     assert!(parse::<StepCall>(json!({"command": "view"})).is_err());
 }
+
+#[test]
+fn a_clustering_of_cells_leads_to_lupins_annotation_and_nothing_else_does() {
+    let next = |v: Value| step_next(&parse(v).unwrap()).map(|n| (n.tool, n.args));
+    assert_eq!(
+        next(json!({"command": "clustering", "from": "r.senna.json", "out": "k"})),
+        Some((
+            "lupin annotate_run".to_string(),
+            json!({"from": "r.senna.json"})
+        ))
+    );
+    let features =
+        json!({"command": "clustering", "from": "r.senna.json", "out": "k", "target": "features"});
+    assert_eq!(next(features), None);
+    assert_eq!(
+        next(json!({"command": "fne", "data": ["e.tsv"], "out": "g"})),
+        None
+    );
+}

@@ -5,8 +5,8 @@ use super::flags::{self, helped};
 use super::jobs::{one_of, planned, senna, start, Task};
 use super::parse;
 use anyhow::{ensure, Context, Result};
-use legume_mcp::{Call, Content, ToolSpec};
-use senna::run_manifest::{self, RunManifest};
+use legume_mcp::{Call, Content, Next, ToolSpec};
+use senna::run_manifest::{self, RunKind, RunManifest};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -66,17 +66,19 @@ fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
     })?;
     // A background fit's run is not there yet: the agent opens it once
     // the job is done.
-    if done.get("job").is_none() {
-        let run = PathBuf::from(done["run"].as_str().unwrap_or_default());
-        let (m, _) = RunManifest::load(&run)?;
-        done["kind"] = serde_json::to_value(m.kind)?;
-        decision_fields(&m, &run, &mut done);
+    if done.get("job").is_some() {
+        return Ok(vec![Content::Json(done)]);
     }
-    Ok(vec![Content::Json(done)])
+    let run = PathBuf::from(done["run"].as_str().unwrap_or_default());
+    let (m, _) = RunManifest::load(&run)?;
+    done["kind"] = serde_json::to_value(m.kind)?;
+    decision_fields(&m, &run, &mut done);
+    Ok(with_next(done, Some(&m), &run))
 }
 
-/// The run at `run`'s (`m` its manifest) objective and what its fit left
-/// to its user ([`needs_input`]), set in `out`.
+/// The run at `run`'s (`m` its manifest) objective, what its fit left to
+/// its user ([`needs_input`]) and the root an ODE grew from
+/// ([`root_field`]), set in `out`.
 pub(super) fn decision_fields(m: &RunManifest, run: &Path, out: &mut Value) {
     if let Some(objective) = m.objective {
         out["objective"] = json!(objective);
@@ -84,6 +86,102 @@ pub(super) fn decision_fields(m: &RunManifest, run: &Path, out: &mut Value) {
     if let Some(ask) = needs_input(m, run) {
         out["needs_input"] = ask;
     }
+    if let Some(root) = root_field(m, run) {
+        out["root"] = root;
+    }
+}
+
+/// The root an ODE run grew from (`root_cells` in its manifest `m`): the
+/// list, its count and what its cells mostly are by the run's newest lupin
+/// round ([`crate::view::cells_by_round`]), or how to have them typed;
+/// `None` when the run records no root.
+fn root_field(m: &RunManifest, run: &Path) -> Option<Value> {
+    let list = m.outputs.root_cells.as_deref()?;
+    let path = run_manifest::resolve(run_manifest::manifest_dir(run), list);
+    let cells = match legume_numeric::matrix::common_io::read_name_list(&path.to_string_lossy()) {
+        Ok(cells) => cells,
+        Err(e) => return Some(json!({"cells": path, "error": format!("{e:#}")})),
+    };
+    let mut root = json!({"cells": path, "n": cells.len()});
+    match crate::view::cells_by_round(run, &cells) {
+        Some(mostly) => root["mostly"] = mostly.into(),
+        None => {
+            root["label_cells"] = "the run has no lupin round to say what these cells are: \
+                 annotate it with lupin's annotate_run (from: this run) and view_open it again"
+                .into();
+        }
+    }
+    Some(root)
+}
+
+/// `said`, the result about the run at `run` (`m` its manifest), and the
+/// calls that could come next on it ([`next_of`]), when there are any.
+pub(super) fn with_next(said: Value, m: Option<&RunManifest>, run: &Path) -> Vec<Content> {
+    let next = m.map(|m| next_of(m, run, &said)).unwrap_or_default();
+    let mut out = vec![Content::Json(said)];
+    if !next.is_empty() {
+        out.push(Content::Next(next));
+    }
+    out
+}
+
+/// The calls that could follow a result `said` about the run at `run` (`m`
+/// its manifest), toward its cell types: a cell fit's clustering or its
+/// annotation with lupin ([`annotate_next`]); an ODE's too while its root
+/// or options name no type, and once they do, a root of the user's
+/// choosing written with view_cells.
+fn next_of(m: &RunManifest, run: &Path, said: &Value) -> Vec<Next> {
+    let untyped = said.pointer("/root/label_cells").is_some()
+        || said.pointer("/needs_input/label_cells").is_some();
+    if m.kind != RunKind::Ode {
+        // A cell fit lupin typed needs nothing more toward its types.
+        if crate::view::has_round(run) {
+            return Vec::new();
+        }
+        return vec![annotate_next(m, run)];
+    }
+    if untyped {
+        return vec![annotate_next(m, run)];
+    }
+    if said.pointer("/root/mostly").is_none() && said.get("needs_input").is_none() {
+        return Vec::new();
+    }
+    vec![Next::new(
+        "view_cells",
+        json!({}),
+        "the root is the user's to choose: with the run's lupin round shown (view_map round), \
+         write the cells of the type they name as the root (groups), then run_fit ode on the \
+         same data with flags root-cells set to that list and a new out",
+    )]
+}
+
+/// The next step toward the cell types of the run at `run` (`m` its
+/// manifest): with no clustering, `run_step` clustering into a new out
+/// (lupin annotates clusters); with one, lupin's `annotate_run` on it.
+fn annotate_next(m: &RunManifest, run: &Path) -> Next {
+    let run = run.to_string_lossy();
+    if m.cluster.clusters.is_none() {
+        let out = format!("{}_clusters", run_manifest::derive_out_prefix(&run));
+        return Next::new(
+            "run_step",
+            json!({"command": "clustering", "from": run, "out": out}),
+            "lupin annotates clusters and the run has none: cluster it first, if the user \
+             wants cell types (the method and its resolution are theirs to choose; run_help \
+             clustering lists them)",
+        );
+    }
+    lupin_annotate(&run)
+}
+
+/// lupin's `annotate_run` on the run manifest `run`.
+pub(super) fn lupin_annotate(run: &str) -> Next {
+    Next::new(
+        "lupin annotate_run",
+        json!({"from": run}),
+        "name the clusters' cell types, if the user wants them: it needs a marker panel the \
+         user names (markers), or lupin annotate_ask without one; then view_open the round \
+         here to look at the types",
+    )
 }
 
 /// What the fit of the run at `run` (`m` its manifest) left to its user
@@ -113,8 +211,8 @@ pub(super) fn needs_input(m: &RunManifest, run: &Path) -> Option<Value> {
     if for_cells && !typed {
         ask["label_cells"] = json!(
             "the options name no cell types: the run has no lupin round. Annotate it with \
-             lupin's MCP server (its annotate, on this run, with a marker panel the user names), \
-             then view_open this run again: every option then says what its cells mostly are."
+             lupin's annotate_run (from: this run, with a marker panel the user names), then \
+             view_open this run again: every option then says what its cells mostly are."
         );
     }
     Some(ask)
@@ -220,3 +318,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
     ]
 }
+
+#[cfg(test)]
+#[path = "../tests/mcp_fit.rs"]
+mod tests;

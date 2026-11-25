@@ -24,15 +24,17 @@ mod jobs;
 mod layout;
 mod model;
 mod predict;
+mod prompts;
 mod reference;
 mod stage2;
 mod steps;
 mod view;
+mod view_cells;
 mod view_chart;
 mod view_stage2;
 
 use anyhow::{bail, Context, Result};
-use legume_mcp::{Call, Content, Handler, ToolSpec};
+use legume_mcp::{Call, Content, Handler, Prompt, ToolSpec};
 use senna::run_manifest;
 use serde::Deserialize;
 use serde_json::Value;
@@ -63,7 +65,19 @@ coordinates are the layout's, y up. When `run_fit` or `view_open` returns \
 `needs_input`, the fit could not settle something from its data (an ODE's root, \
 say): put each question to the user before reading the result as settled, and \
 rerun with the option they choose. Close with `notebook` (kind \
-`conclusion`) and tell the user where the records are.";
+`conclusion`) and tell the user where the records are.
+
+With lupin: cell types come in order, a fit, then `run_step` clustering from \
+its manifest, then lupin's `annotate_run` on that manifest; results carry the \
+`next` calls toward them, and the prompts `annotate` and `trajectory` give \
+the whole recipes. Open the round here (`view_open` the round, or `view_map` \
+`round`) so its cell types are a grouping. To root an ODE, look at the types \
+(`view_markers`; lupin's `annotate_why` on which type is least \
+differentiated), write the root type's cells with `view_cells`, and `run_fit` \
+ode with flag root-cells set to that list and a new out; every ODE result \
+names its `root`, the cells it grew from and what they mostly are. A \
+`needs_input` from an ODE labels its options by lupin's types only when the \
+run has a round.";
 
 /// The tools, and the run they have open.
 #[derive(Default)]
@@ -82,6 +96,10 @@ impl Handler for Tools {
         specs.extend(steps::specs());
         specs.extend(view::specs());
         specs
+    }
+
+    fn prompts(&self) -> Vec<Prompt> {
+        prompts::prompts()
     }
 
     fn call(&mut self, name: &str, args: Value, cx: &Call) -> Result<Vec<Content>> {

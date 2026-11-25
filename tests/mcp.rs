@@ -111,6 +111,7 @@ fn senna_mcp_lists_its_tools_and_answers_a_failure_as_a_result() {
             "view_cell",
             "view_export",
             "view_stage2",
+            "view_cells",
             "job_status",
             "job_wait",
             "job_cancel"

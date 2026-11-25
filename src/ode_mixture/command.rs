@@ -5,7 +5,7 @@
 
 use super::coarsen::{coarse_reads, coarsen_genes};
 use super::counts::{pb_tracks, select_genes, two_track_genes};
-use super::init::{climb, root_gap, root_pseudobulks, Climb, TriedRoot, ROOT_GAP};
+use super::init::{climb, root_gap, root_pseudobulks, Climb, Climbed, TriedRoot, ROOT_GAP};
 use super::likelihood::Reads;
 use super::model::lineage_label;
 use super::output::MapBasis;
@@ -556,6 +556,14 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let climbed = climb(fit_reads, &opts, &dev)?;
     let member = cell_to_pb.last().expect("at least one level");
     let decision = root_decision(&args.out, &climbed.roots, member, &pbs, &all_cells)?;
+    let root = root_list(
+        &args.out,
+        args.root_cells.as_deref(),
+        &climbed,
+        member,
+        &pbs,
+        &all_cells,
+    )?;
     let (fit, objective) = (climbed.fit, climbed.objective);
     info!("ode: the climb's objective {objective:.4}");
     let start_at = fit.params()?;
@@ -620,6 +628,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         pb_tree.is_some(),
         !branch.is_empty(),
         decision,
+        root,
         f64::from(objective),
     )?;
     info!(
@@ -730,13 +739,7 @@ pub(crate) fn root_decision(
     let best = ranked[0].objective;
     let mut options = Vec::with_capacity(ranked.len());
     for (i, root) in ranked.iter().enumerate() {
-        let at: std::collections::HashSet<usize> = root.pbs.iter().map(|&r| pbs[r]).collect();
-        let named: Vec<Box<str>> = cells
-            .iter()
-            .zip(member)
-            .filter(|(_, p)| at.contains(p))
-            .map(|(c, _)| c.clone())
-            .collect();
+        let named = root_cells_of(root, member, pbs, cells);
         let path = format!("{out}.root_{i}.txt");
         legume_numeric::matrix::common_io::write_lines(&named, &path)?;
         let path = std::path::absolute(&path)?.to_string_lossy().into_owned();
@@ -764,6 +767,56 @@ pub(crate) fn root_decision(
             .into(),
         options,
     }))
+}
+
+/// The cells of `root`'s pseudobulks (`member` every cell's pseudobulk,
+/// `pbs` the pseudobulk of every row the climb read).
+fn root_cells_of(
+    root: &TriedRoot,
+    member: &[usize],
+    pbs: &[usize],
+    cells: &[Box<str>],
+) -> Vec<Box<str>> {
+    let at: std::collections::HashSet<usize> = root.pbs.iter().map(|&r| pbs[r]).collect();
+    cells
+        .iter()
+        .zip(member)
+        .filter(|(_, p)| at.contains(p))
+        .map(|(c, _)| c.clone())
+        .collect()
+}
+
+/// The root the fit took, as its manifest records it (`root_cells`): the
+/// list the user named (`named`, made absolute) when the fit grew from it,
+/// else the cells of the tree start's root it grew from, written to
+/// `{out}.root.txt` (its name beside the manifest); `None` when a k-means
+/// start won. A list an earlier run into `out` left is removed first.
+fn root_list(
+    out: &str,
+    named: Option<&std::path::Path>,
+    climbed: &Climbed,
+    member: &[usize],
+    pbs: &[usize],
+    cells: &[Box<str>],
+) -> anyhow::Result<Option<String>> {
+    let path = format!("{out}.root.txt");
+    if std::path::Path::new(&path).exists() {
+        std::fs::remove_file(&path)?;
+    }
+    let Some(root) = climbed.root.map(|r| &climbed.roots[r]) else {
+        return Ok(None);
+    };
+    if let Some(named) = named {
+        return Ok(Some(
+            std::path::absolute(named)?.to_string_lossy().into_owned(),
+        ));
+    }
+    legume_numeric::matrix::common_io::write_lines(
+        &root_cells_of(root, member, pbs, cells),
+        &path,
+    )?;
+    let name = std::path::Path::new(&path).file_name().unwrap_or_default();
+    Ok(Some(name.to_string_lossy().into_owned()))
 }
 
 /// Every `{out}.root_{i}.txt` an earlier run into `out` left, removed: what
@@ -802,6 +855,7 @@ fn write_manifest(
     has_pb_tree: bool,
     has_branch: bool,
     decision: Option<senna::run_manifest::Decision>,
+    root_cells: Option<String>,
     objective: f64,
 ) -> anyhow::Result<()> {
     use senna::run_manifest::{
@@ -818,6 +872,7 @@ fn write_manifest(
         m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
         m.outputs.pb_time = Some(format!("{base}.pb_time.parquet"));
         m.outputs.branch_time = has_branch.then(|| format!("{base}.branch_time.tsv"));
+        m.outputs.root_cells = root_cells;
         m.decisions.extend(decision);
         m.objective = Some(objective);
     };

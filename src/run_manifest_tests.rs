@@ -109,6 +109,17 @@ fn round_trip() {
     );
 }
 
+/// An ODE's root list round trips, and a run with none writes no key.
+#[test]
+fn an_odes_root_cells_round_trip_and_are_absent_by_default() {
+    let mut m = RunManifest::new(RunKind::Ode, "/tmp/ode");
+    let json = serde_json::to_value(&m).unwrap();
+    assert!(json["outputs"].get("root_cells").is_none());
+    m.outputs.root_cells = Some("ode.root.txt".into());
+    let back: RunManifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+    assert_eq!(back.outputs.root_cells.as_deref(), Some("ode.root.txt"));
+}
+
 /// Another tool (or a newer senna) may add keys this version does not
 /// know, or an older one may carry keys it no longer reads; saving must not
 /// drop them, at the top level or inside a section.

@@ -52,7 +52,8 @@ pub(super) fn call(
         "view_open" => {
             let open = open.insert(Open::new(&parse(args.clone())?, cx)?);
             cx.state(&open.view_state());
-            vec![Content::Json(open.summary())]
+            let m = open.scene.data.run.as_ref().map(|(m, _)| m);
+            super::fit::with_next(open.summary(), m, &open.run)
         }
         "view_map" => {
             let open = held(open)?;
@@ -65,6 +66,7 @@ pub(super) fn call(
         "view_markers" => held(open)?.markers(parse(args.clone())?)?,
         "view_cell" => held(open)?.cell(parse(args.clone())?)?,
         "view_export" => held(open)?.export(parse(args.clone())?)?,
+        "view_cells" => held(open)?.cells(parse(args.clone())?, cx)?,
         "view_stage2" => {
             let open = held(open)?;
             open.refresh_stage2();
@@ -84,7 +86,7 @@ fn held(open: &mut Option<Open>) -> Result<&mut Open> {
 /// An open run and the view on it.
 pub(super) struct Open {
     pub(super) scene: Scene,
-    run: PathBuf,
+    pub(super) run: PathBuf,
     /// The world window asked for; `None` fits the whole map.
     window: Option<[f32; 4]>,
     /// The last map drawn, for `view_cell` pixels.
@@ -239,7 +241,7 @@ impl Open {
         Ok(Self::of(scene, absolute(Path::new(&a.run))))
     }
 
-    fn of(scene: Scene, run: PathBuf) -> Self {
+    pub(super) fn of(scene: Scene, run: PathBuf) -> Self {
         Self {
             scene,
             run,
@@ -787,7 +789,7 @@ fn find_space(data: &Dataset, method: &str, kind: &str) -> Result<usize> {
 
 /// Group `name` of `labels`: a level's name, or for clusters its id (`3`,
 /// `C3` or lupin's `K3`, the ids of the round shown).
-fn group_of(labels: &Labels, name: &str) -> Result<u32> {
+pub(super) fn group_of(labels: &Labels, name: &str) -> Result<u32> {
     let by_name = labels
         .levels
         .iter()
@@ -949,6 +951,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             }),
         ),
         super::view_stage2::spec(),
+        super::view_cells::spec(),
     ]
 }
 

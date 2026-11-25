@@ -60,11 +60,11 @@ fn newest_round(run: &Path) -> Option<PathBuf> {
     Some(at)
 }
 
-/// `cell → type` from the newest round of the run at `run`: lupin's fine
-/// types when it wrote them, else its argmax; `None` with no round or no
-/// labels.
+/// `cell → type` from the newest round of the run at `run` (the manifest
+/// itself when it is a round with none made from it): lupin's fine types
+/// when it wrote them, else its argmax; `None` with no round or no labels.
 fn round_cell_types(run: &Path) -> Option<HashMap<Box<str>, Box<str>>> {
-    let round = newest_round(run)?;
+    let round = newest_round(run).unwrap_or_else(|| run.to_path_buf());
     let (m, dir) = RunManifest::load(&round).ok()?;
     let table = annotate_str(&m, "fine_argmax")
         .map(String::from)
@@ -94,10 +94,25 @@ pub(crate) fn typed_decisions(
             continue;
         };
         if let Some(mostly) = composition(&cells, &types) {
-            option.label = format!("{}; {mostly}", option.label);
+            option.label = format!("{}; mostly {mostly}", option.label);
         }
     }
     (out, true)
+}
+
+/// Whether the run at `run` has a lupin round that types its cells (or is
+/// one).
+pub(crate) fn has_round(run: &Path) -> bool {
+    round_cell_types(run).is_some()
+}
+
+/// What `cells` mostly are by the newest lupin round of the run at `run`,
+/// as [`typed_decisions`] says it of an option (`HSC (75%), then Mk
+/// (25%)`), or that the round types none of them; `None` when the run has
+/// no round.
+pub(crate) fn cells_by_round(run: &Path, cells: &[Box<str>]) -> Option<String> {
+    let types = round_cell_types(run)?;
+    Some(composition(cells, &types).unwrap_or_else(|| "none typed by the round".into()))
 }
 
 /// What `cells` mostly are under `types`: the commonest type and its share,
@@ -113,7 +128,7 @@ fn composition(cells: &[Box<str>], types: &HashMap<Box<str>, Box<str>>) -> Optio
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     let share = |n: usize| 100.0 * n as f64 / cells.len() as f64;
     let (top, n) = *ranked.first()?;
-    let mut said = format!("mostly {top} ({:.0}%)", share(n));
+    let mut said = format!("{top} ({:.0}%)", share(n));
     if let Some(&(next, m)) = ranked.get(1).filter(|(_, m)| share(*m) >= 10.0) {
         said.push_str(&format!(", then {next} ({:.0}%)", share(m)));
     }

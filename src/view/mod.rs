@@ -17,7 +17,7 @@ mod render;
 mod review;
 mod rounds;
 mod stage2;
-pub(crate) use rounds::typed_decisions;
+pub(crate) use rounds::{cells_by_round, has_round, typed_decisions};
 mod state;
 mod style;
 mod sublayout;
