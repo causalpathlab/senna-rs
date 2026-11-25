@@ -270,7 +270,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 ///   `llik(cell) = Σ_g x_gj · log recon_gj`,   `total(cell) = Σ_g x_gj`,
 /// and `write_outputs` derives `llik_per_count = llik / total`. Genes absent
 /// from the reference model are skipped (μ = 0), mirroring
-/// [`write_residual_backend`].
+/// [`write_residual_backend`](super::finalize::write_residual_backend).
 ///
 /// Takes `theta_nk` — proportions, rows summing to 1 — **not** the raw latent.
 /// The score is head-agnostic only once that conversion has happened: the

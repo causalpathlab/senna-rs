@@ -286,7 +286,7 @@ pub(super) fn write_outputs(
 /// division**, reusing legume_numeric::matrix's `adjust_by_division_inplace`, and write
 /// the leftover ("residual expression") to a NEW sparse backend.
 ///
-/// Blocks of cells run in parallel (rayon, like [`run_predict_blocks`]). Per
+/// Blocks of cells run in parallel (rayon, like [`run_predict_blocks`](super::run_predict_blocks)). Per
 /// block we form the expected per-gene rate as one `nalgebra` matmul
 /// `pred = exp(β) · θᵀ` (`[D_train, n_block]`) — never an `N × D` dense
 /// matrix, peak intermediate is `D × minibatch`. `pred` is scattered onto the
@@ -301,7 +301,7 @@ pub(super) fn write_outputs(
 /// model have `μ = 0` and are passed through unchanged. Surviving entries
 /// above `--residual-threshold` (all ≥ 0) are written as triplets, mirroring
 /// the `svd` backend-write idiom.
-fn write_residual_backend(
+pub(super) fn write_residual_backend(
     args: &PredictArgs,
     data_vec: &SparseIoVec,
     z_nk: &Mat,
