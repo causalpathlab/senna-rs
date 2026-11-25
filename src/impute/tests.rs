@@ -36,8 +36,7 @@ fn base_args(model: Box<str>, out: Box<str>) -> ImputeArgs {
         minibatch_size: 100,
         block_size: None,
         preload_data: false,
-        device: senna::embed_common::ComputeDevice::Cpu,
-        device_no: 0,
+        compute: senna::embed_common::DeviceArgs::default(),
     }
 }
 

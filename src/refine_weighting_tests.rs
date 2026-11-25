@@ -9,18 +9,15 @@ struct Cli {
 }
 
 #[test]
-fn the_tree_is_the_default_and_marginal_switches_it_off() {
-    let cli = Cli::try_parse_from(["senna"]).unwrap();
-    let params = cli.collapse.pb_tree_params().expect("refined by default");
+fn the_finest_pseudobulks_come_from_the_residual_tree() {
+    let params = pb_tree_params();
     assert!((params.edge_margin - 0.10).abs() < 1e-6);
     assert_eq!(params.below_edge, BelowEdge::Keep);
     assert_eq!(params.max_genes, 2000);
     assert_eq!(params.min_cells_to_split, 8);
     let reassign = params.reassign_cells.expect("cells are reassigned first");
     assert_eq!(reassign.num_gibbs, 3);
-
-    let cli = Cli::try_parse_from(["senna", "--pb-tree", "marginal"]).unwrap();
-    assert!(cli.collapse.pb_tree_params().is_none());
+    assert!(Cli::try_parse_from(["senna", "--pb-tree", "marginal"]).is_err());
 }
 
 /// The carrying default must reach a parent recorded before the opt-out
@@ -128,4 +125,15 @@ fn floats_outputs_and_the_feature_axis_in_the_comparison() {
         &source_settings(&here)
     )
     .is_empty());
+}
+
+/// Fits recorded while `--pb-tree` existed still replay: the field is
+/// ignored, and the tree is grown as it is for every fit now.
+#[test]
+fn a_fit_recorded_with_a_pb_tree_choice_still_replays() {
+    for choice in ["refined", "marginal"] {
+        let raw = format!(r#"{{"pb_tree":"{choice}","sort_dim":7}}"#);
+        let c: CollapseArgs = serde_json::from_str(&raw).expect("old collapse args");
+        assert_eq!(c.sort_dim, 7);
+    }
 }

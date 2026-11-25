@@ -21,6 +21,7 @@ fn job(
         clones: None,
         pb_from: None,
         lane: 0,
+        step: None,
     }
 }
 
@@ -386,4 +387,57 @@ echo \"end $out\" >> '{log}'\n",
     }
     assert_eq!(q.states(), [State::Done, State::Done]);
     assert!(at("end topic") < at("start rbm"), "rbm waited for topic");
+}
+
+/// A step runs after its fit is done, recorded in the fit's script; a
+/// failed fit's step is skipped.
+#[cfg(unix)]
+#[test]
+fn a_step_runs_after_its_fit_and_is_skipped_when_the_fit_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let senna = fake(d, "fake-senna", "senna.json");
+    let step_of = |fit: usize, out: &str| {
+        let mut j = job(
+            d,
+            Tool::Senna,
+            &senna,
+            out,
+            &["layout", "tsne", "--from", &format!("{out}.senna.json")],
+        );
+        j.step = Some(StepOf { fit, step: 0 });
+        j
+    };
+    let jobs = vec![
+        job(
+            d,
+            Tool::Senna,
+            &senna,
+            "svd",
+            &["svd", "d.zarr", "--out", "svd"],
+        ),
+        step_of(0, "svd"),
+        job(
+            d,
+            Tool::Senna,
+            Path::new("/bin/false"),
+            "bad",
+            &["bad", "--out", "bad"],
+        ),
+        step_of(2, "bad"),
+    ];
+    let q = Queue::start(jobs);
+    wait(&q, Queue::finished);
+    let states = q.states();
+    assert_eq!(states[..2], [State::Done, State::Done]);
+    assert!(matches!(&states[3], State::Failed(why) if why.contains("bad did not finish")));
+    let log = std::fs::read_to_string(d.join("argv.log")).unwrap();
+    assert!(log.contains("layout tsne --from svd.senna.json"), "{log}");
+    assert!(!log.contains("bad.senna.json"), "{log}");
+    let script = std::fs::read_to_string(d.join("svd.cmd.sh")).unwrap();
+    assert!(
+        script.contains("layout tsne \\\n  --from svd.senna.json"),
+        "{script}"
+    );
+    assert_eq!(q.done(), [d.join("svd.senna.json")]);
 }

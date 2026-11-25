@@ -120,13 +120,13 @@ fn the_parameters_open_on_the_shared_page() {
     let mut a = app(dir.path());
     let (topic, simba, vae) = (row_of(&a, "topic"), row_of(&a, "simba"), row_of(&a, "vae"));
     a.screen = Screen::Methods;
-    a.method_row = topic;
+    a.methods_cursor.0 = topic;
     key(&mut a, KeyCode::Enter);
     assert_eq!(a.screen, Screen::Params);
     assert!(!a.shared_page, "one fit: its own page");
 
     a.screen = Screen::Methods;
-    a.method_row = simba;
+    a.methods_cursor.0 = simba;
     key(&mut a, KeyCode::Enter);
     assert_eq!(a.screen, Screen::Params);
     assert!(a.shared_page, "the second fit: the shared page");
@@ -138,7 +138,7 @@ fn the_parameters_open_on_the_shared_page() {
     assert!(!a.shared_page, "a fit already queued: its own page");
     assert_eq!(a.param_method, simba);
     a.screen = Screen::Methods;
-    a.method_row = vae;
+    a.methods_cursor.0 = vae;
     key(&mut a, KeyCode::Enter);
     assert!(!a.shared_page, "a third fit: its own page");
     assert_eq!(a.param_method, vae);

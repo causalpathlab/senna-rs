@@ -8,7 +8,6 @@ fn a_command_line_is_built_flag_by_flag_and_skips_what_is_not_given() {
         .many("--bulk", &[])
         .flag("--model", Some("m"))
         .flag("--eval-features", none)
-        .each("-b", &["b1.txt".into(), "b2.txt".into()])
         .many("--null-from", &["t1.zarr".into(), "t2.zarr".into()])
         .switch("--decoder-only", false)
         .switch("--preload-data", true)
@@ -21,10 +20,6 @@ fn a_command_line_is_built_flag_by_flag_and_skips_what_is_not_given() {
             "b.zarr",
             "--model",
             "m",
-            "-b",
-            "b1.txt",
-            "-b",
-            "b2.txt",
             "--null-from",
             "t1.zarr",
             "t2.zarr",

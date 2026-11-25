@@ -118,7 +118,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         coembed_t: args.coembed_temp,
         preset_genes: preset,
         seed: args.train.seed,
-        device: args.train.device.to_device(args.train.device_no)?,
+        device: args.train.compute.to_device()?,
     };
     let out = run_simba(&crate::training_data::Backend(data), &hvg_rows, &cfg)?;
 

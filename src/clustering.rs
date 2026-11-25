@@ -5,6 +5,7 @@
 
 use crate::cluster_bhc::{run_cluster_bhc, ClusterBhcConfig};
 use crate::postprocess::fit_layout_features::{read_feature_rows, FeatureSpace};
+use anyhow::Context;
 use senna::cluster::{
     hsblock_clustering, kmeans_clustering, leiden_clustering, ClusterMethod, ClusterResult,
     LatentMetric,
@@ -109,14 +110,17 @@ pub struct ClusteringArgs {
     #[arg(
         long,
         short = 'l',
-        help = "Latent representation file (cells × K); not with --target features",
+        help = "Latent representation file (cells × K) [default: the --from run's cell table]; not with --target features",
         long_help = "Latent topic proportions or SVD projection (cells × K matrix).\n\
                      Used as feature space for clustering.\n\
                      \n\
                      Expected formats:\n\
                      - From `senna topic`: .latent.parquet (cells × topics)\n\
                      - From `senna svd`: .projection.parquet (cells × components)\n\
-                     - First column: cell names"
+                     - First column: cell names\n\
+                     \n\
+                     With --from and no --latent: the run's cell table, as its layouts\n\
+                     read it (its cell embedding, else its latent)."
     )]
     latent: Option<Box<str>>,
 
@@ -215,16 +219,17 @@ pub struct ClusteringArgs {
     #[arg(
         long,
         short = 'o',
-        required = true,
-        help = "Output file prefix",
-        long_help = "Output file prefix.\n\
+        required_unless_present = "from",
+        help = "Output file prefix [default: the --from run's own]",
+        long_help = "Output file prefix; with --from and no --out, the run's own\n\
+                     (the manifest's path without `.senna.json`).\n\
                      \n\
                      Generates:\n\
                      - {out}.clusters.parquet: Cluster assignments (cell × cluster)\n\
                      - {out}.bhc.merges.parquet: BHC merge tree (when --data is given)\n\
                      - {out}.bhc.cut.parquet:    BHC consensus cut (when --data is given)"
     )]
-    out: Box<str>,
+    out: Option<Box<str>>,
 
     #[arg(
         long,
@@ -277,10 +282,18 @@ pub struct ClusteringArgs {
 }
 
 pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
-    mkdir_parent(&args.out)?;
+    let out = args.out().context("--out is required without --from")?;
+    mkdir_parent(&out)?;
     let (cell_names, latent) = match (args.target, args.latent.as_deref(), args.from.as_deref()) {
-        (ClusterTarget::Cells, Some(latent), _) => {
-            let MatWithNames { rows, mat, .. } = read_mat(latent)?;
+        (ClusterTarget::Cells, latent, from) => {
+            let latent = match (latent, from) {
+                (Some(latent), _) => latent.to_string(),
+                (None, Some(from)) => run_cell_table(from)?,
+                (None, None) => {
+                    anyhow::bail!("--latent (or --from, a run) is required to cluster cells")
+                }
+            };
+            let MatWithNames { rows, mat, .. } = read_mat(&latent)?;
             info!(
                 "Loaded latent representation: {} cells × {} features",
                 mat.nrows(),
@@ -296,9 +309,9 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
             let (manifest, dir) = RunManifest::load(Path::new(from))?;
             read_feature_rows(&manifest, &dir, args.feature_space)?
         }
-        // clap requires --from for an explicit --target features; the
-        // default target is not seen by its conditions.
-        _ => anyhow::bail!("--latent is required to cluster cells"),
+        (ClusterTarget::Features, _, None) => {
+            anyhow::bail!("--target features clusters the features of a run: pass --from")
+        }
     };
 
     // Determine number of clusters
@@ -369,7 +382,7 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
 
     // Output cluster assignments as parquet
     let (suffix, row_label) = args.target.output();
-    let output_file = format!("{}.{suffix}.parquet", args.out);
+    let output_file = format!("{out}.{suffix}.parquet");
     write_cluster_assignments(&result, &cell_names, &output_file, row_label)?;
 
     info!("Wrote cluster assignments to {output_file}");
@@ -379,10 +392,34 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
     }
 
     if let Some(data_files) = args.data_files.as_ref() {
-        run_bhc_postprocess(data_files, &result, &cell_names, args)?;
+        run_bhc_postprocess(data_files, &result, &cell_names, &out, args)?;
     }
 
     Ok(())
+}
+
+impl ClusteringArgs {
+    /// The output prefix: `--out`, else the `--from` run's own.
+    fn out(&self) -> Option<String> {
+        self.out.as_deref().map(String::from).or_else(|| {
+            self.from
+                .as_deref()
+                .map(senna::run_manifest::derive_out_prefix)
+        })
+    }
+}
+
+/// The cell table of the run whose manifest is `from`, as its layouts read
+/// it: its geometry latent (the cell embedding, else the latent).
+fn run_cell_table(from: &str) -> anyhow::Result<String> {
+    let (manifest, dir) = RunManifest::load(Path::new(from))?;
+    let rel = manifest
+        .outputs
+        .geometry_latent()
+        .with_context(|| format!("{from}: the run records no cell table to cluster"))?;
+    Ok(senna::run_manifest::resolve(&dir, rel)
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Update the run manifest in place with the cluster parquet path. Path is
@@ -405,6 +442,7 @@ fn run_bhc_postprocess(
     data_files: &[Box<str>],
     result: &ClusterResult,
     cell_names: &[Box<str>],
+    out: &str,
     args: &ClusteringArgs,
 ) -> anyhow::Result<()> {
     info!(
@@ -438,7 +476,7 @@ fn run_bhc_postprocess(
         data_vec,
         &result.labels,
         &result.cluster_sizes(),
-        &args.out,
+        out,
         &ClusterBhcConfig {
             gamma_per_gene: args.bhc_gamma_per_gene,
             cutoff: args.bhc_cut,
@@ -473,3 +511,7 @@ fn write_cluster_assignments(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests/clustering.rs"]
+mod tests;

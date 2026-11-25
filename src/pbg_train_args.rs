@@ -84,9 +84,7 @@ pub struct PbgTrainArgs {
     #[arg(long, default_value_t = 1, help = "Random seed")]
     pub(crate) seed: u64,
 
-    #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
-    pub(crate) device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
-    pub(crate) device_no: usize,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) compute: senna::embed_common::DeviceArgs,
 }

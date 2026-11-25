@@ -1,7 +1,7 @@
 //! The run screen: the clones step, the queue and its log, and choices a fit asks for.
 
-use super::jobs::{Keep, Queue, Tool};
-use super::{jobs, rerun_argv, App, Choice, Screen};
+use super::jobs::{Keep, Queue};
+use super::{jobs, rerun_argv, script, App, Choice, Screen};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::Path;
 
@@ -89,7 +89,7 @@ impl App {
             .iter()
             .zip(q.states())
             .enumerate()
-            .filter(|(_, (j, s))| j.tool == Tool::Senna && *s == jobs::State::Done)
+            .filter(|(_, (j, s))| j.is_fit() && *s == jobs::State::Done)
             .find_map(|(i, (j, _))| {
                 let run = j.result();
                 let (m, _) = senna::run_manifest::RunManifest::load(&run).ok()?;
@@ -130,10 +130,27 @@ impl App {
                 let mut job = q.jobs[c.job].clone();
                 let option = &c.decision.options[c.row];
                 let out = format!("{}_{}{}", job.out, c.decision.topic, c.row);
+                // The fit's queued steps follow the rerun, on its new out.
+                let steps = q
+                    .jobs
+                    .iter()
+                    .filter(|j| j.step.is_some_and(|of| of.fit == c.job))
+                    .map(|j| {
+                        let mut j = j.clone();
+                        if let Some(of) = j.step {
+                            let step = &self.rows[j.row].steps[of.step];
+                            j.argv = self.step_argv(step, &out, 0);
+                        }
+                        j.out.clone_from(&out);
+                        j.lane = 0;
+                        j.step = j.step.map(|of| jobs::StepOf { fit: 0, ..of });
+                        j
+                    })
+                    .collect::<Vec<_>>();
                 job.argv = rerun_argv(&job.argv, &out, &option.rerun_args);
                 job.out = out;
                 job.lane = 0;
-                self.queue = Some(Queue::start(vec![job]));
+                self.queue = Some(Queue::start(std::iter::once(job).chain(steps).collect()));
                 self.log_top = None;
                 self.message = Some(format!("rerunning with {}", option.label));
             }
@@ -175,13 +192,23 @@ impl App {
             .iter()
             .zip(q.states())
             .map(|(j, s)| {
-                let script = j.script();
                 let what = match s {
                     jobs::State::Done => "done".to_string(),
                     jobs::State::Failed(why) => format!("failed: {why}"),
                     jobs::State::Stopped => "stopped".to_string(),
                     jobs::State::Waiting | jobs::State::Running => "not finished".to_string(),
                 };
+                // A step's fit script refuses to rerun over the fit it made,
+                // so a step is given again as its own command.
+                if j.step.is_some() {
+                    return format!(
+                        "{} {what}; again with: (cd {} && senna {})",
+                        j.method,
+                        script::quote(&self.shown(&j.dir)),
+                        script::line(&j.argv)
+                    );
+                }
+                let script = j.script();
                 if script.exists() {
                     format!(
                         "{} {what}; again with: bash {}",

@@ -1,6 +1,7 @@
 //! Planning the queued commands, and the confirm popup that shows them.
 
-use super::jobs::{Job, Queue, Tool, CLONES_FLAG};
+use super::jobs::{Job, Queue, StepOf, Tool, CLONES_FLAG};
+use super::steps::Step;
 use super::{batches, form, script, share, App, Builder, Planned, Row, Screen};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::{Path, PathBuf};
@@ -48,7 +49,7 @@ impl App {
     /// How senna fit `r` takes the clone table `table` of the queued
     /// `mung clones`: the table, or a warning that it cannot, or a problem.
     fn clones_for(r: &Row, table: &str) -> (Option<String>, Option<String>, Option<String>) {
-        match r.form.fields.iter().find(|f| f.long == CLONES_FLAG) {
+        match r.form.field(CLONES_FLAG) {
             Some(f) if !f.is_default() => (
                 None,
                 None,
@@ -125,7 +126,7 @@ impl App {
             // `--device-no` given by hand stays): each GPU is a lane, its
             // fits run in turn and the GPUs side by side.
             let mut argv = r.form.argv(&data, &batch_files, &out);
-            let lane = match self.gpu_of(r) {
+            let lane = match self.gpu_of(&r.form) {
                 Some(Some(given)) => given,
                 Some(None) => {
                     let gpu = next_gpu % self.gpus;
@@ -149,6 +150,7 @@ impl App {
                 clones,
                 pb_from,
                 lane,
+                step: None,
             };
             let mut blamed = None;
             let problem = if self.pairs.is_empty() {
@@ -176,26 +178,86 @@ impl App {
                     })
             };
             outs.push(dir.join(&out));
+            let steps = self.plan_steps(i, &job, planned.len(), batch_files.is_empty());
             planned.push(Planned {
                 warning: (!notes.is_empty()).then(|| notes.join("; ")),
                 job,
                 problem,
                 blamed,
             });
+            planned.extend(steps);
         }
         planned
     }
 
-    /// Whether row `r`'s fit runs on a GPU while there are several to
-    /// spread fits over: `Some(Some(d))` when `--device-no d` is given,
-    /// `Some(None)` when it is free to take one; `None` otherwise.
-    fn gpu_of(&self, r: &Row) -> Option<Option<usize>> {
-        let value = |long: &str| r.form.fields.iter().find(|f| f.long == long);
-        if self.gpus < 2 || value("device").is_none_or(|f| f.value.trim() != "cuda") {
+    /// The queued steps of row `i`, each to run on `fit` (queued as job
+    /// `at`) in its lane once it is done, `--from` its manifest.
+    fn plan_steps(&self, i: usize, fit: &Job, at: usize, no_batches: bool) -> Vec<Planned> {
+        let r = &self.rows[i];
+        r.steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.on)
+            .map(|(s, step)| {
+                let job = Job {
+                    tool: fit.tool,
+                    program: fit.program.clone(),
+                    row: fit.row,
+                    method: format!("{} › {}", r.label, step.form.name),
+                    dir: fit.dir.clone(),
+                    out: fit.out.clone(),
+                    argv: self.step_argv(step, &fit.out, fit.lane),
+                    labels: Vec::new(),
+                    clones: None,
+                    pb_from: None,
+                    lane: fit.lane,
+                    step: Some(StepOf { fit: at, step: s }),
+                };
+                let mut blamed = None;
+                let problem = if step.spec.needs_batches && no_batches {
+                    Some(format!(
+                        "{} needs the fit's batch files: label the data on the Data screen",
+                        step.form.name
+                    ))
+                } else {
+                    form::check(&self.cli, &job.argv).err().inspect(|why| {
+                        blamed = form::blamed(why, &step.form.fields).map(str::to_string);
+                    })
+                };
+                Planned {
+                    job,
+                    problem,
+                    blamed,
+                    warning: None,
+                }
+            })
+            .collect()
+    }
+
+    /// Step `step`'s command line on the fit writing `fit_out` in lane
+    /// `lane`: on several GPUs a lane is a GPU, which a step on cuda takes
+    /// as a fit would, unless its form names one.
+    pub(super) fn step_argv(&self, step: &Step, fit_out: &str, lane: usize) -> Vec<String> {
+        let mut argv = step.argv(fit_out);
+        if lane > 0 && self.gpu_of(&step.form) == Some(None) {
+            argv.extend(["--device-no".to_string(), lane.to_string()]);
+        }
+        argv
+    }
+
+    /// Whether `form` runs on a GPU while there are several to spread fits
+    /// over: `Some(Some(d))` when `--device-no d` is given, `Some(None)`
+    /// when it is free to take one; `None` otherwise.
+    fn gpu_of(&self, form: &form::Method) -> Option<Option<usize>> {
+        if self.gpus < 2
+            || form
+                .field("device")
+                .is_none_or(|f| f.value.trim() != "cuda")
+        {
             return None;
         }
         Some(
-            value("device-no")
+            form.field("device-no")
                 .filter(|f| !f.is_default())
                 .and_then(|f| f.value.trim().parse().ok())
                 .filter(|&d: &usize| d < self.gpus),
@@ -239,7 +301,7 @@ impl App {
                 };
                 if let Some(p) = planned.iter().find(|p| p.problem.is_some()) {
                     if let Some(flag) = &p.blamed {
-                        self.go_to_flag(p.job.row, flag);
+                        self.go_to_flag(p.job.row, p.job.step.map(|of| of.step), flag);
                     }
                     self.message = Some(format!(
                         "{}: {}",
@@ -257,14 +319,22 @@ impl App {
         }
     }
 
-    /// Show `--flag` of `method` on the parameters screen, the advanced
-    /// rows too when it is one of them.
-    fn go_to_flag(&mut self, m: usize, flag: &str) {
-        let Some(at) = self.rows[m].form.fields.iter().position(|f| f.long == flag) else {
+    /// Show `--flag` of `method` (of its step `step`) on the parameters
+    /// screen, the advanced rows too when it is one of them.
+    fn go_to_flag(&mut self, m: usize, step: Option<usize>, flag: &str) {
+        let form = match step {
+            Some(s) => &self.rows[m].steps[s].form,
+            None => &self.rows[m].form,
+        };
+        let Some(at) = form.fields.iter().position(|f| f.long == flag) else {
             return;
         };
-        self.show_params(m);
-        self.advanced |= self.rows[m].form.fields[at].advanced;
+        let advanced = form.fields[at].advanced;
+        match step {
+            Some(s) => self.show_step(m, s),
+            None => self.show_params(m),
+        }
+        self.advanced |= advanced;
         self.filter.clear();
         self.field_row = self.row_of(at).unwrap_or(0);
     }

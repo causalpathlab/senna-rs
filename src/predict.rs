@@ -39,10 +39,40 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     // Before any data is touched: the latent refit only exists for the dense
     // topic models, and anywhere else the flags would be dropped silently.
     // (`--refine-lr` / `--refine-reg` only tune that refit.)
+    use senna::run_manifest::RunKind;
+    // `itopic` is the manifest's name for both masked simplex heads, not a
+    // command anyone types.
+    let family = match kind {
+        RunKind::Itopic => "masked-topic / masked-sbp",
+        k => k.as_str(),
+    };
+    // No scoring path: say so by name, before anything is read, not as a
+    // field missing from a model.json the run never wrote in that shape.
+    let scored = match kind {
+        RunKind::Topic
+        | RunKind::Itopic
+        | RunKind::MaskedVae
+        | RunKind::Vae
+        | RunKind::JointTopic
+        | RunKind::Svd
+        | RunKind::Bge
+        | RunKind::Simba => true,
+        RunKind::Rbm
+        | RunKind::Ode
+        | RunKind::JointSvd
+        | RunKind::Fne
+        | RunKind::ResolveEmbeddingSpace => false,
+    };
+    anyhow::ensure!(
+        scored,
+        "predict does not score a {family} run ({}): it predicts topic, masked, vae, svd, bge \
+         and simba runs",
+        args.model
+    );
     anyhow::ensure!(
         kind.has_decoder_latent_fit() || (!args.decoder_only && args.refine_steps == 0),
         "--decoder-only / --refine-steps re-fit the latent against a topic decoder; {} is a \
-         `senna {kind}` run, which is predicted from its encoder or projection only",
+         {family} run, which is predicted from its encoder or projection only",
         args.model
     );
 
@@ -102,7 +132,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         k if k.has_frozen_gene_table() => return predict_bge(args, kind),
         // svd writes no checkpoint either; its query side is the Nyström
         // projection onto the frozen dictionary.
-        senna::run_manifest::RunKind::Svd => return predict_svd(args),
+        RunKind::Svd => return predict_svd(args),
         _ => {}
     }
 

@@ -249,6 +249,29 @@ impl RunKind {
         }
     }
 
+    /// Whether stage 2 (`senna donor-deviation`) runs on this kind: one gene
+    /// axis, and a cell → pseudobulk partition recorded. simba, the joint
+    /// fits, fne and resolve-embedding-space record no partition; ode's
+    /// counts are two tracks. A full match, as above.
+    #[must_use]
+    pub fn has_stage2_inputs(self) -> bool {
+        match self {
+            RunKind::Topic
+            | RunKind::Itopic
+            | RunKind::MaskedVae
+            | RunKind::Vae
+            | RunKind::Svd
+            | RunKind::Bge
+            | RunKind::Rbm => true,
+            RunKind::JointTopic
+            | RunKind::JointSvd
+            | RunKind::Fne
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Simba
+            | RunKind::Ode => false,
+        }
+    }
+
     /// Whether the frozen gene table comes with a per-gene bias
     /// (`feature_bias.parquet`). bge fits one and cannot be scored without
     /// it; SIMBA's score is a pure dot product, so its bias is zero by

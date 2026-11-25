@@ -416,3 +416,42 @@ fn model_reads_as_a_prefix_or_its_manifest() {
     }
     assert!(parse_model_prefix(".senna.json").is_err());
 }
+
+/// A family predict has no scoring path for is refused by name before any
+/// file of the run is read, and a masked run is named as its commands are.
+#[test]
+fn predict_names_the_runs_it_does_not_score() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |kind: &str| {
+        let prefix = dir.path().join("r").to_string_lossy().into_owned();
+        std::fs::write(
+            format!("{prefix}.senna.json"),
+            format!(r#"{{"version":2,"kind":"{kind}","prefix":"r"}}"#),
+        )
+        .unwrap();
+        prefix
+    };
+    let out = dir.path().join("p").to_string_lossy().into_owned();
+
+    let rbm = run("rbm");
+    let args = parse(&["--model", &rbm, "-o", &out, "q.zarr"]).unwrap();
+    let err = predict_model(&args).unwrap_err().to_string();
+    assert!(err.contains("does not score a rbm run"), "{err}");
+
+    let masked = run("itopic");
+    let args = parse(&[
+        "--model",
+        &masked,
+        "-o",
+        &out,
+        "--refine-steps",
+        "5",
+        "q.zarr",
+    ])
+    .unwrap();
+    let err = predict_model(&args).unwrap_err().to_string();
+    assert!(
+        err.contains("masked-topic / masked-sbp run") && !err.contains("itopic"),
+        "{err}"
+    );
+}

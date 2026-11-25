@@ -1,5 +1,6 @@
 //! `run_layout`: a run laid out again with the settings given.
 
+use super::flags;
 use super::jobs::{one_of, senna_parses, Task};
 use super::parse;
 use crate::view::recompute::{Step, Target};
@@ -7,7 +8,7 @@ use anyhow::{ensure, Context, Result};
 use legume_mcp::{Call, Content, ToolSpec};
 use legume_numeric::matrix::umap::{MIN_DIST, SPREAD};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 /// A layout tool's call; `None` for another family's.
 pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
@@ -41,10 +42,8 @@ struct LayoutArgs {
     method: String,
     #[serde(default)]
     target: LayoutTarget,
-    min_dist: Option<f32>,
-    spread: Option<f32>,
     #[serde(default)]
-    args: Vec<String>,
+    flags: Map<String, Value>,
 }
 
 /// `senna layout {method} …` as `view_open` lays out the run `t`, with
@@ -53,13 +52,9 @@ fn layout_task(a: &LayoutArgs, t: &Target) -> Result<Task> {
     let step = a.target.step();
     one_of(&a.method, step.settings())
         .with_context(|| format!("senna's {} methods", step.label()))?;
+    let flags = flags::words(&format!("layout {}", a.method), &a.flags)?;
     let mut argv = step.argv(t, &a.method);
-    for (flag, v) in [("--umap-min-dist", a.min_dist), ("--umap-spread", a.spread)] {
-        if let Some(v) = v {
-            argv.extend([flag.into(), v.to_string()]);
-        }
-    }
-    argv.extend(a.args.iter().cloned());
+    argv.extend(flags);
     // The kernel's range too, which clap leaves to the layout.
     if let crate::Commands::Layout {
         cmd: crate::LayoutCmd::Umap(umap),
@@ -107,10 +102,13 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         "run_layout",
         &format!(
             "Lay out a run again with the settings given, as `senna layout {{method}} --from \
-             {{run}} {{args}}`, replacing that method's layout in the run: cells by {cells}, \
-             the feature embedding by {features} (e.g. umap with min_dist 0.5 and \
-             [\"--knn\", \"30\"]). Writes {{run}}.{{method}}.cell_coords.parquet (or \
-             feature_coords). Always runs. Then view_open the run with that map to see it."
+             {{run}} {{flags}}`, replacing that method's layout in the run: cells by {cells}, \
+             the feature embedding by {features} (e.g. umap with flags {{\"umap-min-dist\": \
+             0.5, \"knn\": 30}}; umap-min-dist and umap-spread are umap-learn's min_dist and \
+             spread, the first in [0, spread] [defaults {MIN_DIST} and {SPREAD} when the other \
+             is given], and with neither the layout is t-UMAP). Writes \
+             {{run}}.{{method}}.cell_coords.parquet (or feature_coords). Always runs. Then \
+             view_open the run with that map to see it."
         ),
         json!({
             "type": "object",
@@ -118,9 +116,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                 "run": {"type": "string", "description": "Run manifest ({out}.senna.json)"},
                 "method": {"enum": Step::CellLayout.settings(), "description": format!("Layout method; the feature embedding takes {features}")},
                 "target": {"enum": ["cells", "features"], "description": "Lay out the cells, or the feature embedding on its own [default: cells]"},
-                "min_dist": {"type": "number", "minimum": 0, "description": format!("umap only: umap-learn's min_dist, in [0, spread] [default {MIN_DIST} when spread is given]; larger loosens groups into continua, smaller packs them. With neither this nor spread, t-UMAP")},
-                "spread": {"type": "number", "exclusiveMinimum": 0, "description": format!("umap only: umap-learn's spread, the scale of the map's distances [default {SPREAD} when min_dist is given]")},
-                "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (layout {method}) lists them"},
+                "flags": flags::property("senna layout {method}", r#"{"umap-min-dist": 0.5, "knn": 30}"#),
             },
             "required": ["run", "method"],
             "additionalProperties": false,

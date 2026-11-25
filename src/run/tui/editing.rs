@@ -39,7 +39,9 @@ impl App {
                         }
                     }
                     Target::Header => self.set_header(&text),
-                    Target::Field(..) | Target::Shared(_) => self.set_text(&target, &text),
+                    Target::Field(..) | Target::Step(..) | Target::Shared(_) => {
+                        self.set_text(&target, &text)
+                    }
                     Target::Filter => {}
                     Target::BatchName(i) => {
                         let name = text.trim();

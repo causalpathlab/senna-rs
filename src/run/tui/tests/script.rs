@@ -78,12 +78,12 @@ fn a_script_is_never_written_over() {
     let dir = tempfile::tempdir().unwrap();
     let a = argv(&["svd", "d.zarr", "--out", "r"]);
     let path = dir.path().join("r.cmd.sh");
-    write(&path, "r", &a, Tool::Senna).unwrap();
+    write(&path, "r", &a, &[], Tool::Senna).unwrap();
     assert!(std::fs::read_to_string(&path)
         .unwrap()
         .contains("svd \\\n  d.zarr"));
     std::fs::write(&path, "kept").unwrap();
-    assert!(write(&path, "r", &a, Tool::Senna).is_err());
+    assert!(write(&path, "r", &a, &[], Tool::Senna).is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept");
 }
 
@@ -99,6 +99,7 @@ fn the_script_runs_the_command_once_and_then_refuses() {
         &path,
         "r",
         &argv(&["svd", "d.zarr", "--out", "r"]),
+        &[],
         Tool::Senna,
     )
     .unwrap();
@@ -147,7 +148,7 @@ fn a_script_for_an_out_in_a_folder_runs_from_where_the_run_started() {
     crate::test_program::write(&fake, "#!/bin/sh\n[ -e d.zarr ] || exit 3\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out ] && touch \"$2.senna.json\"; shift; done\n");
     let path = dir.path().join("runs/r.cmd.sh");
     let a = argv(&["svd", "d.zarr", "--out", "runs/r"]);
-    write(&path, "runs/r", &a, Tool::Senna).unwrap();
+    write(&path, "runs/r", &a, &[], Tool::Senna).unwrap();
     let run = || {
         std::process::Command::new("bash")
             .arg(&path)

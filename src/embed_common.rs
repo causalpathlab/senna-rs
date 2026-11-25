@@ -66,10 +66,11 @@ pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
 }
 
 /// Shared compute device enum for candle-based models
-#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(ValueEnum, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum ComputeDevice {
+    #[default]
     Cpu,
     Cuda,
     Metal,
@@ -92,6 +93,34 @@ impl ComputeDevice {
             ComputeDevice::Cuda => candle_core::Device::new_cuda(device_no)?,
             ComputeDevice::Metal => candle_core::Device::new_metal(device_no)?,
         })
+    }
+}
+
+/// `--device` / `--device-no`, flattened into every command that runs on a
+/// candle device. Serialized flat, so manifests keep their `device` and
+/// `device_no` keys.
+#[derive(Args, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DeviceArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ComputeDevice::Cpu,
+        help = "Compute device (cpu|cuda|metal)",
+        long_help = "Compute device. `cuda` / `metal` need senna built with the matching\n\
+                     cargo feature. Results on a GPU agree with cpu to the fit's tolerance,\n\
+                     not bit for bit."
+    )]
+    pub device: ComputeDevice,
+
+    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
+    pub device_no: usize,
+}
+
+impl DeviceArgs {
+    /// The candle device these flags name.
+    pub fn to_device(&self) -> anyhow::Result<candle_core::Device> {
+        self.device.to_device(self.device_no)
     }
 }
 

@@ -13,6 +13,7 @@ mod data;
 mod data_screen;
 mod described;
 mod draw;
+mod draw_methods;
 mod editing;
 mod form;
 mod jobs;
@@ -20,6 +21,8 @@ mod params_screen;
 mod run_screen;
 mod script;
 mod share;
+mod step_rows;
+mod steps;
 
 use batches::Batch;
 use data::Pair;
@@ -84,6 +87,8 @@ struct Row {
     stem: &'static str,
     /// Whether `out` was typed by hand, so the header leaves it be.
     typed: bool,
+    /// The steps offered after its fit, none queued at first.
+    steps: Vec<steps::Step>,
 }
 
 impl Row {
@@ -100,6 +105,7 @@ impl Row {
             out: stem.to_string(),
             stem,
             typed: false,
+            steps: Vec::new(),
         }
     }
 }
@@ -112,6 +118,8 @@ enum Target {
     Header,
     /// Method row, field index.
     Field(usize, usize),
+    /// Method row, its step, the step's field index.
+    Step(usize, usize, usize),
     /// A flag of the shared page, by name: in every queued fit that has it.
     Shared(String),
     Filter,
@@ -170,9 +178,12 @@ pub(crate) struct App {
     /// Where the browser opens next.
     browse_dir: PathBuf,
     rows: Vec<Row>,
-    method_row: usize,
+    /// The Methods screen's cursor: a method, or one of its steps.
+    methods_cursor: step_rows::Entry,
     /// The method whose flags the parameters screen shows.
     param_method: usize,
+    /// The step of `param_method` whose flags it shows instead.
+    param_step: Option<usize>,
     /// The parameters screen shows the flags the queued methods share,
     /// where a change sets every one of them.
     shared_page: bool,
@@ -495,7 +506,9 @@ impl App {
             rows.push(Row::new(Tool::Mung, Method::new(m, CLONES)?, "cnv"));
         }
         for m in METHODS {
-            rows.push(Row::new(Tool::Senna, Method::new(&cli, m)?, m));
+            let mut row = Row::new(Tool::Senna, Method::new(&cli, m)?, m);
+            row.steps = steps::offered(&cli, m);
+            rows.push(row);
         }
         let mut app = App {
             cli,
@@ -514,8 +527,9 @@ impl App {
             browser: Some(Browser::open(start.clone(), Pick::Data, None)),
             browse_dir: start,
             rows,
-            method_row: 0,
+            methods_cursor: (0, None),
             param_method: 0,
+            param_step: None,
             shared_page: false,
             browsing: None,
             field_row: 0,
@@ -656,6 +670,7 @@ impl App {
             clones: None,
             pb_from: None,
             lane: 0,
+            step: None,
         })
     }
 
@@ -740,6 +755,7 @@ impl App {
             self.param_method = methods[0];
             self.field_row = 0;
         }
+        self.settle_steps();
         if self.shared_page && self.shared_rows().len() < 2 {
             self.shared_page = false;
             self.field_row = 0;

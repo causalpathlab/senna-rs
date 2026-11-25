@@ -14,9 +14,12 @@
 //! `reference` reads new data through a reference; `layout` lays a run
 //! out again and `steps` runs the other analysis commands; `view` holds a
 //! run open and draws it. `jobs` builds, checks and starts the senna
-//! commands they run.
+//! commands they run, and `flags` reads each command's flags off senna's
+//! command line: a run tool takes its own arguments by name and every
+//! other flag in `flags`.
 
 mod fit;
+mod flags;
 mod jobs;
 mod layout;
 mod model;
@@ -41,12 +44,14 @@ pub const INSTRUCTIONS: &str = "\
 Use senna's MCP tools to embed single-cell data and look at the result; \
 annotation is lupin's own server. Open the day with `notebook` (kind `plan`): \
 the question, the data, and how the result will be checked. `run_fit` runs a \
-fit to its end (`run_help` lists a method's flags) and returns its run \
-manifest; an existing run is not fitted again. A long fit runs with \
+fit to its end and returns its run manifest; an existing run is not fitted \
+again. Every run tool takes its inputs and out by name and any other flag of \
+its senna command in `flags` (flag name to value); `run_help` lists a \
+command's flags. A long fit runs with \
 `background`, as a job to follow with `job_wait`, in a session of `senna run` the user can watch with `senna attach`. \
 `run_predict` places new cells in a trained model's latent, `run_update` \
 continues a trained model over new data, and `run_layout` lays a run out \
-again with chosen settings, umap's min_dist and spread among them. `view_open` opens a run (or a \
+again with chosen settings, umap's min_dist and spread (flags umap-min-dist, umap-spread) among them. `view_open` opens a run (or a \
 lupin round) and computes a missing layout or clustering first; in a terminal the same \
 run opens with `senna view {run}.senna.json`. `view_map` \
 draws the map with its legend; its arguments stay set until changed, so pass \

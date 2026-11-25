@@ -107,28 +107,6 @@ impl PbRefineArgs {
 // Shared projection + multilevel-collapse CLI args //
 //////////////////////////////////////////////////////
 
-/// CLI args for the shared random-projection + multilevel pseudobulk
-/// collapse pipeline.
-///
-/// Flatten into any subcommand args struct with `#[command(flatten)]` to
-/// expose `--proj-dim`, `--sort-dim`, `--knn-cells`, `--num-levels`,
-/// `--iter-opt`, `--ignore-batch`, and (via the nested [`PbRefineArgs`])
-/// `--pb-refine-*`. Keeps the upstream flag surface identical across every
-/// senna subcommand that collapses cells into pseudobulks.
-/// How the finest pseudobulk partition is built.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, serde::Serialize, serde::Deserialize,
-)]
-#[value(rename_all = "kebab-case")]
-pub(crate) enum PbTreeArg {
-    /// Reassign cells between the top nodes by likelihood, then grow a tree
-    /// below them on residual components to one leaf target per level.
-    #[default]
-    Refined,
-    /// The sign bits of the marginal sketch alone, as before the tree existed.
-    Marginal,
-}
-
 /// `--pb-from`: collapse on another run's pseudobulk partition instead of
 /// building one, for fits of one data set that would build the same one.
 #[derive(Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -140,7 +118,7 @@ pub(crate) struct PbFromArgs {
         help = "Collapse on another run's pseudobulk partition instead of building one",
         long_help = "Reuse the cell → pseudobulk partition of an earlier topic-family run\n\
                      (its prefix, or its .senna.json) on the same cells: the cell\n\
-                     reassignment, the --pb-tree and the BBKNN + DC-SBM refinement are\n\
+                     reassignment, the residual tree and the BBKNN + DC-SBM refinement are\n\
                      skipped; the counts are aggregated and the batch effects estimated\n\
                      on that partition. That run must have built it as this one would:\n\
                      the same collapse, QC, HVG and feature-name settings and sketch\n\
@@ -176,6 +154,16 @@ impl PbFromArgs {
                 if let Some(why) = own_partition(args) {
                     anyhow::bail!("--pb-from {run}: that run {why}");
                 }
+                // Fits from before `--pb-tree` was dropped could choose the
+                // sketch-sign partition; this run grows the residual tree.
+                anyhow::ensure!(
+                    args.pointer("/collapse/pb_tree")
+                        .and_then(serde_json::Value::as_str)
+                        != Some("marginal"),
+                    "--pb-from {run}: that run built its partition with --pb-tree marginal (the \
+                     sketch signs); this run grows the residual tree, so without --pb-from it \
+                     builds its own"
+                );
                 if args.get("from").is_some_and(|v| !v.is_null()) {
                     log::warn!(
                         "--pb-from {run}: that run inherited its partition with --from, so \
@@ -298,6 +286,14 @@ fn source_settings(args: &serde_json::Value) -> serde_json::Value {
     out
 }
 
+/// CLI args for the shared random-projection + multilevel pseudobulk
+/// collapse pipeline.
+///
+/// Flatten into any subcommand args struct with `#[command(flatten)]` to
+/// expose `--proj-dim`, `--sort-dim`, `--knn-cells`, `--num-levels`,
+/// `--iter-opt`, `--ignore-batch`, and (via the nested [`PbRefineArgs`])
+/// `--pb-refine-*`. Keeps the upstream flag surface identical across every
+/// senna subcommand that collapses cells into pseudobulks.
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]
 pub(crate) struct CollapseArgs {
@@ -318,31 +314,10 @@ pub(crate) struct CollapseArgs {
         help = "Partition depth: ≤ 2^d + 1 pseudobulk groups",
         long_help = "Binary-tree partitioning over the top d projection components.\n\
                      Produces at most 2^d + 1 pseudobulk leaves.\n\
-                     Under --pb-tree refined the leaves below the coarsest level\n\
-                     come from a tree grown on residuals; see --pb-tree."
+                     The leaves below the coarsest level come from a tree grown\n\
+                     on residuals (written to {out}.pb_tree.json)."
     )]
     pub(crate) sort_dim: usize,
-
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = PbTreeArg::Refined,
-        help = "Finest pseudobulk partition: refined (tree grown on residuals) or marginal (sketch signs)",
-        long_help = "How the finest pseudobulks are formed.\n\
-                     \n\
-                     refined: cells are first reassigned between the coarsest\n\
-                     sketch nodes by the likelihood of the node profiles, then a\n\
-                     tree is grown below the nodes by bisecting each leaf on the\n\
-                     leading component of its cells' residuals, until every level\n\
-                     reaches its leaf target (2^d for the level's depth). Each split\n\
-                     records the genes that differentiate its two branches, its\n\
-                     strength against the noise edge, and a two-group likelihood\n\
-                     ratio, written to {out}.pb_tree.json.\n\
-                     marginal: the sign bits of the random sketch, whose leading\n\
-                     components follow lineage mass; a within-lineage program of\n\
-                     modest fold change rarely flips one."
-    )]
-    pub(crate) pb_tree: PbTreeArg,
 
     #[arg(
         long,
@@ -461,18 +436,17 @@ pub(crate) struct CollapseArgs {
     pub(crate) pb_refine: PbRefineArgs,
 }
 
-impl CollapseArgs {
-    /// Tree parameters for the multilevel collapse, `None` under
-    /// `--pb-tree marginal`.
-    pub(crate) fn pb_tree_params(&self) -> Option<data_beans::alg::collapse_data::PbTreeParams> {
-        use data_beans::alg::collapse_data::{PbTreeParams, ReassignCellsParams};
-        match self.pb_tree {
-            PbTreeArg::Marginal => None,
-            PbTreeArg::Refined => Some(PbTreeParams {
-                reassign_cells: Some(ReassignCellsParams::default()),
-                ..PbTreeParams::default()
-            }),
-        }
+/// Tree parameters for the multilevel collapse. The finest pseudobulks
+/// always come from it: cells are reassigned between the coarsest sketch
+/// nodes by the likelihood of the node profiles, then each leaf is bisected
+/// on the leading component of its cells' residuals until every level
+/// reaches its leaf target, each split recorded in `{out}.pb_tree.json`.
+/// (bge builds its own partition and ignores this.)
+pub(crate) fn pb_tree_params() -> data_beans::alg::collapse_data::PbTreeParams {
+    use data_beans::alg::collapse_data::{PbTreeParams, ReassignCellsParams};
+    PbTreeParams {
+        reassign_cells: Some(ReassignCellsParams::default()),
+        ..PbTreeParams::default()
     }
 }
 

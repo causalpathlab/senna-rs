@@ -39,7 +39,7 @@ fn a_description_becomes_a_form_like_senna_s_own() {
     let cmd = d.command();
     let m = Method::new(&cmd, "split").unwrap();
     assert_eq!(m.about, "Split cells");
-    let field = |l: &str| m.fields.iter().find(|f| f.long == l).unwrap();
+    let field = |l: &str| m.field(l).unwrap();
     assert_eq!(field("k-max").default, "8");
     assert_eq!(field("k-max").long_help, "Largest K");
     assert_eq!(

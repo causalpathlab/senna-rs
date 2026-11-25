@@ -189,16 +189,9 @@ pub struct TopicArgs {
     )]
     pub(crate) grad_clip: f32,
 
-    #[arg(
-        long,
-        value_enum,
-        default_value = "cpu",
-        help = "Compute device (cpu|cuda|metal)"
-    )]
-    pub(crate) device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
-    pub(crate) device_no: usize,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) compute: senna::embed_common::DeviceArgs,
 
     #[arg(
         long,

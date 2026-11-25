@@ -173,13 +173,22 @@ impl App {
     // ───────────── methods ─────────────
 
     pub(super) fn methods_key(&mut self, k: KeyEvent) {
-        if let Some(row) = legume_tui::keys::list_move(&k, self.method_row, self.rows.len(), true) {
-            self.method_row = row;
+        // The cursor walks the methods and the steps under queued ones.
+        let rows = self.method_entries();
+        let at = rows
+            .iter()
+            .position(|&e| e == self.methods_cursor)
+            .unwrap_or(0);
+        if let Some(row) = legume_tui::keys::list_move(&k, at, rows.len(), true) {
+            self.methods_cursor = rows[row];
+            return;
+        }
+        if self.step_key(k) {
             return;
         }
         match k.code {
             KeyCode::Char(' ') => {
-                let r = &mut self.rows[self.method_row];
+                let r = &mut self.rows[self.methods_cursor.0];
                 r.on = !r.on;
             }
             KeyCode::Char('O') => {
@@ -187,18 +196,18 @@ impl App {
                 self.edit(Target::Header, header);
             }
             KeyCode::Char('o') => {
-                let out = self.rows[self.method_row].out.clone();
-                self.edit(Target::Out(self.method_row), out);
+                let out = self.rows[self.methods_cursor.0].out.clone();
+                self.edit(Target::Out(self.methods_cursor.0), out);
             }
             KeyCode::Enter | KeyCode::Right => {
                 // Queuing the second fit is when the shared page first
                 // exists, so show it then; otherwise the method's own page.
                 let before = self.shared_rows().len();
-                self.rows[self.method_row].on = true;
+                self.rows[self.methods_cursor.0].on = true;
                 if before == 1 && self.shared_rows().len() == 2 {
                     self.go_to(Screen::Params);
                 } else {
-                    self.show_params(self.method_row);
+                    self.show_params(self.methods_cursor.0);
                 }
             }
             _ => {}

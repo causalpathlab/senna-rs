@@ -1,4 +1,4 @@
-use crate::topic::common::{create_device, setup_stop_handler};
+use crate::topic::common::setup_stop_handler;
 use crate::topic::train_joint::{train_and_save, ProgressiveTrainConfig, SaveContext};
 use senna::embed_common::*;
 use senna::senna_input::{
@@ -142,16 +142,8 @@ pub struct JointTopicArgs {
     )]
     pub(crate) grad_clip: f32,
 
-    #[arg(
-        long,
-        value_enum,
-        default_value = "cpu",
-        help = "Compute device (cpu|cuda|metal)"
-    )]
-    pub(crate) device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
-    pub(crate) device_no: usize,
+    #[command(flatten)]
+    pub(crate) compute: senna::embed_common::DeviceArgs,
 
     #[arg(
         long,
@@ -282,7 +274,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             // The feature coarsening reads the finest level's counts
             // (`CollapsedOut::observed_counts`).
             keep_finest_stats: true,
-            pb_tree: args.collapse.pb_tree_params(),
+            pb_tree: Some(crate::refine_weighting::pb_tree_params()),
             strata,
         },
     )?;
@@ -370,7 +362,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // 5. Train a joint topic model on the collapsed data (progressive)
     let n_topics = args.n_latent_topics;
 
-    let dev = create_device(&args.device, args.device_no)?;
+    let dev = args.compute.to_device()?;
 
     let parameters = candle_nn::VarMap::new();
     let param_builder =

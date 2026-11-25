@@ -12,10 +12,11 @@ impl App {
     }
 
     pub(super) fn show_params(&mut self, m: usize) {
-        if self.param_method != m || self.shared_page {
+        if self.param_method != m || self.shared_page || self.param_step.is_some() {
             self.field_row = 0;
         }
         self.param_method = m;
+        self.param_step = None;
         self.shared_page = false;
         self.screen = Screen::Params;
     }
@@ -80,7 +81,7 @@ impl App {
         self.shared_rows()
             .into_iter()
             .filter_map(|r| {
-                let f = self.rows[r].form.fields.iter().find(|f| f.long == long)?;
+                let f = self.rows[r].form.field(long)?;
                 Some((self.rows[r].label.clone(), f.value.clone()))
             })
             .collect()
@@ -92,11 +93,13 @@ impl App {
         values.iter().any(|(_, v)| *v != values[0].1)
     }
 
-    /// The form the parameters screen shows: the method's, or the shared
-    /// page's.
+    /// The form the parameters screen shows: the method's, a step's after
+    /// it, or the shared page's.
     pub(super) fn page_form(&self) -> std::borrow::Cow<'_, Method> {
         if self.shared_page {
             std::borrow::Cow::Owned(self.shared_form())
+        } else if let Some(step) = self.page_step() {
+            std::borrow::Cow::Borrowed(&step.form)
         } else {
             std::borrow::Cow::Borrowed(&self.rows[self.param_method].form)
         }
@@ -107,6 +110,15 @@ impl App {
     fn field_of(&self, target: &Target) -> Option<Field> {
         match target {
             Target::Field(m, i) => self.rows.get(*m)?.form.fields.get(*i).cloned(),
+            Target::Step(m, s, i) => self
+                .rows
+                .get(*m)?
+                .steps
+                .get(*s)?
+                .form
+                .fields
+                .get(*i)
+                .cloned(),
             Target::Shared(long) => self
                 .shared_form()
                 .fields
@@ -121,6 +133,7 @@ impl App {
     pub(super) fn change_field(&mut self, target: &Target, change: impl Fn(&mut Field)) {
         match target {
             Target::Field(m, i) => change(&mut self.rows[*m].form.fields[*i]),
+            Target::Step(m, s, i) => change(&mut self.rows[*m].steps[*s].form.fields[*i]),
             Target::Shared(long) => {
                 let Some(mut x) = self.field_of(target) else {
                     return;
@@ -137,6 +150,7 @@ impl App {
     fn reset_field(&mut self, target: &Target) {
         match target {
             Target::Field(m, i) => self.rows[*m].form.fields[*i].reset(),
+            Target::Step(m, s, i) => self.rows[*m].steps[*s].form.fields[*i].reset(),
             Target::Shared(long) => self.each_shared(long, Field::reset),
             _ => {}
         }
@@ -220,6 +234,8 @@ impl App {
     fn target(&self, i: usize) -> Target {
         if self.shared_page {
             Target::Shared(self.page_form().fields[i].long.clone())
+        } else if let (Some(s), Some(_)) = (self.param_step, self.page_step()) {
+            Target::Step(self.param_method, s, i)
         } else {
             Target::Field(self.param_method, i)
         }
@@ -234,13 +250,8 @@ impl App {
         }
         match k.code {
             KeyCode::Char('[' | ']') => {
-                // The shared page first, when two fits or more are queued.
-                let mut pages: Vec<Option<usize>> = Vec::new();
-                if self.shared_rows().len() > 1 {
-                    pages.push(None);
-                }
-                pages.extend(self.param_methods().into_iter().map(Some));
-                let here = (!self.shared_page).then_some(self.param_method);
+                let pages = self.pages();
+                let here = (!self.shared_page).then_some((self.param_method, self.param_step));
                 let at = pages.iter().position(|&p| p == here).unwrap_or(0);
                 let d = if k.code == KeyCode::Char(']') {
                     1
@@ -248,7 +259,8 @@ impl App {
                     pages.len() - 1
                 };
                 match pages[(at + d) % pages.len()] {
-                    Some(m) => self.show_params(m),
+                    Some((m, None)) => self.show_params(m),
+                    Some((m, Some(s))) => self.show_step(m, s),
                     None => self.show_shared(),
                 }
             }
@@ -279,9 +291,8 @@ impl App {
                         .map(|f| Target::Shared(f.long))
                         .collect()
                 } else {
-                    let n = self.rows[self.param_method].form.fields.len();
-                    (0..n)
-                        .map(|i| Target::Field(self.param_method, i))
+                    (0..self.page_form().fields.len())
+                        .map(|i| self.target(i))
                         .collect()
                 };
                 for t in &targets {

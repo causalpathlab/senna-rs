@@ -21,8 +21,8 @@ fn layout(v: Value) -> Result<Task> {
 
 #[test]
 fn layout_lays_out_the_run_in_its_own_prefix_with_the_flags_given() {
-    let t = layout(json!({"run": "d/r.senna.json", "method": "umap", "args": ["--knn", "30"]}))
-        .unwrap();
+    let t =
+        layout(json!({"run": "d/r.senna.json", "method": "umap", "flags": {"knn": 30}})).unwrap();
     assert_eq!(
         t.argv,
         [
@@ -32,8 +32,7 @@ fn layout_lays_out_the_run_in_its_own_prefix_with_the_flags_given() {
             "d/r.senna.json",
             "--out",
             "d/r",
-            "--knn",
-            "30"
+            "--knn=30"
         ]
     );
     assert_eq!(
@@ -62,32 +61,6 @@ fn layout_lays_out_the_run_in_its_own_prefix_with_the_flags_given() {
 }
 
 #[test]
-fn a_umap_layout_takes_min_dist_and_spread_as_its_flags() {
-    let t = layout(json!({"run": "r.senna.json", "method": "umap", "min_dist": 0.5, "spread": 1.5, "args": ["--knn", "30"]}))
-        .unwrap();
-    assert_eq!(
-        t.argv,
-        [
-            "layout",
-            "umap",
-            "--from",
-            "r.senna.json",
-            "--out",
-            "r",
-            "--umap-min-dist",
-            "0.5",
-            "--umap-spread",
-            "1.5",
-            "--knn",
-            "30"
-        ]
-    );
-    // Either alone.
-    let t = layout(json!({"run": "r.senna.json", "method": "umap", "min_dist": 0.0})).unwrap();
-    assert_eq!(t.argv[6..], ["--umap-min-dist", "0"]);
-}
-
-#[test]
 fn a_layout_senna_would_refuse_is_refused_before_it_runs() {
     let umap = |extra: Value| {
         let mut v = json!({"run": "r.senna.json", "method": "umap"});
@@ -99,19 +72,17 @@ fn a_layout_senna_would_refuse_is_refused_before_it_runs() {
     for (bad, said) in [
         // Not one of phate's flags.
         (
-            json!({"run": "r.senna.json", "method": "phate", "min_dist": 0.5}),
+            json!({"run": "r.senna.json", "method": "phate", "flags": {"umap-min-dist": 0.5}}),
             "--umap-min-dist",
         ),
-        // The kernel's range, with spread given in args.
+        // The kernel's range, checked on the parsed command line.
         (
-            umap(json!({"min_dist": 0.5, "args": ["--umap-spread", "0.3"]})),
+            umap(json!({"flags": {"umap-min-dist": 0.5, "umap-spread": 0.3}})),
             "min_dist",
         ),
-        (
-            umap(json!({"min_dist": 0.5, "args": ["--umap-min-dist", "0.2"]})),
-            "--umap-min-dist",
-        ),
-        (umap(json!({"args": ["--no-such-flag"]})), "--no-such-flag"),
+        // The run and its out are the tool's own.
+        (umap(json!({"flags": {"out": "x"}})), "as `run`"),
+        (umap(json!({"flags": {"no-such-flag": true}})), "run_help"),
         // A method senna lacks for its points.
         (json!({"run": "r.senna.json", "method": "pca"}), ""),
         (
@@ -122,9 +93,9 @@ fn a_layout_senna_would_refuse_is_refused_before_it_runs() {
         let e = format!("{:#}", layout(bad.clone()).unwrap_err());
         assert!(e.contains(said), "{bad}: {e}");
     }
-    // A field and the other in args are checked together.
-    assert!(layout(umap(
-        json!({"spread": 2.0, "args": ["--umap-min-dist=1.5"]})
+    let t = layout(umap(
+        json!({"flags": {"umap-spread": 2.0, "umap-min-dist": 1.5}}),
     ))
-    .is_ok());
+    .unwrap();
+    assert_eq!(t.argv[6..], ["--umap-spread=2.0", "--umap-min-dist=1.5"]);
 }

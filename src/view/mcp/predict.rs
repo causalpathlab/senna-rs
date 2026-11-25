@@ -1,6 +1,7 @@
 //! `run_predict` and `run_probe`: new data scored against a trained model,
 //! which neither changes.
 
+use super::flags::{self, given, parsed};
 use super::jobs::{job_property, model_tag, planned, start_server, Argv, Task};
 use super::parse;
 use crate::topic::model_metadata::resolve_run_kind;
@@ -9,7 +10,7 @@ use anyhow::{bail, ensure, Context, Result};
 use legume_mcp::{Call, Content, ToolSpec};
 use senna::run_manifest::{self, RunKind};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 /// A scoring tool's call; `None` for another family's.
@@ -28,7 +29,8 @@ enum Latent {
     /// The encoder's pass, or the projection of a run with no encoder.
     #[default]
     Encoder,
-    /// The encoder's latent refined by `--refine-steps` decoder-side steps.
+    /// The encoder's latent refined by `--refine-steps` decoder-side steps
+    /// (set in `flags`).
     Refine,
     /// `--decoder-only`: no encoder, the latent fitted to the frozen decoder.
     Decoder,
@@ -44,52 +46,48 @@ struct PredictCall {
     bulk: Vec<String>,
     out: Option<String>,
     #[serde(default)]
-    batch_files: Vec<String>,
-    #[serde(default)]
-    null_from: Vec<String>,
-    eval_features: Option<String>,
-    scoring_delta: Option<String>,
-    #[serde(default)]
     latent: Latent,
-    refine_steps: Option<usize>,
     #[serde(default)]
-    args: Vec<String>,
+    flags: Map<String, Value>,
     #[serde(default)]
     background: bool,
 }
 
-/// `senna predict` of `a` into `out`: the latent and the per-cell
-/// predictive fit; its flags checked first.
-fn predict_task(a: &PredictCall, out: &str) -> Result<Task> {
+/// `senna predict` of `a` into `out`, `flags` the words of its `flags`:
+/// the latent and the per-cell predictive fit; checked first as senna
+/// parses it, then for what senna would refuse only once it ran.
+fn predict_task(a: &PredictCall, flags: &[String], out: &str) -> Result<Task> {
     ensure!(
         a.data.is_empty() != a.bulk.is_empty(),
         "give data files or bulk tables, not both or neither"
     );
+    let argv = Argv::new("predict")
+        .args(a.data.iter().cloned())
+        .many("--bulk", &a.bulk)
+        .flag("--model", Some(run_manifest::derive_out_prefix(&a.model)))
+        .flag("-o", Some(out))
+        .switch("--decoder-only", a.latent == Latent::Decoder)
+        .rest(flags);
+    let m = parsed(&argv)?;
+    let batches = given(&m, "batch_files").len();
     ensure!(
-        a.batch_files.is_empty() || !a.bulk.is_empty() || a.batch_files.len() == a.data.len(),
-        "{} batch files for {} data files: one per data file",
-        a.batch_files.len(),
+        batches == 0 || !a.bulk.is_empty() || batches == a.data.len(),
+        "{batches} batch files for {} data files: one per data file",
         a.data.len()
     );
-    let steps = match (a.latent, a.refine_steps) {
-        (Latent::Encoder, Some(_)) => bail!("refine_steps is for latent refine or decoder"),
-        (Latent::Refine, None | Some(0)) => bail!("latent refine needs refine_steps (1 or more)"),
-        (_, steps) => steps,
-    };
+    let steps = given(&m, "refine_steps")
+        .first()
+        .map(|s| s.parse::<usize>());
+    match (a.latent, steps.transpose()?) {
+        (Latent::Encoder, Some(_)) => bail!("--refine-steps is for latent refine or decoder"),
+        (Latent::Refine, None | Some(0)) => {
+            bail!("latent refine needs refine-steps (1 or more) in flags")
+        }
+        _ => {}
+    }
     let what = a.data.iter().chain(&a.bulk).cloned().collect::<Vec<_>>();
     Ok(Task {
-        argv: Argv::new("predict")
-            .args(a.data.iter().cloned())
-            .many("--bulk", &a.bulk)
-            .flag("--model", Some(run_manifest::derive_out_prefix(&a.model)))
-            .flag("-o", Some(out))
-            .each("-b", &a.batch_files)
-            .many("--null-from", &a.null_from)
-            .flag("--eval-features", a.eval_features.as_deref())
-            .flag("--scoring-delta", a.scoring_delta.as_deref())
-            .switch("--decoder-only", a.latent == Latent::Decoder)
-            .flag("--refine-steps", steps)
-            .rest(&a.args),
+        argv,
         made: vec![
             ("latent", format!("{out}.latent.parquet").into()),
             ("predictive", format!("{out}.predictive.parquet").into()),
@@ -173,9 +171,12 @@ fn run_predict(a: PredictCall, cx: &Call) -> Result<Vec<Content>> {
     if a.latent != Latent::Encoder {
         check_latent(&a, model_kind(&a.model)?)?;
     }
+    let flags = flags::words("predict", &a.flags)?;
     let data = a.data.first().or(a.bulk.first()).map(String::as_str);
     let tag = model_tag(&a.model, "predict");
-    let (_, task) = planned(cx, a.out.as_deref(), data, &tag, |o| predict_task(&a, o))?;
+    let (_, task) = planned(cx, a.out.as_deref(), data, &tag, |o| {
+        predict_task(&a, &flags, o)
+    })?;
     let done = start_server(task, a.background, cx)?;
     with_summary(done, "predictive", predict_summary)
 }
@@ -187,23 +188,22 @@ struct ProbeCall {
     data: Vec<String>,
     calibration: String,
     out: Option<String>,
-    alpha: Option<f64>,
     #[serde(default)]
-    args: Vec<String>,
+    flags: Map<String, Value>,
     #[serde(default)]
     background: bool,
 }
 
-/// `senna probe` of `a` into `out`: the verdict, then each cell's fit.
-fn probe_task(a: &ProbeCall, out: &str) -> Task {
+/// `senna probe` of `a` into `out`, `flags` the words of its `flags`: the
+/// verdict, then each cell's fit.
+fn probe_task(a: &ProbeCall, flags: &[String], out: &str) -> Task {
     Task {
         argv: Argv::new("probe")
             .args(a.data.iter().cloned())
             .flag("--model", Some(run_manifest::derive_out_prefix(&a.model)))
             .flag("--calibration", Some(&a.calibration))
             .flag("-o", Some(out))
-            .flag("--alpha", a.alpha)
-            .rest(&a.args),
+            .rest(flags),
         made: vec![
             ("verdict", format!("{out}.probe.json").into()),
             ("cells", format!("{out}.probe.tsv").into()),
@@ -221,9 +221,12 @@ fn probe_summary(verdict: &Path) -> Result<Value> {
 
 /// Whether a trained model explains new cells, as `senna probe` judges.
 fn run_probe(a: ProbeCall, cx: &Call) -> Result<Vec<Content>> {
+    let flags = flags::words("probe", &a.flags)?;
     let data = a.data.first().map(String::as_str);
     let tag = model_tag(&a.model, "probe");
-    let (_, task) = planned(cx, a.out.as_deref(), data, &tag, |o| Ok(probe_task(&a, o)))?;
+    let (_, task) = planned(cx, a.out.as_deref(), data, &tag, |o| {
+        Ok(probe_task(&a, &flags, o))
+    })?;
     let done = start_server(task, a.background, cx)?;
     with_summary(done, "verdict", probe_summary)
 }
@@ -243,12 +246,12 @@ pub(super) fn specs() -> Vec<ToolSpec> {
              masked-sbp, masked-vae and vae runs through their encoder, an svd run by Nyström \
              projection onto its frozen dictionary, and a bge or simba run by projecting each \
              cell onto its frozen gene table. A model trained with batches needs the held-out \
-             cells' batches (batch_files, one per data file). A run fitted with --adj-method \
+             cells' batches (flags batch-files, one per data file). A run fitted with --adj-method \
              batch then reads its trained per-batch effect delta for batches it was trained on \
              (one batch is enough), and a bge run divides their counts by its trained fold; \
              otherwise the encoder's null is rebuilt from the held-out cells, which needs two \
              or more batches. The score of a topic, masked, vae, bge or simba run takes a \
-             delta as scoring_delta says; by default the trained one for a training batch and \
+             delta as the scoring-delta flag says; by default the trained one for a training batch and \
              a cross-fitted one for other batches, never one fitted on the counts it scores, \
              and the null takes the same batch term. An svd run divides the counts of a \
              training batch by its trained delta before projecting them; its log-count score \
@@ -263,13 +266,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "data": files("New data files (.zarr, .zarr.zip, .h5); or bulk, not both"),
                     "bulk": files("Dense bulk count tables (parquet, or tab/comma text), genes × samples, instead of data (--bulk)"),
                     "out": {"type": "string", "description": "Output prefix [default: today's results folder, by data file and model]"},
-                    "batch_files": files("Batch membership of the data (-b), one file per data file"),
-                    "null_from": files("Training data whose gene composition is the null (--null-from); pass the train half"),
-                    "scoring_delta": {"enum": ["auto", "train", "crossfit", "none", "heldout"], "description": "Per-batch delta the score is taken under (--scoring-delta). auto: trained delta for a batch named like a training batch, cross-fitted for other batches when there are two or more, none for a model trained without batches; train: trained only, refuses a new batch; crossfit: each fold of a batch under the delta of its other folds; none: the batch-free rate; heldout: fitted on the scored cells, optimistic [default: auto]"},
-                    "eval_features": {"type": "string", "description": "Score on these features only, one name per line (--eval-features); the same file for every model compared"},
-                    "latent": {"enum": ["encoder", "refine", "decoder"], "description": "encoder: the encoder's pass, or the projection; refine: then refine_steps decoder-side steps (--refine-steps); decoder: no encoder, fitted to the frozen decoder (--decoder-only). refine and decoder are for topic and joint-topic runs only (not masked, vae, svd or bge) [default: encoder]"},
-                    "refine_steps": {"type": "integer", "minimum": 1, "description": "Steps for refine (required) or decoder [decoder default: 100]"},
-                    "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (predict) lists them"},
+                    "latent": {"enum": ["encoder", "refine", "decoder"], "description": "encoder: the encoder's pass, or the projection; refine: then the decoder-side steps flags refine-steps sets (1 or more); decoder: no encoder, fitted to the frozen decoder (--decoder-only; refine-steps optional). refine and decoder are for topic and joint-topic runs only (not masked, vae, svd or bge) [default: encoder]"},
+                    "flags": flags::property("senna predict", r#"{"batch-files": ["b1.txt"], "null-from": ["train.zarr"], "scoring-delta": "train"}"#),
                     "background": job,
                 },
                 "required": ["model"],
@@ -291,8 +289,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "data": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Query data files (.zarr, .h5)"},
                     "calibration": {"type": "string", "description": "A backend of cells the model already explains (held-out training cells), which sets the null"},
                     "out": {"type": "string", "description": "Output prefix [default: today's results folder, by data file and model]"},
-                    "alpha": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "description": "Null tail probability, the per-cell false-positive rate (--alpha) [default: 0.05]"},
-                    "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (probe) lists them"},
+                    "flags": flags::property("senna probe", r#"{"alpha": 0.01}"#),
                     "background": job,
                 },
                 "required": ["model", "data", "calibration"],

@@ -38,14 +38,18 @@ pub struct Stage1Inputs {
 
 pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inputs> {
     let (manifest, dir) = run_manifest::load_for(&args.from)?;
-    // Any run that records its partition qualifies (joint fits, simba and
-    // fne record none and stop below); ode's counts are two tracks, not one
-    // gene axis.
+    // Any run that records its partition on one gene axis qualifies.
+    let kind = manifest.kind;
     anyhow::ensure!(
-        manifest.kind != RunKind::Ode,
-        "{}: stage 2 does not run on an ode run: its counts are two tracks (spliced and \
-         unspliced), not one gene axis",
-        args.from
+        kind.has_stage2_inputs(),
+        "{}: stage 2 does not run on {} runs: {}",
+        args.from,
+        kind.as_str(),
+        if kind == RunKind::Ode {
+            "their counts are two tracks (spliced and unspliced), not one gene axis"
+        } else {
+            "they record no cell → pseudobulk partition"
+        }
     );
     let resolve = |rel: &str| {
         run_manifest::resolve(&dir, rel)
@@ -59,8 +63,8 @@ pub fn read_stage1_inputs(args: &DonorDeviationArgs) -> anyhow::Result<Stage1Inp
         .ok_or_else(|| anyhow::anyhow!("{}: the run records no cell embedding", args.from))?;
     let partition_path = manifest.cell_to_pb_path(&dir).ok_or_else(|| {
         anyhow::anyhow!(
-            "{}: the run records no cell → pseudobulk partition (joint fits, simba and fne \
-             never write one; a bge run from before senna wrote it needs a refit)",
+            "{}: the run records no cell → pseudobulk partition (a run from before senna \
+             wrote it needs a refit)",
             args.from
         )
     })?;

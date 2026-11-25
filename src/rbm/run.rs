@@ -7,9 +7,7 @@ use super::eval::{score_cells, score_rows};
 use super::hidden::Hidden;
 use super::train::{fit, Level, TrainConfig};
 use super::weights::{Given, Weights};
-use crate::topic::common::{
-    create_device, load_and_collapse, setup_stop_handler, LoadCollapseArgs,
-};
+use crate::topic::common::{load_and_collapse, setup_stop_handler, LoadCollapseArgs};
 use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::matrix::parquet::{write_named_table, Column};
 use senna::embed_common::*;
@@ -123,7 +121,6 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         feature_list_file: hvg.feature_list_file,
         must_train_file: hvg.must_train_file,
         refine: args.collapse.pb_refine.to_params(),
-        pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         qc: args.qc.to_config(),
         qc_block_size: Some(args.block_size),
@@ -250,7 +247,7 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
     );
     info!("rbm: training depth per block {depth:?}");
 
-    let dev = create_device(&args.device, args.device_no)?;
+    let dev = args.compute.to_device()?;
     let weights = Weights::new(
         &rho_row,
         args.n_latent,

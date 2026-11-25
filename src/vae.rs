@@ -15,8 +15,7 @@
 //! continuous-factor model and is intentionally omitted.
 
 use crate::topic::common::{
-    create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
-    PreparedData,
+    load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs, PreparedData,
 };
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use senna::embed_common::*;
@@ -169,16 +168,9 @@ pub struct VaeArgs {
     )]
     pub(crate) grad_clip: f32,
 
-    #[arg(
-        long,
-        value_enum,
-        default_value = "cpu",
-        help = "Compute device (cpu|cuda|metal)"
-    )]
-    pub(crate) device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
-    pub(crate) device_no: usize,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) compute: senna::embed_common::DeviceArgs,
 
     #[arg(
         long,
@@ -287,7 +279,6 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         must_train_file: args.hvg.must_train_features.as_deref(),
         refine: args.collapse.pb_refine.to_params(),
-        pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         qc: args.qc.to_config(),
         qc_block_size: args.block_size,
@@ -319,7 +310,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         finest_collapsed.mu_observed.posterior_mean(),
     );
 
-    let dev = create_device(&args.device, args.device_no)?;
+    let dev = args.compute.to_device()?;
     let parameters = candle_nn::VarMap::new();
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);

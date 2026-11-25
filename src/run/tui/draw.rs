@@ -112,6 +112,10 @@ impl App {
                     " Output header: what every result of this run is named after".to_string()
                 }
                 Target::Field(m, i) => format!(" --{}", self.rows[*m].form.fields[*i].long),
+                Target::Step(m, s, i) => {
+                    let step = &self.rows[*m].steps[*s].form;
+                    format!(" --{} of {}", step.fields[*i].long, step.name)
+                }
                 Target::Shared(long) => format!(" --{long} for every queued fit that has it"),
                 Target::Filter => " flags containing".to_string(),
                 Target::BatchName(i) => format!(
@@ -204,6 +208,10 @@ impl App {
                 vec![
                     ("space".into(), "queue or unqueue"),
                     ("enter".into(), "queue and set its flags"),
+                    (
+                        "space  enter".into(),
+                        "on a step under a queued fit: queue it, or set its flags",
+                    ),
                     ("o".into(), "this fit's --out"),
                     ("O".into(), "the output header of every --out"),
                 ],
@@ -218,7 +226,7 @@ impl App {
                     ("r  R".into(), "reset this flag, or all"),
                     ("a".into(), "show or hide the advanced flags"),
                     ("/".into(), "filter the flags (esc clears it)"),
-                    ("[  ]".into(), "previous or next method's page"),
+                    ("[  ]".into(), "previous or next method's or step's page"),
                 ],
             ),
             (
@@ -488,81 +496,6 @@ impl App {
         out
     }
 
-    fn draw_methods(&self, f: &mut ratatui::Frame, area: Rect) {
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "Methods to fit on these data, each to its own --out",
-                bold(),
-            )),
-            Line::from(vec![
-                Span::styled(" output header ", hint()),
-                if self.header.is_empty() {
-                    Span::styled("(none: O sets one)", hint())
-                } else {
-                    Span::styled(self.header.clone(), bold())
-                },
-            ]),
-            Line::from(""),
-        ];
-        const HEAD: usize = 3;
-        let mut at = 0;
-        let w = usize::from(area.width);
-        let out_w = self
-            .rows
-            .iter()
-            .map(|r| r.out.chars().count())
-            .max()
-            .unwrap_or(0)
-            .min(32);
-        if let Err(why) = &self.mung {
-            lines.push(Line::from(Span::styled(
-                short(&format!(" mung clones (CNV clones first): {why}"), w),
-                hint(),
-            )));
-        }
-        for (i, r) in self.rows.iter().enumerate() {
-            let changed = r.form.changed();
-            let text = format!(
-                " [{}] {:<13} --out {:<out_w$}{} {:<11} {}",
-                if r.on { "x" } else { " " },
-                r.label,
-                short(&r.out, out_w),
-                // Typed by hand: the header leaves it be.
-                if r.typed { " ✎" } else { "  " },
-                if changed == 0 {
-                    "defaults".to_string()
-                } else {
-                    format!("{changed} changed")
-                },
-                r.form.about.lines().next().unwrap_or_default()
-            );
-            let style = if i == self.method_row {
-                selected()
-            } else if r.on {
-                bold()
-            } else {
-                Style::default()
-            };
-            if i == self.method_row {
-                at = lines.len();
-            }
-            lines.push(Line::from(Span::styled(short(&text, w), style)));
-            if r.tool == Tool::Mung {
-                // A note under the row, wrapped by word under its name.
-                let note = "runs first; once it is done you see its clones and choose whether the fits get --cnv-clones";
-                for l in legume_tui::text::wrap_words(note, w.saturating_sub(6)) {
-                    lines.push(Line::from(Span::styled(format!("      {l}"), hint())));
-                }
-                lines.push(Line::from(""));
-            }
-        }
-        // The heading stays; the rows scroll to keep the cursor in sight.
-        let room = usize::from(area.height).saturating_sub(HEAD);
-        let body = lines.split_off(HEAD.min(lines.len()));
-        lines.extend(CHROME.scrolled(body, at.saturating_sub(HEAD), room));
-        f.render_widget(Paragraph::new(lines), area);
-    }
-
     fn draw_params(&self, f: &mut ratatui::Frame, area: Rect) {
         // The flag's help takes up to a third of the screen; the list the rest.
         let [head, list, help] = Layout::vertical([
@@ -571,23 +504,20 @@ impl App {
             Constraint::Length((area.height / 3).clamp(4, 10)),
         ])
         .areas(area);
-        let mut tabs = Vec::new();
-        if self.shared_rows().len() > 1 {
-            let name = " shared ".to_string();
-            tabs.push(if self.shared_page {
-                Span::styled(name, selected())
-            } else {
-                Span::styled(name, hint())
-            });
-        }
-        for m in self.param_methods() {
-            let name = format!(" {} ", self.rows[m].label);
-            tabs.push(if m == self.param_method && !self.shared_page {
-                Span::styled(name, selected())
-            } else {
-                Span::styled(name, hint())
-            });
-        }
+        // Each page in `[ ]`'s order, a step's after its fit's.
+        let here = (!self.shared_page).then_some((self.param_method, self.param_step));
+        let mut tabs: Vec<Span> = self
+            .pages()
+            .into_iter()
+            .map(|page| {
+                let name = match page {
+                    None => " shared ".to_string(),
+                    Some((m, None)) => format!(" {} ", self.rows[m].label),
+                    Some((m, Some(s))) => format!(" › {} ", self.rows[m].steps[s].form.name),
+                };
+                Span::styled(name, if page == here { selected() } else { hint() })
+            })
+            .collect();
         let shown = self.visible().len();
         let mut sub = format!(
             "{}{}  · {} of {shown}",
@@ -723,8 +653,13 @@ impl App {
     /// Checked again only when the command line changes.
     fn blamed_here(&self) -> Option<String> {
         let m = self.param_method;
-        let form = &self.rows[m].form;
-        let argv = form.argv(&["x".to_string()], &[], "x");
+        let (form, argv) = match self.page_step() {
+            Some(step) => (&step.form, step.argv("x")),
+            None => {
+                let form = &self.rows[m].form;
+                (form, form.argv(&["x".to_string()], &[], "x"))
+            }
+        };
         if let Some((cm, ca, blamed)) = self.blame.borrow().as_ref() {
             if *cm == m && *ca == argv {
                 return blamed.clone();
@@ -946,7 +881,11 @@ impl App {
                     hint(),
                 ),
             ]));
-            let lines = super::script::command_lines(&p.job.command(), &p.job.out, p.job.tool);
+            let lines = if p.job.step.is_some() {
+                super::script::step_lines(&p.job.command(), &p.job.out)
+            } else {
+                super::script::command_lines(&p.job.command(), &p.job.out, p.job.tool)
+            };
             let n = lines.len();
             body.extend(lines.into_iter().enumerate().map(|(k, l)| {
                 let indent = if k == 0 { "   " } else { "     " };
@@ -962,13 +901,19 @@ impl App {
             body.push(Line::from(""));
         }
         let blocked = planned.iter().any(|p| p.problem.is_some());
+        let steps = planned.iter().filter(|p| p.job.step.is_some()).count();
+        let fits = planned.iter().filter(|p| p.job.is_fit()).count();
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
         let mut out = vec![
             Line::from(Span::styled(
-                format!(
-                    " Run {} fit{} in turn",
-                    planned.len(),
-                    if planned.len() == 1 { "" } else { "s" }
-                ),
+                match steps {
+                    0 => format!(" Run {fits} fit{} in turn", plural(fits)),
+                    _ => format!(
+                        " Run {fits} fit{} in turn, {steps} step{} after them",
+                        plural(fits),
+                        plural(steps)
+                    ),
+                },
                 bold(),
             )),
             Line::from(Span::styled(

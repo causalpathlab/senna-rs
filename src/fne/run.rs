@@ -211,7 +211,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         relation_repeats: graph.relation_repeats.clone(),
         preset,
         seed: args.train.seed,
-        device: args.train.device.to_device(args.train.device_no)?,
+        device: args.train.compute.to_device()?,
     };
     // The trainer shuffles the edge list in place; hand it over rather
     // than copying every edge. The two tables are small and stay with the

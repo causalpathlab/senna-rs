@@ -4,7 +4,8 @@ use senna::run_manifest::RunKind;
 use std::path::PathBuf;
 
 fn predict(v: Value) -> Result<Task> {
-    predict_task(&parse(v).unwrap(), "p")
+    let a: PredictCall = parse(v).unwrap();
+    predict_task(&a, &flags::words("predict", &a.flags)?, "p")
 }
 
 /// `v` with the fields of `extra` set too.
@@ -16,44 +17,12 @@ fn with(mut v: Value, extra: Value) -> Value {
 }
 
 #[test]
-fn predict_runs_senna_predict_and_makes_the_out_s_latent() {
-    let t = predict(
-        json!({"model": "ref", "data": ["a.zarr", "b.zarr"], "args": ["--refine-steps", "5"]}),
-    )
-    .unwrap();
-    assert_eq!(
-        t.argv,
-        [
-            "predict",
-            "a.zarr",
-            "b.zarr",
-            "--model",
-            "ref",
-            "-o",
-            "p",
-            "--refine-steps",
-            "5"
-        ]
-    );
-    assert_eq!(
-        t.made,
-        [
-            ("latent", PathBuf::from("p.latent.parquet")),
-            ("predictive", PathBuf::from("p.predictive.parquet"))
-        ]
-    );
-}
-
-#[test]
-fn predict_gives_each_option_its_flag_and_senna_reads_the_line() {
+fn predict_runs_senna_predict_with_its_flags_and_makes_the_out_s_latent() {
     let t = predict(json!({
         "model": "fits/m.senna.json",
         "data": ["t1.zarr", "t2.zarr"],
-        "batch_files": ["b1.txt", "b2.txt"],
-        "null_from": ["train.zarr"],
-        "eval_features": "panel.txt",
         "latent": "refine",
-        "refine_steps": 20,
+        "flags": {"batch-files": ["b1.txt", "b2.txt"], "refine-steps": 20},
     }))
     .unwrap();
     assert_eq!(
@@ -66,28 +35,22 @@ fn predict_gives_each_option_its_flag_and_senna_reads_the_line() {
             "fits/m",
             "-o",
             "p",
-            "-b",
-            "b1.txt",
-            "-b",
-            "b2.txt",
-            "--null-from",
-            "train.zarr",
-            "--eval-features",
-            "panel.txt",
-            "--refine-steps",
-            "20"
+            "--batch-files=b1.txt,b2.txt",
+            "--refine-steps=20"
         ]
     );
     senna_parses(&t.argv).unwrap();
+    assert_eq!(
+        t.made,
+        [
+            ("latent", PathBuf::from("p.latent.parquet")),
+            ("predictive", PathBuf::from("p.predictive.parquet"))
+        ]
+    );
 
     let t = predict(json!({"model": "m", "data": ["t.zarr"], "latent": "decoder"})).unwrap();
     assert_eq!(t.argv[6..], ["--decoder-only"]);
-    senna_parses(&t.argv).unwrap();
-
-    let t = predict(json!({
-        "model": "m", "bulk": ["c1.parquet", "c2.tsv"], "null_from": ["a.zarr", "b.zarr"],
-    }))
-    .unwrap();
+    let t = predict(json!({"model": "m", "bulk": ["c1.parquet", "c2.tsv"]})).unwrap();
     assert_eq!(
         t.argv,
         [
@@ -98,10 +61,7 @@ fn predict_gives_each_option_its_flag_and_senna_reads_the_line() {
             "--model",
             "m",
             "-o",
-            "p",
-            "--null-from",
-            "a.zarr",
-            "b.zarr"
+            "p"
         ]
     );
     senna_parses(&t.argv).unwrap();
@@ -114,8 +74,10 @@ fn predict_checks_its_flags_before_anything_runs() {
         json!({"model": "m"}),
         m(json!({"bulk": ["c.parquet"]})),
         m(json!({"latent": "refine"})),
-        m(json!({"refine_steps": 5})),
-        m(json!({"batch_files": ["b1.txt", "b2.txt"]})),
+        m(json!({"latent": "refine", "flags": {"refine-steps": 0}})),
+        m(json!({"flags": {"refine-steps": 5}})),
+        m(json!({"flags": {"batch-files": ["b1.txt", "b2.txt"]}})),
+        m(json!({"flags": {"refine-steps": "many"}})),
     ] {
         assert!(predict(bad.clone()).is_err(), "{bad}");
     }
@@ -131,7 +93,9 @@ fn predict_checks_its_flags_before_anything_runs() {
         assert!(e.contains("encoder"), "{kind}: {e}");
     }
     check_latent(&decoder, RunKind::Topic).unwrap();
-    assert!(parse::<PredictCall>(m(json!({"delta_iters": 0}))).is_err());
+    // The old fields are gone: flags carries them.
+    assert!(parse::<PredictCall>(m(json!({"refine_steps": 5}))).is_err());
+    assert!(parse::<PredictCall>(m(json!({"args": ["--seed", "3"]}))).is_err());
 }
 
 /// A predictive table as `senna predict` writes it, with or without the
@@ -185,11 +149,10 @@ fn probe_runs_senna_probe_and_makes_its_verdict() {
         "model": "m.senna.json",
         "data": ["q1.zarr", "q2.zarr"],
         "calibration": "ref.zarr",
-        "alpha": 0.01,
-        "args": ["--minibatch-size", "7"],
+        "flags": {"alpha": 0.01, "minibatch-size": 7},
     }))
     .unwrap();
-    let t = probe_task(&a, "pr");
+    let t = probe_task(&a, &flags::words("probe", &a.flags).unwrap(), "pr");
     assert_eq!(
         t.argv,
         [
@@ -202,10 +165,8 @@ fn probe_runs_senna_probe_and_makes_its_verdict() {
             "ref.zarr",
             "-o",
             "pr",
-            "--alpha",
-            "0.01",
-            "--minibatch-size",
-            "7"
+            "--alpha=0.01",
+            "--minibatch-size=7"
         ]
     );
     senna_parses(&t.argv).unwrap();

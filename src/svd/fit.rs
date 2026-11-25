@@ -193,7 +193,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         bulk_batches: args.collapse.mixture_batch.clone(),
         observe_panels: true,
         keep_finest_stats: false,
-        pb_tree: args.collapse.pb_tree_params(),
+        pb_tree: Some(crate::refine_weighting::pb_tree_params()),
         strata: None,
     };
     let mut multilevel = collapse_multilevel(

@@ -154,7 +154,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
-            pb_tree: args.collapse.pb_tree_params(),
+            pb_tree: Some(crate::refine_weighting::pb_tree_params()),
             strata,
         },
     )?;

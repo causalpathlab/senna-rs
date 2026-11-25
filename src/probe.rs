@@ -76,27 +76,14 @@ pub struct ProbeArgs {
     )]
     preload_data: bool,
 
-    #[arg(
-        long,
-        default_value_t = ComputeDevice::Cpu,
-        value_enum,
-        help = "Compute device",
-        long_help = "Compute device. `cuda` / `metal` require the matching cargo feature.\n\
-                     \n\
-                     Matters most for a bge or simba model, which has no encoder: probe fits every\n\
-                     cell by Poisson SGD, and it does so TWICE — once for the calibration\n\
-                     arm and once for the query."
-    )]
-    device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
-    device_no: usize,
+    #[command(flatten)]
+    compute: senna::embed_common::DeviceArgs,
 }
 
 impl ProbeArgs {
     /// The compute device this run asks for, resolved once.
     fn resolve_device(&self) -> anyhow::Result<legume_numeric::candle::candle_core::Device> {
-        self.device.to_device(self.device_no)
+        self.compute.to_device()
     }
 }
 

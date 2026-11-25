@@ -272,21 +272,9 @@ pub struct MaskedTopicArgs {
     )]
     pub(super) weight_decay: f32,
 
-    #[arg(
-        long,
-        value_enum,
-        default_value = "cpu",
-        help = "Compute device (cpu|cuda|metal)"
-    )]
-    pub(super) device: ComputeDevice,
-
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "CUDA/Metal device index",
-        hide = true
-    )]
-    pub(super) device_no: usize,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(super) compute: senna::embed_common::DeviceArgs,
 
     #[arg(
         long,

@@ -8,6 +8,8 @@ Annotation, lineage, pseudotime, and plots live in [`lupin`](https://github.com/
 
 **Set up fits in the terminal:** `senna run [DIR]` lets you pick data files and the batch labels of each, queue several methods (topic, masked-topic, masked-vae, masked-sbp, vae, svd, bge, simba, rbm, ode), and change any of their flags. `O` sets an output header that every `--out` starts with (`exp1` gives `exp1_svd`; `results/` puts them all in that folder; any folder the header names, `~/` included, is made as soon as it is entered); `o` names one by hand. Every flag comes with its help, including the hidden ones (marked `·`; `a` hides them) and `--threads`. Ctrl+R shows the exact commands, checked as senna parses them, and Ctrl+R (or Enter) runs them. They run in turn with each one's progress and a scrollable log on screen, and `v` opens the results in `senna view`. Each command is saved first as `{out}.cmd.sh`, so `bash {out}.cmd.sh` runs it again. The script refuses to run over an existing `{out}.senna.json`, and `senna run` never writes over a script.
 
+**Steps after a fit:** under each queued fit, the Methods screen lists the commands one usually runs next on its result: `layout tsne`, `layout umap`, `layout phate`, `clustering`, and `donor-deviation` (for the fits it runs on: topic, masked-topic, masked-vae, masked-sbp, vae, svd, bge, rbm; it needs batch labels). None is queued until you pick it: space queues one as it does a fit, Enter queues it and opens its flags, each read from its own clap definition, as a page after its fit's on the Parameters screen (`[` `]`). A step runs in its fit's lane once the fit is done, with `--from {out}.senna.json` (and, for `clustering`, `--latent` the fit's cell table and `--out {out}`); a fit that does not finish skips its steps. The steps' commands follow the fit's in `{out}.cmd.sh`, so the script runs the whole chain again.
+
 **Clones first, when donors differ:** with several donors, a donor-private CNV clone can be mixed into other donors by batch correction. `senna run` can queue `mung clones` ([mung-cnv](https://github.com/causalpathlab/mung-cnv), 0.2.7 or later, installed separately) before the fits. When it is done, you see its clones (cells per donor in clones; each clone's size, donor share, purity and malignancy) and choose whether the fits get `--cnv-clones`, run without it, or stop. mung is a separate program, as lupin is: senna reads its form from `mung describe clones`, starts `mung` (or `$SENNA_MUNG`), and reads only the `{out}.clones.parquet` it writes.
 
 ## Agents (MCP)
@@ -79,13 +81,15 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > Use senna's MCP tools to embed single-cell data and look at the result;
 > annotation is lupin's own server. Open the day with `notebook` (kind `plan`):
 > the question, the data, and how the result will be checked. `run_fit` runs a
-> fit to its end (`run_help` lists a method's flags) and returns its run
-> manifest; an existing run is not fitted again. A long fit runs with
+> fit to its end and returns its run manifest; an existing run is not fitted
+> again. Every run tool takes its inputs and out by name and any other flag of
+> its senna command in `flags` (flag name to value); `run_help` lists a
+> command's flags. A long fit runs with
 > `background`, as a job to follow with `job_wait`, in a session of `senna run`
 > the user can watch with `senna attach`. `run_predict` places new cells in a
 > trained model's latent, `run_update` continues a trained model over new data,
 > and `run_layout` lays a run out again with chosen settings, umap's min_dist
-> and spread among them. `view_open` opens a run (or a lupin round) and computes a missing layout or clustering first; in a terminal the same run opens with `senna view {run}.senna.json`. `view_map`
+> and spread (flags umap-min-dist, umap-spread) among them. `view_open` opens a run (or a lupin round) and computes a missing layout or clustering first; in a terminal the same run opens with `senna view {run}.senna.json`. `view_map`
 > draws the map with its legend; its arguments stay set until changed, so pass
 > only what changes. `view_markers` lists what sets a group apart, `view_cell`
 > names a point and its groups, and `view_export` writes figures. World
@@ -97,16 +101,16 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 
 | Tool | Does |
 |---|---|
-| `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
-| `run_help` | every flag of one method, or of a command another run tool starts (`predict`, `probe`, `update`, `critique`, `impute`, `deconvolve`, `donor-deviation`, a `run_step` command, `layout <method>`), with its help |
-| `run_predict` | new cells placed in a trained model's latent (`senna predict`), with the null, eval features, batches, bulk tables and latent mode as options; returns the latent, the predictive table and the mean held-out and null log-likelihood per count |
+| `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`, the flags given as a `flags` map) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
+| `run_help` | the flags a run tool takes in `flags` for one method, or for a command another run tool starts (`predict`, `probe`, `update`, `critique`, `impute`, `deconvolve`, `donor-deviation`, a `run_step` command, `layout <method>`), read from senna's command line: name, help, default, choices, and the tool's own arguments |
+| `run_predict` | new cells placed in a trained model's latent (`senna predict`), data or bulk tables and the latent mode by name, every other flag (the null, eval features, batches, scoring delta) in `flags`; returns the latent, the predictive table and the mean held-out and null log-likelihood per count |
 | `run_probe` | whether a frozen model explains new cells (`senna probe`): the covered or novel verdict, read from `{out}.probe.json` |
 | `run_update` | a trained model continued into a new run (`senna update`): new samples absorbed, or a round on its own cells taking `run_critique`'s peer labels; returns the new run's manifest |
 | `run_critique` | where fits disagree on which pseudobulks are alike (`senna critique`); with `questions`, the peer labels for an update round |
 | `run_impute` | full-feature counts on new cells from their nearest reference cells (`senna impute`); returns `{out}.imputed.parquet` |
 | `run_deconvolve` | bulk samples split into cell-type fractions against a run's annotated cells (`senna deconvolve`); returns the fractions file |
 | `run_donor_deviation` | stage 2 on an embedding run (`senna donor-deviation`): per gene and donor, the deviation from other donors' matched samples in the same state, with its batch jackknife and each sample's matched distances |
-| `run_layout` | a run laid out again with the settings given (`senna layout <method> --from <run> <flags>`), replacing that method's layout; umap takes `min_dist` and `spread` as umap-learn's, checked before it runs; `view_open` then shows it |
+| `run_layout` | a run laid out again with the settings given (`senna layout <method> --from <run> <flags>`, the flags as a `flags` map), replacing that method's layout; umap takes `umap-min-dist` and `umap-spread` as umap-learn's min_dist and spread, checked before it runs; `view_open` then shows it |
 | `run_step` | one of the other analysis commands: `clustering` and `resolve-embedding-space` on a run, `joint-topic`, `joint-svd` and `fne` on data files; returns what it made |
 | `view_open` | opens a run or a lupin round: its maps, groupings and the groups shown, a missing layout or clustering computed first |
 | `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, the run's time or velocity field, window and zoom |
