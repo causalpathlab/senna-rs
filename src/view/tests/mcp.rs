@@ -1,4 +1,5 @@
 use super::*;
+use crate::view::data::LabelKind;
 use crate::view::mcp::view_export::ExportArgs;
 use crate::view::mcp::INSTRUCTIONS;
 
@@ -149,20 +150,27 @@ fn a_panel_is_its_size_on_no_fill_with_its_legend_alone() {
     let mut o = open();
     o.map(args(json!({"colour_by": "cluster", "width": 8})))
         .unwrap();
-    let ask = |hide: &str| -> ExportArgs {
+    let ask = |hide: Value| -> ExportArgs {
         serde_json::from_value(json!({
             "png": png, "legend": key, "width_in": 0.5, "height_in": 0.4, "dpi": 100,
-            "background": "none", "labels": "legend", "hide": [hide],
+            "background": "none", "labels": "legend", "hide": [hide], "overwrite": true,
         }))
         .unwrap()
     };
-    assert!(o.export(ask("C9")).is_err());
-    let out = o.export(ask("C1")).unwrap();
+    assert!(o.export(ask(json!("C9"))).is_err());
+    // By cluster id too, as view_map's focus takes it.
+    for id in [json!(1), json!("k1"), json!("C1")] {
+        o.export(ask(id)).unwrap();
+    }
+    let out = o.export(ask(json!("c1"))).unwrap();
     assert_eq!(state(&out)["image"], json!([50, 40]));
     let img = image::open(&png).unwrap().to_rgba8();
     assert_eq!(img.dimensions(), (50, 40));
     assert_eq!(img.get_pixel(0, 0)[3], 0);
     assert!(std::fs::read(&key).unwrap().starts_with(b"%PDF"));
+    // The legend is a file like the others: not replaced unless told.
+    let again = serde_json::from_value(json!({"legend": key, "width_in": 0.5})).unwrap();
+    assert!(o.export(again).unwrap_err().to_string().contains("exists"));
 }
 
 #[test]

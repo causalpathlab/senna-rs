@@ -133,7 +133,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, the run's time or velocity field, window and zoom |
 | `view_markers` | the features that set one group apart, by the model's expected fold change, and its markers from the run's table |
 | `view_cell` | the point under a pixel of the last map, at a world point, or by name: its position, groups and time |
-| `view_export` | the view as `.png`/`.pdf` figures; never replaces a file unless asked |
+| `view_export` | the view as `.png`/`.pdf` figures, or as a figure panel (inches, points, white or no background, labels on the map or in a legend, the legend alone, groups hidden); never replaces a file unless asked |
 | `view_cells` | the cells of some groups of the grouping shown (a lupin round's cell types, say) written one a line, for `root-cells`, `drop-cells` or `archetype-cells` |
 | `notebook` | (from legume-mcp) an entry in the day's lab notebook |
 | `job_status`, `job_wait`, `job_cancel` | (from legume-mcp) a background fit's state, waiting for it, stopping it |

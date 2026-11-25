@@ -11,7 +11,7 @@ use image::codecs::png::CompressionType;
 use legume_mcp::{Content, ToolSpec};
 use legume_tui::export::{Background, Labels, PageSize, Panel};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 
 /// Width and resolution of an exported figure.
@@ -35,8 +35,9 @@ pub(super) struct ExportArgs {
     font_pt: Option<f32>,
     labels: Option<Labels>,
     legend: Option<PathBuf>,
+    /// Groups by name or cluster id, as `view_map`'s focus takes them.
     #[serde(default)]
-    hide: Vec<String>,
+    hide: Vec<Value>,
 }
 
 impl ExportArgs {
@@ -123,15 +124,21 @@ impl Open {
             Some(w) => w,
             None => super::view::width(a.width, EXPORT_WIDTH)? as f32 / dpi as f32,
         };
-        let [x0, y0, x1, y1] = self.window.unwrap_or(self.scene.current().points.bounds);
-        let aspect = ((y1 - y0) / (x1 - x0).max(1e-6)).clamp(0.4, 2.5);
-        let mut p = Panel::new(width_in, a.height_in.unwrap_or(width_in * aspect)).with_dpi(dpi);
+        let bounds = self.window.unwrap_or(self.scene.current().points.bounds);
+        let height_in = a
+            .height_in
+            .unwrap_or_else(|| panel::shaped_height(width_in, bounds));
+        let mut p = Panel::new(width_in, height_in).with_dpi(dpi);
         p.point_pt = a.point_pt;
         p.point_alpha = a.point_alpha;
         p.font_pt = a.font_pt;
         p.background = a.background.unwrap_or_default();
         p.labels = a.labels.unwrap_or_default();
-        p.hidden.clone_from(&a.hide);
+        p.hidden = a
+            .hide
+            .iter()
+            .map(super::view::group_name)
+            .collect::<Result<_>>()?;
         let files = panel::Files {
             png: a.png.as_deref(),
             pdf: a.pdf.as_deref(),
@@ -176,10 +183,10 @@ pub(super) fn spec() -> ToolSpec {
                 "point_pt": num("Point diameter in points [default: by how crowded the map is]"),
                 "point_alpha": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "description": "Point opacity [default: as styled]"},
                 "background": {"type": "string", "enum": ["white", "none", "theme"], "description": "Under the points: white, none (transparent PNG, no PDF fill) or the viewer's page [default: white]"},
-                "font_pt": num("Size of every label in points [default: fit to the panel, 7 at 1.8 in]"),
+                "font_pt": num("Size of every label in points [default: fit to the panel, 7.2 at 1.8 in]"),
                 "labels": {"type": "string", "enum": ["map", "legend", "none"], "description": "Group names on the map (with a halo), in a legend at the right, or none [default: map]"},
                 "legend": {"type": "string", "description": "Also write the legend alone, a key shared by a row of panels (.png or .pdf), the panel's height"},
-                "hide": {"type": "array", "items": {"type": "string"}, "description": "Groups of the grouping shown left out of the panel, by name (e.g. [\"C10\"])"},
+                "hide": {"type": "array", "items": {"type": ["string", "integer"]}, "description": "Groups of the grouping shown left out of the panel, by name or cluster id (C10, 10, K10); the map refits to the rest"},
             },
             "additionalProperties": false,
         }),

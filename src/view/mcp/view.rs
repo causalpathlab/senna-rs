@@ -5,7 +5,7 @@ use super::jobs::senna;
 use super::stage2::{apply_stage2, check_stage2, donor_of, Stage2Arg};
 use super::view_chart::{apply_chart, ChartArg};
 use super::{absolute, parse};
-use crate::view::data::{Axis, Dataset, LabelKind, Labels, NONE};
+use crate::view::data::{Axis, Dataset, Labels, NONE};
 use crate::view::recompute::Step;
 use crate::view::render::{self, Viewport};
 use crate::view::{
@@ -725,21 +725,10 @@ fn find_space(data: &Dataset, method: &str, kind: &str) -> Result<usize> {
         .ok_or_else(|| anyhow!("no {method} map of {kind}; view_open lists the maps"))
 }
 
-/// Group `name` of `labels`: a level's name, or for clusters its id (`3`,
-/// `C3` or lupin's `K3`, the ids of the round shown).
+/// Group `name` of `labels` ([`Labels::group`]).
 pub(super) fn group_of(labels: &Labels, name: &str) -> Result<u32> {
-    let by_name = labels
-        .levels
-        .iter()
-        .position(|l| l.eq_ignore_ascii_case(name));
-    let by_id = || {
-        let id: i64 = name.trim_start_matches(['C', 'c', 'K', 'k']).parse().ok()?;
-        (labels.kind == LabelKind::Cluster)
-            .then(|| labels.ids.iter().position(|&i| i == id))
-            .flatten()
-    };
-    by_name
-        .or_else(by_id)
+    labels
+        .group(name)
         .map(|g| g as u32)
         .ok_or_else(|| anyhow!("no group {name} in {}", labels.title()))
 }

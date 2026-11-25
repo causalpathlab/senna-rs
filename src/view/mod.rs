@@ -731,6 +731,7 @@ pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
         );
         return off_screen(args, &named);
     }
+    anyhow::ensure!(!args.panel.wanted(), panel::NEEDS_A_FILE);
     // On screen, the session first. Hosted, this process only relays the
     // terminal from here on, and the program the host starts reads the
     // runs; with none named, live views are offered before a new one.
