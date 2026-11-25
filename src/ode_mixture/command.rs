@@ -193,11 +193,9 @@ pub struct OdeArgs {
     #[arg(long, default_value_t = 1, help = "Random seed")]
     pub seed: u64,
 
-    #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device of the climb")]
-    pub device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "CUDA/Metal device index")]
-    pub device_no: usize,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub compute: senna::embed_common::DeviceArgs,
 
     #[arg(
         long,
@@ -357,7 +355,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         args.points >= 2,
         "--points must be at least 2: a trajectory runs from one point to another"
     );
-    let dev = args.device.to_device(args.device_no)?;
+    let dev = args.compute.to_device()?;
 
     // The data as every senna fit reads it, its finest pseudobulks.
     let inherited = args

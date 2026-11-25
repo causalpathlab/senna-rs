@@ -1,6 +1,4 @@
-use crate::topic::common::{
-    create_device, load_and_collapse, setup_stop_handler, LoadCollapseArgs, PreparedData,
-};
+use crate::topic::common::{load_and_collapse, setup_stop_handler, LoadCollapseArgs, PreparedData};
 use senna::embed_common::*;
 
 use legume_numeric::candle::decoder::*;
@@ -175,7 +173,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         }
     };
 
-    let dev = create_device(&args.device, args.device_no)?;
+    let dev = args.compute.to_device()?;
 
     let parameters = candle_nn::VarMap::new();
     let param_builder =

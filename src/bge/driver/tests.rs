@@ -173,3 +173,23 @@ fn a_non_finite_embedding_is_refused() {
         assert!(err.to_string().contains("the cell embedding"), "{err}");
     }
 }
+
+/// `--device` / `--device-no` are one shared group now, but a fit's recorded
+/// arguments keep them as flat keys, so manifests written before and after
+/// replay the same way.
+#[test]
+fn the_device_flags_are_recorded_flat() {
+    let args = parse("unused.zarr", "unused");
+    let mut v = serde_json::to_value(&args).unwrap();
+    assert_eq!(v["device"], "cpu");
+    assert_eq!(v["device_no"], 0);
+    assert!(v.get("compute").is_none());
+    v["device"] = "cuda".into();
+    v["device_no"] = 1.into();
+    let back: BgeArgs = serde_json::from_value(v).unwrap();
+    assert_eq!(
+        back.compute.device,
+        senna::embed_common::ComputeDevice::Cuda
+    );
+    assert_eq!(back.compute.device_no, 1);
+}

@@ -184,20 +184,8 @@ pub struct DonorDeviationArgs {
     #[arg(long, default_value_t = 1, help = "Seed for the anchor sample")]
     pub seed: u64,
 
-    #[arg(
-        long,
-        default_value_t = ComputeDevice::Cpu,
-        value_enum,
-        help = "Compute device for the per-gene fits",
-        long_help = "Compute device for the per-gene fits and their batch\n\
-                     jackknife. cpu: one gene per thread. cuda or metal: blocks of\n\
-                     genes fitted together on the device; results agree with cpu\n\
-                     to the fit's tolerance, not bit for bit."
-    )]
-    pub device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
-    pub device_no: usize,
+    #[command(flatten)]
+    pub compute: senna::embed_common::DeviceArgs,
 
     #[arg(
         long,
@@ -351,7 +339,7 @@ fn fit_all_genes(
     sample_states: &UnitStates,
     settings: &ContrastFitSettings,
 ) -> anyhow::Result<Vec<fit_genes::FittedGene>> {
-    Ok(match args.device {
+    Ok(match args.compute.device {
         ComputeDevice::Cpu => fit_genes::fit_genes_on_cpu_threads(
             nonzero_samples_of_gene,
             activity_inputs,
@@ -360,7 +348,7 @@ fn fit_all_genes(
             settings,
         ),
         ComputeDevice::Cuda | ComputeDevice::Metal => {
-            let device = args.device.to_device(args.device_no)?;
+            let device = args.compute.to_device()?;
             let sections = activity_inputs.sections;
             let shared = batched_contrast_fit::SharedContrastTensors::new(
                 anchor_samples,
@@ -371,7 +359,10 @@ fn fit_all_genes(
                 &device,
             )?;
             let genes_per_block = fit_genes::genes_per_block(&shared, args.gpu_mem_fraction);
-            info!("On {}: {genes_per_block} genes per block", args.device);
+            info!(
+                "On {}: {genes_per_block} genes per block",
+                args.compute.device
+            );
             fit_genes::fit_genes_in_blocks(
                 nonzero_samples_of_gene,
                 activity_inputs,

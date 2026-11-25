@@ -145,21 +145,8 @@ pub struct ImputeArgs {
     )]
     pub preload_data: bool,
 
-    #[arg(
-        long,
-        default_value_t = senna::embed_common::ComputeDevice::Cpu,
-        value_enum,
-        help = "Compute device for the inner predict",
-        long_help = "Compute device for the inner predict.\n\
-                     `cuda` / `metal` require the matching cargo feature.\n\
-                     Matters for a bge or simba model, whose projection re-runs\n\
-                     the per-cell SGD of training; the encoder families infer\n\
-                     with one forward pass."
-    )]
-    pub device: senna::embed_common::ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
-    pub device_no: usize,
+    #[command(flatten)]
+    pub compute: senna::embed_common::DeviceArgs,
 }
 
 /// How a run kind's cells reach the matching space.
@@ -607,8 +594,7 @@ fn predict_matching_latents(
         scoring_delta: crate::predict::delta::ScoringDeltaMode::Auto,
         scoring_folds: crate::predict::delta::DEFAULT_SCORING_FOLDS,
         preload_data: args.preload_data,
-        device: args.device.clone(),
-        device_no: args.device_no,
+        compute: args.compute.clone(),
         refine_steps: 0,
         refine_lr: 0.01,
         refine_reg: 1.0,

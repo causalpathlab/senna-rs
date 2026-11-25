@@ -728,18 +728,6 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
     })
 }
 
-/// Create a candle compute device from the CLI device enum.
-pub(crate) fn create_device(
-    device: &ComputeDevice,
-    device_no: usize,
-) -> candle_core::Result<Device> {
-    match device {
-        ComputeDevice::Metal => Device::new_metal(device_no),
-        ComputeDevice::Cuda => Device::new_cuda(device_no),
-        ComputeDevice::Cpu => Ok(Device::Cpu),
-    }
-}
-
 /// Replace every non-CPU Var in the `VarMap` with a CPU copy.
 ///
 /// After this call, a fresh encoder/decoder built from the `VarMap`

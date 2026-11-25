@@ -166,22 +166,8 @@ pub struct PredictArgs {
     )]
     pub(crate) preload_data: bool,
 
-    #[arg(
-        long,
-        default_value_t = ComputeDevice::Cpu,
-        value_enum,
-        help = "Compute device",
-        long_help = "Compute device. `cuda` / `metal` require the matching cargo feature.\n\
-                     \n\
-                     Matters most for a bge or simba model. Every other family infers with\n\
-                     one encoder forward pass, but these have none — prediction re-runs\n\
-                     the same per-cell Poisson SGD the training did, so it belongs on\n\
-                     the device that trained it."
-    )]
-    pub(crate) device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
-    pub(crate) device_no: usize,
+    #[command(flatten)]
+    pub(crate) compute: senna::embed_common::DeviceArgs,
 
     #[arg(
         long,
@@ -410,7 +396,7 @@ impl PredictArgs {
 
     /// The compute device this run asks for, resolved once.
     pub(super) fn resolve_device(&self) -> anyhow::Result<Device> {
-        self.device.to_device(self.device_no)
+        self.compute.to_device()
     }
 
     /// Resolve every query-axis rule, including `--ablate-features`.

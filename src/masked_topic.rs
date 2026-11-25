@@ -1,6 +1,5 @@
 use crate::topic::common::{
-    create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
-    PreparedData,
+    load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs, PreparedData,
 };
 use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
 use crate::topic::train_masked::{train_masked, write_feature_embedding, write_masked_dictionary};
@@ -236,7 +235,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // 5. Train masked topic model on collapsed data
     let n_topics = args.n_latent_topics;
 
-    let dev = create_device(&args.device, args.device_no)?;
+    let dev = args.compute.to_device()?;
 
     let parameters = candle_nn::VarMap::new();
     let param_builder =

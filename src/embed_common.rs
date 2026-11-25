@@ -95,6 +95,42 @@ impl ComputeDevice {
     }
 }
 
+/// `--device` / `--device-no`, flattened into every command that runs on a
+/// candle device. Serialized flat, so manifests keep their `device` and
+/// `device_no` keys.
+#[derive(Args, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DeviceArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ComputeDevice::Cpu,
+        help = "Compute device (cpu|cuda|metal)",
+        long_help = "Compute device. `cuda` / `metal` need senna built with the matching\n\
+                     cargo feature."
+    )]
+    pub device: ComputeDevice,
+
+    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
+    pub device_no: usize,
+}
+
+impl Default for DeviceArgs {
+    fn default() -> Self {
+        Self {
+            device: ComputeDevice::Cpu,
+            device_no: 0,
+        }
+    }
+}
+
+impl DeviceArgs {
+    /// The candle device these flags name.
+    pub fn to_device(&self) -> anyhow::Result<candle_core::Device> {
+        self.device.to_device(self.device_no)
+    }
+}
+
 /// Batch adjustment method
 #[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]

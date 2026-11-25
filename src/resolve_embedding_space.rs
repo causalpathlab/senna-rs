@@ -234,11 +234,8 @@ pub struct RestArgs {
     )]
     preload_data: bool,
 
-    #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
-    device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
-    device_no: usize,
+    #[command(flatten)]
+    compute: senna::embed_common::DeviceArgs,
 
     #[arg(long, default_value_t = 1, help = "RNG seed")]
     seed: u64,
@@ -394,7 +391,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     // Training //
     //////////////
     let stop = setup_stop_handler();
-    let dev = args.device.to_device(args.device_no)?;
+    let dev = args.compute.to_device()?;
     let trained = train_rest(
         &RestTrainInputs {
             theta_aligned,
