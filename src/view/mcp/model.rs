@@ -36,6 +36,7 @@ struct UpdateCall {
 /// round on the parent's own cells; its flags checked first, as senna
 /// parses them and for what senna would refuse only once it ran.
 fn update_task(a: &UpdateCall, out: &str) -> Result<Task> {
+    let flags = flags::words("update", &a.flags)?;
     let model = run_manifest::derive_out_prefix(&a.model);
     ensure!(
         out != model,
@@ -45,7 +46,7 @@ fn update_task(a: &UpdateCall, out: &str) -> Result<Task> {
         .args(a.data.iter().cloned())
         .flag("--model", Some(&model))
         .flag("-o", Some(out))
-        .rest(&flags::words("update", &a.flags)?);
+        .rest(&flags);
     let m = parsed(&argv)?;
     let round = a.data.is_empty();
     ensure!(
@@ -90,12 +91,13 @@ struct CritiqueCall {
 /// and its record; and whether it draws questions, which write the peer
 /// labels too.
 fn critique_task(a: &CritiqueCall) -> Result<(Task, bool)> {
+    let flags = flags::words("critique", &a.flags)?;
     ensure!(a.runs.len() >= 2, "critique compares two runs or more");
     let out = &a.out;
     let argv = Argv::new("critique")
         .args(a.runs.iter().cloned())
         .flag("-o", Some(out))
-        .rest(&flags::words("critique", &a.flags)?);
+        .rest(&flags);
     let questions = given(&parsed(&argv)?, "questions")
         .first()
         .is_some_and(|q| q.parse::<usize>().is_ok_and(|q| q > 0));

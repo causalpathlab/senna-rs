@@ -52,8 +52,9 @@ fn layout_task(a: &LayoutArgs, t: &Target) -> Result<Task> {
     let step = a.target.step();
     one_of(&a.method, step.settings())
         .with_context(|| format!("senna's {} methods", step.label()))?;
+    let flags = flags::words(&format!("layout {}", a.method), &a.flags)?;
     let mut argv = step.argv(t, &a.method);
-    argv.extend(flags::words(&format!("layout {}", a.method), &a.flags)?);
+    argv.extend(flags);
     // The kernel's range too, which clap leaves to the layout.
     if let crate::Commands::Layout {
         cmd: crate::LayoutCmd::Umap(umap),

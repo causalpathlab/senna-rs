@@ -2,9 +2,12 @@ use super::*;
 
 #[test]
 fn every_command_has_the_arguments_its_tool_takes_itself() {
+    for c in super::super::steps::COMMANDS {
+        assert!(own(c).is_ok(), "run_step's {c}");
+    }
     for path in helped() {
         let cmd = command(&path).unwrap();
-        for (id, _) in own(&path) {
+        for (id, _) in own(&path).unwrap() {
             // A layout without a target lays out cells only.
             if *id == "target" && path.starts_with("layout ") {
                 continue;

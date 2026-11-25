@@ -83,6 +83,7 @@ struct StepCall {
 fn step_task(a: &StepCall) -> Result<Task> {
     let c = a.command;
     let name = c.name();
+    let flags = flags::words(name, &a.flags)?;
     ensure!(
         a.target.is_none() || c == Command::Clustering,
         "target is for clustering"
@@ -123,7 +124,7 @@ fn step_task(a: &StepCall) -> Result<Task> {
     let argv = argv
         .flag("-o", Some(&out))
         .flag("--target", features.then_some("features"))
-        .rest(&flags::words(name, &a.flags)?);
+        .rest(&flags);
     let made: Vec<(&'static str, String)> = match c {
         Command::Clustering if features => {
             vec![("clusters", format!("{out}.feature_clusters.parquet"))]

@@ -74,6 +74,7 @@ struct DeconvolveCall {
 /// `senna deconvolve` of the bulk against the run `from`: the fractions
 /// first, then their intervals, the abundances and the residual.
 fn deconvolve_task(a: &DeconvolveCall) -> Result<Task> {
+    let flags = flags::words("deconvolve", &a.flags)?;
     ensure!(!a.bulk.is_empty(), "no bulk tables");
     // senna's own default, named here so the files can be checked.
     let out = match &a.out {
@@ -87,7 +88,7 @@ fn deconvolve_task(a: &DeconvolveCall) -> Result<Task> {
             .flag("--from", Some(&a.from))
             .many("--bulk", &a.bulk)
             .flag("-o", Some(&out))
-            .rest(&flags::words("deconvolve", &a.flags)?),
+            .rest(&flags),
         made: made.to_vec(),
         summary: format!("senna deconvolve of {} by {}", a.bulk.join(", "), a.from),
     })
