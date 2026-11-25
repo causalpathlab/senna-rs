@@ -118,6 +118,14 @@ pub(crate) type FeatureTables = legume_tui::work::Loading<crate::view::features:
 /// A run's stage 2 (`senna donor-deviation`), read once on a worker thread.
 pub(crate) type Stage2Tables = legume_tui::work::Loading<crate::view::stage2::Stage2>;
 
+/// The read of the stage 2 the run at `dir` records (manifest `m`).
+fn stage2_of(m: &RunManifest, dir: &Path) -> Arc<Stage2Tables> {
+    let (m, dir) = (m.clone(), dir.to_path_buf());
+    Arc::new(Stage2Tables::new(move || {
+        crate::view::stage2::Stage2::load(&m, &dir).map_err(|e| e.to_string())
+    }))
+}
+
 /// A run's slow reads, each started once on a worker thread and shared by
 /// every view of the run: its data files, its model of expression, and
 /// its feature embedding.
@@ -156,7 +164,6 @@ impl RunLoads {
         let (fm, fd) = run();
         let (mm, md) = run();
         let (em, ed) = run();
-        let (sm, sd) = run();
         let files = Arc::new(RunFiles::new(move || {
             read_run_data(&fm, &fd).map_err(|e| e.to_string())
         }));
@@ -170,10 +177,19 @@ impl RunLoads {
                 crate::view::features::FeatureEmbedding::load(Some(&(em, ed)))
             })),
             stage2_recorded: !m.stage2.is_empty(),
-            stage2: Arc::new(Stage2Tables::new(move || {
-                crate::view::stage2::Stage2::load(&sm, &sd).map_err(|e| e.to_string())
-            })),
+            stage2: stage2_of(m, dir),
             extra: None,
+        }
+    }
+
+    /// Read the stage 2 the run at `dir` records now (manifest `m`), in
+    /// place of the one read before: `senna donor-deviation` added or
+    /// replaced it since. Started at once when there is one.
+    pub(crate) fn renew_stage2(&mut self, m: &RunManifest, dir: &Path) {
+        self.stage2 = stage2_of(m, dir);
+        self.stage2_recorded = !m.stage2.is_empty();
+        if self.stage2_recorded {
+            self.stage2.start();
         }
     }
 

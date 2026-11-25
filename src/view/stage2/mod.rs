@@ -39,8 +39,8 @@ pub(crate) type DonorScenes = (Vec<(Box<str>, Scene)>, Option<String>);
 pub(crate) const MAX_DONOR_TILES: usize = 12;
 
 /// What a run without stage 2 is told when asked for it.
-pub(crate) const NO_STAGE2: &str = "this run has no stage 2 (run `senna donor-deviation --from` \
-     it, then open the run again)";
+pub(crate) const NO_STAGE2: &str =
+    "this run has no stage 2 (run `senna donor-deviation --from` it first)";
 
 /// Each point's row in stage 2's per-cell tables, by space: matched once.
 pub(crate) type Stage2Rows = std::cell::RefCell<HashMap<usize, Arc<Vec<Option<u32>>>>>;
@@ -49,6 +49,31 @@ impl Scene {
     /// Whether the run recorded a stage 2.
     pub fn has_stage2(&self) -> bool {
         self.data.has_stage2()
+    }
+
+    /// Take up the stage 2 that `fresh`, the run's manifest read again,
+    /// records, when `senna donor-deviation` added or replaced it since the
+    /// run was opened. Returns whether it had.
+    pub(crate) fn refresh_stage2(&mut self, fresh: &senna::run_manifest::RunManifest) -> bool {
+        match self.data.run.as_mut() {
+            Some((m, _)) if m.stage2 != fresh.stage2 => m.stage2 = fresh.stage2.clone(),
+            _ => return false,
+        }
+        self.take_up_stage2();
+        true
+    }
+
+    /// Read the run's stage 2 anew (its manifest's slot changed), and forget
+    /// what was matched and drawn from the one before.
+    pub(super) fn take_up_stage2(&mut self) {
+        if let Some((m, dir)) = &self.data.run {
+            self.data.loads.renew_stage2(m, dir);
+        }
+        self.stage2_rows.borrow_mut().clear();
+        if matches!(self.pick, Some(Pick::Gain { .. } | Pick::Exclusive)) {
+            self.shown = None;
+        }
+        self.chart = self.chart.as_ref().map(super::chart::Chart::like);
     }
 
     /// Stage 2, waited for when the scene is patient.

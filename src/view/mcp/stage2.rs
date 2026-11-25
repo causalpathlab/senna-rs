@@ -175,8 +175,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
          matched distance marks a state no other donor has) and {out}.donor_cell_states.parquet. \
          Needs at least three donors; without flags donor-of-batch each batch is its own donor. Nothing \
          is cut off: read gains through their jackknife z, not through being nonzero. The run's \
-         manifest records the tables, so view_map's stage2 draws them on its map once the run is \
-         opened again (view_open).",
+         manifest records the tables, so view_map's stage2 and view_stage2 take them up on the run \
+         already open.",
         json!({
             "type": "object",
             "properties": {

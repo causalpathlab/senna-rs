@@ -13,7 +13,7 @@ fn names(v: &[&str]) -> Vec<Box<str>> {
 /// Two genes × three donors, one state axis, two batches left out in turn;
 /// two cells of donor B. Only (g1, B) deviates: 1 + 2·state, and 0.5 + 2·state
 /// and 1.5 + 2·state without each batch.
-fn tables(dir: &std::path::Path) -> RunManifest {
+pub(crate) fn tables(dir: &std::path::Path) -> RunManifest {
     let at = |f: &str| dir.join(f).to_string_lossy().into_owned();
     let gene = names(&["g0", "g0", "g0", "g1", "g1", "g1"]);
     let donor = names(&["A", "B", "C", "A", "B", "C"]);

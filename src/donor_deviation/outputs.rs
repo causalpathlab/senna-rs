@@ -101,6 +101,10 @@ pub(crate) fn record_in_stage1_manifest(from: &str, out: &str) -> anyhow::Result
             donor_sample_states: samples,
             donor_cell_states: cells,
             settings: Some(rel(&settings_path(out))),
+            written: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|d| u64::try_from(d.as_nanos()).ok()),
             unknown: std::mem::take(&mut m.stage2.unknown),
         };
     })?;
