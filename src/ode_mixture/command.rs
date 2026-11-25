@@ -556,7 +556,8 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let climbed = climb(fit_reads, &opts, &dev)?;
     let member = cell_to_pb.last().expect("at least one level");
     let named = args.root_cells.as_deref();
-    let decision = root_decision(&args.out, named, &climbed.roots, member, &pbs, &all_cells)?;
+    clear_root_lists(&args.out, named)?;
+    let decision = root_decision(&args.out, &climbed.roots, member, &pbs, &all_cells)?;
     let root = root_list(&args.out, named, &climbed, member, &pbs, &all_cells)?;
     let (fit, objective) = (climbed.fit, climbed.objective);
     info!("ode: the climb's objective {objective:.4}");
@@ -710,18 +711,15 @@ fn write_branch_times(out: &str, branch: &[f64]) -> anyhow::Result<()> {
 /// (no root named), the root left to the user: every root's cells, best
 /// first, in `{out}.root_{i}.txt` (`member` every cell's pseudobulk, `pbs`
 /// the pseudobulk of every row the climb read), and the decision whose
-/// answers rerun from each. The lists an earlier run into `out` left are
-/// removed first, but never `named`, the user's `--root-cells`.
+/// answers rerun from each.
 pub(crate) fn root_decision(
     out: &str,
-    named: Option<&std::path::Path>,
     roots: &[TriedRoot],
     member: &[usize],
     pbs: &[usize],
     cells: &[Box<str>],
 ) -> anyhow::Result<Option<senna::run_manifest::Decision>> {
-    use senna::run_manifest::{Decision, DecisionOption};
-    clear_root_lists(out, named)?;
+    use senna::run_manifest::{root_list_path, Decision, DecisionOption};
     let finished: Vec<f32> = roots.iter().map(|r| r.objective).collect();
     let Some(gap) = root_gap(&finished).filter(|&g| g < ROOT_GAP) else {
         return Ok(None);
@@ -736,7 +734,7 @@ pub(crate) fn root_decision(
     let mut options = Vec::with_capacity(ranked.len());
     for (i, root) in ranked.iter().enumerate() {
         let named = root_cells_of(root, member, pbs, cells);
-        let path = format!("{out}.root_{i}.txt");
+        let path = root_list_path(out, Some(i));
         legume_numeric::matrix::common_io::write_lines(&named, &path)?;
         let path = std::path::absolute(&path)?.to_string_lossy().into_owned();
         let behind = 100.0 * (best - root.objective) / best.abs().max(f32::MIN_POSITIVE);
@@ -795,8 +793,7 @@ enum RootList {
 /// absolute) when the fit grew from it, else the cells of the tree start's
 /// root it grew from, written to `{out}.root.txt` (its name beside the
 /// manifest); a named list a k-means start beat, as unused; `None` when a
-/// k-means start won with no root named. A `{out}.root.txt` an earlier run
-/// left is removed first, unless it is `named`.
+/// k-means start won with no root named.
 fn root_list(
     out: &str,
     named: Option<&std::path::Path>,
@@ -805,11 +802,6 @@ fn root_list(
     pbs: &[usize],
     cells: &[Box<str>],
 ) -> anyhow::Result<Option<RootList>> {
-    let path = format!("{out}.root.txt");
-    let own = std::path::Path::new(&path);
-    if own.exists() && !named.is_some_and(|n| senna::run_manifest::same_file(n, own)) {
-        std::fs::remove_file(own)?;
-    }
     let named = named
         .map(|n| std::path::absolute(n).map(|n| n.to_string_lossy().into_owned()))
         .transpose()?;
@@ -819,20 +811,22 @@ fn root_list(
     if let Some(named) = named {
         return Ok(Some(RootList::Grew(named)));
     }
+    let path = senna::run_manifest::root_list_path(out, None);
     legume_numeric::matrix::common_io::write_lines(
         &root_cells_of(root, member, pbs, cells),
         &path,
     )?;
-    let name = own.file_name().unwrap_or_default();
+    let name = std::path::Path::new(&path).file_name().unwrap_or_default();
     Ok(Some(RootList::Grew(name.to_string_lossy().into_owned())))
 }
 
-/// Every `{out}.root_{i}.txt` an earlier run into `out` left, removed: what
+/// Every root list an earlier run into `out` left
+/// ([`root_list_path`](senna::run_manifest::root_list_path)), removed: what
 /// is there after a run is this run's own, but for `keep` (the user's
 /// `--root-cells`, which may be one of them).
-fn clear_root_lists(out: &str, keep: Option<&std::path::Path>) -> anyhow::Result<()> {
+pub(crate) fn clear_root_lists(out: &str, keep: Option<&std::path::Path>) -> anyhow::Result<()> {
     let path = std::path::Path::new(out);
-    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+    let Some(name) = path.file_name() else {
         return Ok(());
     };
     let dir = path
@@ -842,13 +836,10 @@ fn clear_root_lists(out: &str, keep: Option<&std::path::Path>) -> anyhow::Result
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(());
     };
-    let stem = format!("{name}.root_");
     for entry in entries.flatten() {
         let file = entry.file_name().to_string_lossy().into_owned();
-        let is_list = file
-            .strip_prefix(&stem)
-            .and_then(|r| r.strip_suffix(".txt"))
-            .is_some_and(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()));
+        let is_list = senna::run_manifest::root_list_of(&file)
+            .is_some_and(|(of, _)| std::ffi::OsStr::new(of) == name);
         let kept = keep.is_some_and(|k| senna::run_manifest::same_file(k, &entry.path()));
         if is_list && !kept {
             std::fs::remove_file(entry.path())?;

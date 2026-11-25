@@ -109,6 +109,25 @@ fn round_trip() {
     );
 }
 
+/// A root list's path names its run and root, and no other file does.
+#[test]
+fn a_root_lists_path_names_its_run() {
+    for i in [None, Some(3)] {
+        assert_eq!(
+            root_list_of(&root_list_path("d/run", i)),
+            Some(("d/run", i))
+        );
+    }
+    for other in [
+        "d/run.root_.txt",
+        "d/run.root_+1.txt",
+        "d/run.roots.txt",
+        "d/run.txt",
+    ] {
+        assert_eq!(root_list_of(other), None, "{other}");
+    }
+}
+
 /// An ODE's root list round trips, and a run with none writes no key.
 #[test]
 fn an_odes_root_cells_round_trip_and_are_absent_by_default() {

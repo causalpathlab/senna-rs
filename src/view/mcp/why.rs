@@ -6,7 +6,7 @@ use anyhow::{bail, ensure, Context, Result};
 use legume_mcp::{By, ToolSpec, Why};
 use senna::run_manifest::{self, RunManifest};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Whether the tool `name` takes a why: every run tool but `run_help`,
 /// which runs nothing.
@@ -73,7 +73,7 @@ pub(super) fn add_properties(specs: &mut [ToolSpec]) {
 
 /// Refused when the words `flags` of a fit answer a question a fit left to
 /// the user (an option's `rerun_args` in the manifest of the run whose
-/// list a flag names, [`run_of_list`]) and no `why` says why.
+/// root list a flag names) and no `why` says why.
 pub(super) fn justified(flags: &[String], why: Option<&Why>) -> Result<()> {
     if why.is_some() {
         return Ok(());
@@ -100,10 +100,12 @@ fn answered(flags: &[String]) -> Option<String> {
         });
     for (flag, value) in pairs.filter(|(f, _)| f.starts_with("--")) {
         let file = Path::new(value);
-        let Some(run) = run_of_list(file).filter(|_| file.is_file()) else {
+        // A root list `senna ode` wrote names its run.
+        let Some((out, _)) = run_manifest::root_list_of(value).filter(|_| file.is_file()) else {
             continue;
         };
-        let Ok((m, _)) = RunManifest::load(&run) else {
+        let run = run_manifest::default_path(out);
+        let Ok((m, _)) = RunManifest::load(Path::new(&run)) else {
             continue;
         };
         let hit = m.decisions.iter().find(|d| {
@@ -117,16 +119,6 @@ fn answered(flags: &[String]) -> Option<String> {
         }
     }
     None
-}
-
-/// The manifest of the run a root list is of, by the list's name, as
-/// `senna ode` names them: `{out}.root_{i}.txt` (a decision's options) or
-/// `{out}.root.txt`, of `{out}.senna.json`; `None` for any other file.
-fn run_of_list(file: &Path) -> Option<PathBuf> {
-    let (prefix, tail) = file.to_str()?.strip_suffix(".txt")?.rsplit_once(".root")?;
-    let numbered = |i: &str| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit());
-    (tail.is_empty() || tail.strip_prefix('_').is_some_and(numbered))
-        .then(|| PathBuf::from(run_manifest::default_path(prefix)))
 }
 
 #[cfg(test)]
