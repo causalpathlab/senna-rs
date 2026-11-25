@@ -902,7 +902,7 @@ impl App {
         }
         let blocked = planned.iter().any(|p| p.problem.is_some());
         let steps = planned.iter().filter(|p| p.job.step.is_some()).count();
-        let fits = planned.len() - steps;
+        let fits = planned.iter().filter(|p| p.job.is_fit()).count();
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         let mut out = vec![
             Line::from(Span::styled(

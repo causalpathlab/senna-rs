@@ -154,6 +154,16 @@ impl PbFromArgs {
                 if let Some(why) = own_partition(args) {
                     anyhow::bail!("--pb-from {run}: that run {why}");
                 }
+                // Fits from before `--pb-tree` was dropped could choose the
+                // sketch-sign partition; this run grows the residual tree.
+                anyhow::ensure!(
+                    args.pointer("/collapse/pb_tree")
+                        .and_then(serde_json::Value::as_str)
+                        != Some("marginal"),
+                    "--pb-from {run}: that run built its partition with --pb-tree marginal (the \
+                     sketch signs); this run grows the residual tree, so without --pb-from it \
+                     builds its own"
+                );
                 if args.get("from").is_some_and(|v| !v.is_null()) {
                     log::warn!(
                         "--pb-from {run}: that run inherited its partition with --from, so \

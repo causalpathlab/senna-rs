@@ -46,6 +46,29 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         RunKind::Itopic => "masked-topic / masked-sbp",
         k => k.as_str(),
     };
+    // No scoring path: say so by name, before anything is read, not as a
+    // field missing from a model.json the run never wrote in that shape.
+    let scored = match kind {
+        RunKind::Topic
+        | RunKind::Itopic
+        | RunKind::MaskedVae
+        | RunKind::Vae
+        | RunKind::JointTopic
+        | RunKind::Svd
+        | RunKind::Bge
+        | RunKind::Simba => true,
+        RunKind::Rbm
+        | RunKind::Ode
+        | RunKind::JointSvd
+        | RunKind::Fne
+        | RunKind::ResolveEmbeddingSpace => false,
+    };
+    anyhow::ensure!(
+        scored,
+        "predict does not score a {family} run ({}): it predicts topic, masked, vae, svd, bge \
+         and simba runs",
+        args.model
+    );
     anyhow::ensure!(
         kind.has_decoder_latent_fit() || (!args.decoder_only && args.refine_steps == 0),
         "--decoder-only / --refine-steps re-fit the latent against a topic decoder; {} is a \
@@ -110,24 +133,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         // svd writes no checkpoint either; its query side is the Nyström
         // projection onto the frozen dictionary.
         RunKind::Svd => return predict_svd(args),
-        RunKind::Topic
-        | RunKind::Itopic
-        | RunKind::MaskedVae
-        | RunKind::Vae
-        | RunKind::JointTopic => {}
-        // No scoring path: say so by name, not as a field missing from a
-        // model.json the run never wrote in that shape.
-        RunKind::Rbm
-        | RunKind::Ode
-        | RunKind::JointSvd
-        | RunKind::Fne
-        | RunKind::ResolveEmbeddingSpace
-        | RunKind::Bge
-        | RunKind::Simba => anyhow::bail!(
-            "predict does not score a {family} run ({}): it predicts topic, masked, vae, svd, \
-             bge and simba runs",
-            args.model
-        ),
+        _ => {}
     }
 
     let metadata = TopicModelMetadata::load(&args.model)?;

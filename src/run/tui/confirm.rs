@@ -198,9 +198,20 @@ impl App {
             .enumerate()
             .filter(|(_, s)| s.on)
             .map(|(s, step)| {
+                let mut argv = step.argv(&fit.out);
+                // A step runs in its fit's lane, which on several GPUs is a
+                // GPU: one on cuda takes that GPU unless its form names one.
+                let field = |long: &str| step.form.fields.iter().find(|f| f.long == long);
+                if self.gpus > 1
+                    && fit.lane > 0
+                    && field("device").is_some_and(|f| f.value.trim() == "cuda")
+                    && field("device-no").is_none_or(|f| f.is_default())
+                {
+                    argv.extend(["--device-no".to_string(), fit.lane.to_string()]);
+                }
                 let job = Job {
                     method: format!("{} › {}", r.label, step.form.name),
-                    argv: step.argv(&fit.out),
+                    argv,
                     labels: Vec::new(),
                     clones: None,
                     pb_from: None,

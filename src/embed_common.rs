@@ -107,7 +107,8 @@ pub struct DeviceArgs {
         default_value_t = ComputeDevice::Cpu,
         help = "Compute device (cpu|cuda|metal)",
         long_help = "Compute device. `cuda` / `metal` need senna built with the matching\n\
-                     cargo feature."
+                     cargo feature. Results on a GPU agree with cpu to the fit's tolerance,\n\
+                     not bit for bit."
     )]
     pub device: ComputeDevice,
 

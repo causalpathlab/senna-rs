@@ -130,10 +130,28 @@ impl App {
                 let mut job = q.jobs[c.job].clone();
                 let option = &c.decision.options[c.row];
                 let out = format!("{}_{}{}", job.out, c.decision.topic, c.row);
+                // The fit's queued steps follow the rerun, on its new out.
+                let steps = q
+                    .jobs
+                    .iter()
+                    .filter(|j| j.step.is_some_and(|of| of.fit == c.job))
+                    .map(|j| {
+                        let mut j = j.clone();
+                        j.argv = j
+                            .argv
+                            .iter()
+                            .map(|w| moved_out(w, &job.out, &out))
+                            .collect();
+                        j.out.clone_from(&out);
+                        j.lane = 0;
+                        j.step = j.step.map(|of| jobs::StepOf { fit: 0, ..of });
+                        j
+                    })
+                    .collect::<Vec<_>>();
                 job.argv = rerun_argv(&job.argv, &out, &option.rerun_args);
                 job.out = out;
                 job.lane = 0;
-                self.queue = Some(Queue::start(vec![job]));
+                self.queue = Some(Queue::start(std::iter::once(job).chain(steps).collect()));
                 self.log_top = None;
                 self.message = Some(format!("rerunning with {}", option.label));
             }
@@ -175,13 +193,24 @@ impl App {
             .iter()
             .zip(q.states())
             .map(|(j, s)| {
-                let script = j.script();
                 let what = match s {
                     jobs::State::Done => "done".to_string(),
                     jobs::State::Failed(why) => format!("failed: {why}"),
                     jobs::State::Stopped => "stopped".to_string(),
                     jobs::State::Waiting | jobs::State::Running => "not finished".to_string(),
                 };
+                // A step's fit script refuses to rerun over the fit it made,
+                // so a step is given again as its own command.
+                if j.step.is_some() {
+                    let words: Vec<String> = j.argv.iter().map(|w| shell_word(w)).collect();
+                    return format!(
+                        "{} {what}; again with: (cd {} && senna {})",
+                        j.method,
+                        shell_word(&self.shown(&j.dir)),
+                        words.join(" ")
+                    );
+                }
+                let script = j.script();
                 if script.exists() {
                     format!(
                         "{} {what}; again with: bash {}",
@@ -193,5 +222,26 @@ impl App {
                 }
             })
             .collect()
+    }
+}
+
+/// `w` as one shell word: as is when it is plain, else single-quoted.
+fn shell_word(w: &str) -> String {
+    let plain = !w.is_empty()
+        && w.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
+    if plain {
+        w.to_string()
+    } else {
+        format!("'{}'", w.replace('\'', "'\\''"))
+    }
+}
+
+/// A step's word `w` with the fit's `old` out moved to `new`: the out
+/// itself, or a file named after it (`{old}.senna.json`, `{old}.latent…`).
+fn moved_out(w: &str, old: &str, new: &str) -> String {
+    match w.strip_prefix(old) {
+        Some(rest) if rest.is_empty() || rest.starts_with('.') => format!("{new}{rest}"),
+        _ => w.to_string(),
     }
 }
