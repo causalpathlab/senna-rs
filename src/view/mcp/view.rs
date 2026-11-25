@@ -16,7 +16,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use image::codecs::png::CompressionType;
 use legume_mcp::{Call, Content, ToolSpec};
 use legume_tui::export::PageSize;
-use senna::run_manifest;
+use senna::run_manifest::{self, RunManifest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -56,6 +56,7 @@ pub(super) fn call(
         }
         "view_map" => {
             let open = held(open)?;
+            open.refresh_stage2();
             let out = open.map(parse(args.clone())?)?;
             // What a person following the server sees next.
             cx.state(&open.view_state());
@@ -64,7 +65,11 @@ pub(super) fn call(
         "view_markers" => held(open)?.markers(parse(args.clone())?)?,
         "view_cell" => held(open)?.cell(parse(args.clone())?)?,
         "view_export" => held(open)?.export(parse(args.clone())?)?,
-        "view_stage2" => held(open)?.stage2(parse(args.clone())?)?,
+        "view_stage2" => {
+            let open = held(open)?;
+            open.refresh_stage2();
+            open.stage2(parse(args.clone())?)?
+        }
         _ => return Ok(None),
     };
     Ok(Some(out))
@@ -84,6 +89,26 @@ pub(super) struct Open {
     window: Option<[f32; 4]>,
     /// The last map drawn, for `view_cell` pixels.
     drawn: Option<Viewport>,
+}
+
+impl Open {
+    /// Take up a stage 2 that `senna donor-deviation` (a `run_donor_deviation`
+    /// job, say) recorded in the run's manifest since it was opened, when the
+    /// view shows that run's own tables.
+    fn refresh_stage2(&mut self) {
+        let Ok((fresh, dir)) = RunManifest::load(&self.run) else {
+            return;
+        };
+        let shows_run = self
+            .scene
+            .data
+            .run
+            .as_ref()
+            .is_some_and(|(_, d)| run_manifest::same_file(d, &dir));
+        if shows_run && self.scene.refresh_stage2(&fresh) {
+            self.scene.note = Some("stage 2 read again: donor-deviation recorded it".into());
+        }
+    }
 }
 
 /// `width`, or `default`, within what a picture may be.

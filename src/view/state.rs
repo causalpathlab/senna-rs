@@ -193,12 +193,19 @@ impl Scene {
             .label_index(LabelKind::Batch)
             .map(|i| self.data.labels[i].clone());
         let loads = self.data.loads.clone();
+        let stage2_before = self.data.run.as_ref().map(|(m, _)| m.stage2.clone());
         self.data = data;
         // Another round keeps its own moved labels.
         self.places = super::places::Places::load(&self.data.prefix);
         if same_run {
-            // One read of each per run.
+            // One read of each per run, but a stage 2 added or replaced
+            // since is read anew.
             self.data.loads = loads;
+            if let Some((m, dir)) = &self.data.run {
+                if stage2_before.as_ref() != Some(&m.stage2) {
+                    self.data.loads.renew_stage2(m, dir);
+                }
+            }
             if let Some(b) = batch.filter(|_| self.label_index(LabelKind::Batch).is_none()) {
                 self.data.labels.push(b);
             }

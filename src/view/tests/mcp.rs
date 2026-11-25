@@ -534,3 +534,28 @@ fn stage_2_s_numbers_tiles_and_charts_are_an_agent_s_too() {
     // A tiny picture is still a picture.
     stage2(&mut o, json!({"what": "tiles", "gene": "g1", "width": 2})).unwrap();
 }
+
+#[test]
+fn a_stage_2_recorded_after_the_run_opened_is_taken_up_without_opening_it_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("r.senna.json");
+    // Opened before donor-deviation ran: no stage 2.
+    let mut bare = crate::view::stage2::tests::tables(dir.path());
+    let recorded = std::mem::take(&mut bare.stage2);
+    bare.save(&path).unwrap();
+    let mut scene = crate::view::tests::scene();
+    scene.data.run = Some((bare.clone(), dir.path().to_path_buf()));
+    let mut o = Open::of(scene, path.clone());
+    let e = o.stage2(serde_json::from_value(json!({"what": "genes"})).unwrap());
+    assert!(e.is_err());
+    // donor-deviation records itself; the next stage-2 call reads it.
+    bare.stage2 = recorded;
+    bare.save(&path).unwrap();
+    o.refresh_stage2();
+    let out = o
+        .stage2(
+            serde_json::from_value(json!({"what": "tiles", "gene": "g1", "width": 32})).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(state(&out)["donors"], json!(["A", "B", "C"]));
+}

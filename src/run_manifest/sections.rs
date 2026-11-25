@@ -506,7 +506,7 @@ pub struct RunAnnotate {
 
 /// Paths to the tables of `senna donor-deviation` (stage 2) on this run,
 /// recorded by it so a viewer of the run finds them. Empty until it runs.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunStage2 {
     /// `{out}.donor_gene_deviation.parquet`: per (gene, donor) the
     /// deviation's `intercept` and `state_axis_*` coefficients.
