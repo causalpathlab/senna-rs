@@ -81,6 +81,10 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
     // First, so a bad kernel is refused before the run is read.
     let params = args.umap_layout_args()?;
     if args.common.target == LayoutTarget::Features {
+        anyhow::ensure!(
+            !args.joint,
+            "--joint lays out cells and features together; drop --target features for it"
+        );
         return feature_pb_layout(&args.common, "umap", |pbs| {
             let n = pbs.n_pb();
             Ok(umap_layout_2d_on_graph(n, &pbs.pb_edges, &params.umap(n)))
@@ -95,11 +99,10 @@ pub fn fit_layout_umap(args: &LayoutUmapArgs) -> anyhow::Result<()> {
             "--joint needs a run whose cells and features share one embedding \
              (bge, simba, resolve-embedding-space), not a `{kind}` run"
         );
-    }
-    if args.joint {
-        if let OutlierCut::Mads(_) = args.common.drop_outliers {
-            log::warn!("--drop-outliers is for PB layouts; --joint lays out every cell");
-        }
+        anyhow::ensure!(
+            !matches!(args.common.drop_outliers, OutlierCut::Mads(_)),
+            "--drop-outliers is for PB layouts; --joint lays out every cell"
+        );
         let prep = cell_table(&args.common, &resolved)?;
         fit_layout_joint(args, &params, &mut resolved, &prep)
     } else {

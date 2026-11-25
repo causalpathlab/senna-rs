@@ -327,58 +327,55 @@ fn select_reference(
     manifest: &RunManifest,
     recorded: &[Box<str>],
 ) -> anyhow::Result<Option<senna::pb_reference::ReferenceInput>> {
-    let chosen: Result<Option<senna::pb_reference::ReferenceInput>, String> = if args.is_round() {
-        Err(
-            "a round continues on the parent's own cells, and there is nothing to stand \
-             them in for"
-                .into(),
-        )
-    } else if args.no_pb_reference {
-        Err("--no-pb-reference was passed".into())
-    } else if manifest.kind == RunKind::Simba {
-        Err(
-            "a simba run trains on cells, never on pseudobulks, so there is nothing to \
-             substitute"
-                .into(),
-        )
-    } else if multiome_recorded(manifest) {
-        Err(format!(
-            "{} is a multiome run, whose union column alignment cannot keep carried \
-             pseudobulks contiguous",
-            args.model
-        ))
-    } else if args.batch_files.is_none() {
-        Err(format!(
-            "the new data has no --batch-files; the carried pseudobulks are their own batch \
-             and the loader takes one batch file per data file. Passing batch labels lets an \
-             update reuse {}'s carried pseudobulks and cost the new data only",
-            args.model
-        ))
-    } else {
-        // A sidecar whose backend has gone missing, or that fails to
-        // parse, is "nothing to substitute": a moved run directory used to
-        // update fine and must keep doing so.
-        match senna::pb_reference::prepare(&args.model, &args.out) {
-            Ok(Some(r)) => Ok(Some(r)),
-            Ok(None) => Err(format!(
-                "{} carries no pseudobulks (trained with --no-emit-pb-reference, or before \
-                 carrying was the default)",
-                args.model
-            )),
-            Err(e) => Err(format!(
-                "{}'s carried pseudobulks cannot be used: {e}",
-                args.model
-            )),
-        }
-    };
-    let why = match chosen {
-        Ok(r) => return Ok(r),
-        Err(why) => why,
-    };
+    // A round continues on the parent's own cells: there is nothing to stand
+    // them in for.
     if args.is_round() {
         check_round_inputs(recorded)?;
         return Ok(None);
     }
+    let chosen: Result<Option<senna::pb_reference::ReferenceInput>, String> =
+        if args.no_pb_reference {
+            Err("--no-pb-reference was passed".into())
+        } else if manifest.kind == RunKind::Simba {
+            Err(
+                "a simba run trains on cells, never on pseudobulks, so there is nothing to \
+             substitute"
+                    .into(),
+            )
+        } else if multiome_recorded(manifest) {
+            Err(format!(
+                "{} is a multiome run, whose union column alignment cannot keep carried \
+             pseudobulks contiguous",
+                args.model
+            ))
+        } else if args.batch_files.is_none() {
+            Err(format!(
+                "the new data has no --batch-files; the carried pseudobulks are their own batch \
+             and the loader takes one batch file per data file. Passing batch labels lets an \
+             update reuse {}'s carried pseudobulks and cost the new data only",
+                args.model
+            ))
+        } else {
+            // A sidecar whose backend has gone missing, or that fails to
+            // parse, is "nothing to substitute": a moved run directory used to
+            // update fine and must keep doing so.
+            match senna::pb_reference::prepare(&args.model, &args.out) {
+                Ok(Some(r)) => Ok(Some(r)),
+                Ok(None) => Err(format!(
+                    "{} carries no pseudobulks (trained with --no-emit-pb-reference, or before \
+                 carrying was the default)",
+                    args.model
+                )),
+                Err(e) => Err(format!(
+                    "{}'s carried pseudobulks cannot be used: {e}",
+                    args.model
+                )),
+            }
+        };
+    let why = match chosen {
+        Ok(r) => return Ok(r),
+        Err(why) => why,
+    };
     if let Some(path) = carried_reference_among(recorded) {
         anyhow::bail!(
             "{} cannot be re-collapsed from cells ({why}): its inputs hold a carried reference \

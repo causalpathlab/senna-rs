@@ -400,18 +400,6 @@ pub struct PredictArgs {
 }
 
 impl PredictArgs {
-    /// `--decoder-only` and `--refine-*` re-fit the latent against the
-    /// decoder, which only the topic families do; anywhere else they would be
-    /// dropped without a word, so they are refused, naming what `model` is.
-    pub(super) fn refuse_latent_refinement(&self, model_is: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !self.decoder_only && self.refine_steps == 0,
-            "--decoder-only / --refine-steps are for the topic family; {} is {model_is}",
-            self.model
-        );
-        Ok(())
-    }
-
     /// How this run gets its scoring δ.
     pub(super) fn scoring_spec(&self) -> delta::ScoringSpec {
         delta::ScoringSpec {

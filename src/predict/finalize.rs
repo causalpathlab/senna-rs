@@ -6,7 +6,9 @@ use crate::topic::predict_eval::{
 };
 use senna::embed_common::*;
 
-use super::{build_remap, delta, eval_gene_source, read_query, scoring_remap, PredictArgs};
+use super::{
+    build_remap, delta, eval_gene_source, read_query, scoring_remap, PredictArgs, QueryBatches,
+};
 use crate::logging::new_progress_bar;
 use data_beans::sparse_io_vector::SparseIoVec;
 use indicatif::ParallelProgressIterator;
@@ -141,7 +143,13 @@ fn training_marginal(
     // genes from the floor that the model is being scored on.
     let mut opts = args.query_name_opts()?;
     opts.hide = None;
-    let train = read_query(files, None, args.preload_data, &opts, training_genes)?;
+    let train = read_query(
+        files,
+        QueryBatches::Ignore,
+        args.preload_data,
+        &opts,
+        training_genes,
+    )?;
     let remap = build_remap(training_genes, &train.row_names()?, &opts)?;
     let comp = crate::topic::predict_eval::empirical_composition(
         &train,

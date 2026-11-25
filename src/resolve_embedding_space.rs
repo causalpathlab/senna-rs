@@ -502,7 +502,7 @@ fn write_outputs(
 
     // ρ — gene × H, the raw model-axis gene table.
     trained.rho.to_parquet_with_names(
-        &format!("{out}.feature_embedding.parquet"),
+        &format!("{out}{}", senna::run_manifest::RHO_TABLE_SUFFIX),
         (Some(feature_names), Some("feature")),
         Some(&h_cols),
     )?;

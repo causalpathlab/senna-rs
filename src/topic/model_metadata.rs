@@ -183,6 +183,10 @@ pub struct TopicModelMetadata {
     /// the shape they were trained at.
     #[serde(default)]
     pub n_gene_modules: Option<usize>,
+    /// Read, never written: models from before 0.25.42 could record an encoder
+    /// context window here. See [`TopicModelMetadata::ensure_window_free`].
+    #[serde(default, skip_serializing)]
+    pub enc_context_size: Option<serde_json::Value>,
     /// Query-decoder projection width, `None` when the run had none.
     ///
     /// The query decoder's weights (`dec_query.*`) ride in the checkpoint, and
@@ -225,14 +229,10 @@ impl TopicModelMetadata {
     /// is gone, and scoring the model on every gene would give a different
     /// latent without a word. Continuing one (`--init-from`, `update`) is
     /// fine: its weights transfer, and the new fit is window-free.
-    pub fn ensure_window_free(prefix: &str) -> anyhow::Result<()> {
-        let path = format!("{prefix}.model.json");
-        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    pub fn ensure_window_free(&self, prefix: &str) -> anyhow::Result<()> {
         anyhow::ensure!(
-            value
-                .get("enc_context_size")
-                .is_none_or(serde_json::Value::is_null),
-            "{path}: this model was trained with an encoder context window \
+            self.enc_context_size.is_none(),
+            "{prefix}.model.json: this model was trained with an encoder context window \
              (enc_context_size), which this senna no longer scores; retrain it, or \
              continue it window-free with --init-from"
         );

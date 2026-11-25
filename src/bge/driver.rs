@@ -288,7 +288,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     let cpu = candle_core::Device::Cpu;
     let e_feat_cpu = out.model.e_feat.to_device(&cpu)?; // [D, H] raw ρ
     ge::save_embedding(
-        &format!("{}.feature_embedding.parquet", knobs.out),
+        &format!("{}{}", knobs.out, senna::run_manifest::RHO_TABLE_SUFFIX),
         &e_feat_cpu,
         &plan.unified.feature_names,
         "feature",

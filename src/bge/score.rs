@@ -20,7 +20,6 @@
 use crate::logging::new_progress_bar;
 use crate::topic::eval::{build_gene_remap_with, QueryNameOpts};
 use anyhow::Context;
-use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::{
     CellEncoder, FrozenProjection, FrozenProjectionArgs, FrozenProjector, PROJECTION_RIDGE_SGD,
@@ -296,29 +295,20 @@ impl BgeEmbedding {
             ModuleTables,
         };
 
-        let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
-            ReadSharedRowsArgs {
-                data_files: files.to_vec(),
-                batch_files: batches.and_then(|b| b.files.map(<[_]>::to_vec)),
-                preload,
-                feature_kind: qopts.loader_kind.clone(),
-                ..Default::default()
-            },
+        use crate::predict::QueryBatches as Read;
+        let data_vec = crate::predict::read_query(
+            files,
+            batches.map_or(Read::Ignore, |b| Read::Register(b.files)),
+            preload,
+            qopts,
             &self.gene_names,
-        )?)?;
-        let mut data_vec = loaded.data;
+        )?;
         let fold = match batches {
             Some(b) => {
-                data_vec.register_batch_membership(&loaded.batch);
                 crate::predict::delta::projection_fold(b.model, &self.gene_names, &data_vec)?
             }
             None => None,
         };
-        info!(
-            "Query data: {} features × {} cells",
-            data_vec.num_rows(),
-            data_vec.num_columns()
-        );
 
         let new_genes = data_vec.row_names()?;
         let mut remap = build_gene_remap_with(&self.gene_names, &new_genes, qopts);

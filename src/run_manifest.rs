@@ -89,11 +89,16 @@ type Mat = nalgebra::DMatrix<f32>;
 pub type Unknown = BTreeMap<String, serde_json::Value>;
 
 /// Schema version. Bump only on breaking renames or semantic changes.
-/// Readers accept any version and log a warning for newer-than-known.
+/// Readers refuse versions below [`MIN_MANIFEST_VERSION`] and log a warning
+/// for newer-than-known.
 ///
 /// - v2: `feature_embedding` is ρ for every command and the SIMBA co-embed
 ///   has its own slot, `feature_coembedding`.
 pub const MANIFEST_VERSION: u32 = 2;
+
+/// The oldest schema this senna reads: v1 kept the SIMBA co-embed where v2
+/// keeps ρ, and nothing lifts it any more.
+pub const MIN_MANIFEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
@@ -292,9 +297,10 @@ impl RunManifest {
             }
         })?;
         anyhow::ensure!(
-            m.version >= 2,
-            "manifest {} is v{}, from a senna before 0.18; this senna reads v2 and later \
-             only (its feature slots changed meaning). Refit the run",
+            m.version >= MIN_MANIFEST_VERSION,
+            "manifest {} is v{}, from a senna before 0.18; this senna reads \
+             v{MIN_MANIFEST_VERSION} and later only (its feature slots changed meaning). \
+             Refit the run",
             path.display(),
             m.version
         );

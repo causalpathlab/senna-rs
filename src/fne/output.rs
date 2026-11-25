@@ -51,7 +51,7 @@ pub(crate) fn write_outputs(
 
     // feature_embedding.parquet — [N, H], row column `feature`, every type.
     ge::save_embedding(
-        &format!("{prefix}.feature_embedding.parquet"),
+        &format!("{prefix}{}", senna::run_manifest::RHO_TABLE_SUFFIX),
         &out.embedding,
         &graph.node_names,
         "feature",
@@ -142,6 +142,9 @@ pub(crate) fn write_outputs(
         ],
     )?;
 
-    info!("Saved {n} features × {h} dims to {prefix}.feature_embedding.parquet");
+    info!(
+        "Saved {n} features × {h} dims to {prefix}{}",
+        senna::run_manifest::RHO_TABLE_SUFFIX
+    );
     Ok(())
 }

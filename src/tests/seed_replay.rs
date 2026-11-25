@@ -43,15 +43,6 @@ fn a_vae_fit_replays_from_its_seed() {
 fn a_masked_topic_fit_replays_from_its_seed() {
     replays(
         crate::masked_topic::fit_masked_topic_model,
-        &[
-            "-t",
-            "3",
-            "--minibatch-size",
-            "50",
-            "--gene-modules",
-            "0",
-            "--embedding-dim",
-            "8",
-        ],
+        &["-t", "3", "--minibatch-size", "50", "--embedding-dim", "8"],
     );
 }

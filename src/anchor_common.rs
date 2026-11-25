@@ -133,26 +133,4 @@ mod tests {
             picked
         );
     }
-
-    #[test]
-    fn zscore_is_unit_std() {
-        let x = Mat::from_row_slice(
-            4,
-            3,
-            &[1.0, 2.0, 5.0, 2.0, 3.0, 5.0, 3.0, 4.0, 5.0, 4.0, 5.0, 5.0],
-        );
-        let mut z = x.clone();
-        senna::embed_common::zscore_columns_inplace(&mut z);
-        for j in 0..x.ncols() {
-            let col: Vec<f32> = z.column(j).iter().copied().collect();
-            let mean = col.iter().sum::<f32>() / col.len() as f32;
-            assert!(mean.abs() < 1e-5);
-            if j < 2 {
-                let var = col.iter().map(|v| v * v).sum::<f32>() / col.len() as f32;
-                assert!((var - 1.0).abs() < 1e-5);
-            } else {
-                assert!(col.iter().all(|&v| v == 0.0));
-            }
-        }
-    }
 }

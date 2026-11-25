@@ -561,7 +561,7 @@ impl CollapseArgs {
         anyhow::ensure!(
             self.mixture_batch.is_none(),
             "--mixture-batch has no effect on `{kind}`: its collapse path does not carry the \
-             bulk role. Supported: topic, masked-topic, masked-sbp, masked-vae, vae, svd, bge."
+             bulk role"
         );
         Ok(())
     }

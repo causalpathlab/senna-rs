@@ -376,6 +376,7 @@ where
         n_train_cells: Some(ctx.data_vec.num_columns()),
         // Dense `topic` uses no indexed encoder, so the module branch does not apply.
         n_gene_modules: None,
+        enc_context_size: None,
         query_rank: None,
     };
     metadata.save(&ctx.args.out)?;

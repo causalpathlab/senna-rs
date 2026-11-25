@@ -191,10 +191,7 @@ pub fn kmeans_clustering(latent: &Mat, k: usize, max_iter: usize) -> anyhow::Res
         n_clusters: k,
     };
 
-    let sizes = result.cluster_sizes();
-    let min_size = sizes.iter().copied().min().unwrap_or(0);
-    let max_size = sizes.iter().copied().max().unwrap_or(0);
-    info!("K-means done: {k} clusters, cluster sizes min={min_size} max={max_size}");
+    result.log_sizes("K-means");
 
     Ok(result)
 }
@@ -219,7 +216,7 @@ pub enum LatentMetric {
 ///
 /// * `target_clusters` - if Some, binary-search resolution to approximate this count
 /// * `resolution` - starting (or fixed) resolution for CPM
-pub fn leiden_clustering_with_metric(
+pub fn leiden_clustering(
     latent: &Mat,
     knn: usize,
     resolution: f64,
@@ -374,7 +371,7 @@ mod tests {
     #[test]
     fn test_leiden_valid_output() {
         let latent = three_cluster_latent();
-        let result = leiden_clustering_with_metric(
+        let result = leiden_clustering(
             &latent,
             TEST_KNN,
             1.0,
@@ -397,7 +394,7 @@ mod tests {
     #[test]
     fn test_leiden_no_cross_cluster_labels() {
         let latent = three_cluster_latent();
-        let result = leiden_clustering_with_metric(
+        let result = leiden_clustering(
             &latent,
             TEST_KNN,
             1.0,
@@ -436,7 +433,7 @@ mod tests {
     #[test]
     fn test_leiden_reasonable_output_with_seed() {
         let latent = three_cluster_latent();
-        let r1 = leiden_clustering_with_metric(
+        let r1 = leiden_clustering(
             &latent,
             TEST_KNN,
             1.0,
@@ -465,7 +462,7 @@ mod tests {
         let latent = three_cluster_latent();
 
         // Very low resolution → fewer clusters (tends toward 1 big cluster)
-        let low_res = leiden_clustering_with_metric(
+        let low_res = leiden_clustering(
             &latent,
             TEST_KNN,
             0.1,
@@ -475,7 +472,7 @@ mod tests {
         )
         .unwrap();
         // Very high resolution → more clusters (tends toward singletons)
-        let high_res = leiden_clustering_with_metric(
+        let high_res = leiden_clustering(
             &latent,
             TEST_KNN,
             5.0,
@@ -523,15 +520,8 @@ mod tests {
             }
         }
 
-        let result = leiden_clustering_with_metric(
-            &latent,
-            TEST_KNN,
-            1.0,
-            None,
-            Some(0),
-            LatentMetric::Cosine,
-        )
-        .unwrap();
+        let result =
+            leiden_clustering(&latent, TEST_KNN, 1.0, None, Some(0), LatentMetric::Cosine).unwrap();
 
         // Per-direction label sets must be disjoint when metric is angular.
         let mut group_labels: Vec<rustc_hash::FxHashSet<usize>> = Vec::new();
@@ -556,21 +546,14 @@ mod tests {
     #[test]
     fn test_leiden_too_few_cells() {
         let latent = Mat::from_row_slice(1, 2, &[1.0, 2.0]);
-        let result = leiden_clustering_with_metric(
-            &latent,
-            5,
-            1.0,
-            None,
-            None,
-            LatentMetric::ZScoreEuclidean,
-        );
+        let result = leiden_clustering(&latent, 5, 1.0, None, None, LatentMetric::ZScoreEuclidean);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_leiden_cluster_sizes_sum() {
         let latent = three_cluster_latent();
-        let result = leiden_clustering_with_metric(
+        let result = leiden_clustering(
             &latent,
             TEST_KNN,
             1.0,
@@ -590,7 +573,7 @@ mod tests {
         let latent = three_cluster_latent();
         let target_k = TEST_N_GROUPS; // 3
 
-        let result = leiden_clustering_with_metric(
+        let result = leiden_clustering(
             &latent,
             TEST_KNN,
             0.1,
@@ -622,7 +605,7 @@ mod tests {
         let latent = three_cluster_latent();
         let target_k = 6;
 
-        let result = leiden_clustering_with_metric(
+        let result = leiden_clustering(
             &latent,
             TEST_KNN,
             0.5,

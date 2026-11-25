@@ -7,6 +7,7 @@ use senna::embed_common::*;
 use super::{
     build_remap, delta, feature_mean_on, finalize::topic_agreement, finalize::write_outputs,
     finalize::FinalizePredict, held_out, null, read_query, scoring_remap, PredictArgs,
+    QueryBatches,
 };
 use crate::logging::new_progress_bar;
 use candle_core::Device;
@@ -31,10 +32,6 @@ pub(super) fn predict_masked(
 ) -> anyhow::Result<()> {
     use crate::topic::model_metadata::masked_head_label;
 
-    args.refuse_latent_refinement(&format!(
-        "a `senna {}` model, whose inference is encoder-only",
-        masked_head_label(head)
-    ))?;
     let fit = null::RecordedFit::read(&args.model);
     let scored = score_masked_backend(MaskedScoreArgs {
         model: &args.model,
@@ -130,7 +127,7 @@ pub(crate) struct MaskedScoreArgs<'a> {
 pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<MaskedScored> {
     use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
 
-    TopicModelMetadata::ensure_window_free(a.model)?;
+    a.metadata.ensure_window_free(a.model)?;
     let embedding_dim = a
         .metadata
         .embedding_dim
@@ -144,7 +141,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 
     let mut data_vec = read_query(
         a.data_files,
-        a.batch_files,
+        QueryBatches::Register(a.batch_files),
         a.preload,
         a.query_name_opts,
         &training_genes,

@@ -26,14 +26,13 @@ fn a_model_with_a_context_window_loads_but_is_not_scored() {
     let dir = tempfile::tempdir().unwrap();
     for k in ["64", "0"] {
         let prefix = write(dir.path(), &format!(r#","enc_context_size":{k}"#));
-        assert!(TopicModelMetadata::load(&prefix).is_ok());
-        let err = TopicModelMetadata::ensure_window_free(&prefix)
-            .unwrap_err()
-            .to_string();
+        let m = TopicModelMetadata::load(&prefix).unwrap();
+        let err = m.ensure_window_free(&prefix).unwrap_err().to_string();
         assert!(err.contains("context window"), "{err}");
     }
     for extra in ["", r#","enc_context_size":null"#] {
         let prefix = write(dir.path(), extra);
-        assert!(TopicModelMetadata::ensure_window_free(&prefix).is_ok());
+        let m = TopicModelMetadata::load(&prefix).unwrap();
+        assert!(m.ensure_window_free(&prefix).is_ok());
     }
 }

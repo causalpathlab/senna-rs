@@ -228,6 +228,27 @@ impl RunKind {
         }
     }
 
+    /// Whether `predict` can re-fit this kind's latent against its decoder
+    /// (`--refine-steps`, `--decoder-only`). Only the dense topic models can;
+    /// every other kind is encoder-only or a projection. A full match, as above.
+    #[must_use]
+    pub fn has_decoder_latent_fit(self) -> bool {
+        match self {
+            RunKind::Topic | RunKind::JointTopic => true,
+            RunKind::Bge
+            | RunKind::Simba
+            | RunKind::Itopic
+            | RunKind::MaskedVae
+            | RunKind::Vae
+            | RunKind::Rbm
+            | RunKind::Ode
+            | RunKind::Svd
+            | RunKind::JointSvd
+            | RunKind::Fne
+            | RunKind::ResolveEmbeddingSpace => false,
+        }
+    }
+
     /// Whether the frozen gene table comes with a per-gene bias
     /// (`feature_bias.parquet`). bge fits one and cannot be scored without
     /// it; SIMBA's score is a pure dot product, so its bias is zero by

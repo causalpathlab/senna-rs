@@ -195,50 +195,6 @@ pub struct MaskedTopicArgs {
     )]
     pub(super) encoder_layers: Vec<usize>,
 
-    #[arg(
-        long,
-        default_value_t = 0,
-        help = "Learned gene modules M in the encoder (0 = off)",
-        long_help = "Pool the encoder's context genes within M learned groups,\n\
-                     alongside the existing attention pool.\n\
-                     \n\
-                     Several genes often do the same job:\n\
-                     paralogues, co-regulated members of a program,\n\
-                     alternative probes for one transcript.\n\
-                     Which of them a dataset captures varies\n\
-                     with chemistry, dropout and panel,\n\
-                     so any single gene is fragile across datasets.\n\
-                     A group mean is not.\n\
-                     \n\
-                     Each gene's membership over the M modules is itself learned,\n\
-                     and its embedding row becomes that membership's mixture\n\
-                     of M shared vectors, so no per-gene row is stored.\n\
-                     The encoder additionally sees each module's level\n\
-                     and how much of it was actually observed.\n\
-                     Set M well above the topic count:\n\
-                     these are fine-grained redundancy sets, not topics.\n\
-                     \n\
-                     Membership is sparse: a gene lands on a few modules\n\
-                     with exact zeros elsewhere,\n\
-                     and which ones changes as the fit proceeds.\n\
-                     \n\
-                     This is a MODULE, not a coarsening: it is learned.\n\
-                     --max-coarse-features is the other kind,\n\
-                     read off the data before training and fixed thereafter.\n\
-                     \n\
-                     REFUSED by the window-free encoder: modules pool a cell\n\
-                     by membership over its context slots,\n\
-                     and there is no context any more. Only 0 is accepted.\n\
-                     \n\
-                     0 keeps the older free per-gene embedding instead.\n\
-                     \n\
-                     A continued fit cannot change M, in either direction:\n\
-                     the count decides which weights exist at all,\n\
-                     so a checkpoint trained at one M has nothing to give\n\
-                     a run that asks for another."
-    )]
-    pub(super) gene_modules: usize,
-
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     pub(super) epochs: usize,
 
@@ -697,12 +653,6 @@ impl MaskedTopicArgs {
     /// What belongs here is only the early refusal, so a run that cannot work
     /// stops before it reads a single file.
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.gene_modules == 0,
-            "--gene-modules {} is refused by the window-free encoder, which has no context \
-             slots to pool a membership over (its own error says why): pass --gene-modules 0.",
-            self.gene_modules
-        );
         // The rate is the model, not a knob with a safe default: 0 hides
         // nothing and 1 hides everything, and either leaves one side of the
         // masked objective with no work. The loader used to clamp both back to

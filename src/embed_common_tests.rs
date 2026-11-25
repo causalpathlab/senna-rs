@@ -1,6 +1,6 @@
 //! Tests for the latent-sharpness summary.
 
-use super::{latent_sharpness, Mat};
+use super::{latent_sharpness, zscore_columns_inplace, Mat};
 use legume_numeric::matrix::traits::IoOps;
 
 /// The effective topic count and mean max weight, one row per case:
@@ -395,4 +395,30 @@ fn match_key_folds_gene_case_but_keeps_a_locus_as_is() {
         &*match_key(&mixed, "X:0-100")
     );
     assert!(!is_locus("GENE1"));
+}
+
+#[test]
+fn zscore_gives_unit_sd_and_zeroes_constant_columns() {
+    let x = Mat::from_row_slice(
+        4,
+        3,
+        &[1.0, 2.0, 5.0, 2.0, 3.0, 5.0, 3.0, 4.0, 5.0, 4.0, 5.0, 5.0],
+    );
+    let mut z = x.clone();
+    zscore_columns_inplace(&mut z);
+    for j in 0..x.ncols() {
+        let col: Vec<f32> = z.column(j).iter().copied().collect();
+        let mean = col.iter().sum::<f32>() / col.len() as f32;
+        assert!(mean.abs() < 1e-5);
+        if j < 2 {
+            let var = col.iter().map(|v| v * v).sum::<f32>() / col.len() as f32;
+            assert!((var - 1.0).abs() < 1e-5);
+        } else {
+            assert!(col.iter().all(|&v| v == 0.0));
+        }
+    }
+    // One row: nothing to scale against, every column zero.
+    let mut one = Mat::from_row_slice(1, 2, &[3.0, -1.0]);
+    zscore_columns_inplace(&mut one);
+    assert!(one.iter().all(|&v| v == 0.0));
 }

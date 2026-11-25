@@ -147,7 +147,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     )?;
     // The raw gene table ρ, as bge writes its own.
     ge::save_embedding(
-        &format!("{prefix}.feature_embedding.parquet"),
+        &format!("{prefix}{}", senna::run_manifest::RHO_TABLE_SUFFIX),
         &out.e_gene,
         &feature_names,
         "feature",

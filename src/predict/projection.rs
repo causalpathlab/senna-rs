@@ -8,6 +8,7 @@ use senna::embed_common::*;
 use super::{
     build_remap, delta, embedding_scoring_delta, eval_gene_source, finalize::evaluate_agreement,
     finalize::write_outputs, finalize::AgreementInputs, read_query, EmbeddingScore, PredictArgs,
+    QueryBatches,
 };
 use log::info;
 use rayon::prelude::*;
@@ -36,9 +37,6 @@ pub(super) fn predict_bge(
     args: &PredictArgs,
     kind: senna::run_manifest::RunKind,
 ) -> anyhow::Result<()> {
-    args.refuse_latent_refinement(&format!(
-        "a `senna {kind}` run, whose only inference is the Poisson-MAP projection onto the frozen ρ"
-    ))?;
     if args.residual_out.is_some() {
         log::warn!(
             "--residual-out is not available for a {kind} run (no count decoder to regress \
@@ -134,9 +132,6 @@ pub(super) fn predict_bge(
 pub(super) fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     use legume_numeric::matrix::agreement::agreement_from_rate;
 
-    args.refuse_latent_refinement(
-        "a `senna svd` run, whose only inference is the projection onto the frozen dictionary",
-    )?;
     if args.residual_out.is_some() {
         log::warn!("--residual-out is not available for an svd run (no count decoder); ignoring");
     }
@@ -155,7 +150,7 @@ pub(super) fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     let qopts = args.query_name_opts()?;
     let data_vec = read_query(
         &args.data_files,
-        args.batch_files.as_deref(),
+        QueryBatches::Register(args.batch_files.as_deref()),
         args.preload_data,
         &qopts,
         &training_genes,

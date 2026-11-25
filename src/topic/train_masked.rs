@@ -249,60 +249,6 @@ pub(crate) fn write_feature_embedding(
     )
 }
 
-/// Write the encoder's learned gene modules in the shape the graph-embedding
-/// family writes them: a `[D, M]` membership and an `[M, H]` dictionary, under
-/// the same suffixes.
-///
-/// Both families now learn a membership per feature and compose a row from
-/// shared module vectors, so the artifact means the same thing on either side.
-/// They still differ in what surrounds it — the graph-embedding family keeps a
-/// per-feature residual and warm-starts its membership from a clustering,
-/// while this one composes without a residual from a flat start — so the
-/// tables are shared, not the parameterization.
-///
-/// Returns the two suffixes when the encoder has modules, so the caller can
-/// record them in the manifest, and `None` when it has none.
-pub(crate) fn write_gene_modules(
-    encoder: &IndexedEmbeddingEncoder,
-    gene_names: &[Box<str>],
-    out_prefix: &str,
-) -> anyhow::Result<Option<(&'static str, &'static str)>> {
-    let Some(membership) = encoder.feature_module_membership()? else {
-        return Ok(None);
-    };
-    let module_names: Vec<Box<str>> = (0..encoder.n_gene_modules())
-        .map(|i| format!("m{i}").into_boxed_str())
-        .collect();
-    let membership_suffix = graph_embedding_util::transfer::MODULE_MEMBERSHIP_SUFFIX;
-    let dictionary_suffix = graph_embedding_util::transfer::MODULE_DICTIONARY_SUFFIX;
-    write_tensor_parquet_named(
-        &membership,
-        out_prefix,
-        membership_suffix,
-        gene_names,
-        "gene",
-        &module_names,
-    )?;
-    // Already `[M, H]`: the dictionary is stored the way it is written.
-    let dictionary = encoder
-        .module_dictionary()
-        .expect("a module encoder has a dictionary")
-        .clone();
-    write_tensor_parquet(
-        &dictionary,
-        out_prefix,
-        dictionary_suffix,
-        &module_names,
-        "module",
-        "H",
-    )?;
-    log::info!(
-        "Wrote {} gene module(s) to {out_prefix}.{membership_suffix} and .{dictionary_suffix}",
-        encoder.n_gene_modules(),
-    );
-    Ok(Some((membership_suffix, dictionary_suffix)))
-}
-
 #[cfg(test)]
 #[path = "train_masked_tests.rs"]
 mod train_masked_tests;

@@ -9,7 +9,7 @@ use super::{
     aggregate_feature_mean_to_coarse, build_remap, dense::remap_and_coarsen_dense, dense_bytes,
     embedding_scoring_delta, feature_mean_on, finalize::evaluate_agreement,
     finalize::write_outputs, finalize::AgreementInputs, held_out, null, read_query,
-    run_predict_blocks, EmbeddingScore, PredictArgs, NB_CHAIN_TENSORS,
+    run_predict_blocks, EmbeddingScore, PredictArgs, QueryBatches, NB_CHAIN_TENSORS,
 };
 use candle_core::Device;
 use data_beans::sparse_io_vector::SparseIoVec;
@@ -23,8 +23,6 @@ use log::info;
 /// the encoder (see `null`), like `predict_masked`. The latent is continuous
 /// factors, so there is no decoder refinement to do.
 pub(super) fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
-    args.refuse_latent_refinement("a vae model, whose inference is encoder-only")?;
-
     // The decoder is rebuilt so a vae run is scorable like every other family.
     // It used to be skipped (latent only, no `.predictive.parquet`), which left
     // vae the one family a benchmark could not grade on the shared columns.
@@ -150,7 +148,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
 
     let mut data_vec = read_query(
         a.data_files,
-        a.batch_files,
+        QueryBatches::Register(a.batch_files),
         a.preload,
         a.query_name_opts,
         &training_genes,

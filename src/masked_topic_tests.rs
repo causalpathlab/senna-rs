@@ -79,25 +79,6 @@ mod window_free {
         Cli::try_parse_from(argv).expect("parses").args
     }
 
-    /// Gene modules pool a cell by membership over its CONTEXT SLOTS. With no
-    /// context there are no slots, so the branch has no dense counterpart —
-    /// refuse at argument validation rather than at the first forward.
-    #[test]
-    fn gene_modules_are_refused_and_the_message_names_both_ideas() {
-        let args = parse(&["--gene-modules", "64"]);
-        let msg = args
-            .validate()
-            .expect_err("modules and the window-free encoder do not compose")
-            .to_string();
-        for needle in ["--gene-modules", "context"] {
-            assert!(
-                msg.contains(needle),
-                "the message must name {needle}; got: {msg}"
-            );
-        }
-        assert!(parse(&["--gene-modules", "0"]).validate().is_ok());
-    }
-
     /// Nothing is refused once the query head is unwired.
     #[test]
     fn a_plain_window_free_run_validates() {
@@ -260,16 +241,7 @@ fn masked_topic_anchors_rho_with_a_low_rank_residual_and_folds_it_before_saving(
     let data = planted_zarr(dir.path());
     let first = dir.path().join("first").to_string_lossy().into_owned();
     let second = dir.path().join("second").to_string_lossy().into_owned();
-    let common = [
-        "-t",
-        "3",
-        "-i",
-        "3",
-        "--gene-modules",
-        "0",
-        "--minibatch-size",
-        "50",
-    ];
+    let common = ["-t", "3", "-i", "3", "--minibatch-size", "50"];
     let mut argv = vec![data.as_str(), "-o", &first, "--embedding-dim", "8"];
     argv.extend_from_slice(&common);
     fit_masked_topic_model(&parse_masked(&argv)).unwrap();
@@ -329,16 +301,7 @@ fn a_lora_rank_as_wide_as_the_table_is_taken() {
     let data = planted_zarr(dir.path());
     let first = dir.path().join("first").to_string_lossy().into_owned();
     let second = dir.path().join("second").to_string_lossy().into_owned();
-    let common = [
-        "-t",
-        "3",
-        "-i",
-        "1",
-        "--gene-modules",
-        "0",
-        "--minibatch-size",
-        "50",
-    ];
+    let common = ["-t", "3", "-i", "1", "--minibatch-size", "50"];
     let mut argv = vec![data.as_str(), "-o", &first, "--embedding-dim", "4"];
     argv.extend_from_slice(&common);
     fit_masked_topic_model(&parse_masked(&argv)).unwrap();
@@ -369,16 +332,7 @@ fn masked_topic_carries_the_unmatched_rows_of_a_pinned_table_through() {
     let first = dir.path().join("first").to_string_lossy().into_owned();
     let plus = dir.path().join("plus").to_string_lossy().into_owned();
     let second = dir.path().join("second").to_string_lossy().into_owned();
-    let common = [
-        "-t",
-        "3",
-        "-i",
-        "2",
-        "--gene-modules",
-        "0",
-        "--minibatch-size",
-        "50",
-    ];
+    let common = ["-t", "3", "-i", "2", "--minibatch-size", "50"];
     let mut argv = vec![data.as_str(), "-o", &first, "--embedding-dim", "8"];
     argv.extend_from_slice(&common);
     fit_masked_topic_model(&parse_masked(&argv)).unwrap();

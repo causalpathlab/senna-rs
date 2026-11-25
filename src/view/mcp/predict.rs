@@ -102,7 +102,7 @@ fn predict_task(a: &PredictCall, out: &str) -> Result<Task> {
 /// refuses the flags on every other run, so they are refused here first.
 fn check_latent(a: &PredictCall, kind: RunKind) -> Result<()> {
     ensure!(
-        a.latent == Latent::Encoder || matches!(kind, RunKind::Topic | RunKind::JointTopic),
+        a.latent == Latent::Encoder || kind.has_decoder_latent_fit(),
         "latent refine and decoder are for topic runs; a {kind} run is predicted from its \
          encoder or projection only (latent encoder)"
     );

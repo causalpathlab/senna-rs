@@ -36,6 +36,15 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     // into a bare file-not-found naming a path the user never typed — the same confusion
     // `BgeEmbedding::open` exists to prevent, reintroduced one level up.
     let kind = crate::topic::model_metadata::resolve_run_kind(&args.model)?;
+    // Before any data is touched: the latent refit only exists for the dense
+    // topic models, and anywhere else the flags would be dropped silently.
+    // (`--refine-lr` / `--refine-reg` only tune that refit.)
+    anyhow::ensure!(
+        kind.has_decoder_latent_fit() || (!args.decoder_only && args.refine_steps == 0),
+        "--decoder-only / --refine-steps re-fit the latent against a topic decoder; {} is a \
+         `senna {kind}` run, which is predicted from its encoder or projection only",
+        args.model
+    );
 
     // `--bulk`: dense tables become temp backends here, and every family path
     // below reads them as it would any data file. The guard removes them when
@@ -188,16 +197,30 @@ fn feature_mean_on(model: &str, training_genes: &[Box<str>]) -> anyhow::Result<V
     Ok(feature_mean)
 }
 
+/// How [`read_query`] treats the cells' batches.
+#[derive(Clone, Copy)]
+pub(crate) enum QueryBatches<'a> {
+    /// Register each cell's batch: from these files, or one batch per data
+    /// file when `None`.
+    Register(Option<&'a [Box<str>]>),
+    /// The caller never reads batches; skip the registration pass.
+    Ignore,
+}
+
 /// Count data read onto the model's gene axis the way every family reads a
 /// query: shared rows under the caller's name rules, batch membership
-/// registered from `batch_files` (one batch per file without them).
-fn read_query(
+/// registered as `batches` says.
+pub(crate) fn read_query(
     data_files: &[Box<str>],
-    batch_files: Option<&[Box<str>]>,
+    batches: QueryBatches<'_>,
     preload: bool,
     opts: &QueryNameOpts,
     training_genes: &[Box<str>],
 ) -> anyhow::Result<SparseIoVec> {
+    let batch_files = match batches {
+        QueryBatches::Register(files) => files,
+        QueryBatches::Ignore => None,
+    };
     let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: data_files.to_vec(),
@@ -209,7 +232,9 @@ fn read_query(
         training_genes,
     )?)?;
     let mut data_vec = loaded.data;
-    data_vec.register_batch_membership(&loaded.batch);
+    if matches!(batches, QueryBatches::Register(_)) {
+        data_vec.register_batch_membership(&loaded.batch);
+    }
     info!(
         "Query data: {} features × {} cells",
         data_vec.num_rows(),

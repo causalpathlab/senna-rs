@@ -169,6 +169,7 @@ fn the_query_rank_round_trips_with_and_without_a_value() {
         theta_mean: None,
         n_train_cells: None,
         n_gene_modules: None,
+        enc_context_size: None,
         query_rank: None,
     };
     let dir = tempfile::tempdir().unwrap();

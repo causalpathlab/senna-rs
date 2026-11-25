@@ -84,16 +84,15 @@ impl AnchorPrior {
         };
 
         // Z-score per feature so Gram-Schmidt residuals aren't dominated
-        // by high-variance genes.
-        // With one PB there is nothing to scale against; its raw row is the anchor.
+        // by high-variance genes. With one PB there is nothing to scale
+        // against; its raw row is the anchor.
         if x_pd_selection.nrows() >= 2 {
             senna::embed_common::zscore_columns_inplace(&mut x_pd_selection);
         }
-        let x_sel_zscored = x_pd_selection;
 
         // Greedy Gram-Schmidt vertex selection in the selection space.
         let k = n_topics.min(n_pb);
-        let anchor_pb_idx = gram_schmidt_anchors(&x_sel_zscored, k);
+        let anchor_pb_idx = gram_schmidt_anchors(&x_pd_selection, k);
 
         // [D_full, K] prior: softmax of each anchor PB's log1p expression
         // at full resolution. `x_gp.column(pb)` gives a PB's gene vector

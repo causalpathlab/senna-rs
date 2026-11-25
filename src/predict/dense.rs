@@ -10,7 +10,7 @@ use senna::embed_common::*;
 use super::{
     aggregate_feature_mean_to_coarse, build_remap, delta, dense_bytes, finalize::finalize_predict,
     finalize::FinalizePredict, held_out, null, read_query, resolve_mode, run_predict_blocks,
-    scoring_remap, PredictArgs, NB_CHAIN_TENSORS,
+    scoring_remap, PredictArgs, QueryBatches, NB_CHAIN_TENSORS,
 };
 use candle_core::{Device, Tensor};
 use data_beans::alg::feature_coarsening::FeatureCoarsening;
@@ -137,7 +137,7 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
 
     let mut data_vec = read_query(
         a.data_files,
-        a.batch_files,
+        QueryBatches::Register(a.batch_files),
         a.preload,
         a.query_name_opts,
         &training_genes,

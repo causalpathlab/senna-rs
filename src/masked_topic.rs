@@ -110,11 +110,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // checkpoint's metadata, so ask now rather than after the import and the
     // collapse. Re-checked inside the warm start, which every entry point takes.
     if let Some(prefix) = args.init_from.as_deref() {
-        crate::topic::warm_start::check_feature_side(
-            prefix,
-            args.gene_modules,
-            args.add_embedding_dim,
-        )?;
+        crate::topic::warm_start::check_feature_side(prefix, 0, args.add_embedding_dim)?;
     }
 
     // Resolved before H so the pre-trained dictionary's column count
@@ -122,17 +118,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let pretrained_spec: Option<crate::topic::freeze::FrozenFeatureSpec> = match pretrained_prefix {
         None => None,
         Some(prefix) => {
-            // Refuse here, before anything is read. With modules the encoder
-            // has no per-gene table to seed or to hold fixed: a gene's row is
-            // composed from shared vectors, so a pre-trained table would have
-            // to be factorized into a membership and a dictionary first.
-            anyhow::ensure!(
-                args.gene_modules == 0,
-                "{preset_flag} does not compose with --gene-modules {}: with modules a gene's \
-                 embedding is a learned mixture of shared vectors, so there is no per-gene table \
-                 to seed, freeze or anchor. Drop one of the two.",
-                args.gene_modules,
-            );
             if pinned_rho {
                 anyhow::ensure!(
                     args.feature_network.is_none(),
@@ -280,7 +265,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             embedding_dim: h,
             layers: &args.encoder_layers,
             attn_pool: true,
-            n_gene_modules: args.gene_modules,
+            n_gene_modules: 0,
             lora_rank: lora.map_or(0, |l| l.rank),
         },
         &parameters,
@@ -447,7 +432,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                     add_topics: args.add_topics,
                     add_embedding_dim: args.add_embedding_dim,
                 },
-                n_gene_modules: args.gene_modules,
+                n_gene_modules: 0,
                 // A free ρ restarts an unseen gene at the mean of its finest
                 // coarse group, or at the global mean when the source run
                 // trained at full resolution. A composed feature side ignores
@@ -545,10 +530,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let finest_decoder = decoders.last().unwrap();
     write_masked_dictionary(finest_decoder, &gene_names, &args.out)?;
     write_feature_embedding(&base_encoder.feature_embeddings()?, &gene_names, &args.out)?;
-    // Learned gene modules, in the shape the graph-embedding family writes
-    // them, so one reader serves both.
-    let module_suffixes =
-        crate::topic::train_masked::write_gene_modules(&base_encoder, &gene_names, &args.out)?;
 
     // Optional held-out masked-imputation evaluation — the un-optimized
     // generalization metric (see `--eval-mask-fraction`). Runs on the training
@@ -621,7 +602,8 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         n_train_cells: Some(data_vec.num_columns()),
         // Round-trips the encoder's FC input width; without it every rebuild site
         // would construct `[L, H]` and `VarMap::load` would reject the checkpoint.
-        n_gene_modules: Some(args.gene_modules),
+        n_gene_modules: Some(0),
+        enc_context_size: None,
         query_rank: None,
     };
     metadata.save(&args.out)?;
@@ -644,7 +626,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             embedding_dim: h,
             layers: &args.encoder_layers,
             attn_pool: true,
-            n_gene_modules: args.gene_modules,
+            n_gene_modules: 0,
             lora_rank: 0,
         },
         &parameters,
@@ -894,8 +876,8 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_coembedding_suffix: None,
         carried: carried.as_ref(),
-        module_membership_suffix: module_suffixes.map(|(m, _)| m),
-        module_dictionary_suffix: module_suffixes.map(|(_, d)| d),
+        module_membership_suffix: None,
+        module_dictionary_suffix: None,
         softmax_dictionary_suffix: Some("dictionary.parquet"),
         cell_embedding_suffix: None,
         cell_encoder_suffix: None,

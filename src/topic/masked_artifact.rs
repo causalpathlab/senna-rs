@@ -18,9 +18,7 @@
 
 use crate::predict::{score_masked_backend, MaskedScoreArgs, MaskedScored};
 use crate::topic::eval::QueryNameOpts;
-use crate::topic::model_metadata::{
-    load_feature_mean, masked_head_from_model_type, TopicModelMetadata,
-};
+use crate::topic::model_metadata::{masked_head_from_model_type, TopicModelMetadata};
 use legume_numeric::candle::candle_core::Device;
 use legume_numeric::candle::vae::masked_topic::LatentHead;
 
@@ -88,7 +86,6 @@ impl<'a> MaskedModel<'a> {
                 metadata.model_type
             )
         })?;
-        load_feature_mean(prefix)?;
 
         Ok(Self {
             prefix,
@@ -160,6 +157,7 @@ mod tests {
             theta_mean: None,
             n_train_cells: None,
             n_gene_modules: None,
+            enc_context_size: None,
             query_rank: None,
         };
         m.save(prefix).unwrap();
