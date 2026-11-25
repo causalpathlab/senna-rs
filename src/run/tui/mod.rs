@@ -13,6 +13,7 @@ mod data;
 mod data_screen;
 mod described;
 mod draw;
+mod draw_methods;
 mod editing;
 mod form;
 mod jobs;
