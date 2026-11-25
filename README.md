@@ -87,7 +87,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > the user can watch with `senna attach`. `run_predict` places new cells in a
 > trained model's latent, `run_update` continues a trained model over new data,
 > and `run_layout` lays a run out again with chosen settings, umap's min_dist
-> and spread among them. `view_open` opens a run (or a lupin round) and computes a missing layout or clustering first; in a terminal the same run opens with `senna view {run}.senna.json`. `view_map`
+> and spread (flags umap-min-dist, umap-spread) among them. `view_open` opens a run (or a lupin round) and computes a missing layout or clustering first; in a terminal the same run opens with `senna view {run}.senna.json`. `view_map`
 > draws the map with its legend; its arguments stay set until changed, so pass
 > only what changes. `view_markers` lists what sets a group apart, `view_cell`
 > names a point and its groups, and `view_export` writes figures. World
@@ -108,7 +108,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | `run_impute` | full-feature counts on new cells from their nearest reference cells (`senna impute`); returns `{out}.imputed.parquet` |
 | `run_deconvolve` | bulk samples split into cell-type fractions against a run's annotated cells (`senna deconvolve`); returns the fractions file |
 | `run_donor_deviation` | stage 2 on an embedding run (`senna donor-deviation`): per gene and donor, the deviation from other donors' matched samples in the same state, with its batch jackknife and each sample's matched distances |
-| `run_layout` | a run laid out again with the settings given (`senna layout <method> --from <run> <flags>`), replacing that method's layout; umap takes `min_dist` and `spread` as umap-learn's, checked before it runs; `view_open` then shows it |
+| `run_layout` | a run laid out again with the settings given (`senna layout <method> --from <run> <flags>`, the flags as a `flags` map), replacing that method's layout; umap takes `umap-min-dist` and `umap-spread` as umap-learn's min_dist and spread, checked before it runs; `view_open` then shows it |
 | `run_step` | one of the other analysis commands: `clustering` and `resolve-embedding-space` on a run, `joint-topic`, `joint-svd` and `fne` on data files; returns what it made |
 | `view_open` | opens a run or a lupin round: its maps, groupings and the groups shown, a missing layout or clustering computed first |
 | `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, the run's time or velocity field, window and zoom |

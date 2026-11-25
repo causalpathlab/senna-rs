@@ -51,7 +51,7 @@ command's flags. A long fit runs with \
 `background`, as a job to follow with `job_wait`, in a session of `senna run` the user can watch with `senna attach`. \
 `run_predict` places new cells in a trained model's latent, `run_update` \
 continues a trained model over new data, and `run_layout` lays a run out \
-again with chosen settings, umap's min_dist and spread among them. `view_open` opens a run (or a \
+again with chosen settings, umap's min_dist and spread (flags umap-min-dist, umap-spread) among them. `view_open` opens a run (or a \
 lupin round) and computes a missing layout or clustering first; in a terminal the same \
 run opens with `senna view {run}.senna.json`. `view_map` \
 draws the map with its legend; its arguments stay set until changed, so pass \

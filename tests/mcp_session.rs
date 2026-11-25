@@ -180,7 +180,7 @@ fn predict_layout_and_update_run_on_a_fit_and_are_recorded() {
             ),
             (
                 "run_layout",
-                json!({"run": project.join("fit.senna.json"), "method": "umap", "min_dist": 0.5, "args": ["--knn", "5"]}),
+                json!({"run": project.join("fit.senna.json"), "method": "umap", "flags": {"umap-min-dist": 0.5, "knn": 5}}),
             ),
             (
                 "run_update",
@@ -210,7 +210,7 @@ fn predict_layout_and_update_run_on_a_fit_and_are_recorded() {
     let script = std::fs::read_to_string(day.join("runall.sh")).unwrap();
     assert!(script.contains("senna predict"), "{script}");
     assert!(script.contains("senna layout umap"), "{script}");
-    assert!(script.contains("--umap-min-dist 0.5"), "{script}");
+    assert!(script.contains("--umap-min-dist=0.5"), "{script}");
     // Unguarded: a replay redoes the layout with these flags even after an
     // earlier layout of the method made its file.
     assert!(
