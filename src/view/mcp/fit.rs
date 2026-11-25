@@ -244,7 +244,7 @@ fn background_fit(
         let label = Path::new(out)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
-        let started = cx.start_session_job(legume_mcp::SessionJob {
+        let job = legume_mcp::SessionJob {
             tool: crate::tui::TOOL,
             screen: "fit".into(),
             label,
@@ -252,22 +252,19 @@ fn background_fit(
             record: senna(argv)?,
             outputs: outputs.to_vec(),
             summary: summary.into(),
-        })?;
+        };
+        let started = match why {
+            Some(why) => cx.start_session_job_why(job, why.clone())?,
+            None => cx.start_session_job(job)?,
+        };
         let session = started.session;
-        let mut said = json!({
+        Ok(json!({
             "job": started.job,
             "session": session,
             "note": format!(
                 "the fit runs as this job, on senna run's screen in session {session} (`senna attach {session}` shows it to the user), and goes on if this server ends; follow it with job_status or job_wait, then open the run with view_open once the job is done"
             ),
-        });
-        // A session job does not take the step's reason yet.
-        if why.is_some() {
-            said["why"] = "not recorded with the step: a fit in a session does not take one; \
-                           put it in the notebook (kind choice)"
-                .into();
-        }
-        Ok(said)
+        }))
     }
     #[cfg(not(unix))]
     {
