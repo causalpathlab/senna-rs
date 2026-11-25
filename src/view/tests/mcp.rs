@@ -546,8 +546,9 @@ fn a_stage_2_recorded_after_the_run_opened_is_taken_up_without_opening_it_again(
     let mut scene = crate::view::tests::scene();
     scene.data.run = Some((bare.clone(), dir.path().to_path_buf()));
     let mut o = Open::of(scene, path.clone());
-    let e = o.stage2(serde_json::from_value(json!({"what": "genes"})).unwrap());
-    assert!(e.is_err());
+    let stage2 = |o: &mut Open, v: Value| o.stage2(serde_json::from_value(v).unwrap());
+    o.refresh_stage2();
+    assert!(stage2(&mut o, json!({"what": "genes"})).is_err());
     // donor-deviation records itself; the next stage-2 call reads it.
     bare.stage2 = recorded;
     bare.save(&path).unwrap();

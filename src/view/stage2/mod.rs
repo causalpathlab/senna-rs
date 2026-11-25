@@ -55,22 +55,25 @@ impl Scene {
     /// records, when `senna donor-deviation` added or replaced it since the
     /// run was opened. Returns whether it had.
     pub(crate) fn refresh_stage2(&mut self, fresh: &senna::run_manifest::RunManifest) -> bool {
-        let Some((m, dir)) = self.data.run.as_mut() else {
-            return false;
-        };
-        if m.stage2 == fresh.stage2 {
-            return false;
+        match self.data.run.as_mut() {
+            Some((m, _)) if m.stage2 != fresh.stage2 => m.stage2 = fresh.stage2.clone(),
+            _ => return false,
         }
-        m.stage2 = fresh.stage2.clone();
-        let (m, dir) = (m.clone(), dir.clone());
-        self.data.loads.renew_stage2(&m, &dir);
+        self.take_up_stage2();
+        true
+    }
+
+    /// Read the run's stage 2 anew (its manifest's slot changed), and forget
+    /// what was matched and drawn from the one before.
+    pub(super) fn take_up_stage2(&mut self) {
+        if let Some((m, dir)) = &self.data.run {
+            self.data.loads.renew_stage2(m, dir);
+        }
         self.stage2_rows.borrow_mut().clear();
-        // What was drawn from the other stage 2 is drawn again.
         if matches!(self.pick, Some(Pick::Gain { .. } | Pick::Exclusive)) {
             self.shown = None;
         }
         self.chart = self.chart.as_ref().map(super::chart::Chart::like);
-        true
     }
 
     /// Stage 2, waited for when the scene is patient.

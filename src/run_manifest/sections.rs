@@ -527,6 +527,10 @@ pub struct RunStage2 {
     /// `{out}.donor_deviation.json`: the run's settings and donors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<String>,
+    /// When the tables were written (nanoseconds since the Unix epoch), so
+    /// a stage 2 run again to the same paths still reads as new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written: Option<u64>,
     /// Fields this version does not know, written by another tool or a
     /// newer senna; kept so a load/save round trip never drops them.
     #[serde(flatten, default)]
@@ -542,6 +546,7 @@ impl RunStage2 {
             && self.donor_sample_states.is_none()
             && self.donor_cell_states.is_none()
             && self.settings.is_none()
+            && self.written.is_none()
             && self.unknown.is_empty()
     }
 }

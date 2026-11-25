@@ -95,7 +95,9 @@ impl Open {
     /// Take up a stage 2 that `senna donor-deviation` (a `run_donor_deviation`
     /// job, say) recorded in the run's manifest since it was opened, when the
     /// view shows that run's own tables.
-    fn refresh_stage2(&mut self) {
+    pub(super) fn refresh_stage2(&mut self) {
+        // A small file, read whole each time: a write within a coarse
+        // file clock's tick would slip past a modified-time check.
         let Ok((fresh, dir)) = RunManifest::load(&self.run) else {
             return;
         };
