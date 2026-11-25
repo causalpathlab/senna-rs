@@ -52,7 +52,8 @@ pub(super) fn call(
         "view_open" => {
             let open = open.insert(Open::new(&parse(args.clone())?, cx)?);
             cx.state(&open.view_state());
-            vec![Content::Json(open.summary())]
+            let m = open.scene.data.run.as_ref().map(|(m, _)| m);
+            super::fit::reply(open.summary(), m, &open.run)
         }
         "view_map" => {
             let open = held(open)?;
@@ -65,6 +66,7 @@ pub(super) fn call(
         "view_markers" => held(open)?.markers(parse(args.clone())?)?,
         "view_cell" => held(open)?.cell(parse(args.clone())?)?,
         "view_export" => held(open)?.export(parse(args.clone())?)?,
+        "view_cells" => held(open)?.cells(parse(args.clone())?, cx)?,
         "view_stage2" => {
             let open = held(open)?;
             open.refresh_stage2();
@@ -84,7 +86,7 @@ fn held(open: &mut Option<Open>) -> Result<&mut Open> {
 /// An open run and the view on it.
 pub(super) struct Open {
     pub(super) scene: Scene,
-    run: PathBuf,
+    pub(super) run: PathBuf,
     /// The world window asked for; `None` fits the whole map.
     window: Option<[f32; 4]>,
     /// The last map drawn, for `view_cell` pixels.
@@ -239,7 +241,7 @@ impl Open {
         Ok(Self::of(scene, absolute(Path::new(&a.run))))
     }
 
-    fn of(scene: Scene, run: PathBuf) -> Self {
+    pub(super) fn of(scene: Scene, run: PathBuf) -> Self {
         Self {
             scene,
             run,
@@ -275,7 +277,7 @@ impl Open {
                 .run
                 .as_ref()
                 .is_some_and(|(m, _)| velocity::Field::available(m));
-        let mut out = json!({
+        json!({
             "run": self.run,
             "maps": maps,
             "groupings": groupings,
@@ -283,11 +285,7 @@ impl Open {
             "stage2": s.has_stage2(),
             "velocity": velocity,
             "view": self.state(),
-        });
-        if let Some((m, _)) = &s.data.run {
-            super::fit::decision_fields(m, &self.run, &mut out);
-        }
-        out
+        })
     }
 
     /// The view as a watcher re-applies it: view_map's own arguments, set
@@ -623,17 +621,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         .collect();
     let colour = match &a.colour_by {
         Some(by) if by.eq_ignore_ascii_case("none") => Some(None),
-        Some(by) => Some(Some(
-            choices
-                .iter()
-                .copied()
-                .find(|&i| data.labels[i].title().eq_ignore_ascii_case(by))
-                .ok_or_else(|| {
-                    let names: Vec<&str> =
-                        choices.iter().map(|&i| data.labels[i].title()).collect();
-                    anyhow!("no {by} grouping on this map; it has {}", names.join(", "))
-                })?,
-        )),
+        Some(by) => Some(Some(grouping_named(data, &choices, by)?)),
         None => None,
     };
     // The grouping shown once the rest applies: the one asked for, a
@@ -767,6 +755,16 @@ pub(in crate::view) fn agent_view(state: &Value) -> Result<(PathBuf, MapArgs)> {
     Ok((shown, parse(Value::Object(fields))?))
 }
 
+/// The grouping among `choices` (indices of `data`'s labels) titled `by`.
+pub(super) fn grouping_named(data: &Dataset, choices: &[usize], by: &str) -> Result<usize> {
+    let title = |i: &usize| data.labels[*i].title();
+    let found = choices.iter().find(|i| title(i).eq_ignore_ascii_case(by));
+    found.copied().ok_or_else(|| {
+        let names: Vec<&str> = choices.iter().map(title).collect();
+        anyhow!("no {by} grouping on this map; it has {}", names.join(", "))
+    })
+}
+
 /// Whether the round at `path` is the one `scene` shows.
 fn shows_round(scene: &Scene, path: &Path) -> bool {
     let shown = scene.data.round.as_ref().map(|r| r.path.as_path());
@@ -787,7 +785,7 @@ fn find_space(data: &Dataset, method: &str, kind: &str) -> Result<usize> {
 
 /// Group `name` of `labels`: a level's name, or for clusters its id (`3`,
 /// `C3` or lupin's `K3`, the ids of the round shown).
-fn group_of(labels: &Labels, name: &str) -> Result<u32> {
+pub(super) fn group_of(labels: &Labels, name: &str) -> Result<u32> {
     let by_name = labels
         .levels
         .iter()
@@ -804,14 +802,19 @@ fn group_of(labels: &Labels, name: &str) -> Result<u32> {
         .ok_or_else(|| anyhow!("no group {name} in {}", labels.title()))
 }
 
+/// A group as the agent names it: its name, or a cluster id.
+pub(super) fn group_name(v: &Value) -> Result<String> {
+    match v {
+        Value::String(s) => Ok(s.clone()),
+        Value::Number(n) => Ok(n.to_string()),
+        _ => bail!("a group is a name or a cluster id"),
+    }
+}
+
 /// The group `focus` names, `None` to clear: a name or id, or as pinto
 /// takes it, a list, of which senna focuses at most one.
 fn focus_name(focus: &Value) -> Result<Option<String>> {
-    let one = |v: &Value| match v {
-        Value::String(s) => Ok(s.clone()),
-        Value::Number(n) => Ok(n.to_string()),
-        _ => bail!("focus is a group name or cluster id"),
-    };
+    let one = group_name;
     match focus {
         Value::Array(list) => match list.as_slice() {
             [] => Ok(None),
@@ -949,6 +952,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             }),
         ),
         super::view_stage2::spec(),
+        super::view_cells::spec(),
     ]
 }
 

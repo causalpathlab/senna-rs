@@ -5,7 +5,7 @@
 
 use super::coarsen::{coarse_reads, coarsen_genes};
 use super::counts::{pb_tracks, select_genes, two_track_genes};
-use super::init::{climb, root_gap, root_pseudobulks, Climb, TriedRoot, ROOT_GAP};
+use super::init::{climb, root_gap, root_pseudobulks, Climb, Climbed, TriedRoot, ROOT_GAP};
 use super::likelihood::Reads;
 use super::model::lineage_label;
 use super::output::MapBasis;
@@ -555,7 +555,10 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     };
     let climbed = climb(fit_reads, &opts, &dev)?;
     let member = cell_to_pb.last().expect("at least one level");
+    let named = args.root_cells.as_deref();
+    clear_root_lists(&args.out, named)?;
     let decision = root_decision(&args.out, &climbed.roots, member, &pbs, &all_cells)?;
+    let root = root_list(&args.out, named, &climbed, member, &pbs, &all_cells)?;
     let (fit, objective) = (climbed.fit, climbed.objective);
     info!("ode: the climb's objective {objective:.4}");
     let start_at = fit.params()?;
@@ -620,6 +623,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         pb_tree.is_some(),
         !branch.is_empty(),
         decision,
+        root,
         f64::from(objective),
     )?;
     info!(
@@ -715,8 +719,7 @@ pub(crate) fn root_decision(
     pbs: &[usize],
     cells: &[Box<str>],
 ) -> anyhow::Result<Option<senna::run_manifest::Decision>> {
-    use senna::run_manifest::{Decision, DecisionOption};
-    clear_root_lists(out)?;
+    use senna::run_manifest::{root_list_path, Decision, DecisionOption};
     let finished: Vec<f32> = roots.iter().map(|r| r.objective).collect();
     let Some(gap) = root_gap(&finished).filter(|&g| g < ROOT_GAP) else {
         return Ok(None);
@@ -730,14 +733,8 @@ pub(crate) fn root_decision(
     let best = ranked[0].objective;
     let mut options = Vec::with_capacity(ranked.len());
     for (i, root) in ranked.iter().enumerate() {
-        let at: std::collections::HashSet<usize> = root.pbs.iter().map(|&r| pbs[r]).collect();
-        let named: Vec<Box<str>> = cells
-            .iter()
-            .zip(member)
-            .filter(|(_, p)| at.contains(p))
-            .map(|(c, _)| c.clone())
-            .collect();
-        let path = format!("{out}.root_{i}.txt");
+        let named = root_cells_of(root, member, pbs, cells);
+        let path = root_list_path(out, Some(i));
         legume_numeric::matrix::common_io::write_lines(&named, &path)?;
         let path = std::path::absolute(&path)?.to_string_lossy().into_owned();
         let behind = 100.0 * (best - root.objective) / best.abs().max(f32::MIN_POSITIVE);
@@ -766,11 +763,70 @@ pub(crate) fn root_decision(
     }))
 }
 
-/// Every `{out}.root_{i}.txt` an earlier run into `out` left, removed: what
-/// is there after a run is this run's own.
-fn clear_root_lists(out: &str) -> anyhow::Result<()> {
+/// The cells of `root`'s pseudobulks (`member` every cell's pseudobulk,
+/// `pbs` the pseudobulk of every row the climb read).
+fn root_cells_of(
+    root: &TriedRoot,
+    member: &[usize],
+    pbs: &[usize],
+    cells: &[Box<str>],
+) -> Vec<Box<str>> {
+    let at: std::collections::HashSet<usize> = root.pbs.iter().map(|&r| pbs[r]).collect();
+    cells
+        .iter()
+        .zip(member)
+        .filter(|(_, p)| at.contains(p))
+        .map(|(c, _)| c.clone())
+        .collect()
+}
+
+/// The root a fit was given or took, as its manifest records it.
+enum RootList {
+    /// The list of the root it grew from (`root_cells`).
+    Grew(String),
+    /// The `--root-cells` list it was given, its start beaten by one with
+    /// no root (`root_cells_unused`).
+    Unused(String),
+}
+
+/// The root the fit took: the list the user named (`named`, made
+/// absolute) when the fit grew from it, else the cells of the tree start's
+/// root it grew from, written to `{out}.root.txt` (its name beside the
+/// manifest); a named list a k-means start beat, as unused; `None` when a
+/// k-means start won with no root named.
+fn root_list(
+    out: &str,
+    named: Option<&std::path::Path>,
+    climbed: &Climbed,
+    member: &[usize],
+    pbs: &[usize],
+    cells: &[Box<str>],
+) -> anyhow::Result<Option<RootList>> {
+    let named = named
+        .map(|n| std::path::absolute(n).map(|n| n.to_string_lossy().into_owned()))
+        .transpose()?;
+    let Some(root) = climbed.root.map(|r| &climbed.roots[r]) else {
+        return Ok(named.map(RootList::Unused));
+    };
+    if let Some(named) = named {
+        return Ok(Some(RootList::Grew(named)));
+    }
+    let path = senna::run_manifest::root_list_path(out, None);
+    legume_numeric::matrix::common_io::write_lines(
+        &root_cells_of(root, member, pbs, cells),
+        &path,
+    )?;
+    let name = std::path::Path::new(&path).file_name().unwrap_or_default();
+    Ok(Some(RootList::Grew(name.to_string_lossy().into_owned())))
+}
+
+/// Every root list an earlier run into `out` left
+/// ([`root_list_path`](senna::run_manifest::root_list_path)), removed: what
+/// is there after a run is this run's own, but for `keep` (the user's
+/// `--root-cells`, which may be one of them).
+pub(crate) fn clear_root_lists(out: &str, keep: Option<&std::path::Path>) -> anyhow::Result<()> {
     let path = std::path::Path::new(out);
-    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+    let Some(name) = path.file_name() else {
         return Ok(());
     };
     let dir = path
@@ -780,14 +836,12 @@ fn clear_root_lists(out: &str) -> anyhow::Result<()> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(());
     };
-    let stem = format!("{name}.root_");
     for entry in entries.flatten() {
         let file = entry.file_name().to_string_lossy().into_owned();
-        let is_list = file
-            .strip_prefix(&stem)
-            .and_then(|r| r.strip_suffix(".txt"))
-            .is_some_and(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()));
-        if is_list {
+        let is_list = senna::run_manifest::root_list_of(&file)
+            .is_some_and(|(of, _)| std::ffi::OsStr::new(of) == name);
+        let kept = keep.is_some_and(|k| senna::run_manifest::same_file(k, &entry.path()));
+        if is_list && !kept {
             std::fs::remove_file(entry.path())?;
         }
     }
@@ -802,6 +856,7 @@ fn write_manifest(
     has_pb_tree: bool,
     has_branch: bool,
     decision: Option<senna::run_manifest::Decision>,
+    root: Option<RootList>,
     objective: f64,
 ) -> anyhow::Result<()> {
     use senna::run_manifest::{
@@ -818,6 +873,11 @@ fn write_manifest(
         m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
         m.outputs.pb_time = Some(format!("{base}.pb_time.parquet"));
         m.outputs.branch_time = has_branch.then(|| format!("{base}.branch_time.tsv"));
+        match root {
+            Some(RootList::Grew(list)) => m.outputs.root_cells = Some(list),
+            Some(RootList::Unused(list)) => m.outputs.root_cells_unused = Some(list),
+            None => {}
+        }
         m.decisions.extend(decision);
         m.objective = Some(objective);
     };

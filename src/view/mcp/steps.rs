@@ -5,15 +5,21 @@ use super::flags;
 use super::jobs::{job_property, start_server, Argv, Task};
 use super::parse;
 use anyhow::{ensure, Context, Result};
-use legume_mcp::{Call, Content, ToolSpec};
+use legume_mcp::{Call, Content, Next, ToolSpec, Why};
 use senna::run_manifest;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use std::path::Path;
 
 /// A step tool's call; `None` for another family's.
-pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
+pub(super) fn call(
+    name: &str,
+    args: &Value,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Option<Vec<Content>>> {
     Ok(Some(match name {
-        "run_step" => run_step(parse(args.clone())?, cx)?,
+        "run_step" => run_step(parse(args.clone())?, cx, why)?,
         _ => return Ok(None),
     }))
 }
@@ -143,10 +149,34 @@ fn step_task(a: &StepCall) -> Result<Task> {
 }
 
 /// One analysis command run on a run or on data files.
-fn run_step(a: StepCall, cx: &Call) -> Result<Vec<Content>> {
+fn run_step(a: StepCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     let task = step_task(&a)?;
-    let done = start_server(task, a.background, cx)?;
-    Ok(vec![Content::Json(done)])
+    let done = start_server(task, a.background, cx, why)?;
+    // A step running as a job has made nothing yet to go on from.
+    let next = match done.get("job") {
+        None => step_next(&a),
+        Some(_) => Vec::new(),
+    };
+    let mut out = vec![Content::Json(done)];
+    if !next.is_empty() {
+        out.push(Content::Next(next));
+    }
+    Ok(out)
+}
+
+/// What could follow the step `a` once it ran: after a clustering of a
+/// run's cells, which the run records, what follows on the run
+/// ([`next_after`](super::fit::next_after): lupin's annotation).
+fn step_next(a: &StepCall) -> Vec<Next> {
+    let (Some(from), Command::Clustering, None | Some(Target::Cells)) =
+        (&a.from, a.command, a.target)
+    else {
+        return Vec::new();
+    };
+    match run_manifest::load_for(from) {
+        Ok((m, _)) => super::fit::next_after(&m, Path::new(&run_manifest::manifest_path_for(from))),
+        Err(_) => Vec::new(),
+    }
 }
 
 pub(super) fn specs() -> Vec<ToolSpec> {

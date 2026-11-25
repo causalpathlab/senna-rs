@@ -60,31 +60,47 @@ fn newest_round(run: &Path) -> Option<PathBuf> {
     Some(at)
 }
 
-/// `cell → type` from the newest round of the run at `run`: lupin's fine
-/// types when it wrote them, else its argmax; `None` with no round or no
-/// labels.
-fn round_cell_types(run: &Path) -> Option<HashMap<Box<str>, Box<str>>> {
-    let round = newest_round(run)?;
-    let (m, dir) = RunManifest::load(&round).ok()?;
-    let table = annotate_str(&m, "fine_argmax")
-        .map(String::from)
-        .or_else(|| m.annotate.argmax.clone())?;
-    read_argmax(&run_manifest::resolve(&dir, &table)).ok()
+/// The cell types the newest lupin round of a run gives its cells:
+/// lupin's fine types when it wrote them, else its argmax.
+pub(crate) struct CellTypes(HashMap<Box<str>, Box<str>>);
+
+impl CellTypes {
+    /// Those of the run at `run` (`m` its manifest, read as the round when
+    /// it is one with none made from it); `None` with no round or no labels.
+    pub(crate) fn of_run(run: &Path, m: &RunManifest) -> Option<Self> {
+        let newer = newest_round(run).and_then(|r| RunManifest::load(&r).ok());
+        let (m, dir) = match &newer {
+            Some((m, dir)) => (m, dir.as_path()),
+            None => (m, run_manifest::manifest_dir(run)),
+        };
+        let table = annotate_str(m, "fine_argmax").or(m.annotate.argmax.as_deref())?;
+        read_argmax(&run_manifest::resolve(dir, table))
+            .ok()
+            .map(Self)
+    }
+
+    /// What `cells` mostly are ([`mostly`]); `None` when none is typed.
+    pub(crate) fn mostly(&self, cells: &[Box<str>]) -> Option<String> {
+        let mut counts: HashMap<&str, usize> = HashMap::default();
+        for t in cells.iter().filter_map(|c| self.0.get(c)) {
+            *counts.entry(t.as_ref()).or_default() += 1;
+        }
+        mostly(counts.into_iter().collect(), cells.len())
+    }
 }
 
-/// The open choices of the run at `run` (`decisions`, from its manifest),
-/// every option that stands for cells ([`DecisionOption::cells`]) labelled
-/// with what they mostly are by the run's newest lupin round, and whether
-/// the run had one to label them by.
+/// The open choices `decisions` of a run, every option that stands for
+/// cells ([`DecisionOption::cells`]) labelled with what they mostly are by
+/// `types`, the run's lupin round's, when it has one.
 ///
 /// [`DecisionOption::cells`]: run_manifest::DecisionOption::cells
 pub(crate) fn typed_decisions(
-    run: &Path,
+    types: Option<&CellTypes>,
     decisions: &[run_manifest::Decision],
-) -> (Vec<run_manifest::Decision>, bool) {
+) -> Vec<run_manifest::Decision> {
     let mut out = decisions.to_vec();
-    let Some(types) = round_cell_types(run) else {
-        return (out, false);
+    let Some(types) = types else {
+        return out;
     };
     for option in out.iter_mut().flat_map(|d| d.options.iter_mut()) {
         let Some(list) = &option.cells else {
@@ -93,28 +109,23 @@ pub(crate) fn typed_decisions(
         let Ok(cells) = legume_numeric::matrix::common_io::read_name_list(list) else {
             continue;
         };
-        if let Some(mostly) = composition(&cells, &types) {
-            option.label = format!("{}; {mostly}", option.label);
+        if let Some(mostly) = types.mostly(&cells) {
+            option.label = format!("{}; mostly {mostly}", option.label);
         }
     }
-    (out, true)
+    out
 }
 
-/// What `cells` mostly are under `types`: the commonest type and its share,
-/// and the next when it holds a tenth or more; `None` when none is typed.
-fn composition(cells: &[Box<str>], types: &HashMap<Box<str>, Box<str>>) -> Option<String> {
-    let mut counts: HashMap<&str, usize> = HashMap::default();
-    for c in cells {
-        if let Some(t) = types.get(c) {
-            *counts.entry(t.as_ref()).or_default() += 1;
-        }
-    }
-    let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    let share = |n: usize| 100.0 * n as f64 / cells.len() as f64;
-    let (top, n) = *ranked.first()?;
-    let mut said = format!("mostly {top} ({:.0}%)", share(n));
-    if let Some(&(next, m)) = ranked.get(1).filter(|(_, m)| share(*m) >= 10.0) {
+/// What `total` cells mostly are, from the count of each kind among them
+/// (`counts`, in any order): the commonest and its share, and the next when
+/// it holds a tenth or more (`HSC (75%), then Mk (25%)`); `None` when there
+/// are none.
+pub(crate) fn mostly(mut counts: Vec<(&str, usize)>, total: usize) -> Option<String> {
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let share = |n: usize| 100.0 * n as f64 / total.max(1) as f64;
+    let &(top, n) = counts.first()?;
+    let mut said = format!("{top} ({:.0}%)", share(n));
+    if let Some(&(next, m)) = counts.get(1).filter(|(_, m)| share(*m) >= 10.0) {
         said.push_str(&format!(", then {next} ({:.0}%)", share(m)));
     }
     Some(said)
@@ -837,9 +848,12 @@ mod tests {
                 cells: Some(cells.to_string_lossy().into_owned()),
             }],
         }];
-        let (same, typed) = typed_decisions(&run, &decisions);
-        assert!(!typed);
-        assert_eq!(same[0].options[0].label, "root 0");
+        let types = |run: &Path| CellTypes::of_run(run, &RunManifest::load(run).unwrap().0);
+        assert!(types(&run).is_none());
+        assert_eq!(
+            typed_decisions(None, &decisions)[0].options[0].label,
+            "root 0"
+        );
         write(
             dir.path(),
             "r.L1.fine.tsv",
@@ -850,8 +864,7 @@ mod tests {
             "r.L1.senna.json",
             r#"{"version":2,"kind":"ode","prefix":"r.L1","annotate":{"source":"r.senna.json","fine_argmax":"r.L1.fine.tsv"}}"#,
         );
-        let (labelled, typed) = typed_decisions(&run, &decisions);
-        assert!(typed);
+        let labelled = typed_decisions(types(&run).as_ref(), &decisions);
         assert_eq!(
             labelled[0].options[0].label,
             "root 0; mostly HSC (75%), then Mk (25%)"

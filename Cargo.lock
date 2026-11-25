@@ -2634,9 +2634,9 @@ dependencies = [
 
 [[package]]
 name = "legume-mcp"
-version = "0.6.5"
+version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07ad5689f53b645400ce5e53627018ae045e1d4dff3d8cc6c988ce399cac28fb"
+checksum = "5241c18405fb04e74b6e1c1f0dde2882a41336587e2b54bed3fc8cb709b1d469"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

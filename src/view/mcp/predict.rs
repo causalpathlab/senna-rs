@@ -7,17 +7,22 @@ use super::parse;
 use crate::topic::model_metadata::resolve_run_kind;
 use crate::topic::predict_eval::mean_finite;
 use anyhow::{bail, ensure, Context, Result};
-use legume_mcp::{Call, Content, ToolSpec};
+use legume_mcp::{Call, Content, ToolSpec, Why};
 use senna::run_manifest::{self, RunKind};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 /// A scoring tool's call; `None` for another family's.
-pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
+pub(super) fn call(
+    name: &str,
+    args: &Value,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Option<Vec<Content>>> {
     Ok(Some(match name {
-        "run_predict" => run_predict(parse(args.clone())?, cx)?,
-        "run_probe" => run_probe(parse(args.clone())?, cx)?,
+        "run_predict" => run_predict(parse(args.clone())?, cx, why)?,
+        "run_probe" => run_probe(parse(args.clone())?, cx, why)?,
         _ => return Ok(None),
     }))
 }
@@ -166,7 +171,7 @@ fn model_kind(model: &str) -> Result<RunKind> {
 
 /// New cells in a trained model's latent, as `senna predict` puts them,
 /// with the held-out fit summed up.
-fn run_predict(a: PredictCall, cx: &Call) -> Result<Vec<Content>> {
+fn run_predict(a: PredictCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     // The run is read only when the latent mode depends on its kind.
     if a.latent != Latent::Encoder {
         check_latent(&a, model_kind(&a.model)?)?;
@@ -177,7 +182,7 @@ fn run_predict(a: PredictCall, cx: &Call) -> Result<Vec<Content>> {
     let (_, task) = planned(cx, a.out.as_deref(), data, &tag, |o| {
         predict_task(&a, &flags, o)
     })?;
-    let done = start_server(task, a.background, cx)?;
+    let done = start_server(task, a.background, cx, why)?;
     with_summary(done, "predictive", predict_summary)
 }
 
@@ -220,14 +225,14 @@ fn probe_summary(verdict: &Path) -> Result<Value> {
 }
 
 /// Whether a trained model explains new cells, as `senna probe` judges.
-fn run_probe(a: ProbeCall, cx: &Call) -> Result<Vec<Content>> {
+fn run_probe(a: ProbeCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     let flags = flags::words("probe", &a.flags)?;
     let data = a.data.first().map(String::as_str);
     let tag = model_tag(&a.model, "probe");
     let (_, task) = planned(cx, a.out.as_deref(), data, &tag, |o| {
         Ok(probe_task(&a, &flags, o))
     })?;
-    let done = start_server(task, a.background, cx)?;
+    let done = start_server(task, a.background, cx, why)?;
     with_summary(done, "verdict", probe_summary)
 }
 

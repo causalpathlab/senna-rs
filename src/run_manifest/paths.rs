@@ -250,6 +250,32 @@ pub fn manifest_path_for(from: &str) -> String {
     }
 }
 
+/// The list of an ode run's root cells beside its manifest: with `i`, the
+/// cells of its `i`-th root left to the user (`{out}.root_{i}.txt`), else
+/// of the root it grew from (`{out}.root.txt`).
+#[must_use]
+pub fn root_list_path(out: &str, i: Option<usize>) -> String {
+    match i {
+        Some(i) => format!("{out}.root_{i}.txt"),
+        None => format!("{out}.root.txt"),
+    }
+}
+
+/// The run prefix and root a list's path names, as [`root_list_path`]
+/// writes them; `None` for any other file.
+#[must_use]
+pub fn root_list_of(path: &str) -> Option<(&str, Option<usize>)> {
+    let (out, tail) = path.strip_suffix(".txt")?.rsplit_once(".root")?;
+    if tail.is_empty() {
+        return Some((out, None));
+    }
+    let i = tail.strip_prefix('_')?;
+    // Digits only: `parse` would also take a sign.
+    (!i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| i.parse().ok().map(|i| (out, Some(i))))
+        .flatten()
+}
+
 /// Default manifest filename given a run `--out` prefix.
 #[must_use]
 pub fn default_path(prefix: &str) -> String {

@@ -564,6 +564,9 @@ pub struct Climbed {
     pub fit: Fit,
     pub objective: f32,
     pub roots: Vec<TriedRoot>,
+    /// The root of the fit, an index of `roots`: the tree start it grew
+    /// from; `None` when a k-means start won.
+    pub root: Option<usize>,
 }
 
 /// The pseudobulks at a tree start's root: the earliest [`ROOT_REGION`] of
@@ -632,11 +635,15 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
     }
     let mut tried: Vec<TriedRoot> = Vec::with_capacity(trees.len());
     let mut best: Option<(Fit, f32)> = None;
+    // Whether `other` is the best so far, kept.
     let mut keep = |other: (Fit, f32)| {
-        if best.as_ref().is_none_or(|b| beats(other.1, b.1)) {
+        let better = best.as_ref().is_none_or(|b| beats(other.1, b.1));
+        if better {
             best = Some(other);
         }
+        better
     };
+    let mut root = None;
     if !opts.trunk || trees.is_empty() {
         let mut reversed = vec![false; opts.lineages];
         let mut best_kmeans = run(&kmeans_places(&scores, opts.lineages, &reversed))?;
@@ -687,7 +694,9 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
             }
         }
         if let Some(b) = top {
-            keep((all.start(b)?, all.objectives[b]));
+            if keep((all.start(b)?, all.objectives[b])) {
+                root = Some(b / per_tree);
+            }
         }
     }
     let (fit, objective) = best.expect("a start");
@@ -700,6 +709,7 @@ pub fn climb(reads: &Reads, opts: &Climb, dev: &Device) -> Result<Climbed> {
         fit,
         objective,
         roots: tried,
+        root,
     })
 }
 

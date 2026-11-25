@@ -98,6 +98,23 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > say): put each question to the user before reading the result as settled, and
 > rerun with the option they choose. Close with `notebook` (kind
 > `conclusion`) and tell the user where the records are.
+>
+> With lupin: cell types come in order, a fit, then `run_step` clustering from
+> its manifest, then lupin's `annotate_run` on that manifest; results carry the
+> `next` calls toward them, and the prompts `annotate` and `trajectory` give
+> the whole recipes. Open the round here (`view_open` the round, or `view_map`
+> `round`) so its cell types are a grouping. To root an ODE, look at the types
+> (`view_markers`; lupin's `annotate_why` on which type is least
+> differentiated), write the root type's cells with `view_cells`, and `run_fit`
+> ode with flag root-cells set to that list and a new out. An ODE grown from a
+> root says so in its result's `root`: the cells and what they are, by the
+> groups `view_cells` wrote them from or by a lupin round of the run; a named
+> root a start with none beat is said to be unused. A
+> `needs_input` from an ODE labels its options by lupin's types only when the
+> run has a round. A run tool's call that carries a choice (a root, a setting
+> the user picked) says why with `why`, `by` (user, agent or agent_accepted)
+> and `cites`, kept with the step; an answer to a `needs_input` is refused
+> without them.
 
 | Tool | Does |
 |---|---|
@@ -117,6 +134,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | `view_markers` | the features that set one group apart, by the model's expected fold change, and its markers from the run's table |
 | `view_cell` | the point under a pixel of the last map, at a world point, or by name: its position, groups and time |
 | `view_export` | the view as `.png`/`.pdf` figures; never replaces a file unless asked |
+| `view_cells` | the cells of some groups of the grouping shown (a lupin round's cell types, say) written one a line, for `root-cells`, `drop-cells` or `archetype-cells` |
 | `notebook` | (from legume-mcp) an entry in the day's lab notebook |
 | `job_status`, `job_wait`, `job_cancel` | (from legume-mcp) a background fit's state, waiting for it, stopping it |
 

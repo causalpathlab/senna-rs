@@ -146,6 +146,12 @@ fn a_run_writes_the_cells_tables_and_a_manifest() {
 
     let (m, _) = RunManifest::load(std::path::Path::new(&format!("{out}.senna.json"))).unwrap();
     assert_eq!(m.kind, RunKind::Ode);
+    // The root it grew from, when a tree start won, beside the manifest.
+    let root = std::path::Path::new(&format!("{out}.root.txt")).exists();
+    assert_eq!(
+        m.outputs.root_cells.as_deref(),
+        root.then_some("run.root.txt")
+    );
     for (slot, file) in [
         (&m.outputs.cell_time, "cell_time"),
         (&m.outputs.cell_velocity, "cell_velocity"),
@@ -283,7 +289,7 @@ fn the_defaults_group_the_genes() {
 /// first, in a file the rerun names; roots far apart leave nothing.
 #[test]
 fn tied_roots_are_put_to_the_user_with_their_cells() {
-    use crate::ode_mixture::command::root_decision;
+    use crate::ode_mixture::command::{clear_root_lists, root_decision};
     use crate::ode_mixture::init::TriedRoot;
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("run").to_string_lossy().into_owned();
@@ -321,9 +327,15 @@ fn tied_roots_are_put_to_the_user_with_their_cells() {
             objective: -1000.0,
         },
     ];
+    clear_root_lists(&out, None).unwrap();
     assert!(root_decision(&out, &apart, &member, &pbs, &cells)
         .unwrap()
         .is_none());
     // No root files of the tied run are left beside the one that settled.
     assert!(!std::path::Path::new(&first[1]).exists());
+    // But never the list the user named, though it is one of them.
+    let named = std::path::PathBuf::from(format!("{out}.root_1.txt"));
+    std::fs::write(&named, "a\n").unwrap();
+    clear_root_lists(&out, Some(&named)).unwrap();
+    assert!(named.exists());
 }

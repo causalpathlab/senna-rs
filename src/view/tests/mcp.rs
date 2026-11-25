@@ -420,7 +420,12 @@ fn a_feature_has_no_time_even_named_as_a_cell() {
 fn a_runs_open_decisions_are_put_to_the_agent() {
     use senna::run_manifest::{Decision, DecisionOption, RunKind, RunManifest};
     let mut m = RunManifest::new(RunKind::Ode, "run");
-    assert!(super::super::fit::needs_input(&m, Path::new("run.senna.json")).is_none());
+    let run = Path::new("run.senna.json");
+    let needs_input = |m: &RunManifest| {
+        let types = super::super::fit::Types::new(run, m);
+        super::super::fit::needs_input(m, &types).map(|(ask, _)| ask)
+    };
+    assert!(needs_input(&m).is_none());
     m.decisions.push(Decision {
         topic: "root".into(),
         question: "Which root?".into(),
@@ -432,8 +437,7 @@ fn a_runs_open_decisions_are_put_to_the_agent() {
             cells: None,
         }],
     });
-    let ask =
-        super::super::fit::needs_input(&m, Path::new("run.senna.json")).expect("an open decision");
+    let ask = needs_input(&m).expect("an open decision");
     assert_eq!(ask["decisions"][0]["topic"], "root");
     assert_eq!(
         ask["decisions"][0]["options"][0]["rerun_args"][1],
