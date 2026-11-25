@@ -43,6 +43,15 @@ pub(crate) fn own_group(command: &mut std::process::Command) -> &mut std::proces
 /// whether a key is it.
 pub(crate) use legume_tui::{is_run_key, RUN_KEY};
 
+/// The command at `path` under `cli` (`["layout", "tsne"]` for a nested
+/// one), as both front ends find senna's commands; `cli` built, so its
+/// global flags are in it.
+#[must_use]
+pub(crate) fn subcommand<'a>(cli: &'a clap::Command, path: &[&str]) -> Option<&'a clap::Command> {
+    path.iter()
+        .try_fold(cli, |at, word| at.find_subcommand(word))
+}
+
 /// The last component of `path`, or an empty string.
 #[must_use]
 pub fn name(path: &Path) -> String {

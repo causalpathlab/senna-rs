@@ -21,13 +21,10 @@ pub(super) const LISTER: &str = "run_help";
 pub(super) fn command(path: &str) -> Result<clap::Command> {
     let mut cli = <crate::Cli as clap::CommandFactory>::command();
     cli.build();
-    let mut at = &cli;
-    for word in path.split(' ') {
-        at = at
-            .find_subcommand(word)
-            .with_context(|| format!("senna has no command {path}"))?;
-    }
-    Ok(at.clone())
+    let words: Vec<&str> = path.split(' ').collect();
+    crate::tui::subcommand(&cli, &words)
+        .cloned()
+        .with_context(|| format!("senna has no command {path}"))
 }
 
 /// The arguments of `path` its run tool takes itself, by clap id, each
