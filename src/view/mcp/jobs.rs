@@ -3,7 +3,7 @@
 
 use super::absolute;
 use anyhow::{ensure, Context, Result};
-use legume_mcp::Call;
+use legume_mcp::{Call, Step, Why};
 use senna::run_manifest;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -87,24 +87,35 @@ impl Task {
 
     /// `senna {argv}` to its end, verbose, its log the call's progress;
     /// `guarded`, recorded with its outputs as its guard on replay, else
-    /// recorded to run every time.
-    pub(super) fn run(&self, guarded: bool, cx: &Call) -> Result<()> {
+    /// recorded to run every time; with the reason for its choices, `why`.
+    pub(super) fn run(&self, guarded: bool, cx: &Call, why: Option<&Why>) -> Result<()> {
         let outputs = if guarded { self.outputs() } else { vec![] };
         cx.progress(&self.summary);
-        cx.run_making(senna(&self.argv)?, &outputs, &self.summary)
+        cx.run_step(senna(&self.argv)?, self.step(&outputs, why))
             .with_context(|| self.line())?;
         Ok(())
     }
+
+    /// The step as the records keep it: its outputs, summary and `why`.
+    fn step(&self, outputs: &[PathBuf], why: Option<&Why>) -> Step {
+        let step = Step::new(outputs, &self.summary);
+        match why {
+            Some(why) => step.why(why.clone()),
+            None => step,
+        }
+    }
 }
 
-/// `task` run, or with `background` started by `spawn` (given the task
-/// and its outputs, giving the job as the agent is told it). A task whose
-/// files are there already is not run; one with only some of them there
-/// is refused, as running it would write over them.
+/// `task` run, with the reason for its choices `why`, or with
+/// `background` started by `spawn` (given the task and its outputs, giving
+/// the job as the agent is told it). A task whose files are there already
+/// is not run; one with only some of them there is refused, as running it
+/// would write over them.
 pub(super) fn start(
     task: Task,
     background: bool,
     cx: &Call,
+    why: Option<&Why>,
     spawn: impl FnOnce(&Task, &[PathBuf]) -> Result<Value>,
 ) -> Result<Value> {
     senna_parses(&task.argv)?;
@@ -122,21 +133,31 @@ pub(super) fn start(
             .expect("named() is an object")
             .extend(job.as_object().cloned().unwrap_or_default());
     } else {
-        task.run(true, cx)?;
+        task.run(true, cx, why)?;
         done["ran"] = json!(true);
     }
     Ok(done)
 }
 
 /// [`start`], a background task as this server's job.
-pub(super) fn start_server(task: Task, background: bool, cx: &Call) -> Result<Value> {
-    start(task, background, cx, |t, o| server_job(t, o, cx))
+pub(super) fn start_server(
+    task: Task,
+    background: bool,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Value> {
+    start(task, background, cx, why, |t, o| server_job(t, o, cx, why))
 }
 
 /// `task` as this server's job, which ends with the server.
-fn server_job(task: &Task, outputs: &[PathBuf], cx: &Call) -> Result<Value> {
+pub(super) fn server_job(
+    task: &Task,
+    outputs: &[PathBuf],
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Value> {
     Ok(json!({
-        "job": cx.spawn_job(senna(&task.argv)?, outputs, &task.summary)?,
+        "job": cx.spawn_step(senna(&task.argv)?, task.step(outputs, why))?,
         "note": "it runs as this job until it ends or the server does; follow it with job_status or job_wait",
     }))
 }

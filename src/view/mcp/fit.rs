@@ -4,8 +4,9 @@
 use super::flags::{self, helped};
 use super::jobs::{one_of, planned, senna, start, Task};
 use super::parse;
+use super::why::justified;
 use anyhow::{ensure, Context, Result};
-use legume_mcp::{Call, Content, Next, ToolSpec};
+use legume_mcp::{Call, Content, Next, ToolSpec, Why};
 use senna::run_manifest::{self, RunKind, RunManifest};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -15,9 +16,14 @@ use std::path::{Path, PathBuf};
 use crate::run::tui::METHODS;
 
 /// A fit tool's call; `None` for another family's.
-pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
+pub(super) fn call(
+    name: &str,
+    args: &Value,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Option<Vec<Content>>> {
     Ok(Some(match name {
-        "run_fit" => run_fit(parse(args.clone())?, cx)?,
+        "run_fit" => run_fit(parse(args.clone())?, cx, why)?,
         "run_help" => run_help(parse(args.clone())?)?,
         _ => return Ok(None),
     }))
@@ -51,18 +57,19 @@ fn fit_task(a: &FitArgs, flags: &[String], out: &str) -> Task {
 /// `senna {method} {data} -o {out} {flags}` as a child, unless the run is
 /// there already. Without an out, the run goes in today's results folder,
 /// named by its first data file and method.
-fn run_fit(a: FitArgs, cx: &Call) -> Result<Vec<Content>> {
+fn run_fit(a: FitArgs, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     check_method(&a.method)?;
     ensure!(!a.data.is_empty(), "no data files");
     let flags = flags::words(&a.method, &a.flags)?;
+    justified(&flags, why)?;
     let (out, task) = planned(cx, a.out.as_deref(), Some(&a.data[0]), &a.method, |out| {
         Ok(fit_task(&a, &flags, out))
     })?;
     // legume-mcp refuses an out a background fit is still writing (naming
     // its job) until that fit has written the manifest, and fails a fit
     // that ends without it.
-    let mut done = start(task, a.background, cx, |t, outputs| {
-        background_fit(cx, &out, &t.argv, outputs, &t.summary)
+    let mut done = start(task, a.background, cx, why, |t, outputs| {
+        background_fit(cx, &out, t, outputs, why)
     })?;
     // A background fit's run is not there yet: the agent opens it once
     // the job is done.
@@ -225,12 +232,13 @@ pub(super) fn needs_input(m: &RunManifest, run: &Path) -> Option<Value> {
 fn background_fit(
     cx: &Call,
     out: &str,
-    argv: &[String],
+    task: &Task,
     outputs: &[PathBuf],
-    summary: &str,
+    why: Option<&Why>,
 ) -> Result<Value> {
     #[cfg(unix)]
     {
+        let (argv, summary) = (&task.argv, &task.summary);
         let mut watch = legume_mcp::own_command(["run", "--"])?;
         watch.args(argv);
         let label = Path::new(out)
@@ -246,21 +254,27 @@ fn background_fit(
             summary: summary.into(),
         })?;
         let session = started.session;
-        Ok(json!({
+        let mut said = json!({
             "job": started.job,
             "session": session,
             "note": format!(
                 "the fit runs as this job, on senna run's screen in session {session} (`senna attach {session}` shows it to the user), and goes on if this server ends; follow it with job_status or job_wait, then open the run with view_open once the job is done"
             ),
-        }))
+        });
+        // A session job does not take the step's reason yet.
+        if why.is_some() {
+            said["why"] = "not recorded with the step: a fit in a session does not take one; \
+                           put it in the notebook (kind choice)"
+                .into();
+        }
+        Ok(said)
     }
     #[cfg(not(unix))]
     {
         let _ = out;
-        Ok(json!({
-            "job": cx.spawn_job(senna(argv)?, outputs, summary)?,
-            "note": "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done",
-        }))
+        let mut said = super::jobs::server_job(task, outputs, cx, why)?;
+        said["note"] = "the fit runs as this job until it ends or the server does; follow it with job_status or job_wait, then open the run with view_open once the job is done".into();
+        Ok(said)
     }
 }
 

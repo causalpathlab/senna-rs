@@ -5,16 +5,21 @@ use super::flags::{self, given, parsed};
 use super::jobs::{job_property, start_server, Argv, Task};
 use super::parse;
 use anyhow::{ensure, Context, Result};
-use legume_mcp::{Call, Content, ToolSpec};
+use legume_mcp::{Call, Content, ToolSpec, Why};
 use senna::run_manifest;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 /// A model tool's call; `None` for another family's.
-pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
+pub(super) fn call(
+    name: &str,
+    args: &Value,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Option<Vec<Content>>> {
     Ok(Some(match name {
-        "run_update" => run_update(parse(args.clone())?, cx)?,
-        "run_critique" => run_critique(parse(args.clone())?, cx)?,
+        "run_update" => run_update(parse(args.clone())?, cx, why)?,
+        "run_critique" => run_critique(parse(args.clone())?, cx, why)?,
         _ => return Ok(None),
     }))
 }
@@ -70,9 +75,9 @@ fn update_task(a: &UpdateCall, out: &str) -> Result<Task> {
 
 /// A trained model continued over new data, or a round on its own cells:
 /// a new run.
-fn run_update(a: UpdateCall, cx: &Call) -> Result<Vec<Content>> {
+fn run_update(a: UpdateCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     let out = a.out.as_deref().context("pass out: the new run's prefix")?;
-    let done = start_server(update_task(&a, out)?, a.background, cx)?;
+    let done = start_server(update_task(&a, out)?, a.background, cx, why)?;
     Ok(vec![Content::Json(done)])
 }
 
@@ -114,9 +119,9 @@ fn critique_task(a: &CritiqueCall) -> Result<(Task, bool)> {
 }
 
 /// Where fits disagree on which pseudobulks are alike.
-fn run_critique(a: CritiqueCall, cx: &Call) -> Result<Vec<Content>> {
+fn run_critique(a: CritiqueCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     let (task, questions) = critique_task(&a)?;
-    let mut done = start_server(task, a.background, cx)?;
+    let mut done = start_server(task, a.background, cx, why)?;
     // Labels a critique there already made without questions lack.
     if questions && done["ran"] != json!(false) {
         done["labels"] = json!(format!(

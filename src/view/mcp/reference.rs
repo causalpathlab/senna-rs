@@ -5,16 +5,21 @@ use super::flags;
 use super::jobs::{job_property, model_tag, planned, start_server, Argv, Task};
 use super::parse;
 use anyhow::{ensure, Result};
-use legume_mcp::{Call, Content, ToolSpec};
+use legume_mcp::{Call, Content, ToolSpec, Why};
 use senna::run_manifest;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 /// A reference tool's call; `None` for another family's.
-pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
+pub(super) fn call(
+    name: &str,
+    args: &Value,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Option<Vec<Content>>> {
     Ok(Some(match name {
-        "run_impute" => run_impute(parse(args.clone())?, cx)?,
-        "run_deconvolve" => run_deconvolve(parse(args.clone())?, cx)?,
+        "run_impute" => run_impute(parse(args.clone())?, cx, why)?,
+        "run_deconvolve" => run_deconvolve(parse(args.clone())?, cx, why)?,
         _ => return Ok(None),
     }))
 }
@@ -48,14 +53,14 @@ fn impute_task(a: &ImputeCall, flags: &[String], out: &str) -> Result<Task> {
 
 /// Full-feature counts on new cells, pooled from their nearest reference
 /// cells in the model's latent.
-fn run_impute(a: ImputeCall, cx: &Call) -> Result<Vec<Content>> {
+fn run_impute(a: ImputeCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     let flags = flags::words("impute", &a.flags)?;
     let data = a.data.first().map(String::as_str);
     let tag = model_tag(&a.model, "impute");
     let (_, task) = planned(cx, a.out.as_deref(), data, &tag, |o| {
         impute_task(&a, &flags, o)
     })?;
-    let done = start_server(task, a.background, cx)?;
+    let done = start_server(task, a.background, cx, why)?;
     Ok(vec![Content::Json(done)])
 }
 
@@ -95,8 +100,8 @@ fn deconvolve_task(a: &DeconvolveCall) -> Result<Task> {
 }
 
 /// Bulk samples split into cell-type fractions against the run's cells.
-fn run_deconvolve(a: DeconvolveCall, cx: &Call) -> Result<Vec<Content>> {
-    let done = start_server(deconvolve_task(&a)?, a.background, cx)?;
+fn run_deconvolve(a: DeconvolveCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
+    let done = start_server(deconvolve_task(&a)?, a.background, cx, why)?;
     Ok(vec![Content::Json(done)])
 }
 

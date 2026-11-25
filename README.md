@@ -109,7 +109,10 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > ode with flag root-cells set to that list and a new out; every ODE result
 > names its `root`, the cells it grew from and what they mostly are. A
 > `needs_input` from an ODE labels its options by lupin's types only when the
-> run has a round.
+> run has a round. A run tool's call that carries a choice (a root, a setting
+> the user picked) says why with `why`, `by` (user, agent or agent_accepted)
+> and `cites`, kept with the step; an answer to a `needs_input` is refused
+> without them.
 
 | Tool | Does |
 |---|---|

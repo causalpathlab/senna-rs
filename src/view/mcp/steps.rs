@@ -5,15 +5,20 @@ use super::flags;
 use super::jobs::{job_property, start_server, Argv, Task};
 use super::parse;
 use anyhow::{ensure, Context, Result};
-use legume_mcp::{Call, Content, Next, ToolSpec};
+use legume_mcp::{Call, Content, Next, ToolSpec, Why};
 use senna::run_manifest;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 /// A step tool's call; `None` for another family's.
-pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
+pub(super) fn call(
+    name: &str,
+    args: &Value,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Option<Vec<Content>>> {
     Ok(Some(match name {
-        "run_step" => run_step(parse(args.clone())?, cx)?,
+        "run_step" => run_step(parse(args.clone())?, cx, why)?,
         _ => return Ok(None),
     }))
 }
@@ -143,9 +148,9 @@ fn step_task(a: &StepCall) -> Result<Task> {
 }
 
 /// One analysis command run on a run or on data files.
-fn run_step(a: StepCall, cx: &Call) -> Result<Vec<Content>> {
+fn run_step(a: StepCall, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     let task = step_task(&a)?;
-    let done = start_server(task, a.background, cx)?;
+    let done = start_server(task, a.background, cx, why)?;
     let mut out = vec![Content::Json(done)];
     out.extend(step_next(&a).map(|n| Content::Next(vec![n])));
     Ok(out)

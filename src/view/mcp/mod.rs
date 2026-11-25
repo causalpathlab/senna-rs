@@ -32,6 +32,7 @@ mod view;
 mod view_cells;
 mod view_chart;
 mod view_stage2;
+mod why;
 
 use anyhow::{bail, Context, Result};
 use legume_mcp::{Call, Content, Handler, Prompt, ToolSpec};
@@ -77,7 +78,10 @@ differentiated), write the root type's cells with `view_cells`, and `run_fit` \
 ode with flag root-cells set to that list and a new out; every ODE result \
 names its `root`, the cells it grew from and what they mostly are. A \
 `needs_input` from an ODE labels its options by lupin's types only when the \
-run has a round.";
+run has a round. A run tool's call that carries a choice (a root, a setting \
+the user picked) says why with `why`, `by` (user, agent or agent_accepted) \
+and `cites`, kept with the step; an answer to a `needs_input` is refused \
+without them.";
 
 /// The tools, and the run they have open.
 #[derive(Default)]
@@ -95,6 +99,7 @@ impl Handler for Tools {
         specs.extend(layout::specs());
         specs.extend(steps::specs());
         specs.extend(view::specs());
+        why::add_properties(&mut specs);
         specs
     }
 
@@ -102,7 +107,8 @@ impl Handler for Tools {
         prompts::prompts()
     }
 
-    fn call(&mut self, name: &str, args: Value, cx: &Call) -> Result<Vec<Content>> {
+    fn call(&mut self, name: &str, mut args: Value, cx: &Call) -> Result<Vec<Content>> {
+        let why = why::take(name, &mut args)?;
         for family in [
             fit::call,
             predict::call,
@@ -112,7 +118,7 @@ impl Handler for Tools {
             layout::call,
             steps::call,
         ] {
-            if let Some(out) = family(name, &args, cx)? {
+            if let Some(out) = family(name, &args, cx, why.as_ref())? {
                 return Ok(out);
             }
         }

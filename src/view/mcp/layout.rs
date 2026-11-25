@@ -5,15 +5,20 @@ use super::jobs::{one_of, senna_parses, Task};
 use super::parse;
 use crate::view::recompute::{Step, Target};
 use anyhow::{ensure, Context, Result};
-use legume_mcp::{Call, Content, ToolSpec};
+use legume_mcp::{Call, Content, ToolSpec, Why};
 use legume_numeric::matrix::umap::{MIN_DIST, SPREAD};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 /// A layout tool's call; `None` for another family's.
-pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
+pub(super) fn call(
+    name: &str,
+    args: &Value,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Option<Vec<Content>>> {
     Ok(Some(match name {
-        "run_layout" => run_layout(parse(args.clone())?, cx)?,
+        "run_layout" => run_layout(parse(args.clone())?, cx, why)?,
         _ => return Ok(None),
     }))
 }
@@ -76,11 +81,11 @@ fn layout_task(a: &LayoutArgs, t: &Target) -> Result<Task> {
 /// layout of the method. Its file is held and checked here instead, and
 /// gets no row in results/INDEX.tsv (legume-mcp records no step that
 /// replaces its outputs).
-fn run_layout(a: LayoutArgs, cx: &Call) -> Result<Vec<Content>> {
+fn run_layout(a: LayoutArgs, cx: &Call, why: Option<&Why>) -> Result<Vec<Content>> {
     let task = layout_task(&a, &Target::load(&a.run)?)?;
     let outputs = task.outputs();
     cx.ensure_free(&outputs)?;
-    task.run(false, cx)?;
+    task.run(false, cx, why)?;
     ensure!(
         outputs[0].exists(),
         "senna layout ended without {}",

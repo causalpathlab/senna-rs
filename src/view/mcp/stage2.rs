@@ -9,14 +9,19 @@ use crate::view::data::Dataset;
 use crate::view::stage2::NO_STAGE2;
 use crate::view::{Pick, Scene};
 use anyhow::{anyhow, ensure, Result};
-use legume_mcp::{Call, Content, ToolSpec};
+use legume_mcp::{Call, Content, ToolSpec, Why};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 /// A stage-2 tool's call; `None` for another family's.
-pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Content>>> {
+pub(super) fn call(
+    name: &str,
+    args: &Value,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Option<Vec<Content>>> {
     Ok(Some(match name {
-        "run_donor_deviation" => run_donor_deviation(parse(args.clone())?, cx)?,
+        "run_donor_deviation" => run_donor_deviation(parse(args.clone())?, cx, why)?,
         _ => return Ok(None),
     }))
 }
@@ -151,12 +156,16 @@ pub(super) fn donor_deviation_task(a: &DonorDeviationCall, flags: &[String], out
 
 /// Named as the other run tools name theirs ([`planned`]): `out` when given,
 /// else `{run}_stage2` in the results folder, a name no running job holds.
-fn run_donor_deviation(a: DonorDeviationCall, cx: &Call) -> Result<Vec<Content>> {
+fn run_donor_deviation(
+    a: DonorDeviationCall,
+    cx: &Call,
+    why: Option<&Why>,
+) -> Result<Vec<Content>> {
     let flags = flags::words("donor-deviation", &a.flags)?;
     let (_, task) = planned(cx, a.out.as_deref(), Some(&a.from), "stage2", |out| {
         Ok(donor_deviation_task(&a, &flags, out))
     })?;
-    let done = start_server(task, a.background, cx)?;
+    let done = start_server(task, a.background, cx, why)?;
     Ok(vec![Content::Json(done)])
 }
 
