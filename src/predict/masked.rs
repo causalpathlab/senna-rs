@@ -130,6 +130,7 @@ pub(crate) struct MaskedScoreArgs<'a> {
 pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<MaskedScored> {
     use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
 
+    TopicModelMetadata::ensure_window_free(a.model)?;
     let embedding_dim = a
         .metadata
         .embedding_dim

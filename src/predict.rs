@@ -176,9 +176,6 @@ fn eval_gene_source(args: &PredictArgs) -> (Option<&str>, &'static str) {
     }
 }
 
-/// Align query genes onto the model's axis, or `None` when the axes already
-/// match. Coverage is logged and gated by
-/// [`crate::topic::eval::ensure_gene_coverage`].
 /// The model's saved `μ_d`, refused unless it has one entry per dictionary gene.
 fn feature_mean_on(model: &str, training_genes: &[Box<str>]) -> anyhow::Result<Vec<f32>> {
     let (_, feature_mean) = crate::topic::model_metadata::load_feature_mean(model)?;
@@ -221,6 +218,9 @@ fn read_query(
     Ok(data_vec)
 }
 
+/// Align query genes onto the model's axis, or `None` when the axes already
+/// match. Coverage is logged and gated by
+/// [`crate::topic::eval::ensure_gene_coverage`].
 fn build_remap(
     training_genes: &[Box<str>],
     new_genes: &[Box<str>],

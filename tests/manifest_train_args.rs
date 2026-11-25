@@ -59,7 +59,7 @@ fn manifest_without_train_args_still_loads() {
     let (_dir, path) = scratch();
     std::fs::write(
         &path,
-        r#"{"version":1,"kind":"topic","prefix":"old","data":{"input":["a.zarr"]}}"#,
+        r#"{"version":2,"kind":"topic","prefix":"old","data":{"input":["a.zarr"]}}"#,
     )
     .expect("write legacy manifest");
 

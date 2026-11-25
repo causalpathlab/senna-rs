@@ -399,3 +399,14 @@ fn the_manifest_decides_where_rho_is() {
     assert_eq!(resolve_feature_embedding(&prefix).unwrap().0, e);
     assert_eq!(resolve_feature_embedding(&e).unwrap().0, e);
 }
+
+/// A v1 manifest kept its co-embed where v2 keeps ρ; read as v2 it would hand
+/// the co-embed out as the gene embedding, so it is refused by version.
+#[test]
+fn a_manifest_before_v2_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("r.senna.json");
+    std::fs::write(&path, r#"{"version":1,"kind":"bge","prefix":"r"}"#).unwrap();
+    let err = RunManifest::load(&path).unwrap_err().to_string();
+    assert!(err.contains("v1") && err.contains("Refit"), "{err}");
+}

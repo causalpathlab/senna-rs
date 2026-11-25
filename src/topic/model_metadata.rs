@@ -216,21 +216,27 @@ impl TopicModelMetadata {
     pub fn load(prefix: &str) -> anyhow::Result<Self> {
         let path = format!("{prefix}.model.json");
         let json = std::fs::read_to_string(&path)?;
-        let value: serde_json::Value = serde_json::from_str(&json)?;
-        // Models trained before 0.25.42 could record an encoder context window
-        // (a top-K shortlist per cell). That read is gone; scoring such a model
-        // densely would silently give a different latent, so refuse it.
-        if value
-            .get("enc_context_size")
-            .and_then(serde_json::Value::as_u64)
-            .is_some_and(|k| k > 0)
-        {
-            anyhow::bail!(
-                "{path}: this model was trained with an encoder context window \
-                 (enc_context_size), which this senna no longer scores; retrain it"
-            );
-        }
-        Ok(serde_json::from_value(value)?)
+        let metadata: Self = serde_json::from_str(&json)?;
+        Ok(metadata)
+    }
+
+    /// Refuse to score a model trained with an encoder context window (a
+    /// top-K shortlist per cell, any recorded `enc_context_size`). That read
+    /// is gone, and scoring the model on every gene would give a different
+    /// latent without a word. Continuing one (`--init-from`, `update`) is
+    /// fine: its weights transfer, and the new fit is window-free.
+    pub fn ensure_window_free(prefix: &str) -> anyhow::Result<()> {
+        let path = format!("{prefix}.model.json");
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        anyhow::ensure!(
+            value
+                .get("enc_context_size")
+                .is_none_or(serde_json::Value::is_null),
+            "{path}: this model was trained with an encoder context window \
+             (enc_context_size), which this senna no longer scores; retrain it, or \
+             continue it window-free with --init-from"
+        );
+        Ok(())
     }
 
     /// Compute `θ̄_train` from the training-time `[N, K]` **topic-proportion**

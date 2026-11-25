@@ -98,8 +98,8 @@ fn predict_task(a: &PredictCall, out: &str) -> Result<Task> {
     })
 }
 
-/// Only the dense topic path has a decoder-side latent fit; the other
-/// runs refuse the flags (bge, simba, svd) or ignore them (vae, masked).
+/// Only the dense topic path has a decoder-side latent fit; senna predict
+/// refuses the flags on every other run, so they are refused here first.
 fn check_latent(a: &PredictCall, kind: RunKind) -> Result<()> {
     ensure!(
         a.latent == Latent::Encoder || matches!(kind, RunKind::Topic | RunKind::JointTopic),
@@ -267,7 +267,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "null_from": files("Training data whose gene composition is the null (--null-from); pass the train half"),
                     "scoring_delta": {"enum": ["auto", "train", "crossfit", "none", "heldout"], "description": "Per-batch delta the score is taken under (--scoring-delta). auto: trained delta for a batch named like a training batch, cross-fitted for other batches when there are two or more, none for a model trained without batches; train: trained only, refuses a new batch; crossfit: each fold of a batch under the delta of its other folds; none: the batch-free rate; heldout: fitted on the scored cells, optimistic [default: auto]"},
                     "eval_features": {"type": "string", "description": "Score on these features only, one name per line (--eval-features); the same file for every model compared"},
-                    "latent": {"enum": ["encoder", "refine", "decoder"], "description": "encoder: the encoder's pass, or the projection; refine: then refine_steps decoder-side steps (--refine-steps); decoder: no encoder, fitted to the frozen decoder (--decoder-only). refine and decoder are for topic runs [default: encoder]"},
+                    "latent": {"enum": ["encoder", "refine", "decoder"], "description": "encoder: the encoder's pass, or the projection; refine: then refine_steps decoder-side steps (--refine-steps); decoder: no encoder, fitted to the frozen decoder (--decoder-only). refine and decoder are for topic and joint-topic runs only (not masked, vae, svd or bge) [default: encoder]"},
                     "refine_steps": {"type": "integer", "minimum": 1, "description": "Steps for refine (required) or decoder [decoder default: 100]"},
                     "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (predict) lists them"},
                     "background": job,

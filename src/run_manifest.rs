@@ -291,6 +291,13 @@ impl RunManifest {
                 None => anyhow::anyhow!("parse {}: {e}", path.display()),
             }
         })?;
+        anyhow::ensure!(
+            m.version >= 2,
+            "manifest {} is v{}, from a senna before 0.18; this senna reads v2 and later \
+             only (its feature slots changed meaning). Refit the run",
+            path.display(),
+            m.version
+        );
         if m.version > MANIFEST_VERSION {
             log::warn!(
                 "manifest {} is v{} but this binary supports up to v{MANIFEST_VERSION}; \
