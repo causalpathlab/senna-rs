@@ -16,7 +16,7 @@ pub(crate) struct EmbedKnobs<'a> {
     /// The shared random-projection + multilevel pseudobulk collapse
     /// pipeline (`--proj-dim`, `--sort-dim`, `--knn-cells`, `--num-levels`,
     /// `--iter-opt`, `--pb-refine-*`, `--mixture-batch`,
-    /// `--emit-pb-reference` / `--no-emit-pb-reference`). `build_config`
+    /// `--no-emit-pb-reference`). `build_config`
     /// reads its raw numbers straight off this reference.
     pub collapse: &'a crate::refine_weighting::CollapseArgs,
     /// `--mixture-batch`, resolved off `collapse`.
@@ -288,7 +288,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     let cpu = candle_core::Device::Cpu;
     let e_feat_cpu = out.model.e_feat.to_device(&cpu)?; // [D, H] raw ρ
     ge::save_embedding(
-        &format!("{}.feature_embedding.parquet", knobs.out),
+        &format!("{}{}", knobs.out, senna::run_manifest::RHO_TABLE_SUFFIX),
         &e_feat_cpu,
         &plan.unified.feature_names,
         "feature",
@@ -434,7 +434,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // lives in `feature_embedding`, so these are additive.
         module_membership_suffix: has_modules.then_some(ge::transfer::MODULE_MEMBERSHIP_SUFFIX),
         module_dictionary_suffix: has_modules.then_some(ge::transfer::MODULE_DICTIONARY_SUFFIX),
-        // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm => it is ρ.
+        // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm writes none.
         softmax_dictionary_suffix: resolve_etm.then_some("dictionary.parquet"),
         // Z always lands in cell_embedding.parquet — on BOTH the ETM and
         // --skip-etm paths — so every geometry consumer finds the H-space

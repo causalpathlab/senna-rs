@@ -22,7 +22,7 @@ use legume_numeric::matrix::dmatrix_io::DMatrix;
 use legume_numeric::matrix::traits::{IoOps, MatWithNames};
 use log::{info, warn};
 use rustc_hash::{FxHashMap, FxHashSet};
-use senna::cluster::leiden_clustering;
+use senna::cluster::{leiden_clustering, LatentMetric};
 use senna::cluster_aggregation::accumulate_gene_sum_multi;
 use senna::embed_common::Mat;
 use senna::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
@@ -338,6 +338,7 @@ impl ArchetypeInputs {
             LEIDEN_RESOLUTION,
             Some(target),
             Some(seed),
+            LatentMetric::ZScoreEuclidean,
         )?;
         let labels_sub = merge_small(
             &clustered.labels,

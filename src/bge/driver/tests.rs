@@ -173,3 +173,13 @@ fn a_non_finite_embedding_is_refused() {
         assert!(err.to_string().contains("the cell embedding"), "{err}");
     }
 }
+
+/// bge never builds the marginal sketch-sign partition, so asking for it is
+/// refused before any data is read rather than quietly fitting the refined one.
+#[test]
+fn bge_refuses_the_marginal_pb_tree() {
+    let mut args = parse("unused.zarr", "unused");
+    args.collapse.pb_tree = crate::refine_weighting::PbTreeArg::Marginal;
+    let err = fit_bge(&args).unwrap_err().to_string();
+    assert!(err.contains("--pb-tree marginal"), "{err}");
+}

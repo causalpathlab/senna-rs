@@ -1,6 +1,6 @@
 //! Inheriting a source run's coarsening ladder under `--init-from`.
 
-use super::{batch_shares, inherit_level_coarsenings};
+use super::levels::{batch_shares, inherit_level_coarsenings};
 use crate::topic::eval::GeneRemap;
 use crate::topic::model_metadata::save_coarsening_levels;
 use data_beans::alg::feature_coarsening::FeatureCoarsening;

@@ -8,21 +8,18 @@
 //! then scoring against them. Hence a scorer, in the bge module, rather than an artifact
 //! declaration at the crate root.
 //!
-//! **ρ lives in more than one place, and only one resolver knows the rules.**
+//! **Only one resolver knows where ρ is.**
 //! [`senna::run_manifest::resolve_feature_embedding_for`] exists because three consumers each
 //! probed for ρ independently and each broke differently. Go through it. Note it returns
 //! `(ρ_path, bias_path)` and `deconvolve` discards the second — a probe needs both, since
 //! `(ρ, b_feat)` is exactly the frozen side that [`FrozenProjector`] and
 //! [`graph_embedding_util::loss::multinomial_ll`] consume.
 //!
-//! `--skip-etm` is **not** required. It used to be, before the ρ slot always
-//! carried raw signed ρ; it now does on both paths, which is why `deconvolve` documents
-//! itself as working with or without the flag.
+//! `--skip-etm` is **not** required: the ρ slot carries raw signed ρ on both paths.
 
 use crate::logging::new_progress_bar;
 use crate::topic::eval::{build_gene_remap_with, QueryNameOpts};
 use anyhow::Context;
-use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::{
     CellEncoder, FrozenProjection, FrozenProjectionArgs, FrozenProjector, PROJECTION_RIDGE_SGD,
@@ -166,8 +163,7 @@ impl BgeEmbedding {
         let (rho_path, bias_path) = run_manifest::resolve_feature_embedding_for(&manifest, &dir)?;
         let rho = DMatrix::<f32>::from_parquet(&rho_path)
             .with_context(|| format!("reading per-gene loading ρ {rho_path}"))?;
-        // Catches a manifest that points at a log-simplex β instead of signed ρ — the exact
-        // confusion `--skip-etm` used to create.
+        // Catches a manifest that points at a log-simplex β instead of signed ρ.
         ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &rho_path)?;
 
         let (d, h) = (rho.mat.nrows(), rho.mat.ncols());
@@ -299,29 +295,20 @@ impl BgeEmbedding {
             ModuleTables,
         };
 
-        let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
-            ReadSharedRowsArgs {
-                data_files: files.to_vec(),
-                batch_files: batches.and_then(|b| b.files.map(<[_]>::to_vec)),
-                preload,
-                feature_kind: qopts.loader_kind.clone(),
-                ..Default::default()
-            },
+        use crate::predict::QueryBatches as Read;
+        let data_vec = crate::predict::read_query(
+            files,
+            batches.map_or(Read::Ignore, |b| Read::Register(b.files)),
+            preload,
+            qopts,
             &self.gene_names,
-        )?)?;
-        let mut data_vec = loaded.data;
+        )?;
         let fold = match batches {
             Some(b) => {
-                data_vec.register_batch_membership(&loaded.batch);
                 crate::predict::delta::projection_fold(b.model, &self.gene_names, &data_vec)?
             }
             None => None,
         };
-        info!(
-            "Query data: {} features × {} cells",
-            data_vec.num_rows(),
-            data_vec.num_columns()
-        );
 
         let new_genes = data_vec.row_names()?;
         let mut remap = build_gene_remap_with(&self.gene_names, &new_genes, qopts);

@@ -31,7 +31,7 @@ impl Wanted for Pick {
             ),
             Pick::Table => (
                 "An earlier run's feature table",
-                "feature tables (.feature_embedding / .dictionary .parquet, .senna.json)",
+                "feature tables (.feature_embedding.parquet, .senna.json)",
             ),
             Pick::File => ("A file for this flag", "files"),
         };
@@ -45,9 +45,7 @@ impl Wanted for Pick {
             // A run's feature table, or its manifest.
             Pick::Table => {
                 name.ends_with(".senna.json")
-                    || senna::run_manifest::RHO_TABLE_SUFFIXES
-                        .iter()
-                        .any(|e| name.ends_with(e))
+                    || name.ends_with(senna::run_manifest::RHO_TABLE_SUFFIX)
             }
             Pick::File => true,
         };
@@ -67,18 +65,12 @@ impl Wanted for Pick {
     }
 
     /// The newest feature table here that the flags take, as the likely one:
-    /// not a run's co-embed, or a manifest with no ρ. A `.dictionary.parquet`
-    /// is never the likely one: telling a legacy ρ from a topic run's β means
-    /// reading it, which the folder listing should not wait on.
+    /// not a manifest with no ρ, or a table its manifest does not record.
     fn best(&self, dir: &Path, files: &[(&str, &String)]) -> Option<String> {
         if *self != Pick::Table {
             return None;
         }
-        let mut names: Vec<&str> = files
-            .iter()
-            .map(|(n, _)| *n)
-            .filter(|n| !n.ends_with(".dictionary.parquet"))
-            .collect();
+        let mut names: Vec<&str> = files.iter().map(|(n, _)| *n).collect();
         names.sort_by_cached_key(|n| {
             std::cmp::Reverse(
                 std::fs::metadata(dir.join(n))

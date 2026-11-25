@@ -18,15 +18,6 @@ pub enum Topic {
     Rbm,
     /// Every cell's lineage, time and velocity from a mixture of splicing ODEs.
     Ode,
-    // Moved to lupin; kept so the old names say where to look.
-    #[value(hide = true)]
-    Annotation,
-    #[value(hide = true)]
-    Grouping,
-    #[value(hide = true)]
-    OntologyPlan,
-    #[value(hide = true)]
-    RootingPlan,
 }
 
 /// Every write-up, in one place: the topic, a one-line blurb, and the text.
@@ -66,8 +57,8 @@ pub fn run_docs(args: &DocsArgs) -> Result<()> {
         println!("senna method write-ups (`senna docs <TOPIC>` to read one):\n");
         for (topic, blurb, _) in DOCS {
             // The slug clap will actually ACCEPT. Deriving it with `format!("{topic:?}")` prints
-            // `ontologyplan` while the parser wants `ontology-plan`, so the listing would
-            // advertise names the command then refuses — the one failure this table prevents.
+            // `Deconvolve` while the parser wants `deconvolve`, and a two-word topic would be
+            // kebab-cased, so the listing would advertise names the command then refuses.
             let slug = topic
                 .to_possible_value()
                 .as_ref()
@@ -86,20 +77,11 @@ pub fn run_docs(args: &DocsArgs) -> Result<()> {
         );
         return Ok(());
     };
-    let Some(text) = DOCS
+    let text = DOCS
         .iter()
         .find(|(t, _, _)| *t == want)
         .map(|(_, _, text)| *text)
-    else {
-        let slug = want
-            .to_possible_value()
-            .as_ref()
-            .map(PossibleValue::get_name)
-            .unwrap_or_default()
-            .to_string();
-        println!("This write-up moved to lupin: run `lupin docs {slug}`.");
-        return Ok(());
-    };
+        .expect("every topic has a write-up");
     println!("{text}");
     Ok(())
 }

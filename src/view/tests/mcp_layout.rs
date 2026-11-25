@@ -11,7 +11,6 @@ fn target(from: &str) -> Target {
         has_cells: true,
         has_features: true,
         has_coembedding: false,
-        can_resolve_topics: false,
     }
 }
 

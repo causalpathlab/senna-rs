@@ -6,8 +6,8 @@
 use crate::cluster_bhc::{run_cluster_bhc, ClusterBhcConfig};
 use crate::postprocess::fit_layout_features::{read_feature_rows, FeatureSpace};
 use senna::cluster::{
-    hsblock_clustering, kmeans_clustering, leiden_clustering_with_metric, ClusterMethod,
-    ClusterResult, LatentMetric,
+    hsblock_clustering, kmeans_clustering, leiden_clustering, ClusterMethod, ClusterResult,
+    LatentMetric,
 };
 use senna::embed_common::*;
 use senna::run_manifest::{RunCluster, RunManifest};
@@ -322,7 +322,7 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
                 "Running Leiden clustering with knn={}, resolution={:.2}, target_k={:?}",
                 args.knn, args.resolution, args.num_clusters
             );
-            leiden_clustering_with_metric(
+            leiden_clustering(
                 &latent,
                 args.knn,
                 args.resolution,

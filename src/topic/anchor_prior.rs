@@ -11,7 +11,7 @@
 //! decoders (dense `senna topic`). Silently no-ops for decoders that
 //! don't register that Var (e.g. vMF).
 
-use crate::anchor_common::{gram_schmidt_anchors, softmax_col_into, zscore_columns};
+use crate::anchor_common::{gram_schmidt_anchors, softmax_col_into};
 use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
@@ -78,18 +78,21 @@ impl AnchorPrior {
         // feature space when a finest-level coarsening is active, otherwise
         // use the full-resolution matrix. Either way, transpose once to get
         // [n_pb, D_selection] rows for Gram-Schmidt.
-        let x_pd_selection: Mat = match finest_coarsening {
+        let mut x_pd_selection: Mat = match finest_coarsening {
             Some(fc) => fc.aggregate_rows_ds(&x_gp).transpose(),
             None => x_gp.transpose(),
         };
 
         // Z-score per feature so Gram-Schmidt residuals aren't dominated
-        // by high-variance genes.
-        let x_sel_zscored = zscore_columns(&x_pd_selection);
+        // by high-variance genes. With one PB there is nothing to scale
+        // against; its raw row is the anchor.
+        if x_pd_selection.nrows() >= 2 {
+            senna::embed_common::zscore_columns_inplace(&mut x_pd_selection);
+        }
 
         // Greedy Gram-Schmidt vertex selection in the selection space.
         let k = n_topics.min(n_pb);
-        let anchor_pb_idx = gram_schmidt_anchors(&x_sel_zscored, k);
+        let anchor_pb_idx = gram_schmidt_anchors(&x_pd_selection, k);
 
         // [D_full, K] prior: softmax of each anchor PB's log1p expression
         // at full resolution. `x_gp.column(pb)` gives a PB's gene vector

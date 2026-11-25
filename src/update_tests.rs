@@ -20,18 +20,12 @@ fn parse(extra: &[&str]) -> Result<UpdateArgs, clap::Error> {
 
 /// Carrying the pseudobulks forward is what makes a round cost the new data
 /// rather than the whole history, so it is on unless refused.
-/// `--use-pb-reference` is redundant for the behaviour, but it turns a silent
-/// fallback into an error when the parent carries nothing; asking for both is
-/// a contradiction, not a precedence puzzle.
 #[test]
 fn the_carried_reference_is_used_unless_refused() {
     let a = parse(&[]).expect("bare update parses");
-    assert!(!a.no_pb_reference && !a.use_pb_reference);
+    assert!(!a.no_pb_reference);
     let a = parse(&["--no-pb-reference"]).expect("opt-out parses");
     assert!(a.no_pb_reference);
-    let a = parse(&["--use-pb-reference"]).expect("explicit request parses");
-    assert!(a.use_pb_reference && !a.no_pb_reference);
-    assert!(parse(&["--use-pb-reference", "--no-pb-reference"]).is_err());
 }
 
 /// The recorded fit arguments say whether the parent loads under multiome
@@ -109,10 +103,6 @@ fn a_round_takes_a_partition_and_labels_but_no_new_cell_flags() {
     assert!(
         round(&["--batch-files", "b.tsv"]).is_err(),
         "batch files describe new data"
-    );
-    assert!(
-        round(&["--use-pb-reference"]).is_err(),
-        "a round never substitutes its only cells"
     );
     assert!(
         parse(&["--pb-from", "p.senna.json"]).is_err(),

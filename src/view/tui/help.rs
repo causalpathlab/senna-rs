@@ -128,10 +128,6 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
                 "+  -",
                 "heatmap: more or fewer top features per group (z-scored mean ln(1 + count))",
             ),
-            (
-                "T",
-                "make topics for a run with none (simba, bge --skip-etm): one per cell cluster",
-            ),
         ],
     ),
     (
@@ -186,8 +182,8 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("lowercase", "looks: changes what is on screen, never the run's files"),
             (
-                "R A T X E",
-                "uppercase that opens a mode or writes: relabel, annotate, make topics, close a view for good, move labels",
+                "R A X E",
+                "uppercase that opens a mode or writes: relabel, annotate, close a view for good, move labels",
             ),
             (
                 "g G  f F  z Z",

@@ -71,7 +71,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     // the trained axis. `--n-hvg 0` embeds every gene.
     let effective = crate::hvg::resolve_multiome_with_hvg(false, args.data_files.len(), &args.hvg);
     let must_train =
-        crate::hvg::load_must_train(effective.must_train_file, effective.selection_on())?;
+        data_beans::alg::hvg::load_must_train(effective.must_train_file, effective.selection_on())?;
     let (hvg_rows, feature_names): (Vec<usize>, Vec<Box<str>>) = if effective.selection_on() {
         let sel = select_hvg_streaming(
             data,
@@ -147,7 +147,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     )?;
     // The raw gene table ρ, as bge writes its own.
     ge::save_embedding(
-        &format!("{prefix}.feature_embedding.parquet"),
+        &format!("{prefix}{}", senna::run_manifest::RHO_TABLE_SUFFIX),
         &out.e_gene,
         &feature_names,
         "feature",

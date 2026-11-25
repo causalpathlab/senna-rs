@@ -100,14 +100,14 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | `run_fit` | a fit (`senna <method> <data> -o <out> <flags>`) as a child, its log as progress; returns the run manifest and its kind, or with `background` a job to follow, running on `senna run`'s screen in a session of its own (`senna attach`) that outlives the server |
 | `run_help` | every flag of one method, or of a command another run tool starts (`predict`, `probe`, `update`, `critique`, `impute`, `deconvolve`, `donor-deviation`, a `run_step` command, `layout <method>`), with its help |
 | `run_predict` | new cells placed in a trained model's latent (`senna predict`), with the null, eval features, batches, bulk tables and latent mode as options; returns the latent, the predictive table and the mean held-out and null log-likelihood per count |
-| `run_probe` | whether a frozen model explains new cells (`senna probe`): the covered or novel verdict, and with `counterfactual` (masked runs) the benefit and forgetting an update on them would bring, read from `{out}.probe.json` |
+| `run_probe` | whether a frozen model explains new cells (`senna probe`): the covered or novel verdict, read from `{out}.probe.json` |
 | `run_update` | a trained model continued into a new run (`senna update`): new samples absorbed, or a round on its own cells taking `run_critique`'s peer labels; returns the new run's manifest |
 | `run_critique` | where fits disagree on which pseudobulks are alike (`senna critique`); with `questions`, the peer labels for an update round |
 | `run_impute` | full-feature counts on new cells from their nearest reference cells (`senna impute`); returns `{out}.imputed.parquet` |
 | `run_deconvolve` | bulk samples split into cell-type fractions against a run's annotated cells (`senna deconvolve`); returns the fractions file |
 | `run_donor_deviation` | stage 2 on an embedding run (`senna donor-deviation`): per gene and donor, the deviation from other donors' matched samples in the same state, with its batch jackknife and each sample's matched distances |
 | `run_layout` | a run laid out again with the settings given (`senna layout <method> --from <run> <flags>`), replacing that method's layout; umap takes `min_dist` and `spread` as umap-learn's, checked before it runs; `view_open` then shows it |
-| `run_step` | one of the other analysis commands: `clustering`, `resolve-topics`, `resolve-embedding-space` and `embed-diag` on a run, `joint-topic`, `joint-svd` and `fne` on data files; returns what it made |
+| `run_step` | one of the other analysis commands: `clustering` and `resolve-embedding-space` on a run, `joint-topic`, `joint-svd` and `fne` on data files; returns what it made |
 | `view_open` | opens a run or a lupin round: its maps, groupings and the groups shown, a missing layout or clustering computed first |
 | `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, the run's time or velocity field, window and zoom |
 | `view_markers` | the features that set one group apart, by the model's expected fold change, and its markers from the run's table |
@@ -158,9 +158,9 @@ project", PLoS Comput Biol 19(1): e1010786 (2023). doi:10.1371/journal.pcbi.1010
 
 # Stochastic data Embedding with Nearest Neighbourhood Adjustment
 
-## `senna indexed-topic` — Embedded Topic Model
+## `senna masked-topic` — Embedded Topic Model
 
-The per-cell top-K feature window training (`indexed-topic` / `itopic`) factorizes the topic-feature distribution β through a shared per-gene embedding ρ — Dieng et al. (2020)'s ETM, on packed top-K inputs.
+`masked-topic` factorizes the topic-feature distribution β through a shared per-gene embedding ρ — Dieng et al. (2020)'s ETM.
 
 **Parameters**
 - ρ ∈ ℝ^{D×H}: per-gene embedding. **Shared between encoder and decoder.**
@@ -169,27 +169,21 @@ The per-cell top-K feature window training (`indexed-topic` / `itopic`) factoriz
 **Model**
 
 ```text
-encoder (input pooling):
-    v_norm  = anscombe_lite(values, batch_null, μ_d)                   # [N, K]
-    h       = Σ_k v_norm[k] · ρ[idx[k]]                                # [N, H]
-    z       ∼ Gaussian(μ_z(h), σ_z(h)),    log θ = log_softmax(z)      # [N, K_topics]
+encoder (masked, visible-pooled):
+    h       = Σ_{k∈visible} v_norm[k] · ρ[idx[k]]            # bag-of-visible-genes
+    log θ   = log_softmax(W_θ · h)                           # topic proportions
 
-decoder (ETM factorization):
-    β_kd    = log_softmax_d(α_k · ρ_dᵀ)                                # [K_topics, D]
-    log x̂_n = log(Σ_k θ_nk · exp β_k:)                                 # multinomial recon
+decoder (NB ETM head):
+    β_kg    = softmax_d(α_k · ρ_dᵀ)                          # per-topic gene dist (full-vocab Zₖ)
+    μ_g     = ℓ · Σ_t θ_t · β_{t,g}
+    x_g     ∼ NB(μ_g, φ_g)        for masked g
 ```
 
-**Per-batch slice (no [K, D] materialization).** For the union of top-K feature ids across the minibatch, only `ρ_S = ρ[S, :]` is gathered:
+Training is deterministic and KL-free: a random subset of each cell's genes is hidden from the encoder, and the loss scores only the hidden genes. The masking is the regularizer. Inference is encoder-only, on every gene the cell has.
 
-```text
-β̃_kS = log_softmax_S(α · ρ_Sᵀ − log q_S)
-```
+**Why share ρ.** Each gradient step lands on the same `Var` from two paths — the encoder's bag-of-features pool *and* the decoder's α·ρᵀ logits — so feature embeddings are supervised from both sides. Parameter count drops from K·D to K·H + D·H (H ≪ D in typical configurations).
 
-where `log q_S` is the Jean et al. (2015) importance correction for sampled softmax (`q_s` = per-feature selection frequency). Per-batch cost is O(K·S·H) on the gradient path; the full β is only built on demand for output / evaluation.
-
-**Why share ρ.** Each gradient step lands on the same `Var` from two paths — the encoder's bag-of-features pool *and* the decoder's α·ρᵀ logits — so feature embeddings are densely supervised even though only top-K features fire per cell. Parameter count drops from K·D to K·H + D·H (H ≪ D in typical configurations).
-
-**Outputs.** In addition to the standard topic-model artifacts (`.dictionary.parquet`, `.latent.parquet`, `.safetensors`, etc.), `indexed-topic` writes:
+**Outputs.** In addition to the standard topic-model artifacts (`.dictionary.parquet`, `.latent.parquet`, `.safetensors`, etc.), `masked-topic` writes:
 
 - `{out}.feature_embedding.parquet` — D × H learned ρ. Directly usable for gene-gene similarity, clustering into programs, or initializing downstream models.
 

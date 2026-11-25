@@ -20,7 +20,7 @@ fn args(out: &str) -> ProbeArgs {
 }
 
 #[test]
-fn the_verdict_and_the_counterfactual_are_written_beside_the_cells() {
+fn the_verdict_is_written_beside_the_cells() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("pr").to_string_lossy().into_owned();
     let a = args(&out);
@@ -34,7 +34,6 @@ fn the_verdict_and_the_counterfactual_are_written_beside_the_cells() {
         cal_fit,
         q_fit,
         q_names,
-        counterfactual: Some(serde_json::json!({"benefit": 0.5, "forgetting": 0.1})),
     })
     .unwrap();
     let text = std::fs::read_to_string(format!("{out}.probe.json")).unwrap();
@@ -42,7 +41,6 @@ fn the_verdict_and_the_counterfactual_are_written_beside_the_cells() {
     assert_eq!(v["verdict"], "novel");
     assert_eq!(v["cells"], 20);
     assert_eq!(v["flagged"], 20);
-    assert_eq!(v["counterfactual"]["benefit"], 0.5);
     let tsv = std::fs::read_to_string(format!("{out}.probe.tsv")).unwrap();
     assert_eq!(tsv.lines().count(), 21);
 }

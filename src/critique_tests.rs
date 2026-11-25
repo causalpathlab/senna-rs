@@ -1,3 +1,4 @@
+use super::ranks::{far_share, known_ranks, median};
 use super::*;
 
 fn line_view(x: &[f32], valid: &[bool]) -> View {

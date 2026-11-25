@@ -5,7 +5,6 @@
 //! feature) graph is *built* internally from expression counts. The
 //! sibling `senna fne` (Feature Network Embedding) is the graph-input
 //! companion that consumes an explicit feature-feature edge list.
-//! `gbe` remains a clap alias for one release cycle.
 //!
 //! All algorithmic work lives in `graph_embedding_util`. This file resolves
 //! the multiome layout, loads the data, and weights the HVG selection — the
@@ -34,6 +33,13 @@ pub use args::BgeArgs;
 /// [`driver::fit_embed_family`], which trains and writes every output.
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
+    // bge's finest pseudobulks are the hash partition refined by
+    // `--pb-refine-*`; the marginal sketch-sign partition is not built here.
+    anyhow::ensure!(
+        args.collapse.pb_tree != crate::refine_weighting::PbTreeArg::Marginal,
+        "--pb-tree marginal does not apply to bge: its finest pseudobulks are always the \
+         refined hash partition (tune it with --pb-refine-*)"
+    );
     anyhow::ensure!(
         args.pb_reference.is_none() || args.multiome.is_empty(),
         "a pb_reference and --multiome do not compose: multiome loads with union column \
@@ -183,7 +189,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     //
     // `--must-train-features` is a curated panel kept in the HVG-weighted set.
     let hvg_enabled = effective_hvg.selection_on();
-    let must_train = crate::hvg::load_must_train(effective_hvg.must_train_file, hvg_enabled)?;
+    let must_train =
+        data_beans::alg::hvg::load_must_train(effective_hvg.must_train_file, hvg_enabled)?;
     let hvg_full: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             unified.count_backend(),

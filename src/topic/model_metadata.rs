@@ -164,18 +164,12 @@ pub struct TopicModelMetadata {
     /// [D, H] feature embedding width (`indexed_topic` only)
     #[serde(default)]
     pub embedding_dim: Option<usize>,
-    /// Top-K shortlist size at encoder (`indexed_topic` only)
-    #[serde(default)]
-    pub enc_context_size: Option<usize>,
     /// Mean training topic proportions θ̄ ∈ ℝ^K: a record of the fit, and a
     /// guard against a diverged one (`populate_theta_mean_and_save` refuses
     /// a non-finite mean). Predict no longer reads it; absent in older models.
     #[serde(default)]
     pub theta_mean: Option<Vec<f32>>,
-    /// Number of cells the model was trained on. Model provenance, and the running
-    /// `N_absorbed` for sequential integration: net gain is weighted
-    /// `n_query · benefit − n_train · forgetting`, so later rounds resist updates in
-    /// proportion to how much data the model already carries. Absent in older models.
+    /// Number of cells the model was trained on: model provenance. Absent in older models.
     #[serde(default)]
     pub n_train_cells: Option<usize>,
     /// Number of learned gene modules `M` in the encoder's module-pooling branch
@@ -189,6 +183,10 @@ pub struct TopicModelMetadata {
     /// the shape they were trained at.
     #[serde(default)]
     pub n_gene_modules: Option<usize>,
+    /// Read, never written: models from before 0.25.42 could record an encoder
+    /// context window here. See [`TopicModelMetadata::ensure_window_free`].
+    #[serde(default, skip_serializing)]
+    pub enc_context_size: Option<serde_json::Value>,
     /// Query-decoder projection width, `None` when the run had none.
     ///
     /// The query decoder's weights (`dec_query.*`) ride in the checkpoint, and
@@ -224,6 +222,21 @@ impl TopicModelMetadata {
         let json = std::fs::read_to_string(&path)?;
         let metadata: Self = serde_json::from_str(&json)?;
         Ok(metadata)
+    }
+
+    /// Refuse to score a model trained with an encoder context window (a
+    /// top-K shortlist per cell, any recorded `enc_context_size`). That read
+    /// is gone, and scoring the model on every gene would give a different
+    /// latent without a word. Continuing one (`--init-from`, `update`) is
+    /// fine: its weights transfer, and the new fit is window-free.
+    pub fn ensure_window_free(&self, prefix: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.enc_context_size.is_none(),
+            "{prefix}.model.json: this model was trained with an encoder context window \
+             (enc_context_size), which this senna no longer scores; retrain it, or \
+             continue it window-free with --init-from"
+        );
+        Ok(())
     }
 
     /// Compute `θ̄_train` from the training-time `[N, K]` **topic-proportion**
@@ -391,24 +404,6 @@ pub fn load_feature_mean(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32
     Ok((result.rows, feature_mean))
 }
 
-/// Load NB-Fisher shortlist weights from disk; returns (`gene_names`, weights).
-///
-/// Read-only: nothing writes this file any more. It ranked the top-K context a
-/// windowed encoder read, and the encoder reads every gene now — so this exists
-/// to keep OLD models (`enc_context_size: Some(k)`) scoring exactly as they did.
-pub fn load_shortlist_weights(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
-    use legume_numeric::matrix::traits::IoOps;
-    let path = format!("{prefix}.shortlist_weights.parquet");
-    let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
-    anyhow::ensure!(
-        result.mat.ncols() >= 1,
-        "shortlist_weights parquet missing column at {path}"
-    );
-    let weights: Vec<f32> = result.mat.column(0).iter().copied().collect();
-    log::info!("Loaded {} shortlist weights from {path}", weights.len());
-    Ok((result.rows, weights))
-}
-
 /// Refuse a model whose checkpoint carries a query decoder.
 ///
 /// The head is no longer wired into the masked family. Its `dec_query.*`
@@ -448,3 +443,7 @@ pub fn load_dispersion(prefix: &str) -> anyhow::Result<Option<Vec<f32>>> {
     log::info!("Loaded {} dispersion values from {path}", phi.len());
     Ok(Some(phi))
 }
+
+#[cfg(test)]
+#[path = "model_metadata_tests.rs"]
+mod model_metadata_tests;

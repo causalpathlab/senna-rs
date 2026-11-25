@@ -23,7 +23,7 @@ fn shapes(long: &str) -> bool {
         let groups = [
             crate::refine_weighting::CollapseArgs::augment_args(clap::Command::new("collapse")),
             data_beans::qc_lib::QcArgs::augment_args(clap::Command::new("qc")),
-            crate::hvg::HvgCliArgs::augment_args(clap::Command::new("hvg")),
+            data_beans::alg::hvg::HvgCliArgs::augment_args(clap::Command::new("hvg")),
         ];
         groups
             .iter()

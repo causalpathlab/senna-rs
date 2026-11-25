@@ -28,7 +28,7 @@ fn the_tree_is_the_default_and_marginal_switches_it_off() {
 /// to the type's zero, which would silently stop the chain from carrying.
 #[test]
 fn a_fit_recorded_before_the_opt_out_existed_still_carries() {
-    let json = r#"{"emit_pb_reference": false}"#;
+    let json = r#"{}"#;
     let a: CollapseArgs = serde_json::from_str(json).expect("old record replays");
     assert!(
         a.emits_pb_reference(),
@@ -52,13 +52,13 @@ fn cnv_clones_flag_parses() {
 #[test]
 fn differences_are_in_what_builds_the_partition() {
     let there = serde_json::json!({
-        "collapse": {"proj_dim": 50, "sort_dim": 10, "emit_pb_reference": true},
+        "collapse": {"proj_dim": 50, "sort_dim": 10, "no_emit_pb_reference": false},
         "qc": {"min_features": 200},
         "n_latent_topics": 60,
         "epochs": 1000,
     });
     let here = serde_json::json!({
-        "collapse": {"proj_dim": 60, "sort_dim": 10, "emit_pb_reference": false},
+        "collapse": {"proj_dim": 60, "sort_dim": 10, "no_emit_pb_reference": true},
         "qc": {"min_features": 200, "new_flag": 1},
         "n_latent": 10,
         "epochs": 5,

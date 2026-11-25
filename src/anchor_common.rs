@@ -36,30 +36,6 @@ pub(crate) fn softmax_col_into(
     }
 }
 
-/// Return a column-z-scored copy of `x_pg` (PB rows × gene columns).
-/// Each gene column is shifted and scaled so its mean is 0 and its std is 1.
-/// Constant columns get zero (their contribution to residuals is nil anyway).
-pub(crate) fn zscore_columns(x_pg: &Mat) -> Mat {
-    let mut out = x_pg.clone();
-    let n = out.nrows() as f32;
-    if n < 2.0 {
-        return out;
-    }
-    for mut col in out.column_iter_mut() {
-        let mean = col.iter().sum::<f32>() / n;
-        let var = col.iter().map(|&v| (v - mean).powi(2)).sum::<f32>() / n;
-        let sd = var.sqrt();
-        if sd > 1e-8 {
-            for v in col.iter_mut() {
-                *v = (*v - mean) / sd;
-            }
-        } else {
-            col.fill(0.0);
-        }
-    }
-    out
-}
-
 /// Greedy Gram-Schmidt vertex selection. Returns `k` row indices of
 /// `x_pg` (PB rows × gene columns) chosen to maximize residual norm at
 /// each step. Rows are projected out of all remaining rows after each pick.
@@ -156,26 +132,5 @@ mod tests {
             "expected pure rows, got {:?}",
             picked
         );
-    }
-
-    #[test]
-    fn zscore_is_unit_std() {
-        let x = Mat::from_row_slice(
-            4,
-            3,
-            &[1.0, 2.0, 5.0, 2.0, 3.0, 5.0, 3.0, 4.0, 5.0, 4.0, 5.0, 5.0],
-        );
-        let z = zscore_columns(&x);
-        for j in 0..x.ncols() {
-            let col: Vec<f32> = z.column(j).iter().copied().collect();
-            let mean = col.iter().sum::<f32>() / col.len() as f32;
-            assert!(mean.abs() < 1e-5);
-            if j < 2 {
-                let var = col.iter().map(|v| v * v).sum::<f32>() / col.len() as f32;
-                assert!((var - 1.0).abs() < 1e-5);
-            } else {
-                assert!(col.iter().all(|&v| v == 0.0));
-            }
-        }
     }
 }

@@ -186,8 +186,7 @@ fn probe_runs_senna_probe_and_makes_its_verdict() {
         "data": ["q1.zarr", "q2.zarr"],
         "calibration": "ref.zarr",
         "alpha": 0.01,
-        "counterfactual": true,
-        "args": ["--cf-seed", "7"],
+        "args": ["--minibatch-size", "7"],
     }))
     .unwrap();
     let t = probe_task(&a, "pr");
@@ -205,8 +204,7 @@ fn probe_runs_senna_probe_and_makes_its_verdict() {
             "pr",
             "--alpha",
             "0.01",
-            "--counterfactual",
-            "--cf-seed",
+            "--minibatch-size",
             "7"
         ]
     );
@@ -218,12 +216,6 @@ fn probe_runs_senna_probe_and_makes_its_verdict() {
             ("cells", PathBuf::from("pr.probe.tsv"))
         ]
     );
-    // The counterfactual is the masked models' only.
-    for kind in [RunKind::Topic, RunKind::Vae, RunKind::Bge, RunKind::Simba] {
-        assert!(check_probe(&a, kind).is_err(), "{kind}");
-    }
-    check_probe(&a, RunKind::Itopic).unwrap();
-    check_probe(&a, RunKind::MaskedVae).unwrap();
 }
 
 #[test]
@@ -232,7 +224,6 @@ fn a_probe_s_verdict_is_read_from_the_file_it_writes() {
     let path = dir.path().join("pr.probe.json");
     let written = json!({
         "verdict": "novel", "novel": true, "flagged": 40, "cells": 100,
-        "counterfactual": {"benefit": 0.5, "forgetting": 0.1},
     });
     std::fs::write(&path, written.to_string()).unwrap();
     assert_eq!(probe_summary(&path).unwrap(), written);

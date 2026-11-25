@@ -145,9 +145,6 @@ pub struct ImputeArgs {
     )]
     pub preload_data: bool,
 
-    #[arg(short, long, help = "Verbose logging")]
-    pub verbose: bool,
-
     #[arg(
         long,
         default_value_t = senna::embed_common::ComputeDevice::Cpu,
@@ -618,7 +615,6 @@ fn predict_matching_latents(
         decoder_only: false,
         // Coverage is reported; imputation adds no gate of its own.
         min_gene_overlap: 0.0,
-        verbose: args.verbose,
         residual_out: None,
         residual_include_delta: false,
         residual_threshold: 0.0,

@@ -98,11 +98,11 @@ fn predict_task(a: &PredictCall, out: &str) -> Result<Task> {
     })
 }
 
-/// Only the dense topic path has a decoder-side latent fit; the other
-/// runs refuse the flags (bge, simba, svd) or ignore them (vae, masked).
+/// Only the dense topic path has a decoder-side latent fit; senna predict
+/// refuses the flags on every other run, so they are refused here first.
 fn check_latent(a: &PredictCall, kind: RunKind) -> Result<()> {
     ensure!(
-        a.latent == Latent::Encoder || matches!(kind, RunKind::Topic | RunKind::JointTopic),
+        a.latent == Latent::Encoder || kind.has_decoder_latent_fit(),
         "latent refine and decoder are for topic runs; a {kind} run is predicted from its \
          encoder or projection only (latent encoder)"
     );
@@ -189,8 +189,6 @@ struct ProbeCall {
     out: Option<String>,
     alpha: Option<f64>,
     #[serde(default)]
-    counterfactual: bool,
-    #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
     background: bool,
@@ -205,7 +203,6 @@ fn probe_task(a: &ProbeCall, out: &str) -> Task {
             .flag("--calibration", Some(&a.calibration))
             .flag("-o", Some(out))
             .flag("--alpha", a.alpha)
-            .switch("--counterfactual", a.counterfactual)
             .rest(&a.args),
         made: vec![
             ("verdict", format!("{out}.probe.json").into()),
@@ -215,18 +212,7 @@ fn probe_task(a: &ProbeCall, out: &str) -> Task {
     }
 }
 
-/// The counterfactual is the masked models' only: theirs is the one small
-/// gene-side block a batch can move.
-fn check_probe(a: &ProbeCall, kind: RunKind) -> Result<()> {
-    ensure!(
-        !a.counterfactual || kind.is_masked_family(),
-        "counterfactual is for masked-topic, masked-sbp and masked-vae runs; {} is a {kind} run",
-        a.model
-    );
-    Ok(())
-}
-
-/// The probe's verdict and counterfactual effects, as it wrote them.
+/// The probe's verdict, as it wrote it.
 fn probe_summary(verdict: &Path) -> Result<Value> {
     let text = std::fs::read_to_string(verdict)
         .with_context(|| format!("reading {}", verdict.display()))?;
@@ -235,19 +221,8 @@ fn probe_summary(verdict: &Path) -> Result<Value> {
 
 /// Whether a trained model explains new cells, as `senna probe` judges.
 fn run_probe(a: ProbeCall, cx: &Call) -> Result<Vec<Content>> {
-    if a.counterfactual {
-        check_probe(&a, model_kind(&a.model)?)?;
-    }
     let data = a.data.first().map(String::as_str);
-    // The counterfactual is another result than the fit alone.
-    let tag = model_tag(
-        &a.model,
-        if a.counterfactual {
-            "probe_cf"
-        } else {
-            "probe"
-        },
-    );
+    let tag = model_tag(&a.model, "probe");
     let (_, task) = planned(cx, a.out.as_deref(), data, &tag, |o| Ok(probe_task(&a, o)))?;
     let done = start_server(task, a.background, cx)?;
     with_summary(done, "verdict", probe_summary)
@@ -292,7 +267,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "null_from": files("Training data whose gene composition is the null (--null-from); pass the train half"),
                     "scoring_delta": {"enum": ["auto", "train", "crossfit", "none", "heldout"], "description": "Per-batch delta the score is taken under (--scoring-delta). auto: trained delta for a batch named like a training batch, cross-fitted for other batches when there are two or more, none for a model trained without batches; train: trained only, refuses a new batch; crossfit: each fold of a batch under the delta of its other folds; none: the batch-free rate; heldout: fitted on the scored cells, optimistic [default: auto]"},
                     "eval_features": {"type": "string", "description": "Score on these features only, one name per line (--eval-features); the same file for every model compared"},
-                    "latent": {"enum": ["encoder", "refine", "decoder"], "description": "encoder: the encoder's pass, or the projection; refine: then refine_steps decoder-side steps (--refine-steps); decoder: no encoder, fitted to the frozen decoder (--decoder-only). refine and decoder are for topic runs [default: encoder]"},
+                    "latent": {"enum": ["encoder", "refine", "decoder"], "description": "encoder: the encoder's pass, or the projection; refine: then refine_steps decoder-side steps (--refine-steps); decoder: no encoder, fitted to the frozen decoder (--decoder-only). refine and decoder are for topic and joint-topic runs only (not masked, vae, svd or bge) [default: encoder]"},
                     "refine_steps": {"type": "integer", "minimum": 1, "description": "Steps for refine (required) or decoder [decoder default: 100]"},
                     "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (predict) lists them"},
                     "background": job,
@@ -306,11 +281,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "Ask whether a frozen model explains new cells, as `senna probe {data} --model \
              {model} --calibration {calibration} -o {out}`: each cell's fit against a null \
              calibrated on cells the model already explains, and a batch verdict (covered or \
-             novel). With counterfactual (masked-topic, masked-sbp and masked-vae runs only) \
-             it also estimates what updating on this batch would do: benefit, the fit it \
-             would gain on the new cells (would it teach the model), and forgetting, the fit \
-             it would lose on the reference (would it damage it). Writes {out}.probe.json \
-             (returned: verdict, flagged cells, the counterfactual effects) and \
+             novel). Writes {out}.probe.json (returned: verdict, flagged cells) and \
              {out}.probe.tsv (per cell). Trains and writes no model. Serves masked, topic, \
              vae, bge and simba runs.",
             json!({
@@ -321,7 +292,6 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "calibration": {"type": "string", "description": "A backend of cells the model already explains (held-out training cells), which sets the null"},
                     "out": {"type": "string", "description": "Output prefix [default: today's results folder, by data file and model]"},
                     "alpha": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "description": "Null tail probability, the per-cell false-positive rate (--alpha) [default: 0.05]"},
-                    "counterfactual": {"type": "boolean", "description": "Masked runs only: also estimate benefit and forgetting (--counterfactual) [default: false]"},
                     "args": {"type": "array", "items": {"type": "string"}, "description": "Further flags, as run_help (probe) lists them"},
                     "background": job,
                 },

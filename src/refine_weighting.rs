@@ -6,7 +6,7 @@
 //!   `--num-levels`, `--iter-opt`, `--ignore-batch`) and flattens
 //!   [`PbRefineArgs`] inside it. Flatten it into any subcommand that runs
 //!   that pipeline so the flag surface stays identical across `senna topic`,
-//!   `masked-topic`, `joint-topic`, `svd`, `svd joint`, and `gbe`.
+//!   `masked-topic`, `joint-topic`, `svd`, `svd joint`, and `bge`.
 //!
 //! Two distinct things share the word "refinement", so the CLI keeps them on
 //! separate prefixes:
@@ -206,12 +206,7 @@ impl PbFromArgs {
 
 /// Settings that write something out but do not change how cells are
 /// partitioned, by their recorded (snake_case) names.
-pub(crate) const OUTPUT_ONLY: &[&str] = &[
-    "emit_pb_reference",
-    "no_emit_pb_reference",
-    "qc_report",
-    "qc_histogram",
-];
+pub(crate) const OUTPUT_ONLY: &[&str] = &["no_emit_pb_reference", "qc_report", "qc_histogram"];
 
 /// Settings, by recorded (snake_case) name, outside the collapse, QC and HVG
 /// groups that change the cells' sketch: multiome load, and the masked
@@ -418,22 +413,8 @@ pub(crate) struct CollapseArgs {
     )]
     pub(crate) iter_opt: usize,
 
-    /// Explicit form of the default. Kept so existing scripts parse, and so
-    /// `reject_pb_reference` can tell "the user asked for this" from "the
-    /// default is on": the former is worth an error on a family that cannot
-    /// use it, the latter is not.
     #[arg(
         long,
-        hide = true,
-        help = "Carry this run's pseudobulks forward (already the default)",
-        long_help = "Already the default. Passing it makes a family that cannot carry\n\
-                     pseudobulks refuse instead of silently writing nothing."
-    )]
-    pub(crate) emit_pb_reference: bool,
-
-    #[arg(
-        long,
-        conflicts_with = "emit_pb_reference",
         help = "Do NOT carry this run's pseudobulks forward",
         long_help = "By default a run writes {out}.pb_reference.zarr.zip, one column per\n\
                      pseudobulk holding its batch-adjusted per-cell rate, plus a\n\
@@ -503,7 +484,7 @@ impl CollapseArgs {
 /// landed inside the spread between two runs of the same configuration. There
 /// is no measured reason to prefer one, so nothing changes for an ordinary fit.
 ///
-/// **`senna update --use-pb-reference` is not an ordinary fit.** There the
+/// **`senna update` on carried pseudobulks is not an ordinary fit.** There the
 /// backend holds the parent's carried pseudobulks — per-cell **rates** — beside
 /// the new cohort's real cell **counts**. A trend fitted across that mixture is
 /// fitted on two incompatible units: averaging already removed the Poisson
@@ -514,7 +495,7 @@ impl CollapseArgs {
 /// holds columns that are summaries, not cells", which the loader records as
 /// [`SparseIoVec::has_column_multiplicity`] when it registers the carried
 /// columns' weights. Keying on that keeps the choice correct for any future
-/// producer of weighted columns (bulk samples), not just `--use-pb-reference`.
+/// producer of weighted columns (bulk samples), not just a carried reference.
 ///
 /// Measured against the exact re-collapse (900-cell parent absorbing 400
 /// cells), on Spearman ρ of the induced gene ranking:
@@ -571,32 +552,16 @@ impl CollapseArgs {
         !self.no_emit_pb_reference
     }
 
-    /// Refuse an EXPLICIT `--emit-pb-reference` on a family that would ignore it.
-    ///
-    /// The flag rides on this shared struct, so it appears on every command
-    /// that flattens `CollapseArgs` — including `joint-topic` and `joint-svd`,
-    /// which `senna update` cannot continue and which therefore write nothing.
-    /// Accepting an explicit request there and silently doing nothing is the
-    /// worst option: the user believes the reference exists and only finds out
-    /// a round later. The default is not a request, so it is not an error.
-    ///
-    pub(crate) fn reject_pb_reference(
+    /// Refuse `--mixture-batch` on a family whose collapse path does not carry
+    /// the bulk role (`joint-topic`, `joint-svd`).
+    pub(crate) fn reject_mixture_batch(
         &self,
         kind: senna::run_manifest::RunKind,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.mixture_batch.is_none(),
             "--mixture-batch has no effect on `{kind}`: its collapse path does not carry the \
-             bulk role. Supported: topic, masked-topic, masked-sbp, masked-vae, vae, svd, bge."
-        );
-        // Only an EXPLICIT `--emit-pb-reference` is an error here. The default
-        // is on everywhere, and a default cannot be a user mistake: these
-        // families simply write nothing.
-        anyhow::ensure!(
-            !self.emit_pb_reference,
-            "--emit-pb-reference has no effect on `{kind}`: `senna update` cannot continue a \
-             '{kind}' run, so the carried pseudobulks would have no consumer. Supported: topic, \
-             masked-topic, masked-sbp, masked-vae, vae, svd, bge."
+             bulk role"
         );
         Ok(())
     }

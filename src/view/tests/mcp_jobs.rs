@@ -11,7 +11,7 @@ fn a_command_line_is_built_flag_by_flag_and_skips_what_is_not_given() {
         .each("-b", &["b1.txt".into(), "b2.txt".into()])
         .many("--null-from", &["t1.zarr".into(), "t2.zarr".into()])
         .switch("--decoder-only", false)
-        .switch("--counterfactual", true)
+        .switch("--preload-data", true)
         .rest(&["--seed".into(), "3".into()]);
     assert_eq!(
         argv,
@@ -28,7 +28,7 @@ fn a_command_line_is_built_flag_by_flag_and_skips_what_is_not_given() {
             "--null-from",
             "t1.zarr",
             "t2.zarr",
-            "--counterfactual",
+            "--preload-data",
             "--seed",
             "3"
         ]

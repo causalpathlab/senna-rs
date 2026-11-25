@@ -256,7 +256,7 @@ pub(crate) mod test_support {
             types.push(ty.into());
         }
         mat.to_parquet_with_names(
-            &format!("{out}.feature_embedding.parquet"),
+            &format!("{out}{}", senna::run_manifest::RHO_TABLE_SUFFIX),
             (Some(&names), Some("gene")),
             Some(&t.cols),
         )

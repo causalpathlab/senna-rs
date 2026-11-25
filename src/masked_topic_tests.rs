@@ -72,55 +72,11 @@ mod no_kl {
 mod window_free {
     use super::{Cli, MaskedTopicArgs};
     use clap::Parser;
-    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
 
     fn parse(extra: &[&str]) -> MaskedTopicArgs {
         let mut argv = vec!["senna-masked-vae", "d.zarr", "-o", "out"];
         argv.extend_from_slice(extra);
         Cli::try_parse_from(argv).expect("parses").args
-    }
-
-    /// An old run manifest still carries `context_size`, and `senna update` has
-    /// to be able to replay it. The value no longer applies; the record must
-    /// still deserialise.
-    #[test]
-    fn a_fit_recorded_with_a_context_size_still_replays() {
-        let mut m = RunManifest::new(RunKind::MaskedVae, "old");
-        m.train_args = Some(TrainArgsRecord {
-            senna_version: "0.15.5".into(),
-            args: serde_json::json!({
-                "data_files": ["d.zarr"], "out": "old",
-                "context_size": 1000, "n_latent_topics": 9
-            }),
-        });
-        let a: MaskedTopicArgs = m
-            .train_args_as("old")
-            .expect("a recorded context_size still parses");
-        assert_eq!(a.n_latent_topics, 9);
-        assert_eq!(
-            a.recorded_context_size(),
-            Some(1000),
-            "the recorded window must survive the read so the run can say it no longer applies"
-        );
-    }
-
-    /// Gene modules pool a cell by membership over its CONTEXT SLOTS. With no
-    /// context there are no slots, so the branch has no dense counterpart —
-    /// refuse at argument validation rather than at the first forward.
-    #[test]
-    fn gene_modules_are_refused_and_the_message_names_both_ideas() {
-        let args = parse(&["--gene-modules", "64"]);
-        let msg = args
-            .validate()
-            .expect_err("modules and the window-free encoder do not compose")
-            .to_string();
-        for needle in ["--gene-modules", "context"] {
-            assert!(
-                msg.contains(needle),
-                "the message must name {needle}; got: {msg}"
-            );
-        }
-        assert!(parse(&["--gene-modules", "0"]).validate().is_ok());
     }
 
     /// Nothing is refused once the query head is unwired.
@@ -285,16 +241,7 @@ fn masked_topic_anchors_rho_with_a_low_rank_residual_and_folds_it_before_saving(
     let data = planted_zarr(dir.path());
     let first = dir.path().join("first").to_string_lossy().into_owned();
     let second = dir.path().join("second").to_string_lossy().into_owned();
-    let common = [
-        "-t",
-        "3",
-        "-i",
-        "3",
-        "--gene-modules",
-        "0",
-        "--minibatch-size",
-        "50",
-    ];
+    let common = ["-t", "3", "-i", "3", "--minibatch-size", "50"];
     let mut argv = vec![data.as_str(), "-o", &first, "--embedding-dim", "8"];
     argv.extend_from_slice(&common);
     fit_masked_topic_model(&parse_masked(&argv)).unwrap();
@@ -354,16 +301,7 @@ fn a_lora_rank_as_wide_as_the_table_is_taken() {
     let data = planted_zarr(dir.path());
     let first = dir.path().join("first").to_string_lossy().into_owned();
     let second = dir.path().join("second").to_string_lossy().into_owned();
-    let common = [
-        "-t",
-        "3",
-        "-i",
-        "1",
-        "--gene-modules",
-        "0",
-        "--minibatch-size",
-        "50",
-    ];
+    let common = ["-t", "3", "-i", "1", "--minibatch-size", "50"];
     let mut argv = vec![data.as_str(), "-o", &first, "--embedding-dim", "4"];
     argv.extend_from_slice(&common);
     fit_masked_topic_model(&parse_masked(&argv)).unwrap();
@@ -394,16 +332,7 @@ fn masked_topic_carries_the_unmatched_rows_of_a_pinned_table_through() {
     let first = dir.path().join("first").to_string_lossy().into_owned();
     let plus = dir.path().join("plus").to_string_lossy().into_owned();
     let second = dir.path().join("second").to_string_lossy().into_owned();
-    let common = [
-        "-t",
-        "3",
-        "-i",
-        "2",
-        "--gene-modules",
-        "0",
-        "--minibatch-size",
-        "50",
-    ];
+    let common = ["-t", "3", "-i", "2", "--minibatch-size", "50"];
     let mut argv = vec![data.as_str(), "-o", &first, "--embedding-dim", "8"];
     argv.extend_from_slice(&common);
     fit_masked_topic_model(&parse_masked(&argv)).unwrap();

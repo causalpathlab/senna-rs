@@ -113,7 +113,7 @@ fn build_data_flags() -> std::collections::HashSet<String> {
     let mut c = Command::new("data");
     c = crate::refine_weighting::CollapseArgs::augment_args(c);
     c = crate::refine_weighting::PbFromArgs::augment_args(c);
-    c = crate::hvg::HvgCliArgs::augment_args(c);
+    c = data_beans::alg::hvg::HvgCliArgs::augment_args(c);
     c = senna::embed_common::QcArgs::augment_args(c);
     c.get_arguments()
         .filter_map(|a| a.get_long().map(str::to_string))

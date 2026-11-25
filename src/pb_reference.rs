@@ -43,23 +43,10 @@ use serde::{Deserialize, Serialize};
 /// Suffixes under the run's `--out` prefix.
 pub const BACKEND_SUFFIX: &str = "pb_reference.zarr.zip";
 pub const SIDECAR_SUFFIX: &str = "pb_reference.json";
-/// What runs before the archive convention wrote: an unzipped directory.
-const LEGACY_BACKEND_SUFFIX: &str = "pb_reference.zarr";
 
 #[must_use]
 pub fn backend_path(prefix: &str) -> String {
     format!("{prefix}.{BACKEND_SUFFIX}")
-}
-
-/// The reference a parent actually has on disk: the `.zarr.zip` archive, or
-/// the unzipped `.zarr` directory an older binary left, or `None`.
-fn existing_backend_path(prefix: &str) -> Option<String> {
-    [
-        backend_path(prefix),
-        format!("{prefix}.{LEGACY_BACKEND_SUFFIX}"),
-    ]
-    .into_iter()
-    .find(|p| std::path::Path::new(p).exists())
 }
 
 #[must_use]
@@ -280,8 +267,6 @@ pub fn write(
         100.0 * density
     );
 
-    // An older binary's unzipped directory would sit stale beside the archive.
-    remove_file(&format!("{prefix}.{LEGACY_BACKEND_SUFFIX}"))?;
     let path = write_backend(
         &backend_path(prefix),
         Entries::Triplets(triplets),
@@ -330,7 +315,7 @@ pub fn write(
 /// fresh fit or an exact re-collapse) — its column count identifies the
 /// carried tail so [`write()`] can pass those columns through instead of
 /// re-summarizing them. It is deliberately separate from `parent`: an update
-/// without `--use-pb-reference` has a parent (for the generation counter) but
+/// that re-collapses from cells has a parent (for the generation counter) but
 /// no carried tail.
 #[allow(clippy::too_many_arguments)] // one slot per provenance source, each documented above
 pub fn emit_if_requested(
@@ -494,12 +479,11 @@ pub fn prepare(parent: &str, out: &str) -> anyhow::Result<Option<ReferenceInput>
     let Some(meta) = read_meta(parent)? else {
         return Ok(None);
     };
-    let backend = existing_backend_path(parent).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{parent} records carried pseudobulks but {} is missing",
-            backend_path(parent)
-        )
-    })?;
+    let backend = backend_path(parent);
+    anyhow::ensure!(
+        std::path::Path::new(&backend).exists(),
+        "{parent} records carried pseudobulks but {backend} is missing"
+    );
 
     // The loader takes batch labels as a file, one line per column.
     let batch_file = format!("{out}.pb_reference_batch.txt");

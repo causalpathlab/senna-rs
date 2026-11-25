@@ -153,22 +153,8 @@ pub struct UpdateArgs {
     )]
     epochs: Option<usize>,
 
-    /// Explicit form of the default. Kept so existing scripts parse, and so a
-    /// request the update cannot honour is an error rather than a fallback.
     #[arg(
         long,
-        hide = true,
-        requires = "data_files",
-        help = "Reuse the parent's carried pseudobulks (already the default)",
-        long_help = "Already the default. Passing it turns every case where the\n\
-                     substitution is impossible into an error instead of a\n\
-                     re-collapse."
-    )]
-    use_pb_reference: bool,
-
-    #[arg(
-        long,
-        conflicts_with = "use_pb_reference",
         help = "Re-collapse the whole cohort from cells, ignoring any carried pseudobulks",
         long_help = "By default an update substitutes the parent's carried pseudobulks\n\
                      for its cells, so it costs the NEW data only: absorbing S\n\
@@ -224,7 +210,7 @@ pub struct UpdateArgs {
 impl UpdateArgs {
     /// No new data: the parent continues on its own cells. What a round may
     /// and may not set is clap's: `--pb-from` and `--peer-labels` conflict
-    /// with new data, `--batch-files` and `--use-pb-reference` require it.
+    /// with new data, `--batch-files` requires it.
     pub(crate) fn is_round(&self) -> bool {
         self.data_files.is_empty()
     }
@@ -329,9 +315,7 @@ fn union_batches(
 /// whose files load in positional column order (a multiome parent's union
 /// alignment cannot keep the carried columns contiguous, and their weights
 /// apply by position). Any of those missing falls back to the exact
-/// re-collapse, said out loud. An EXPLICIT `--use-pb-reference` errors there
-/// instead: the user has said what they want, and a silent downgrade would
-/// cost them a round to notice.
+/// re-collapse, said out loud.
 ///
 /// One case cannot fall back at all. A lineage that already substituted once
 /// records a carried reference among its inputs in place of the cells it
@@ -343,58 +327,55 @@ fn select_reference(
     manifest: &RunManifest,
     recorded: &[Box<str>],
 ) -> anyhow::Result<Option<senna::pb_reference::ReferenceInput>> {
-    let chosen: Result<Option<senna::pb_reference::ReferenceInput>, String> = if args.is_round() {
-        Err(
-            "a round continues on the parent's own cells, and there is nothing to stand \
-             them in for"
-                .into(),
-        )
-    } else if args.no_pb_reference {
-        Err("--no-pb-reference was passed".into())
-    } else if manifest.kind == RunKind::Simba {
-        Err(
-            "a simba run trains on cells, never on pseudobulks, so there is nothing to \
-             substitute"
-                .into(),
-        )
-    } else if multiome_recorded(manifest) {
-        Err(format!(
-            "{} is a multiome run, whose union column alignment cannot keep carried \
-             pseudobulks contiguous",
-            args.model
-        ))
-    } else if args.batch_files.is_none() {
-        Err(format!(
-            "the new data has no --batch-files; the carried pseudobulks are their own batch \
-             and the loader takes one batch file per data file. Passing batch labels lets an \
-             update reuse {}'s carried pseudobulks and cost the new data only",
-            args.model
-        ))
-    } else {
-        // A sidecar whose backend has gone missing, or that fails to
-        // parse, is "nothing to substitute": a moved run directory used to
-        // update fine and must keep doing so.
-        match senna::pb_reference::prepare(&args.model, &args.out) {
-            Ok(Some(r)) => Ok(Some(r)),
-            Ok(None) => Err(format!(
-                "{} carries no pseudobulks (trained with --no-emit-pb-reference, or before \
-                 carrying was the default)",
-                args.model
-            )),
-            Err(e) => Err(format!(
-                "{}'s carried pseudobulks cannot be used: {e}",
-                args.model
-            )),
-        }
-    };
-    let why = match chosen {
-        Ok(r) => return Ok(r),
-        Err(why) => why,
-    };
+    // A round continues on the parent's own cells: there is nothing to stand
+    // them in for.
     if args.is_round() {
         check_round_inputs(recorded)?;
         return Ok(None);
     }
+    let chosen: Result<Option<senna::pb_reference::ReferenceInput>, String> =
+        if args.no_pb_reference {
+            Err("--no-pb-reference was passed".into())
+        } else if manifest.kind == RunKind::Simba {
+            Err(
+                "a simba run trains on cells, never on pseudobulks, so there is nothing to \
+             substitute"
+                    .into(),
+            )
+        } else if multiome_recorded(manifest) {
+            Err(format!(
+                "{} is a multiome run, whose union column alignment cannot keep carried \
+             pseudobulks contiguous",
+                args.model
+            ))
+        } else if args.batch_files.is_none() {
+            Err(format!(
+                "the new data has no --batch-files; the carried pseudobulks are their own batch \
+             and the loader takes one batch file per data file. Passing batch labels lets an \
+             update reuse {}'s carried pseudobulks and cost the new data only",
+                args.model
+            ))
+        } else {
+            // A sidecar whose backend has gone missing, or that fails to
+            // parse, is "nothing to substitute": a moved run directory used to
+            // update fine and must keep doing so.
+            match senna::pb_reference::prepare(&args.model, &args.out) {
+                Ok(Some(r)) => Ok(Some(r)),
+                Ok(None) => Err(format!(
+                    "{} carries no pseudobulks (trained with --no-emit-pb-reference, or before \
+                 carrying was the default)",
+                    args.model
+                )),
+                Err(e) => Err(format!(
+                    "{}'s carried pseudobulks cannot be used: {e}",
+                    args.model
+                )),
+            }
+        };
+    let why = match chosen {
+        Ok(r) => return Ok(r),
+        Err(why) => why,
+    };
     if let Some(path) = carried_reference_among(recorded) {
         anyhow::bail!(
             "{} cannot be re-collapsed from cells ({why}): its inputs hold a carried reference \
@@ -404,7 +385,6 @@ fn select_reference(
             args.model
         );
     }
-    anyhow::ensure!(!args.use_pb_reference, "--use-pb-reference: {why}");
     info!("re-collapsing the whole cohort: {why}");
     Ok(None)
 }
@@ -436,14 +416,11 @@ fn multiome_in_args(args: &serde_json::Value) -> bool {
 /// one: the backend `update` itself appended, recognised by the name the tool
 /// gives it.
 fn carried_reference_among(recorded: &[Box<str>]) -> Option<&str> {
-    // Either the `.zarr.zip` archive or the unzipped `.zarr` directory an
-    // older binary wrote; the archive suffix extends the directory one.
     let suffix = format!(".{}", senna::pb_reference::BACKEND_SUFFIX);
-    let legacy = suffix.trim_end_matches(".zip");
     recorded
         .iter()
         .map(AsRef::as_ref)
-        .find(|p: &&str| p.ends_with(&suffix) || p.ends_with(legacy))
+        .find(|p: &&str| p.ends_with(&suffix))
 }
 
 pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {

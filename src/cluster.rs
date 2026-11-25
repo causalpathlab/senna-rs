@@ -64,6 +64,20 @@ impl ClusterResult {
         counts
     }
 
+    /// Log the cluster count and the min / median / max cluster size.
+    fn log_sizes(&self, method: &str) {
+        let mut sizes = self.cluster_sizes();
+        sizes.sort_unstable();
+        let (min, max) = (sizes.first(), sizes.last());
+        info!(
+            "{method} done: {} clusters, cluster sizes min={} max={} median={}",
+            self.n_clusters,
+            min.copied().unwrap_or(0),
+            max.copied().unwrap_or(0),
+            sizes.get(sizes.len() / 2).copied().unwrap_or(0)
+        );
+    }
+
     /// Remove clusters smaller than `min_size`.
     ///
     /// Cells in removed clusters get label `usize::MAX` (written as NaN in output).
@@ -177,10 +191,7 @@ pub fn kmeans_clustering(latent: &Mat, k: usize, max_iter: usize) -> anyhow::Res
         n_clusters: k,
     };
 
-    let sizes = result.cluster_sizes();
-    let min_size = sizes.iter().copied().min().unwrap_or(0);
-    let max_size = sizes.iter().copied().max().unwrap_or(0);
-    info!("K-means done: {k} clusters, cluster sizes min={min_size} max={max_size}");
+    result.log_sizes("K-means");
 
     Ok(result)
 }
@@ -200,33 +211,12 @@ pub enum LatentMetric {
     Cosine,
 }
 
-/// Run Leiden community detection on latent representation (cells × features)
+/// Run Leiden community detection on latent representation (cells × features),
+/// with `metric` the latent-space metric used by the kNN graph.
 ///
 /// * `target_clusters` - if Some, binary-search resolution to approximate this count
 /// * `resolution` - starting (or fixed) resolution for CPM
-///
-/// Back-compat shim: uses `LatentMetric::ZScoreEuclidean`. New callers
-/// that care about the metric should use [`leiden_clustering_with_metric`].
 pub fn leiden_clustering(
-    latent: &Mat,
-    knn: usize,
-    resolution: f64,
-    target_clusters: Option<usize>,
-    seed: Option<u64>,
-) -> anyhow::Result<ClusterResult> {
-    leiden_clustering_with_metric(
-        latent,
-        knn,
-        resolution,
-        target_clusters,
-        seed,
-        LatentMetric::ZScoreEuclidean,
-    )
-}
-
-/// Same as [`leiden_clustering`] but lets the caller pick the latent-space
-/// metric used by the kNN graph.
-pub fn leiden_clustering_with_metric(
     latent: &Mat,
     knn: usize,
     resolution: f64,
@@ -252,20 +242,7 @@ pub fn leiden_clustering_with_metric(
         n_clusters,
     };
 
-    let sizes = result.cluster_sizes();
-    let min_size = sizes.iter().copied().min().unwrap_or(0);
-    let max_size = sizes.iter().copied().max().unwrap_or(0);
-    info!(
-        "Leiden done: {} clusters, cluster sizes min={} max={} median={}",
-        result.n_clusters,
-        min_size,
-        max_size,
-        {
-            let mut s = sizes.clone();
-            s.sort_unstable();
-            s[s.len() / 2]
-        }
-    );
+    result.log_sizes("Leiden");
 
     Ok(result)
 }
@@ -351,20 +328,7 @@ pub fn hsblock_clustering(
         labels,
     };
 
-    let sizes = result.cluster_sizes();
-    let min_size = sizes.iter().copied().min().unwrap_or(0);
-    let max_size = sizes.iter().copied().max().unwrap_or(0);
-    info!(
-        "HSBM done: {} clusters, cluster sizes min={} max={} median={}",
-        result.n_clusters,
-        min_size,
-        max_size,
-        {
-            let mut s = sizes.clone();
-            s.sort_unstable();
-            s[s.len() / 2]
-        }
-    );
+    result.log_sizes("HSBM");
 
     Ok(result)
 }
@@ -407,7 +371,15 @@ mod tests {
     #[test]
     fn test_leiden_valid_output() {
         let latent = three_cluster_latent();
-        let result = leiden_clustering(&latent, TEST_KNN, 1.0, None, Some(0)).unwrap();
+        let result = leiden_clustering(
+            &latent,
+            TEST_KNN,
+            1.0,
+            None,
+            Some(0),
+            LatentMetric::ZScoreEuclidean,
+        )
+        .unwrap();
 
         assert_eq!(result.labels.len(), TEST_N);
         assert!(result.n_clusters > 0);
@@ -422,7 +394,15 @@ mod tests {
     #[test]
     fn test_leiden_no_cross_cluster_labels() {
         let latent = three_cluster_latent();
-        let result = leiden_clustering(&latent, TEST_KNN, 1.0, None, Some(0)).unwrap();
+        let result = leiden_clustering(
+            &latent,
+            TEST_KNN,
+            1.0,
+            None,
+            Some(0),
+            LatentMetric::ZScoreEuclidean,
+        )
+        .unwrap();
 
         // Each ground-truth group should NOT share labels with other groups.
         // Collect the set of labels for each ground-truth group.
@@ -453,7 +433,15 @@ mod tests {
     #[test]
     fn test_leiden_reasonable_output_with_seed() {
         let latent = three_cluster_latent();
-        let r1 = leiden_clustering(&latent, TEST_KNN, 1.0, None, Some(123)).unwrap();
+        let r1 = leiden_clustering(
+            &latent,
+            TEST_KNN,
+            1.0,
+            None,
+            Some(123),
+            LatentMetric::ZScoreEuclidean,
+        )
+        .unwrap();
 
         // HNSW parallel_insert is non-deterministic, so exact label
         // reproducibility is not guaranteed. Check structure instead.
@@ -474,9 +462,25 @@ mod tests {
         let latent = three_cluster_latent();
 
         // Very low resolution → fewer clusters (tends toward 1 big cluster)
-        let low_res = leiden_clustering(&latent, TEST_KNN, 0.1, None, Some(0)).unwrap();
+        let low_res = leiden_clustering(
+            &latent,
+            TEST_KNN,
+            0.1,
+            None,
+            Some(0),
+            LatentMetric::ZScoreEuclidean,
+        )
+        .unwrap();
         // Very high resolution → more clusters (tends toward singletons)
-        let high_res = leiden_clustering(&latent, TEST_KNN, 5.0, None, Some(0)).unwrap();
+        let high_res = leiden_clustering(
+            &latent,
+            TEST_KNN,
+            5.0,
+            None,
+            Some(0),
+            LatentMetric::ZScoreEuclidean,
+        )
+        .unwrap();
 
         assert!(
             low_res.n_clusters <= high_res.n_clusters,
@@ -516,15 +520,8 @@ mod tests {
             }
         }
 
-        let result = leiden_clustering_with_metric(
-            &latent,
-            TEST_KNN,
-            1.0,
-            None,
-            Some(0),
-            LatentMetric::Cosine,
-        )
-        .unwrap();
+        let result =
+            leiden_clustering(&latent, TEST_KNN, 1.0, None, Some(0), LatentMetric::Cosine).unwrap();
 
         // Per-direction label sets must be disjoint when metric is angular.
         let mut group_labels: Vec<rustc_hash::FxHashSet<usize>> = Vec::new();
@@ -549,14 +546,22 @@ mod tests {
     #[test]
     fn test_leiden_too_few_cells() {
         let latent = Mat::from_row_slice(1, 2, &[1.0, 2.0]);
-        let result = leiden_clustering(&latent, 5, 1.0, None, None);
+        let result = leiden_clustering(&latent, 5, 1.0, None, None, LatentMetric::ZScoreEuclidean);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_leiden_cluster_sizes_sum() {
         let latent = three_cluster_latent();
-        let result = leiden_clustering(&latent, TEST_KNN, 1.0, None, Some(0)).unwrap();
+        let result = leiden_clustering(
+            &latent,
+            TEST_KNN,
+            1.0,
+            None,
+            Some(0),
+            LatentMetric::ZScoreEuclidean,
+        )
+        .unwrap();
 
         let sizes = result.cluster_sizes();
         let total: usize = sizes.iter().sum();
@@ -568,7 +573,15 @@ mod tests {
         let latent = three_cluster_latent();
         let target_k = TEST_N_GROUPS; // 3
 
-        let result = leiden_clustering(&latent, TEST_KNN, 0.1, Some(target_k), Some(42)).unwrap();
+        let result = leiden_clustering(
+            &latent,
+            TEST_KNN,
+            0.1,
+            Some(target_k),
+            Some(42),
+            LatentMetric::ZScoreEuclidean,
+        )
+        .unwrap();
 
         assert_eq!(
             result.n_clusters, target_k,
@@ -592,7 +605,15 @@ mod tests {
         let latent = three_cluster_latent();
         let target_k = 6;
 
-        let result = leiden_clustering(&latent, TEST_KNN, 0.5, Some(target_k), Some(42)).unwrap();
+        let result = leiden_clustering(
+            &latent,
+            TEST_KNN,
+            0.5,
+            Some(target_k),
+            Some(42),
+            LatentMetric::ZScoreEuclidean,
+        )
+        .unwrap();
 
         // May not hit exactly 6, but should be close
         let diff = (result.n_clusters as isize - target_k as isize).unsigned_abs();

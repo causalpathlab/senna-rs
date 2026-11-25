@@ -18,9 +18,7 @@
 
 use crate::predict::{score_masked_backend, MaskedScoreArgs, MaskedScored};
 use crate::topic::eval::QueryNameOpts;
-use crate::topic::model_metadata::{
-    load_feature_mean, load_shortlist_weights, masked_head_from_model_type, TopicModelMetadata,
-};
+use crate::topic::model_metadata::{masked_head_from_model_type, TopicModelMetadata};
 use legume_numeric::candle::candle_core::Device;
 use legume_numeric::candle::vae::masked_topic::LatentHead;
 
@@ -43,14 +41,6 @@ pub const REQUIRED: &[&str] = &[
     "feature_embedding.parquet",
     "feature_mean.parquet",
 ];
-
-/// Required IN ADDITION, and only for a model that recorded a context window.
-///
-/// Those weights ranked the top-K such an encoder read, so the model cannot be
-/// scored without them. Nothing this build trains has a window, and nothing
-/// writes the file — requiring it unconditionally would make every new model
-/// unopenable.
-pub const REQUIRED_WINDOWED: &[&str] = &["shortlist_weights.parquet"];
 
 /// Assert `{prefix}.{suffix}` exists for every required suffix, naming all the missing
 /// ones at once.
@@ -81,10 +71,6 @@ pub struct MaskedModel<'a> {
     pub prefix: &'a str,
     pub metadata: TopicModelMetadata,
     pub head: LatentHead,
-    pub feature_mean: Vec<f32>,
-    /// The shortlist an OLD model was fitted with; `None` for a window-free
-    /// model, which has nothing to rank.
-    pub shortlist: Option<Vec<f32>>,
 }
 
 impl<'a> MaskedModel<'a> {
@@ -100,25 +86,11 @@ impl<'a> MaskedModel<'a> {
                 metadata.model_type
             )
         })?;
-        let (_gene_names, feature_mean) = load_feature_mean(prefix)?;
-        let shortlist = match metadata.enc_context_size {
-            None => None,
-            Some(_) => {
-                require_files(
-                    prefix,
-                    REQUIRED_WINDOWED,
-                    "masked model with a context window",
-                )?;
-                Some(load_shortlist_weights(prefix)?.1)
-            }
-        };
 
         Ok(Self {
             prefix,
             metadata,
             head,
-            feature_mean,
-            shortlist,
         })
     }
 
@@ -166,7 +138,7 @@ mod tests {
     /// Write just enough of a masked model for [`MaskedModel::open`] to get as
     /// far as the file check: a real `model.json` and a real
     /// `feature_mean.parquet`, the rest present but empty.
-    fn skeleton(prefix: &str, enc_context_size: Option<usize>, with_shortlist: bool) {
+    fn skeleton(prefix: &str) {
         let genes: Vec<Box<str>> = (0..4).map(|i| format!("G{i}").into()).collect();
         let m = TopicModelMetadata {
             model_type: crate::topic::model_metadata::MODEL_TYPE_MASKED_VAE.into(),
@@ -182,10 +154,10 @@ mod tests {
             batch_null_in_training: false,
             has_coarsening: false,
             embedding_dim: Some(4),
-            enc_context_size,
             theta_mean: None,
             n_train_cells: None,
             n_gene_modules: None,
+            enc_context_size: None,
             query_rank: None,
         };
         m.save(prefix).unwrap();
@@ -198,51 +170,15 @@ mod tests {
         ] {
             std::fs::write(format!("{prefix}.{suffix}"), b"").unwrap();
         }
-        if with_shortlist {
-            use legume_numeric::matrix::traits::IoOps;
-            let cols: Vec<Box<str>> = vec!["weight".into()];
-            nalgebra::DMatrix::<f32>::from_column_slice(4, 1, &[1.0, 1.0, 1.0, 1.0])
-                .to_parquet_with_names(
-                    &format!("{prefix}.shortlist_weights.parquet"),
-                    (Some(&genes), Some("gene")),
-                    Some(&cols),
-                )
-                .unwrap();
-        }
     }
 
-    /// A window-free model has no shortlist: nothing ranked a context window,
-    /// because there is none. Requiring the file would make every model this
-    /// build writes unopenable by `predict` and `probe`.
+    /// A model with every required file opens.
     #[test]
-    fn a_window_free_model_needs_no_shortlist_weights() {
+    fn a_complete_model_opens() {
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("dense").to_string_lossy().into_owned();
-        skeleton(&prefix, None, false);
-        let m = MaskedModel::open(&prefix).expect("a window-free model is complete without it");
-        assert!(m.shortlist.is_none(), "no window, no shortlist");
-        assert!(m.metadata.enc_context_size.is_none());
-    }
-
-    /// An OLD model still needs its shortlist: the window it recorded is scored
-    /// by those weights, and reading it without them would be a different model.
-    #[test]
-    fn a_windowed_model_still_requires_its_shortlist_weights() {
-        let dir = tempfile::tempdir().unwrap();
-        let prefix = dir.path().join("windowed").to_string_lossy().into_owned();
-        skeleton(&prefix, Some(512), false);
-        let msg = match MaskedModel::open(&prefix) {
-            Ok(_) => panic!("a windowed model without its weights is incomplete"),
-            Err(e) => e.to_string(),
-        };
-        assert!(
-            msg.contains("shortlist_weights.parquet"),
-            "the error must name the missing file; got: {msg}"
-        );
-
-        skeleton(&prefix, Some(512), true);
-        let m = MaskedModel::open(&prefix).expect("with the weights it opens");
-        assert_eq!(m.shortlist.as_deref().map(<[f32]>::len), Some(4));
+        skeleton(&prefix);
+        MaskedModel::open(&prefix).expect("a model with every required file is complete");
     }
 
     #[test]
@@ -251,7 +187,7 @@ mod tests {
         let prefix = dir.path().join("nothing_here");
         let prefix = prefix.to_str().expect("utf8");
 
-        // `MaskedModel` is not `Debug` (it carries the whole gene axis), so match on the
+        // `MaskedModel` is not `Debug`, so match on the
         // Result rather than `expect_err`.
         let msg = match MaskedModel::open(prefix) {
             Ok(_) => panic!("an empty prefix is not a model"),
