@@ -422,3 +422,75 @@ fn the_run_s_own_totals_are_read_on_the_side() {
         .unwrap();
     assert_eq!(total.values, [4f32.ln_1p(), 2f32.ln_1p()]);
 }
+
+#[test]
+fn a_statistic_over_matching_rows_per_the_run_s_own_umis() {
+    use crate::view::CellStat;
+    use senna::sparse_output::{write_backend, Entries};
+    let dir = tempfile::tempdir().unwrap();
+    let cells = boxed(&["c0@lib", "c1@lib", "c2@lib", "c3@lib"]);
+    // The run's own counts: 4, 2 and 6 UMIs in c0, c1, c2; no c3.
+    let run_path = dir.path().join("run.zarr.zip");
+    counts_file(&run_path, &["c0@lib", "c1@lib", "c2@lib"]);
+    let mut loads = RunLoads::none();
+    loads.files = Arc::new(RunFiles::ready(Ok(RunRead {
+        observed: read_extra(&[run_path], &cells).unwrap().observed,
+        batches: None,
+    })));
+    loads.totals = totals_of(&loads.files);
+    // Sites, methylated or not, by barcode.
+    let sites = dir.path().join("sites.zarr.zip");
+    write_backend(
+        sites.to_str().unwrap(),
+        Entries::Triplets(vec![
+            (0, 0, 2.0),
+            (1, 0, 1.0),
+            (0, 1, 1.0),
+            (2, 1, 1.0),
+            (3, 1, 5.0),
+            (3, 2, 3.0),
+        ]),
+        &boxed(&[
+            "s1/methylated",
+            "s1/unmethylated",
+            "s2/methylated",
+            "s2/unmethylated",
+        ]),
+        &boxed(&["c0", "c1", "c2"]),
+    )
+    .unwrap();
+    let mut a = Activity::new(
+        RunManifest::new(senna::run_manifest::RunKind::Svd, "r"),
+        dir.path().to_path_buf(),
+        loads,
+        true,
+    );
+    a.set_extra(Arc::new(ExtraFiles::ready(
+        read_extra(&[sites], &cells).map_err(|e| e.to_string()),
+    )));
+    let stat =
+        |rows: Option<&str>, per| Stat::Rows(RowStat::new(CellStat::Detected, rows, per).unwrap());
+    let levels = |a: &mut Activity, s: &Stat| {
+        a.stat_levels(s, &[], Source::Extra, 0, &cells)
+            .unwrap()
+            .values
+    };
+    // Every row counts both of a site's rows; the pattern only methylated.
+    let all = a
+        .stat_levels(&Stat::Detected, &[], Source::Extra, 0, &cells)
+        .unwrap();
+    assert_eq!(&all.values[..3], &[2.0, 3.0, 1.0]);
+    let methylated = levels(&mut a, &stat(Some("/methylated$"), None));
+    assert_eq!(&methylated[..3], &[1.0, 2.0, 0.0]);
+    let per_1k = stat(Some("/methylated$"), Some(1000));
+    let rate = levels(&mut a, &per_1k);
+    assert_eq!(&rate[..3], &[250.0, 1000.0, 0.0]);
+    assert!(rate[3].is_nan());
+    assert_eq!(
+        per_1k.name(),
+        "features detected matching /methylated$ per 1k run UMIs"
+    );
+    assert!(RowStat::new(CellStat::Total, Some("("), None).is_err());
+    let none = Stat::Rows(RowStat::new(CellStat::Total, Some("^nothing$"), None).unwrap());
+    assert!(a.stat_levels(&none, &[], Source::Extra, 0, &cells).is_err());
+}

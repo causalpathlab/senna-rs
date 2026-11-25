@@ -18,6 +18,7 @@
 //! command line: a run tool takes its own arguments by name and every
 //! other flag in `flags`.
 
+mod cell_colour;
 mod fit;
 mod flags;
 mod jobs;
@@ -79,7 +80,7 @@ differentiated), write the root type's cells with `view_cells`, and `run_fit` \
 ode with flag root-cells set to that list and a new out. An ODE grown from a \
 root says so in its result's `root`: the cells and what they are, by the \
 groups `view_cells` wrote them from or by a lupin round of the run; a named \
-root a start with none beat is said to be unused. A \
+root is grown from unless no tree can be, then said to be unused, with why. A \
 `needs_input` from an ODE labels its options by lupin's types only when the \
 run has a round. A run tool's call that carries a choice (a root, a setting \
 the user picked) says why with `why`, `by` (user, agent or agent_accepted) \

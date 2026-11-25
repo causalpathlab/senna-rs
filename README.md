@@ -109,7 +109,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 > ode with flag root-cells set to that list and a new out. An ODE grown from a
 > root says so in its result's `root`: the cells and what they are, by the
 > groups `view_cells` wrote them from or by a lupin round of the run; a named
-> root a start with none beat is said to be unused. A
+> root is grown from unless no tree can be, then said to be unused, with why. A
 > `needs_input` from an ODE labels its options by lupin's types only when the
 > run has a round. A run tool's call that carries a choice (a root, a setting
 > the user picked) says why with `why`, `by` (user, agent or agent_accepted)
@@ -130,7 +130,7 @@ put this in the agent's own instructions (an `AGENTS.md`, a system prompt):
 | `run_layout` | a run laid out again with the settings given (`senna layout <method> --from <run> <flags>`, the flags as a `flags` map), replacing that method's layout; umap takes `umap-min-dist` and `umap-spread` as umap-learn's min_dist and spread, checked before it runs; `view_open` then shows it |
 | `run_step` | one of the other analysis commands: `clustering` and `resolve-embedding-space` on a run, `joint-topic`, `joint-svd` and `fne` on data files; returns what it made |
 | `view_open` | opens a run or a lupin round: its maps, groupings and the groups shown, a missing layout or clustering computed first |
-| `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, the run's time or velocity field, window and zoom |
+| `view_map` | the map as a PNG with its state and legend: layout, points, grouping, focus, a feature's level, the run's time or velocity field, window and zoom; the cells coloured by a number each: `cell_stat` (`{"stat": "detected", "rows": "/methylated$", "per_run_umi": 1000}`: features matching a case-insensitive pattern detected per 1k of the cell's UMIs in the run's own counts) of the counts or of `extra` data files matched by barcode, or `values` (`{"file", "column"}`) from a table, unmatched cells grey; `senna view` takes the same as `--extra`, `--cell-stat`, `--rows`, `--per-run-umi` and `--values FILE[:COLUMN]` |
 | `view_markers` | the features that set one group apart, by the model's expected fold change, and its markers from the run's table |
 | `view_cell` | the point under a pixel of the last map, at a world point, or by name: its position, groups and time |
 | `view_export` | the view as `.png`/`.pdf` figures, or as a figure panel (inches, points, white or no background, labels on the map or in a legend, the legend alone, groups hidden); never replaces a file unless asked |

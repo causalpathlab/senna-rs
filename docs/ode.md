@@ -81,8 +81,12 @@ left free. Only the invariants are reported: times, rates and levels.
    the root, or the one grown from the root the user names (`--root-cells`,
    cells at the root of the trajectory, one a line: a stem inside the tree
    is no end of it; over MCP, `view_cells` writes such a list of a cell
-   type). On a trunk the tree starts alone run. The best
-   objective wins; a start whose objective is not finite never does.
+   type). On a trunk the tree starts alone run. A named root is the
+   user's, not a candidate: its tree start alone runs, raced by no other,
+   and only when no tree grows from it (one lineage, too few pseudobulks,
+   the graph falling apart, a lineage left empty) or its climb diverges
+   the k-means starts run instead, the root recorded as unused with why. The best objective wins;
+   a start whose objective is not finite never does.
 2. **Genes at the mode**: every pseudobulk sits at its most probable row
    under the mode, and every gene's rates are the mode of its conditional
    there (bounded Newton), reported with the sds of the Laplace
@@ -113,7 +117,7 @@ and a gene's sd reports what the reads pin.
 | `{out}.gene_rates.parquet` | every gene's `log_gamma` and `log_ratio` (log γ/β) at the mode with the sd of its Laplace approximation |
 | `{out}.pb_time.parquet` | every finest pseudobulk's posterior over lineage and time, a row per `(pb, lineage, position)` with its `phase` (the position's share of the lineage's grid, its lineage's own time) and mass `q`; `pb` as `{out}.cell_to_pb.parquet`'s finest level |
 | `{out}.branch_time.tsv` | with `--trunk`, every other lineage's branch time off it at the mode, on `pb_time`'s phase scale |
-| `{out}.root.txt` | when the fit grew from a tree start's root it chose, that root's cells, one a line; the manifest's `outputs.root_cells` names it, or the `--root-cells` list the fit grew from (`outputs.root_cells_unused` when a start with no root beat that list's) |
+| `{out}.root.txt` | when the fit grew from a tree start's root it chose, that root's cells, one a line; the manifest's `outputs.root_cells` names it, or the `--root-cells` list the fit grew from (`outputs.root_cells_unused` when no tree start grew from that list, `outputs.root_cells_unused_why` why) |
 | `{out}.root_{i}.txt` | when roots tie, every root's cells, best first, for the decision the manifest records |
 | `{out}.coarsening.json` | when the genes were grouped, every gene's group |
 | `{out}.senna.json` | the run manifest `senna view` and the MCP tools read |

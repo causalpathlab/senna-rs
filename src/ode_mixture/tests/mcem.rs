@@ -138,3 +138,39 @@ fn from_roots_the_start_finds_the_fates(seeds: std::ops::RangeInclusive<u64>, n_
         "seeds {missed:?}: the start from the root misses a fate"
     );
 }
+
+/// A root the user names is theirs: its tree start alone climbs, raced by
+/// no k-means start; with one lineage no tree grows from it, the k-means
+/// starts run and the climb says why.
+#[test]
+fn a_named_root_is_grown_from_or_said_why_not() {
+    use crate::ode_mixture::init::{climb, Climb, NoTree};
+    let (sim, reads) = fates(2, 1);
+    let mut by_time: Vec<usize> = (0..sim.n_pb).collect();
+    by_time.sort_by(|&a, &b| sim.truth.time[a].total_cmp(&sim.truth.time[b]));
+    let opts = |lineages| Climb {
+        lineages,
+        points: 12,
+        dim: 3,
+        kappa: 1.0,
+        steps: 5,
+        lr: 0.03,
+        sub: 1,
+        jitter: false,
+        trunk: false,
+        roots: by_time[..8].to_vec(),
+    };
+    let dev = legume_numeric::candle::candle_core::Device::Cpu;
+    let grown = climb(&reads, &opts(2), &dev).unwrap();
+    assert_eq!(
+        (grown.roots.len(), grown.root, grown.unrooted),
+        (1, Some(0), None)
+    );
+    let not = climb(&reads, &opts(1), &dev).unwrap();
+    assert_eq!((not.root, not.unrooted), (None, Some(NoTree::OneLineage)));
+    let note = NoTree::OneLineage.note(8, sim.n_pb, true, 1);
+    assert!(
+        note.contains("8 of 600 pseudobulks are mostly root cells"),
+        "{note}"
+    );
+}

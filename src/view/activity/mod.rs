@@ -27,10 +27,13 @@ mod background_loads;
 mod embedding_neighbours;
 mod group_contrasts;
 mod numeric;
+mod row_stats;
 mod sources;
 
 pub(crate) use background_loads::*;
 pub(super) use numeric::*;
+pub use row_stats::RowStat;
+pub(crate) use row_stats::RowSumLoads;
 pub(crate) use sources::*;
 
 /// Per group, a score per feature; and the features, in column order.
@@ -82,6 +85,9 @@ pub enum Stat {
     Detected,
     /// The set's share of the cell's counts.
     Share(Box<str>),
+    /// A total or a count of features over the rows whose names match a
+    /// pattern, or per the run's own totals.
+    Rows(RowStat),
 }
 
 impl Stat {
@@ -91,6 +97,7 @@ impl Stat {
             Stat::Total => "total counts".into(),
             Stat::Detected => "features detected".into(),
             Stat::Share(group) => format!("{group} markers' share of counts"),
+            Stat::Rows(r) => r.name(),
         }
     }
 }
@@ -433,6 +440,9 @@ impl Activity {
                 "{} needs counts: o shows the observed (or extra) counts",
                 stat.name()
             ));
+        }
+        if let Stat::Rows(r) = stat {
+            return self.row_stat_levels(r, source, key, names);
         }
         let rows = self.rows(source, key, names)?;
         // The run's own totals are a pass over its data: on the side.

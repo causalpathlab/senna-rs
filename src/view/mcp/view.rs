@@ -1,6 +1,7 @@
 //! The view tools: one run held open between calls, drawn as the
 //! terminal viewer draws it.
 
+use super::cell_colour;
 use super::jobs::senna;
 use super::stage2::{apply_stage2, check_stage2, donor_of, Stage2Arg};
 use super::view_chart::{apply_chart, ChartArg};
@@ -147,6 +148,9 @@ pub(in crate::view) struct MapArgs {
     center: Option<[f32; 2]>,
     zoom: Option<f32>,
     width: Option<usize>,
+    pub(super) extra: Option<Vec<PathBuf>>,
+    pub(super) cell_stat: Option<cell_colour::CellStatArg>,
+    pub(super) values: Option<cell_colour::ValuesArg>,
 }
 
 /// How the run's velocity field is drawn over the cells, or not.
@@ -279,7 +283,7 @@ impl Open {
         let s = &self.scene;
         let root = &s.data.spaces[s.root()];
         let feature = s.pick.as_ref().and_then(Pick::feature).unwrap_or_default();
-        json!({
+        let mut state = json!({
             "run": self.run,
             "round": s.data.round.as_ref().map(|r| absolute(&r.path)),
             "map": root.method,
@@ -294,7 +298,9 @@ impl Open {
             "chart": ChartArg::of(s),
             "velocity": VelocityArg::from(s.velocity_style),
             "bbox": self.drawn.map(|vp| vp.window()),
-        })
+        });
+        cell_colour::publish(s, &mut state);
+        state
     }
 
     /// What the view shows: map, grouping, focus, feature and legend.
@@ -342,6 +348,7 @@ impl Open {
             "feature": feature,
             "time": s.pick == Some(Pick::Time) && s.current_shown().is_some(),
             "stage2": stage2,
+            "cell_colour": cell_colour::state(s),
             "chart": ChartArg::of(s),
             "velocity": VelocityArg::from(s.velocity_drawn()),
             "legend": legend,
@@ -599,6 +606,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         ensure!(data.times.is_some(), features::NO_TIMES);
     }
     check_stage2(a, s, data)?;
+    let mut cells = cell_colour::check(a, s, data)?;
     if let Some(chart) = a.chart {
         chart.check(data.has_stage2())?;
     }
@@ -629,6 +637,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
     if let Some(focus) = focus {
         scene.focus = focus;
     }
+    cells.open_extra(scene);
     match a.observed {
         Some(true) => scene.source = scene.count_source(),
         Some(false) => scene.source = Source::Expected,
@@ -650,6 +659,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         }
         _ => {}
     }
+    cells.apply(scene);
     apply_stage2(scene, a.stage2, a.donor.as_deref());
     apply_chart(scene, a.chart);
     if let Some(field) = field {
@@ -662,7 +672,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
 }
 
 /// The view_map arguments a published view sets.
-const VIEW_KEYS: [&str; 13] = [
+const VIEW_KEYS: [&str; 16] = [
     "round",
     "map",
     "space",
@@ -676,6 +686,9 @@ const VIEW_KEYS: [&str; 13] = [
     "chart",
     "velocity",
     "bbox",
+    "extra",
+    "cell_stat",
+    "values",
 ];
 
 /// An agent's published view ([`Open::view_state`]): the manifest it
@@ -828,6 +841,9 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "donor": {"type": "string", "description": "With stage2 gain: this donor's deviation drawn at every cell's state; \"\" each cell's own donor"},
                     "chart": {"enum": ["structure", "heatmap", "gains", "volcano", "off"], "description": "Draw a chart in place of the map, of the cells in the view and the grouping shown: structure (each cell's topic mixture, a panel per group; runs with topics), heatmap (each group's top features), gains (the feature shown, its stage-2 log gain by group × donor) or volcano (every gene's stage-2 log gain × |z| per donor in the focused group); off draws the map again. A chart stays on, made again for what changes, until off"},
                     "velocity": {"enum": ["stream", "arrows", "off"], "description": "Draw the run's velocity field over the cells (a run view_open says has velocity), as streamlines or arrows, or not"},
+                    "extra": cell_colour::spec("extra"),
+                    "cell_stat": cell_colour::spec("cell_stat"),
+                    "values": cell_colour::spec("values"),
                     "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "World window [x0, y0, x1, y1]"},
                     "fit": {"type": "boolean", "description": "true: the whole map"},
                     "center": xy("Move the window's centre to this world point"),

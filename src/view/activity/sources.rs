@@ -187,38 +187,27 @@ impl Observed {
     }
 
     /// Each column's total count and number of features detected, in one
-    /// pass over the columns. No progress bar: the screen is the view's.
+    /// pass over the columns.
     pub(super) fn totals(&self) -> Result<&(Vec<f32>, Vec<f32>), String> {
         if let Some(t) = self.totals.get() {
             return Ok(t);
         }
-        const BLOCK: usize = 4096;
-        let blocks: Vec<usize> = (0..self.n_cells).step_by(BLOCK).collect();
-        let parts = blocks
-            .par_iter()
-            .map(|&lb| {
-                let csc = self
-                    .data
-                    .read_columns_csc(lb..(lb + BLOCK).min(self.n_cells))?;
-                Ok(csc
-                    .col_iter()
-                    .map(|c| {
-                        let v = c.values();
-                        (
-                            v.iter().sum::<f32>(),
-                            v.iter().filter(|&&x| x > 0.0).count() as f32,
-                        )
-                    })
-                    .unzip::<_, _, Vec<f32>, Vec<f32>>())
-            })
-            .collect::<anyhow::Result<Vec<_>>>()
-            .map_err(|e| e.to_string())?;
-        let (mut total, mut detected) = (Vec::new(), Vec::new());
-        for (t, d) in parts {
-            total.extend(t);
-            detected.extend(d);
-        }
-        Ok(self.totals.get_or_init(|| (total, detected)))
+        let sums = self.column_stats(None)?;
+        Ok(self.totals.get_or_init(|| sums))
+    }
+
+    /// Each column's total count and number of features detected over
+    /// `rows` (every row: `None`): data-beans' column statistics, as its
+    /// QC sums the mito rows.
+    pub(super) fn column_stats(
+        &self,
+        rows: Option<&[usize]>,
+    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let (detected, total, _, _) =
+            data_beans::qc::collect_column_stat_across_vec(&self.data, rows, None)
+                .map_err(|e| e.to_string())?
+                .to_f32_vecs();
+        Ok((total, detected))
     }
 
     /// `stat` per column.
@@ -227,6 +216,7 @@ impl Observed {
         Ok(match stat {
             Stat::Total => Cow::Owned(total.iter().map(|t| t.ln_1p()).collect()),
             Stat::Detected => Cow::Borrowed(detected),
+            Stat::Rows(_) => return Err("a row statistic is read on the side".into()),
             Stat::Share(_) => {
                 let rows: std::collections::BTreeSet<usize> = set
                     .iter()

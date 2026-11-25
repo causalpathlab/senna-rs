@@ -118,6 +118,17 @@ pub(super) fn read_out_cells(
 }
 
 impl CellTable {
+    /// The lineages some cell is most on.
+    pub(super) fn lineages_held(&self) -> usize {
+        let held: std::collections::HashSet<&str> = self
+            .lineage
+            .iter()
+            .map(AsRef::as_ref)
+            .filter(|&l| l != "NA")
+            .collect();
+        held.len()
+    }
+
     /// `{out}.cell_time.parquet`, and the map's `cell_embedding` and
     /// `cell_velocity` (`k` components).
     pub(super) fn write(&self, out: &str, k: usize) -> anyhow::Result<()> {

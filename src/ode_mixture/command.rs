@@ -490,9 +490,10 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         all_cells.len(),
         inputs.data_files.len()
     );
-    // The root pseudobulks, from the cells the user names.
-    let roots = match &args.root_cells {
-        None => Vec::new(),
+    // The root pseudobulks, from the cells the user names, and whether
+    // they are mostly of them.
+    let (roots, roots_mostly) = match &args.root_cells {
+        None => (Vec::new(), false),
         Some(path) => {
             let path = path.to_string_lossy();
             let named: std::collections::HashSet<Box<str>> =
@@ -519,7 +520,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
                     named.len()
                 );
             }
-            roots
+            (roots, mostly)
         }
     };
 
@@ -558,7 +559,10 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
     let named = args.root_cells.as_deref();
     clear_root_lists(&args.out, named)?;
     let decision = root_decision(&args.out, &climbed.roots, member, &pbs, &all_cells)?;
-    let root = root_list(&args.out, named, &climbed, member, &pbs, &all_cells)?;
+    let unused = climbed
+        .unrooted
+        .map(|why| why.note(opts.roots.len(), pbs.len(), roots_mostly, args.lineages));
+    let root = root_list(&args.out, named, unused, &climbed, member, &pbs, &all_cells)?;
     let (fit, objective) = (climbed.fit, climbed.objective);
     info!("ode: the climb's objective {objective:.4}");
     let start_at = fit.params()?;
@@ -622,9 +626,12 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         &inputs,
         pb_tree.is_some(),
         !branch.is_empty(),
-        decision,
-        root,
-        f64::from(objective),
+        Settled {
+            decision,
+            root,
+            objective: f64::from(objective),
+            lineages_held: table.lineages_held(),
+        },
     )?;
     info!(
         "Wrote {0}.{{cell_time,cell_embedding,cell_velocity,gene_rates,pb_time}}.parquet and {0}.senna.json (and {0}.branch_time.tsv on a trunk)",
@@ -784,19 +791,22 @@ fn root_cells_of(
 enum RootList {
     /// The list of the root it grew from (`root_cells`).
     Grew(String),
-    /// The `--root-cells` list it was given, its start beaten by one with
-    /// no root (`root_cells_unused`).
-    Unused(String),
+    /// The `--root-cells` list it was given, no tree start growing from
+    /// it (`root_cells_unused`), and why ([`NoTree::note`]).
+    ///
+    /// [`NoTree::note`]: super::init::NoTree::note
+    Unused(String, Option<String>),
 }
 
 /// The root the fit took: the list the user named (`named`, made
 /// absolute) when the fit grew from it, else the cells of the tree start's
 /// root it grew from, written to `{out}.root.txt` (its name beside the
-/// manifest); a named list a k-means start beat, as unused; `None` when a
-/// k-means start won with no root named.
+/// manifest); a named list no tree start grew from, as unused (`unused`
+/// why); `None` when a k-means start won with no root named.
 fn root_list(
     out: &str,
     named: Option<&std::path::Path>,
+    unused: Option<String>,
     climbed: &Climbed,
     member: &[usize],
     pbs: &[usize],
@@ -806,7 +816,7 @@ fn root_list(
         .map(|n| std::path::absolute(n).map(|n| n.to_string_lossy().into_owned()))
         .transpose()?;
     let Some(root) = climbed.root.map(|r| &climbed.roots[r]) else {
-        return Ok(named.map(RootList::Unused));
+        return Ok(named.map(|list| RootList::Unused(list, unused)));
     };
     if let Some(named) = named {
         return Ok(Some(RootList::Grew(named)));
@@ -848,16 +858,29 @@ pub(crate) fn clear_root_lists(out: &str, keep: Option<&std::path::Path>) -> any
     Ok(())
 }
 
+/// What the fit settled, as its manifest records it.
+struct Settled {
+    /// What it left to decide.
+    decision: Option<senna::run_manifest::Decision>,
+    root: Option<RootList>,
+    objective: f64,
+    /// The lineages some cell is most on ([`cell_table::CellTable::lineages_held`]).
+    lineages_held: usize,
+}
+
 /// `{out}.senna.json`: the run as `senna view` and the layouts open it,
-/// with what the fit left to decide.
+/// with what the fit settled.
 fn write_manifest(
     args: &OdeArgs,
     inputs: &Inputs,
     has_pb_tree: bool,
     has_branch: bool,
-    decision: Option<senna::run_manifest::Decision>,
-    root: Option<RootList>,
-    objective: f64,
+    Settled {
+        decision,
+        root,
+        objective,
+        lineages_held,
+    }: Settled,
 ) -> anyhow::Result<()> {
     use senna::run_manifest::{
         record_train_args, write_run_manifest_with, RunDescription, RunKind,
@@ -873,9 +896,13 @@ fn write_manifest(
         m.outputs.cell_velocity = Some(format!("{base}.cell_velocity.parquet"));
         m.outputs.pb_time = Some(format!("{base}.pb_time.parquet"));
         m.outputs.branch_time = has_branch.then(|| format!("{base}.branch_time.tsv"));
+        m.outputs.cell_time_lineages = Some(lineages_held);
         match root {
             Some(RootList::Grew(list)) => m.outputs.root_cells = Some(list),
-            Some(RootList::Unused(list)) => m.outputs.root_cells_unused = Some(list),
+            Some(RootList::Unused(list, why)) => {
+                m.outputs.root_cells_unused = Some(list);
+                m.outputs.root_cells_unused_why = why;
+            }
             None => {}
         }
         m.decisions.extend(decision);

@@ -142,8 +142,8 @@ pub(super) fn next_after(m: &RunManifest, run: &Path) -> Vec<Next> {
     next_of(m, run, &types, &facts)
 }
 
-/// The run's objective, needs_input and root, set in `out`, and what they
-/// say for the next calls.
+/// The run's objective, needs_input, lineages and root, set in `out`, and
+/// what they say for the next calls.
 fn decision_fields(m: &RunManifest, types: &Types, out: &mut Value) -> Said {
     let mut said = Said::default();
     if let Some(objective) = m.objective {
@@ -153,6 +153,14 @@ fn decision_fields(m: &RunManifest, types: &Types, out: &mut Value) -> Said {
         out["needs_input"] = ask;
         said.open = true;
         said.untyped |= untyped;
+    }
+    // An ODE's lineages asked and those some cell is most on.
+    let asked = m
+        .train_args
+        .as_ref()
+        .and_then(|t| t.args["lineages"].as_u64());
+    if let (Some(asked), Some(held)) = (asked, m.outputs.cell_time_lineages) {
+        out["lineages"] = json!({"asked": asked, "with_cells": held});
     }
     if let Some((root, typed)) = root_field(m, types) {
         let from_fit = root["from"] == "fit";
@@ -165,41 +173,54 @@ fn decision_fields(m: &RunManifest, types: &Types, out: &mut Value) -> Said {
 
 /// The root an ODE run grew from (`root_cells` in its manifest `m`): the
 /// list, its count, whether the user named it (`from`, by the fit's
-/// arguments), and what its cells mostly are: by the groups view_cells
-/// wrote it from ([`view_cells::source_of`](super::view_cells::source_of)),
-/// else by the run's newest lupin round, else how to have them typed; and
-/// whether they are typed (`None` for a named list the fit did not grow
-/// from, said to be unused). `None` when the run records no root.
+/// arguments), and what its cells are ([`typed_root`]); and whether they
+/// are typed (`None` when the list cannot be read). A named list no tree
+/// start grew from (`root_cells_unused`) is said to be unused, with why.
+/// `None` when the run records no root.
 fn root_field(m: &RunManifest, types: &Types) -> Option<(Value, Option<bool>)> {
     let dir = run_manifest::manifest_dir(types.run);
-    if let Some(list) = &m.outputs.root_cells_unused {
-        let unused = json!({
-            "named": run_manifest::resolve(dir, list),
-            "used": false,
-            "note": "the fit was given this root, but a start with no root fit better, so the \
-                     trajectory does not grow from these cells and its time need not run from \
-                     them",
-        });
-        return Some((unused, None));
-    }
-    let path = run_manifest::resolve(dir, m.outputs.root_cells.as_deref()?);
+    let used = m.outputs.root_cells.as_deref();
+    let path = run_manifest::resolve(dir, used.or(m.outputs.root_cells_unused.as_deref())?);
+    let mut root = if used.is_some() {
+        let named = m
+            .train_args
+            .as_ref()
+            .is_some_and(|t| !t.args["root_cells"].is_null());
+        let from = if named { "root-cells" } else { "fit" };
+        json!({"cells": path, "from": from})
+    } else {
+        let note = m.outputs.root_cells_unused_why.as_deref().unwrap_or(
+            "the fit was given this root but did not grow from it, so the trajectory does not \
+             grow from these cells and its time need not run from them",
+        );
+        json!({"named": path, "used": false, "note": note})
+    };
     let cells = match legume_numeric::matrix::common_io::read_name_list(&path.to_string_lossy()) {
         Ok(cells) => cells,
-        Err(e) => return Some((json!({"cells": path, "error": format!("{e:#}")}), None)),
+        Err(e) => {
+            root["error"] = format!("{e:#}").into();
+            return Some((root, None));
+        }
     };
-    let named = m
-        .train_args
-        .as_ref()
-        .is_some_and(|t| !t.args["root_cells"].is_null());
-    let from = if named { "root-cells" } else { "fit" };
-    let mut root = json!({"cells": path, "n": cells.len(), "from": from});
-    let mostly = match super::view_cells::source_of(&path, cells.len()) {
+    root["n"] = cells.len().into();
+    let typed = typed_root(&mut root, &path, &cells, types);
+    Some((root, Some(typed)))
+}
+
+/// What the root's `cells` (the list at `path`) mostly are, set in `root`
+/// with what says so (`typed_by`): the groups view_cells wrote the list
+/// from ([`view_cells::source_of`](super::view_cells::source_of)), else the
+/// run's newest lupin round; else how to have them typed. Whether they are
+/// typed.
+fn typed_root(root: &mut Value, path: &Path, cells: &[Box<str>], types: &Types) -> bool {
+    let mostly = match super::view_cells::source_of(path, cells.len()) {
         Some((mostly, by)) => {
             root["typed_by"] = by;
             Some(mostly)
         }
         None => types.get().map(|t| {
-            t.mostly(&cells)
+            root["typed_by"] = json!({"round": t.round()});
+            t.mostly(cells)
                 .unwrap_or_else(|| "none typed by the round".into())
         }),
     };
@@ -213,7 +234,7 @@ fn root_field(m: &RunManifest, types: &Types) -> Option<(Value, Option<bool>)> {
                 .into();
         }
     }
-    Some((root, Some(typed)))
+    typed
 }
 
 /// The calls that could follow a result about the run at `run` (`m` its
