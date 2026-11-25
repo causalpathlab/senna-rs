@@ -446,3 +446,37 @@ fn a_runs_open_decisions_are_put_to_the_agent() {
     let (back, _) = RunManifest::load(&path).unwrap();
     assert_eq!(back.decisions.len(), 1);
 }
+
+#[test]
+fn stage_2_is_drawn_as_asked_said_back_and_refused_on_a_run_without_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = Open::of(
+        crate::view::stage2::tests::scene_with_stage2(dir.path()),
+        PathBuf::from("r.senna.json"),
+    );
+    assert_eq!(o.summary()["stage2"], true);
+    let out = o
+        .map(args(
+            json!({"feature": "g1", "stage2": "gain", "donor": "C", "width": 16}),
+        ))
+        .unwrap();
+    assert_eq!(state(&out)["stage2"]["showing"], "gain");
+    assert_eq!(state(&out)["stage2"]["donor"], "C");
+    // A published view carries it to a watcher.
+    let (_, a) = agent_view(&o.view_state()).unwrap();
+    let mut watcher = Open::of(
+        crate::view::stage2::tests::scene_with_stage2(dir.path()),
+        PathBuf::from("r.senna.json"),
+    );
+    apply(&mut watcher.scene, &a).unwrap();
+    assert_eq!(watcher.view_state()["donor"], "C");
+    // Off: the feature again (the fixture has no model to draw it from).
+    o.map(args(json!({"stage2": "off", "width": 16}))).unwrap();
+    assert_eq!(o.view_state()["feature"], "g1");
+    assert_eq!(o.view_state()["stage2"], "off");
+    let e = open()
+        .map(args(json!({"stage2": "exclusivity", "width": 16})))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no stage 2"), "{e}");
+}

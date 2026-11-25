@@ -27,7 +27,7 @@ use activity::Levels;
 const RANKED: usize = 100;
 
 /// What a run without stage 2 is told when asked for it.
-pub(super) const NO_STAGE2: &str =
+pub(crate) const NO_STAGE2: &str =
     "this run has no stage 2 (run `senna donor-deviation --from` it first)";
 
 impl Scene {

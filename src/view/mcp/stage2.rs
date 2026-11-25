@@ -4,9 +4,10 @@
 use super::flags;
 use super::jobs::{job_property, planned, start_server, Argv, Task};
 use super::parse;
+use crate::view::{Pick, Scene};
 use anyhow::Result;
 use legume_mcp::{Call, Content, ToolSpec};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 /// A stage-2 tool's call; `None` for another family's.
@@ -15,6 +16,65 @@ pub(super) fn call(name: &str, args: &Value, cx: &Call) -> Result<Option<Vec<Con
         "run_donor_deviation" => run_donor_deviation(parse(args.clone())?, cx)?,
         _ => return Ok(None),
     }))
+}
+
+/// What of the run's stage 2 colours the cells, or none of it.
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum Stage2Arg {
+    Gain,
+    Exclusivity,
+    Off,
+}
+
+impl Stage2Arg {
+    pub(super) fn of(pick: Option<&Pick>) -> Self {
+        match pick {
+            Some(Pick::Gain { .. }) => Self::Gain,
+            Some(Pick::Exclusive) => Self::Exclusivity,
+            _ => Self::Off,
+        }
+    }
+}
+
+/// The donor a gain map draws, `""` for each cell's own.
+pub(super) fn donor_of(pick: Option<&Pick>) -> &str {
+    match pick {
+        Some(Pick::Gain { donor: Some(d), .. }) => d,
+        _ => "",
+    }
+}
+
+/// `stage2` and `donor` on the scene, after `feature`: a gain map of the
+/// feature shown (`donor`'s deviation, `""` each cell's own), exclusivity,
+/// or off (the feature's activity again); `donor` alone changes the donor
+/// of the gain map shown.
+pub(super) fn apply_stage2(scene: &mut Scene, stage2: Option<Stage2Arg>, donor: Option<&str>) {
+    let donor_now = || donor.map(|d| (!d.is_empty()).then(|| d.into()));
+    match (stage2, scene.pick.clone()) {
+        (Some(Stage2Arg::Gain), pick) => {
+            let Some(gene) = pick.as_ref().and_then(Pick::feature).map(Into::into) else {
+                return;
+            };
+            let kept = match pick {
+                Some(Pick::Gain { donor, .. }) => donor,
+                _ => None,
+            };
+            let donor = donor_now().unwrap_or(kept);
+            scene.set_pick(Pick::Gain { gene, donor });
+        }
+        (Some(Stage2Arg::Exclusivity), _) => scene.set_pick(Pick::Exclusive),
+        (Some(Stage2Arg::Off), Some(Pick::Gain { gene, .. })) => scene.set_pick(Pick::One(gene)),
+        (Some(Stage2Arg::Off), Some(Pick::Exclusive)) => {
+            scene.clear_pick();
+        }
+        (None, Some(Pick::Gain { gene, .. })) => {
+            if let Some(donor) = donor_now() {
+                scene.set_pick(Pick::Gain { gene, donor });
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Deserialize)]
@@ -69,7 +129,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
          replicates, for a gain's standard error), {out}.donor_sample_states.parquet (a large \
          matched distance marks a state no other donor has) and {out}.donor_cell_states.parquet. \
          Needs at least three donors; without flags donor-of-batch each batch is its own donor. Nothing \
-         is cut off: read gains through their jackknife z, not through being nonzero.",
+         is cut off: read gains through their jackknife z, not through being nonzero. The run's \
+         manifest records the tables, so view_map's stage2 draws them on its map.",
         json!({
             "type": "object",
             "properties": {

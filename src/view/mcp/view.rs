@@ -2,6 +2,7 @@
 //! terminal viewer draws it.
 
 use super::jobs::senna;
+use super::stage2::{apply_stage2, donor_of, Stage2Arg};
 use super::{absolute, parse};
 use crate::view::data::{Axis, Dataset, LabelKind, Labels, NONE};
 use crate::view::recompute::Step;
@@ -111,6 +112,8 @@ pub(in crate::view) struct MapArgs {
     feature: Option<String>,
     observed: Option<bool>,
     time: Option<bool>,
+    stage2: Option<Stage2Arg>,
+    donor: Option<String>,
     velocity: Option<VelocityArg>,
     pub(in crate::view) bbox: Option<[f32; 4]>,
     fit: Option<bool>,
@@ -247,6 +250,7 @@ impl Open {
             "maps": maps,
             "groupings": groupings,
             "time": s.data.times.is_some(),
+            "stage2": s.has_stage2(),
             "velocity": velocity,
             "view": self.state(),
         });
@@ -261,10 +265,7 @@ impl Open {
     fn view_state(&self) -> Value {
         let s = &self.scene;
         let root = &s.data.spaces[s.root()];
-        let feature = match &s.pick {
-            Some(Pick::One(f)) => f.as_ref(),
-            _ => "",
-        };
+        let feature = s.pick.as_ref().and_then(Pick::feature).unwrap_or_default();
         json!({
             "run": self.run,
             "round": s.data.round.as_ref().map(|r| absolute(&r.path)),
@@ -275,6 +276,8 @@ impl Open {
             "feature": feature,
             "observed": s.source != Source::Expected,
             "time": s.pick == Some(Pick::Time),
+            "stage2": Stage2Arg::of(s.pick.as_ref()),
+            "donor": donor_of(s.pick.as_ref()),
             "velocity": VelocityArg::from(s.velocity_style),
             "bbox": self.drawn.map(|vp| vp.window()),
         })
@@ -304,7 +307,17 @@ impl Open {
         // is left out, and the note says why.
         let feature = match (&s.pick, s.current_shown()) {
             (Some(Pick::One(f)), Some(_)) => Some(json!({"feature": f, "source": s.source.name()})),
+            (Some(Pick::Gain { gene, .. }), Some(_)) => Some(json!({"feature": gene})),
             _ => None,
+        };
+        // A stage-2 colouring as drawn, with its key's title (range, fade).
+        let stage2 = match (&s.pick, s.current_shown()) {
+            (Some(p @ (Pick::Gain { .. } | Pick::Exclusive)), Some(shown)) => json!({
+                "showing": Stage2Arg::of(Some(p)),
+                "donor": donor_of(Some(p)),
+                "key": shown.title,
+            }),
+            _ => Value::Null,
         };
         json!({
             "map": sp.method,
@@ -314,6 +327,7 @@ impl Open {
             "focus": s.focused_name(),
             "feature": feature,
             "time": s.pick == Some(Pick::Time) && s.current_shown().is_some(),
+            "stage2": stage2,
             "velocity": VelocityArg::from(s.velocity_drawn()),
             "legend": legend,
         })
@@ -619,6 +633,24 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         );
         ensure!(data.times.is_some(), features::NO_TIMES);
     }
+    let asks_stage2 = matches!(a.stage2, Some(Stage2Arg::Gain | Stage2Arg::Exclusivity));
+    if asks_stage2 {
+        ensure!(
+            a.time != Some(true),
+            "colour by time or by stage 2, not both"
+        );
+        ensure!(
+            data.run.as_ref().is_some_and(|(m, _)| !m.stage2.is_empty()),
+            crate::view::stage2::NO_STAGE2
+        );
+    }
+    if a.stage2 == Some(Stage2Arg::Gain) {
+        ensure!(
+            a.feature.as_deref().is_some_and(|f| !f.is_empty())
+                || s.pick.as_ref().and_then(Pick::feature).is_some(),
+            "stage2 gain is of a feature: pass feature too"
+        );
+    }
     // The field, read now when it is asked for and the view has none of
     // this run's: the round's run, when a round is swapped in.
     let has_field =
@@ -666,6 +698,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         }
         _ => {}
     }
+    apply_stage2(scene, a.stage2, a.donor.as_deref());
     if let Some(field) = field {
         scene.velocity = Some(field);
     }
@@ -676,7 +709,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
 }
 
 /// The view_map arguments a published view sets.
-const VIEW_KEYS: [&str; 10] = [
+const VIEW_KEYS: [&str; 12] = [
     "round",
     "map",
     "space",
@@ -685,6 +718,8 @@ const VIEW_KEYS: [&str; 10] = [
     "feature",
     "observed",
     "time",
+    "stage2",
+    "donor",
     "velocity",
     "bbox",
 ];
@@ -831,6 +866,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "feature": {"type": "string", "description": "Colour cells by one feature's level; \"\" shows the groups again"},
                     "observed": {"type": "boolean", "description": "The feature's observed counts instead of the model's expected level"},
                     "time": {"type": "boolean", "description": "Colour the cells by the run's time (a run view_open says has time); false shows the groups again"},
+                    "stage2": {"enum": ["gain", "exclusivity", "off"], "description": "On a run view_open says has stage2 (senna donor-deviation): gain colours the cells by the feature's log gain in their own donor (diverging; faded where the batch jackknife |z| < 2); exclusivity by their sample's distance to the nearest sample of another donor (large: a state no other donor has); off shows the feature's level again"},
+                    "donor": {"type": "string", "description": "With stage2 gain: this donor's deviation drawn at every cell's state; \"\" each cell's own donor"},
                     "velocity": {"enum": ["stream", "arrows", "off"], "description": "Draw the run's velocity field over the cells (a run view_open says has velocity), as streamlines or arrows, or not"},
                     "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "World window [x0, y0, x1, y1]"},
                     "fit": {"type": "boolean", "description": "true: the whole map"},
