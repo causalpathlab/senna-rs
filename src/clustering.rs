@@ -263,9 +263,10 @@ pub struct ClusteringArgs {
         long = "from",
         required_if_eq("target", "features"),
         help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
-        long_help = "When given, the manifest is updated in place with the cluster output path,\n\
-                     under `cluster.clusters`,\n\
-                     so `lupin annotate` picks the cluster parquet up automatically."
+        long_help = "When given and the output goes beside the run (its directory), the\n\
+                     manifest is updated in place with the cluster output path, under\n\
+                     `cluster.clusters`, so `lupin annotate` picks the cluster parquet up\n\
+                     automatically. With --out in another directory it is left as it was."
     )]
     from: Option<Box<str>>,
 }
@@ -376,7 +377,11 @@ pub fn run_clustering(args: &ClusteringArgs) -> anyhow::Result<()> {
 
     info!("Wrote cluster assignments to {output_file}");
 
-    if let Some(from) = args.from.as_deref() {
+    if let Some(from) = args
+        .from
+        .as_deref()
+        .filter(|from| outputs_beside_run(from, &out))
+    {
         update_manifest_cluster_path(from, &output_file, args.target)?;
     }
 
@@ -409,6 +414,17 @@ fn run_cell_table(from: &str) -> anyhow::Result<String> {
     Ok(senna::run_manifest::resolve(&dir, rel)
         .to_string_lossy()
         .into_owned())
+}
+
+/// Whether `out` sits beside the run `from` names, so its manifest records
+/// the clusters; with `--out` elsewhere the run is left as it was.
+fn outputs_beside_run(from: &str, out: &str) -> bool {
+    let manifest = senna::run_manifest::manifest_path_for(from);
+    let beside = senna::run_manifest::outputs_beside(Path::new(&manifest), out);
+    if !beside {
+        info!("--out {out} is outside the run's directory: {manifest} is left as it was");
+    }
+    beside
 }
 
 /// Update the run manifest in place with the cluster parquet path. Path is

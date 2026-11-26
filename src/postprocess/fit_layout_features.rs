@@ -317,6 +317,14 @@ pub(crate) fn write_feature_layout(
     write_xy(&out_path, &input.names, coords, "feature")?;
     info!("Saved {out_path}");
 
+    if !run_manifest::outputs_beside(&input.manifest_path, &input.out) {
+        info!(
+            "--out {} is outside the run's directory: {} is left as it was",
+            input.out,
+            input.manifest_path.display()
+        );
+        return Ok(());
+    }
     let rel = rel_to_manifest(&input.manifest_dir, &out_path);
     input
         .manifest

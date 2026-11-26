@@ -187,6 +187,16 @@ pub fn rebase(path: &Path, from_dir: &Path, to_dir: &Path) -> PathBuf {
     normalize(&abs(to_dir).join(relative_to(&abs(path), &abs(from_dir))))
 }
 
+/// Whether a command's outputs at `out_prefix` sit beside the run whose
+/// manifest is `manifest_path` (the same directory, links followed): only
+/// then does the command record them in that manifest. Outputs sent
+/// elsewhere leave the run as it was.
+#[must_use]
+pub fn outputs_beside(manifest_path: &Path, out_prefix: &str) -> bool {
+    let dir = |p: &Path| canonical_so_far(&normalize(&from_cwd(manifest_dir(p))));
+    dir(manifest_path) == dir(Path::new(out_prefix))
+}
+
 /// A command's output prefix: `out` when given, else beside the manifest
 /// `from` and named after it ([`derive_out_prefix`]). Not the manifest's
 /// recorded `prefix`: one copied from another machine names that machine's
