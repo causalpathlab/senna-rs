@@ -23,6 +23,7 @@ const EXPORT_DPI: u32 = 300;
 pub(super) struct ExportArgs {
     png: Option<PathBuf>,
     pdf: Option<PathBuf>,
+    svg: Option<PathBuf>,
     width: Option<usize>,
     #[serde(default)]
     overwrite: bool,
@@ -59,11 +60,11 @@ impl ExportArgs {
 impl Open {
     pub(super) fn export(&mut self, a: ExportArgs) -> Result<Vec<Content>> {
         ensure!(
-            a.png.is_some() || a.pdf.is_some() || a.legend.is_some(),
-            "pass png, pdf, legend or more than one"
+            a.png.is_some() || a.pdf.is_some() || a.svg.is_some() || a.legend.is_some(),
+            "pass png, pdf, svg, legend or more than one"
         );
         // Figures only: no other file is written, overwrite or not.
-        let named = [(&a.png, "png"), (&a.pdf, "pdf")];
+        let named = [(&a.png, "png"), (&a.pdf, "pdf"), (&a.svg, "svg")];
         for (path, ext) in named.iter().filter_map(|(p, e)| Some((p.as_ref()?, *e))) {
             ensure!(
                 path.extension()
@@ -74,13 +75,12 @@ impl Open {
         }
         if let Some(path) = &a.legend {
             ensure!(
-                path.extension()
-                    .is_some_and(|e| ["png", "pdf"].iter().any(|x| e.eq_ignore_ascii_case(x))),
-                "legend {} is not a .png or .pdf file",
+                panel::Kind::of(path).is_some(),
+                "legend {} is not a .png, .pdf or .svg file",
                 path.display()
             );
         }
-        for path in a.png.iter().chain(&a.pdf).chain(&a.legend) {
+        for path in a.png.iter().chain(&a.pdf).chain(&a.svg).chain(&a.legend) {
             ensure!(
                 a.overwrite || !path.exists(),
                 "{} exists; pass overwrite to replace it",
@@ -104,11 +104,19 @@ impl Open {
                 .with_context(|| format!("writing {}", path.display()))?;
             wrote.push(absolute(path));
         }
-        if let Some(path) = &a.pdf {
+        if a.pdf.is_some() || a.svg.is_some() {
             let pages = deck::view_pages(&[(&self.scene, vp, cell_px)]);
-            legume_tui::export::write_pdf(&pages, EXPORT_DPI as f32, path)
-                .with_context(|| format!("writing {}", path.display()))?;
-            wrote.push(absolute(path));
+            if let Some(path) = &a.pdf {
+                legume_tui::export::write_pdf(&pages, EXPORT_DPI as f32, path)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                wrote.push(absolute(path));
+            }
+            if let Some(path) = &a.svg {
+                let face = legume_tui::export::Face::Helvetica;
+                legume_tui::export::write_svg(&pages[0], EXPORT_DPI as f32, face, path)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                wrote.push(absolute(path));
+            }
         }
         Ok(vec![Content::Json(
             json!({"wrote": wrote, "image": [vp.w, vp.h]}),
@@ -124,7 +132,7 @@ impl Open {
             Some(w) => w,
             None => super::view::width(a.width, EXPORT_WIDTH)? as f32 / dpi as f32,
         };
-        let bounds = self.window.unwrap_or(self.scene.current().points.bounds);
+        let bounds = self.window.unwrap_or(self.scene.fit_bounds());
         let height_in = a
             .height_in
             .unwrap_or_else(|| panel::shaped_height(width_in, bounds));
@@ -142,6 +150,7 @@ impl Open {
         let files = panel::Files {
             png: a.png.as_deref(),
             pdf: a.pdf.as_deref(),
+            svg: a.svg.as_deref(),
             legend: a.legend.as_deref(),
         };
         let saved = panel::save(&self.scene, &p, self.window, &files)?;
@@ -164,7 +173,10 @@ pub(super) fn spec() -> ToolSpec {
     let num = |d: &str| json!({"type": "number", "exclusiveMinimum": 0, "description": d});
     ToolSpec::new(
         "view_export",
-        "Write the current view as a PNG and/or a one-page PDF, text sized for print. \
+        "Write the current view as a PNG, a one-page PDF and/or an SVG, text sized for print; \
+         in a PDF or SVG the points are one raster image and every label and key's text \
+         stays text. Colours, scale, range, palette, draw order, missing cells and the key \
+         come from view_map's colour_scale; focus from its focus. \
          Any of width_in, height_in, dpi, point_pt, point_alpha, background, font_pt, \
          labels, legend or hide makes it a figure panel instead: exactly width_in × \
          height_in inches with the map fitted inside (aspect kept, centred), no title, \
@@ -175,6 +187,7 @@ pub(super) fn spec() -> ToolSpec {
             "properties": {
                 "png": {"type": "string", "description": "PNG path"},
                 "pdf": {"type": "string", "description": "PDF path"},
+                "svg": {"type": "string", "description": "SVG path: the points one embedded image, text as SVG text"},
                 "width": {"type": "integer", "minimum": 1, "maximum": MAX_SIDE, "description": format!("Image width in pixels [default: {EXPORT_WIDTH}]; a panel's width_in, when that is not given")},
                 "overwrite": {"type": "boolean", "description": "Replace files that exist"},
                 "width_in": num("Panel width in inches (e.g. 1.8)"),
@@ -184,8 +197,8 @@ pub(super) fn spec() -> ToolSpec {
                 "point_alpha": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "description": "Point opacity [default: as styled]"},
                 "background": {"type": "string", "enum": ["white", "none", "theme"], "description": "Under the points: white, none (transparent PNG, no PDF fill) or the viewer's page [default: white]"},
                 "font_pt": num("Size of every label in points [default: fit to the panel, 7.2 at 1.8 in]"),
-                "labels": {"type": "string", "enum": ["map", "legend", "none"], "description": "Group names on the map (with a halo), in a legend at the right, or none [default: map]"},
-                "legend": {"type": "string", "description": "Also write the legend alone, a key shared by a row of panels (.png or .pdf), the panel's height"},
+                "labels": {"type": "string", "enum": ["map", "legend", "none"], "description": "Group names on the map (with a halo), in a legend at the right, or none [default: map]; none also leaves out a number's key: the panel alone"},
+                "legend": {"type": "string", "description": "Also write the legend alone (a number's key, with its ticks, when cells are coloured by one), a key shared by a row of panels (.png, .pdf or .svg), the panel's height"},
                 "hide": {"type": "array", "items": {"type": ["string", "integer"]}, "description": "Groups of the grouping shown left out of the panel, by name or cluster id (C10, 10, K10); the map refits to the rest"},
             },
             "additionalProperties": false,

@@ -739,7 +739,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1441,7 +1441,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2336,7 +2336,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -2582,7 +2582,7 @@ checksum = "3d29407db961492b5744bb1439c08414810ab34e0f85e9f8822afbaebc616176"
 dependencies = [
  "anyhow",
  "indicatif",
- "legume-numeric 0.9.8",
+ "legume-numeric 0.10.14",
  "log",
  "nalgebra",
  "rand 0.10.4",
@@ -2601,7 +2601,7 @@ checksum = "53b46209799a157af8a8fc2e0621ee9c67985f23eb2da2b6f21c7921d52cd3c0"
 dependencies = [
  "anyhow",
  "dashmap",
- "legume-numeric 0.9.8",
+ "legume-numeric 0.10.14",
  "log",
  "nalgebra",
  "rayon",
@@ -2718,10 +2718,11 @@ dependencies = [
 
 [[package]]
 name = "legume-tui"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ae46cde3ea9a3c5983cc483bf61c93502483b3054b058a826dbab0f2ceb1a4f"
+checksum = "6403d5ec3cc7cd40ddd78fd0124223c94c0fa52c7f41c529d8301954cb6a09f0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "image",
  "log",
@@ -4445,7 +4446,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4959,7 +4960,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5637,7 +5638,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5928,7 +5929,7 @@ checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
  "serde",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

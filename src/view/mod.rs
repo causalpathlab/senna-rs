@@ -5,12 +5,14 @@ mod cell_colour;
 pub use cell_colour::CellStat;
 mod chart;
 mod color;
+pub(crate) mod colour_scale;
 mod data;
 mod decide;
 mod deck;
 mod features;
 mod files;
 pub(crate) mod mcp;
+pub(crate) mod outliers;
 mod paint;
 mod panel;
 mod places;
@@ -36,7 +38,7 @@ use features::Centre;
 use legume_tui::export::{Page, PageSize, PanelArgs, PdfArgs};
 use legume_tui::map::labels::{Hits, TEXT_SCALES};
 use legume_tui::map::text::Font;
-use render::{group_medians, Frame, Label, Paint, Tier, Viewport};
+use render::{group_medians, Frame, Label, Paint, Strays, Tier, Viewport};
 use senna::embed_common::*;
 
 /// `--graphics`: the image protocol named, else the terminal asked.
@@ -209,6 +211,9 @@ pub struct ViewArgs {
     #[command(flatten)]
     pub cells: cell_colour::CellArgs,
 
+    #[command(flatten)]
+    pub outliers: outliers::OutlierArgs,
+
     #[arg(
         long,
         value_name = "SERVER",
@@ -356,7 +361,8 @@ pub(crate) struct Scene {
     shown: Option<Shown>,
     /// Each point's stage-2 row, by space ([`stage2::Stage2Rows`]).
     stage2_rows: stage2::Stage2Rows,
-    ramp: Vec<Rgb>,
+    /// How a number per cell is coloured ([`colour_scale::ColourScale`]).
+    colour_scale: colour_scale::ColourScale,
     suggestions: Option<Suggestions>,
     /// Draw orders computed for recent layer states; see `layers`.
     orders: std::cell::RefCell<Vec<(OrderKey, std::sync::Arc<Vec<u32>>)>>,
@@ -405,6 +411,10 @@ pub(crate) struct Scene {
     velocity_moved: std::cell::RefCell<Option<Moved>>,
     /// The `u` cycle's statistic and table the flags or the agent set.
     cell_colour: cell_colour::CellColour,
+    /// Outlying points ([`outliers`]), and those found on the layout last
+    /// asked, by its space, size and bounds.
+    outliers: outliers::Outliers,
+    outlier_flags: outliers::Found,
 }
 
 impl Scene {
@@ -432,7 +442,7 @@ impl Scene {
             source: Source::Expected,
             activity: None,
             shown: None,
-            ramp: color::activity_ramp(256),
+            colour_scale: colour_scale::ColourScale::default(),
             stage2_rows: Default::default(),
             geometry: None,
             patient: true,
@@ -458,6 +468,8 @@ impl Scene {
             stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
             velocity_moved: std::cell::RefCell::new(None),
             cell_colour: Default::default(),
+            outliers: args.outliers.outliers().unwrap_or_default(),
+            outlier_flags: Default::default(),
         };
         // `--colour-by tau` (or `time`) colours a run's cells by
         // their time; any other name is a grouping.
@@ -549,7 +561,7 @@ impl Scene {
             source: self.source,
             activity: None,
             shown: self.shown.clone(),
-            ramp: self.ramp.clone(),
+            colour_scale: self.colour_scale.clone(),
             // The same spaces, so the same rows.
             stage2_rows: self.stage2_rows.clone(),
             suggestions: None,
@@ -575,6 +587,8 @@ impl Scene {
             stream_lanes: self.stream_lanes,
             velocity_moved: std::cell::RefCell::new(self.velocity_moved.borrow().clone()),
             cell_colour: self.cell_colour.clone(),
+            outliers: self.outliers.clone(),
+            outlier_flags: Default::default(),
         };
         s.refresh_groups();
         s
@@ -708,6 +722,7 @@ impl ViewArgs {
 
 pub fn run_view(args: &ViewArgs) -> anyhow::Result<()> {
     args.cells.check()?;
+    args.outliers.outliers().map_err(anyhow::Error::msg)?;
     let named = args.runs();
     // A PDF or --relabel prints and exits; the rest is on screen.
     let saves =
@@ -948,7 +963,7 @@ fn headless_page(
     // of that shape. A chart, or several views: a roughly 4:3 page of
     // 4:3 tiles.
     let (w, h) = if let ([scene], false) = (scenes, chart) {
-        let [x0, y0, x1, y1] = scene.current().points.bounds;
+        let [x0, y0, x1, y1] = scene.fit_bounds();
         size.check((y1 - y0) / (x1 - x0).max(1e-6))
     } else {
         size.check_grid(scenes.len())
@@ -956,7 +971,7 @@ fn headless_page(
     .map_err(|e| anyhow::anyhow!("{e} (--width, --dpi)"))?;
     let cell_px = size.cell_px();
     let page = if let [scene] = scenes {
-        let vp = render::fit(scene.current().points.bounds, w, h);
+        let vp = render::fit(scene.fit_bounds(), w, h);
         deck::view_pages(&[(scene, vp, cell_px)]).remove(0)
     } else {
         let refs: Vec<&Scene> = scenes.iter().collect();

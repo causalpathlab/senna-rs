@@ -31,6 +31,7 @@ mod row_stats;
 mod sources;
 
 pub(crate) use background_loads::*;
+pub(in crate::view) use numeric::quantile;
 pub(super) use numeric::*;
 pub use row_stats::RowStat;
 pub(crate) use row_stats::RowSumLoads;
@@ -367,7 +368,7 @@ impl Activity {
                     .index
                     .match_gene(feature)
                     .ok_or_else(|| format!("no feature {feature} in {place}"))?;
-                Ok((o.row(g, f32::ln_1p)?, o.features.names[g].clone()))
+                Ok((o.row(g, |v| v)?, o.features.names[g].clone()))
             }
         }
     }
@@ -422,7 +423,13 @@ impl Activity {
         let rows = self.rows(source, key, names)?;
         let (raw, spelled) = self.raw(feature, source)?;
         let values = Self::on_points(&raw, &rows);
-        Ok((Levels::from_values(values, source.counts()), spelled))
+        // Counts on ln(1 + count) unless the colour scale says otherwise:
+        // its min, max and ticks are counts.
+        let natural = crate::view::colour_scale::Transform::for_counts(source.counts());
+        Ok((
+            Levels::from_values(values, source.counts()).on(natural),
+            spelled,
+        ))
     }
 
     /// `stat` on each of the points `names` (the view `key`), from a count
@@ -453,7 +460,9 @@ impl Activity {
         // A share starts at zero; a total or a count of features has no
         // natural origin in view, so its ramp starts at a low quantile.
         let from_zero = matches!(stat, Stat::Share(_));
-        Ok(Levels::from_values(Self::on_points(&raw, &rows), from_zero))
+        // Counts on ln(1 + count), the key's ticks in counts.
+        let natural = crate::view::colour_scale::Transform::for_counts(matches!(stat, Stat::Total));
+        Ok(Levels::from_values(Self::on_points(&raw, &rows), from_zero).on(natural))
     }
 
     /// Mean ramp position over a feature set: each feature is first placed on

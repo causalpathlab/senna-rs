@@ -85,6 +85,7 @@ pub(super) fn scene() -> Scene {
         no_compute: true,
         extra: Vec::new(),
         cells: Default::default(),
+        outliers: Default::default(),
         session: Default::default(),
     };
     Scene::new(data, &args)

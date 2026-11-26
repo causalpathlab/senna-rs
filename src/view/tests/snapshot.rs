@@ -135,7 +135,7 @@ fn with_activity(mut s: Scene) -> Scene {
         pick: Pick::One("GENE1".into()),
         source: Source::Observed,
         title: "GENE1 observed".into(),
-        levels: Levels::from_values(values, true),
+        levels: Levels::from_values(values, true).fitted(&Default::default()),
     });
     s
 }
@@ -194,7 +194,7 @@ fn a_grid_page_is_as_it_was() {
     );
     assert_eq!(
         (digest(&page.img), page.text.len(), runs_digest(&page.text)),
-        ((240, 180, 17764791235586080237), 9, 2514423851555036642)
+        ((240, 180, 4878330256155307214), 14, 288727390360294382)
     );
 }
 

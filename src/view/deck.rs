@@ -92,7 +92,7 @@ pub(crate) fn render_grid(
     let views: Vec<(&Scene, Viewport, f32)> = scenes
         .iter()
         .zip(cams)
-        .map(|(&s, &cam)| (s, camera(cam, s.current().points.bounds, tw, th), cell_px))
+        .map(|(&s, &cam)| (s, camera(cam, s.fit_bounds(), tw, th), cell_px))
         .collect();
     let tiles = frames(&views, keep_text)
         .into_iter()

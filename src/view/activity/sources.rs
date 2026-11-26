@@ -2,12 +2,15 @@
 //! expression ([`Expected`]) and the observed counts ([`Observed`]), with the
 //! per-group sums a contrast is linear in.
 
+use super::numeric::quantile;
 use super::*;
 use crate::view::color;
+use crate::view::colour_scale::{ColourScale, Missing, Order, Transform};
 use rustc_hash::FxHashMap as HashMap;
 use senna::run_manifest::{self, RunManifest};
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 pub(super) enum Model {
@@ -214,7 +217,7 @@ impl Observed {
     pub(super) fn stat(&self, stat: &Stat, set: &[Box<str>]) -> Result<Cow<'_, [f32]>, String> {
         let (total, detected) = self.totals()?;
         Ok(match stat {
-            Stat::Total => Cow::Owned(total.iter().map(|t| t.ln_1p()).collect()),
+            Stat::Total => Cow::Borrowed(total),
             Stat::Detected => Cow::Borrowed(detected),
             Stat::Rows(_) => return Err("a row statistic is read on the side".into()),
             Stat::Share(_) => {
@@ -246,107 +249,249 @@ impl Observed {
 }
 
 /// Values of one feature (or feature set) per point, `NaN` where the point
-/// has no value, and the range the colour ramp spans.
+/// has no value, what they are (counts, a fraction, signed scores), and
+/// once [`Levels::fit`] to a [`ColourScale`], how they are coloured: the
+/// scale, the range the ramp spans on it, the ramp, each point's place on
+/// it, and the key's ticks.
 #[derive(Clone)]
 pub struct Levels {
     pub values: Vec<f32>,
-    pub lo: f32,
-    pub hi: f32,
     /// Observed counts: a zero means "not detected" and is drawn muted rather
     /// than at the bottom of the ramp.
     pub zero_is_off: bool,
-    /// Signed values around 0, drawn on the diverging ramp over `±hi`
-    /// (`lo = −hi`) rather than on the sequential one.
-    pub diverging: bool,
+    /// The ramp starts at zero (a fraction) unless clipped.
+    pub from_zero: bool,
+    /// Signed values around 0: drawn on a diverging ramp unless the colour
+    /// scale asks for a sequential one.
+    pub signed: bool,
+    /// The scale the values take when the colour scale names none.
+    pub natural: Transform,
     /// How much of each point's colour to draw, in `[0, 1]`, the rest muted:
     /// a value drawn faded where it is not well supported. `None`: all of it.
     pub weight: Option<Vec<f32>>,
+    /// Fitted: the ramp's ends, on `transform`'s scale.
+    pub lo: f32,
+    pub hi: f32,
+    pub transform: Transform,
+    /// Fitted: drawn on a diverging ramp, its middle at `(lo + hi) / 2`.
+    pub diverging: bool,
+    /// Fitted: the colour scale's missing points hidden, and draw order.
+    pub hide_missing: bool,
+    pub order: Order,
+    /// Fitted: the ramp, each point's place on it ([`Levels::t`]), whether
+    /// any point has no value, and the key's ticks.
+    ramp: Arc<[color::Rgb]>,
+    pos: Vec<f32>,
+    any_missing: bool,
+    ticks: Vec<(f32, String)>,
 }
 
+/// [`Levels::t`] of a point with no value, and of one that is off (a count
+/// of zero, not detected).
+pub const MISSING: f32 = -2.0;
+pub const OFF: f32 = -1.0;
+
 impl Levels {
-    /// Position on the ramp in `[0, 1]`, or a negative number for "off".
+    /// Position on the ramp in `[0, 1]`, or [`OFF`] or [`MISSING`], as
+    /// fitted.
     #[inline]
     #[must_use]
     pub fn t(&self, i: usize) -> f32 {
-        let v = self.values[i];
-        if !v.is_finite() || (self.zero_is_off && v <= 0.0) {
-            return -1.0;
-        }
-        ((v - self.lo) / (self.hi - self.lo).max(1e-12)).clamp(0.0, 1.0)
+        self.pos[i]
     }
 
+    /// Plain values; [`Levels::fit`] colours them.
     pub(in crate::view) fn from_values(values: Vec<f32>, zero_is_off: bool) -> Self {
-        let mut sample: Vec<f32> = values
-            .iter()
-            .copied()
-            .filter(|v| v.is_finite() && (!zero_is_off || *v > 0.0))
-            .collect();
-        let (lo, hi) = if sample.is_empty() {
-            (0.0, 1.0)
-        } else {
-            let hi = quantile(&mut sample, 0.99);
-            // Counts start the ramp at zero; model levels at a low quantile,
-            // since their scale has no natural origin.
-            let lo = if zero_is_off {
-                0.0
-            } else {
-                quantile(&mut sample, 0.02)
-            };
-            (lo, hi.max(lo + 1e-6))
-        };
         Self {
             values,
-            lo,
-            hi,
             zero_is_off,
-            diverging: false,
+            from_zero: false,
+            signed: false,
+            natural: Transform::Linear,
             weight: None,
+            lo: 0.0,
+            hi: 1.0,
+            transform: Transform::Linear,
+            diverging: false,
+            hide_missing: false,
+            order: Order::High,
+            ramp: Arc::from(Vec::new()),
+            pos: Vec::new(),
+            any_missing: false,
+            ticks: Vec::new(),
         }
     }
 
     /// Signed `values` on the diverging ramp, symmetric about 0 out to their
     /// 99th percentile in size, each drawn with its `weight`.
     pub(in crate::view) fn diverging(values: Vec<f32>, weight: Vec<f32>) -> Self {
-        let mut size: Vec<f32> = values
-            .iter()
-            .filter(|v| v.is_finite())
-            .map(|v| v.abs())
-            .collect();
-        let hi = if size.is_empty() {
-            1.0
-        } else {
-            quantile(&mut size, 0.99).max(1e-6)
-        };
         Self {
-            values,
-            lo: -hi,
-            hi,
-            zero_is_off: false,
-            diverging: true,
+            signed: true,
             weight: Some(weight),
+            ..Self::from_values(values, false)
         }
     }
 
-    /// The ramp the levels are drawn on: the diverging one for signed
-    /// levels, else `sequential`.
+    /// These levels with the ramp from zero, as a fraction's.
     #[must_use]
-    pub fn ramp<'a>(&self, sequential: &'a [color::Rgb]) -> &'a [color::Rgb] {
-        if self.diverging {
-            color::diverging_ramp()
-        } else {
-            sequential
-        }
+    pub(in crate::view) fn starting_at_zero(mut self) -> Self {
+        self.from_zero = true;
+        self
     }
 
-    /// Point `i`'s place in the draw order, later on top: by level, or for
-    /// signed levels by the size of the departure either way times its
-    /// weight, so strong departures are not hidden under faded ones.
+    /// These levels on `natural` unless a colour scale names another.
+    #[must_use]
+    pub(in crate::view) fn on(mut self, natural: Transform) -> Self {
+        self.natural = natural;
+        self
+    }
+
+    /// These levels fitted to `scale`.
+    #[cfg(test)]
+    #[must_use]
+    pub fn fitted(mut self, scale: &ColourScale) -> Self {
+        self.fit(scale);
+        self
+    }
+
+    /// Colour these levels as `scale` says: its scale, its range (the
+    /// percentiles, else 2 to 99, from 0 for counts; a min or max given
+    /// overrides its side; a diverging ramp symmetric about its midpoint),
+    /// its ramp, order and missing points.
+    pub fn fit(&mut self, scale: &ColourScale) {
+        self.transform = scale.scale.unwrap_or(self.natural);
+        self.diverging = scale.diverging(self.signed);
+        self.hide_missing = scale.missing == Missing::Hidden;
+        self.order = scale.order;
+        self.ramp = Arc::from(scale.ramp(self.diverging));
+        let f = |v: f32| self.transform.apply(v);
+        let mut sample: Vec<f32> = self
+            .values
+            .iter()
+            .filter(|&&v| !(self.zero_is_off && v <= 0.0))
+            .map(|&v| f(v))
+            .filter(|v| v.is_finite())
+            .collect();
+        let [p_lo, p_hi] = scale.clip.map_or(
+            [if self.zero_is_off { 0.0 } else { 0.02 }, 0.99],
+            |[a, b]| [a / 100.0, b / 100.0],
+        );
+        let (lo, hi) = if self.diverging {
+            let mid = f(scale.midpoint.unwrap_or(0.0));
+            let mid = if mid.is_finite() || sample.is_empty() {
+                mid
+            } else {
+                quantile(&mut sample, 0.5)
+            };
+            let given = [scale.min, scale.max]
+                .into_iter()
+                .flatten()
+                .map(|v| (f(v) - mid).abs())
+                .reduce(f32::max);
+            // Out to the farther of the clip's two percentiles from the
+            // middle, by default the 99th percentile of the departure.
+            let half = given.unwrap_or_else(|| match scale.clip {
+                _ if sample.is_empty() => 1.0,
+                Some(_) => {
+                    let (a, b) = (quantile(&mut sample, p_lo), quantile(&mut sample, p_hi));
+                    (a - mid).abs().max((b - mid).abs())
+                }
+                None => {
+                    let mut size: Vec<f32> = sample.iter().map(|v| (v - mid).abs()).collect();
+                    quantile(&mut size, p_hi)
+                }
+            });
+            let half = half.max(1e-6);
+            (mid - half, mid + half)
+        } else {
+            // Counts and fractions start the ramp at zero unless asked to
+            // clip; model levels at a low percentile, their scale having no
+            // origin. A min or max given holds even with no value to show.
+            let zero = f(0.0);
+            let empty = sample.is_empty();
+            let lo = match scale.min {
+                Some(v) => f(v),
+                None if (self.zero_is_off || self.from_zero)
+                    && scale.clip.is_none()
+                    && zero.is_finite() =>
+                {
+                    zero
+                }
+                None if empty => 0.0,
+                None => quantile(&mut sample, p_lo),
+            };
+            let hi = match scale.max {
+                Some(v) => f(v),
+                None if empty => lo + 1.0,
+                None => quantile(&mut sample, p_hi),
+            };
+            (lo, hi.max(lo + 1e-6))
+        };
+        (self.lo, self.hi) = (lo, hi);
+        let span = (hi - lo).max(1e-12);
+        self.pos = self
+            .values
+            .iter()
+            .map(|&v| {
+                if self.zero_is_off && v <= 0.0 {
+                    return OFF;
+                }
+                let x = f(v);
+                if x.is_finite() {
+                    ((x - lo) / span).clamp(0.0, 1.0)
+                } else {
+                    MISSING
+                }
+            })
+            .collect();
+        self.any_missing = self.pos.contains(&MISSING);
+        self.ticks = self.key_ticks();
+    }
+
+    /// Whether some point has no value (not one that is off), as fitted.
+    #[must_use]
+    pub fn any_missing(&self) -> bool {
+        self.any_missing
+    }
+
+    /// The key's ticks, as fitted.
+    #[must_use]
+    pub fn ticks(&self) -> &[(f32, String)] {
+        &self.ticks
+    }
+
+    /// The ramp the levels are drawn on.
+    #[must_use]
+    pub fn ramp(&self) -> &[color::Rgb] {
+        &self.ramp
+    }
+
+    /// The ramp, shared.
+    #[must_use]
+    pub fn ramp_arc(&self) -> Arc<[color::Rgb]> {
+        self.ramp.clone()
+    }
+
+    /// Point `i`'s place in the draw order, later on top, as the order
+    /// asks: by level, or for diverging levels by the size of the
+    /// departure either way times its weight, so strong departures are not
+    /// hidden under faded ones; points with no value or off always under.
     #[inline]
     #[must_use]
     pub fn draw_key(&self, i: usize) -> f32 {
-        match self.t(i) {
-            t if t < 0.0 || !self.diverging => t,
-            t => (t - 0.5).abs() * self.weight_of(i),
+        let t = self.t(i);
+        if t < 0.0 {
+            return t - 10.0;
+        }
+        let key = if self.diverging {
+            (t - 0.5).abs() * self.weight_of(i)
+        } else {
+            t
+        };
+        match self.order {
+            Order::High => key,
+            Order::Low => -key,
+            Order::Random => 0.0,
         }
     }
 
@@ -356,13 +501,6 @@ impl Levels {
     pub fn weight_of(&self, i: usize) -> f32 {
         self.weight.as_ref().map_or(1.0, |w| w[i])
     }
-}
-
-/// The `p`-quantile of `sample` (non-empty), by a linear-time selection
-/// that reorders it.
-fn quantile(sample: &mut [f32], p: f32) -> f32 {
-    let k = ((sample.len() - 1) as f32 * p) as usize;
-    *sample.select_nth_unstable_by(k, f32::total_cmp).1
 }
 
 /// The run's model of expression, read the way its kind's decoder reads

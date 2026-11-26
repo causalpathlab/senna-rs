@@ -68,6 +68,18 @@ pub struct Paint<'a> {
     pub levels: Option<(&'a Levels, &'a [Rgb])>,
     /// The draw order, when the caller has it cached; else it is computed.
     pub order: Option<Arc<Vec<u32>>>,
+    /// Outliers of the layout ([`super::outliers`]), left out or pinned.
+    pub outliers: Option<Strays>,
+}
+
+/// What a layer does with a layout's outliers.
+#[derive(Clone)]
+pub enum Strays {
+    /// Leaves out the points marked.
+    Hide(Arc<[bool]>),
+    /// Draws every point inside these bounds (data units): those outside
+    /// sit at their edge.
+    Pin([f32; 4]),
 }
 
 impl Paint<'_> {
@@ -86,6 +98,9 @@ impl Paint<'_> {
         }
         if let Some((levels, ramp)) = self.levels {
             let t = levels.t(i);
+            if t == super::activity::MISSING && levels.hide_missing {
+                return None;
+            }
             if t < 0.0 {
                 return Some(plain(muted));
             }
@@ -162,7 +177,11 @@ impl Paint<'_> {
 
 impl PointLayer for Paint<'_> {
     fn xy(&self, i: usize) -> [f32; 2] {
-        self.points.xy[i]
+        let [x, y] = self.points.xy[i];
+        match self.outliers {
+            Some(Strays::Pin([x0, y0, x1, y1])) => [x.clamp(x0, x1), y.clamp(y0, y1)],
+            _ => [x, y],
+        }
     }
 
     fn shuffled(&self) -> &[u32] {
@@ -177,6 +196,11 @@ impl PointLayer for Paint<'_> {
 
     #[inline]
     fn mark(&self, i: usize) -> Option<Mark> {
+        if let Some(Strays::Hide(out)) = &self.outliers {
+            if out[i] {
+                return None;
+            }
+        }
         self.mark_in(i, *MUTED, *INK)
     }
 
@@ -258,6 +282,7 @@ mod tests {
             size: 1.0,
             levels: None,
             order: None,
+            outliers: None,
         };
         let order = paint.draw_order();
         let last: Vec<u32> = order[4..].iter().map(|&i| groups[i as usize]).collect();
@@ -291,6 +316,7 @@ mod tests {
             size: 1.0,
             levels: None,
             order: None,
+            outliers: None,
         };
         let colour = |i| paint.mark(i).unwrap().colour;
         assert_eq!(colour(0), color::linear_rgb(color::MUTED));
