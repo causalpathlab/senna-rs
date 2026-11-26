@@ -39,6 +39,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod anchor_common;
 mod bge;
+mod cell_cycle;
 mod cluster_bhc;
 mod clustering;
 mod commands;
@@ -294,6 +295,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Probe(args) => {
             run_probe(args)?;
+        }
+        Commands::CellCycle(args) => {
+            cell_cycle::run_cell_cycle(args)?;
         }
         Commands::Update(args) => {
             run_update(args)?;

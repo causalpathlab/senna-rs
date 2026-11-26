@@ -2595,9 +2595,9 @@ dependencies = [
 
 [[package]]
 name = "legume-genomic-types"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53b46209799a157af8a8fc2e0621ee9c67985f23eb2da2b6f21c7921d52cd3c0"
+checksum = "66cf3e9d48f5d8d79b6b4a793c496069aff639b780306e9220838193b663b60d"
 dependencies = [
  "anyhow",
  "dashmap",

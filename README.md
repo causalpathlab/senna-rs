@@ -317,6 +317,36 @@ model type and runs the encoder over held-out cells.
 (gene × factor loadings `W`), `{out}.feature_mean.parquet` (per-gene mean rate
 `μ_d`), plus the standard `.safetensors` / `.model.json` / `.senna.json`.
 
+## `senna cell-cycle` — S and G2/M scores, phase and cycle angle
+
+```sh
+senna cell-cycle --from run.senna.json -o out --learn
+```
+
+Scores each cell's S and G2/M programmes with the module score of Tirosh et
+al. 2016 (*Science* 352:189): a set's mean log expression minus that of
+expression-matched control genes, as Seurat's `AddModuleScore` computes it.
+The phase is G1 when both scores are below zero, else the higher (Undecided
+on a tie, as Seurat calls it); the angle
+is the cell's direction on the cycle genes' top two components (G1 near 0,
+S before G2/M), a cycle position in the spirit of Revelio and tricycle.
+
+- **Genes**: Tirosh et al.'s 43 S and 54 G2/M genes, bundled in
+  legume-genomic-types (`data/cell_cycle_tirosh2016.tsv`, with Seurat's
+  2019 HGNC renames); `--cycle-genes FILE` reads your own (tab-separated
+  `phase`, `symbol`, optional `current`). Names match as senna matches genes
+  everywhere: case, `ENSG…_SYMBOL`, `/count/spliced`, HGNC aliases. With
+  fewer than 10 of either set among the features, nothing is scored and the
+  command says why.
+- **Writes** `{out}.cell_cycle.parquet` (`s_score`, `g2m_score`, `phase`,
+  `angle` per cell; `view_map`'s `values` colours by any of them) and with
+  `--learn` `{out}.cell_cycle.genes.parquet`: every gene's correlation with
+  the two scores, `programme` marking those past `--learn-min-r`.
+- **With `--from`**, what the scores say about the run:
+  `{out}.cell_cycle.latent.parquet` (each latent dimension's R² on S, on
+  G2/M and on both) and `{out}.cell_cycle.clusters.parquet` (each cluster's
+  phase shares, `one_phase` at 95% or more).
+
 ## Tests
 
 `cargo test` runs the suite optimized, with debug assertions on.
