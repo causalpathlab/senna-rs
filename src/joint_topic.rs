@@ -186,6 +186,9 @@ pub struct JointTopicArgs {
 }
 
 pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
+    args.collapse
+        .cell_cycle
+        .ensure_off("joint fits, whose modalities carry their own batch labels")?;
     mkdir_parent(&args.out)?;
     args.collapse
         .reject_mixture_batch(senna::run_manifest::RunKind::JointTopic)?;

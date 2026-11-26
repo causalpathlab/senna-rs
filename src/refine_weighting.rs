@@ -329,6 +329,10 @@ pub(crate) struct CollapseArgs {
     )]
     pub(crate) ignore_batch: bool,
 
+    #[command(flatten)]
+    #[serde(default)]
+    pub(crate) cell_cycle: crate::cell_cycle::covariate::CycleCovariateArgs,
+
     #[arg(
         long,
         value_delimiter = ',',

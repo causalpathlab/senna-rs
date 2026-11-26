@@ -365,7 +365,7 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         .transpose()?;
     use senna::run_manifest::InheritedFromManifest;
     InheritedFromManifest::ensure_replayable(inherited.as_ref(), "ode")?;
-    let inputs = Inputs {
+    let mut inputs = Inputs {
         data_files: InheritedFromManifest::resolve_data(inherited.as_ref(), &args.data_files)?,
         batch_files: InheritedFromManifest::resolve_batch(
             inherited.as_ref(),
@@ -396,7 +396,9 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         cell_to_pb_per_level,
         pb_tree,
         output_keep_idx: keep,
+        batch_files: recorded_batch_files,
     } = crate::topic::common::load_and_collapse(&crate::topic::common::LoadCollapseArgs {
+        cell_cycle: &args.collapse.cell_cycle,
         data_files: &inputs.data_files,
         batch_files: &inputs.batch_files,
         preload: args.preload_data,
@@ -430,6 +432,8 @@ pub fn run_ode(args: &OdeArgs) -> anyhow::Result<()> {
         multiome: None,
         reuse: args.pb_from.pb_from.as_deref(),
     })?;
+    // The run records the batch files its labels came from (`--cell-cycle`'s).
+    inputs.batch_files = recorded_batch_files;
     let cell_to_pb = cell_to_pb_per_level.expect("the collapse keeps its hierarchy");
     let all_cells = data.column_names()?;
     let row_names = data.row_names()?;

@@ -106,7 +106,9 @@ pub fn fit_rbm(args: &RbmArgs) -> anyhow::Result<()> {
         cell_to_pb_per_level,
         pb_tree,
         output_keep_idx,
+        batch_files,
     } = load_and_collapse(&LoadCollapseArgs {
+        cell_cycle: &args.collapse.cell_cycle,
         data_files: &data_files,
         batch_files: &batch_files,
         preload: args.preload_data,

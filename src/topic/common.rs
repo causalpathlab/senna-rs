@@ -1,3 +1,4 @@
+use crate::cell_cycle::covariate::{model_cycle, CycleOutput};
 use data_beans::alg::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
 pub use senna::embed_common::preferred_posterior_mean;
 use senna::embed_common::*;
@@ -40,12 +41,19 @@ pub struct PreparedData {
     /// column order). `None` when no QC ran. Applied at the per-cell
     /// output writers via `Mat::select_rows`.
     pub output_keep_idx: Option<Vec<usize>>,
+    /// The batch files this fit's labels came from, for the manifest to
+    /// record: the given ones, or the `batch|bin` files `--cell-cycle`
+    /// wrote, one per data file.
+    pub batch_files: Option<Vec<Box<str>>>,
 }
 
 /// Result of the read + batch + HVG + project pipeline. Shared by
 /// `load_and_collapse` (multilevel collapse downstream) and `senna svd`
 /// (single-level collapse downstream).
 pub struct ProjectedData {
+    /// The batch files this fit's labels came from (see
+    /// [`PreparedData::batch_files`]).
+    pub batch_files: Option<Vec<Box<str>>>,
     pub data_vec: SparseIoVec,
     pub batch_membership: Vec<Box<str>>,
     /// `proj_dim × n_cells` random-projection sketch (post-batch-correction
@@ -64,6 +72,8 @@ pub struct ProjectedData {
 /// Args for [`load_and_project`] — the read + batch + HVG + project
 /// portion shared by topic, masked-topic, and svd routines.
 pub struct LoadProjectArgs<'a> {
+    /// The cell cycle as a second axis of batch ([`crate::cell_cycle::covariate`]).
+    pub cell_cycle: &'a crate::cell_cycle::covariate::CycleCovariateArgs,
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
     pub preload: bool,
@@ -240,6 +250,7 @@ fn reuse_preprocessing(args: &LoadProjectArgs, run: &str) -> anyhow::Result<Opti
         prep.rows.len()
     );
     Ok(Some(ProjectedData {
+        batch_files: args.batch_files.clone(),
         data_vec,
         batch_membership,
         proj_kn: prep.proj_kn,
@@ -284,6 +295,11 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
          weights are applied by position. Pass --no-pb-reference for this round and let it \
          re-collapse."
     );
+    args.cell_cycle.ensure_loadable(
+        args.multiome.is_some()
+            || args.column_alignment == data_beans::sparse_io_vector::ColumnAlignment::Union,
+        args.pb_reference.is_some(),
+    )?;
 
     if let Some(done) = args
         .reuse
@@ -291,6 +307,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
             args.pb_reference.is_none()
                 && args.feature_mask_fn.is_none()
                 && args.qc_report_out.is_none()
+                && args.cell_cycle.mode == crate::cell_cycle::covariate::CycleMode::None
         })
         .map(|run| reuse_preprocessing(args, run))
         .transpose()?
@@ -354,19 +371,58 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         output_keep_idx
     };
 
-    let (proj_kn, selected_features) = select_and_project(
+    let settings = ProjectSettings {
+        proj_dim: args.proj_dim,
+        block_size: args.block_size,
+        max_features: args.max_features,
+        feature_list_file: args.feature_list_file,
+        must_train_file: args.must_train_file,
+    };
+    let selected_features = select_features(&data_vec, &settings)?;
+    let mut proj_kn = project(
         &data_vec,
         &batch_membership,
-        &ProjectSettings {
-            proj_dim: args.proj_dim,
-            block_size: args.block_size,
-            max_features: args.max_features,
-            feature_list_file: args.feature_list_file,
-            must_train_file: args.must_train_file,
-        },
+        &settings,
+        selected_features.as_ref(),
     )?;
 
+    // The cell cycle as a second axis of batch: bins from the projection
+    // under plain labels, then the sketch again under `batch|bin` (on the
+    // same HVGs, which do not depend on the labels).
+    let mut batch_files = args.batch_files.clone();
+    if let Some(cycle) = model_cycle(
+        &data_vec,
+        &batch_membership,
+        &proj_kn,
+        args.cell_cycle,
+        args.block_size.unwrap_or(1024),
+        args.out.map(|out| CycleOutput {
+            out,
+            batch_files: args.batch_files.as_deref(),
+            ignore_batch: args.ignore_batch,
+        }),
+        || {
+            read_data_on_shared_rows(ReadSharedRowsArgs {
+                keep_empty_barcodes: true,
+                preload: false,
+                ..read_args(args, None)
+            })
+        },
+    )? {
+        batch_membership = cycle.labels;
+        proj_kn = project(
+            &data_vec,
+            &batch_membership,
+            &settings,
+            selected_features.as_ref(),
+        )?;
+        if cycle.batch_files.is_some() {
+            batch_files = cycle.batch_files;
+        }
+    }
+
     let done = ProjectedData {
+        batch_files,
         data_vec,
         batch_membership,
         proj_kn,
@@ -375,6 +431,42 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
     };
     keep_preprocessing(args, &done)?;
     Ok(done)
+}
+
+/// `{out}.delta.parquet`, the collapse's per-gene batch δ melted by gene and
+/// batch, when it fitted one, and the cell cycle's share of it when its
+/// levels carry cycle bins, `{out}.cycle_effect.parquet`
+/// ([`crate::cell_cycle::covariate::write_cycle_effect`]).
+///
+/// # Errors
+/// A table that cannot be written.
+pub(crate) fn write_batch_delta(
+    out: &str,
+    data_vec: &SparseIoVec,
+    collapsed: &CollapsedOut,
+) -> anyhow::Result<()> {
+    let Some(batch_db) = collapsed.delta.as_ref() else {
+        return Ok(());
+    };
+    let outfile = format!("{out}.delta.parquet");
+    info!("Writing batch delta: {outfile}");
+    let batch_names = data_vec.batch_names();
+    let gene_names = data_vec.row_names()?;
+    batch_db.to_melted_parquet(
+        &outfile,
+        (Some(&gene_names), Some("gene")),
+        (batch_names.as_deref(), Some("batch")),
+    )?;
+    if let Some(levels) = batch_names.as_deref() {
+        use legume_numeric::param::traits::Inference;
+        crate::cell_cycle::covariate::write_cycle_effect(
+            out,
+            &gene_names,
+            levels,
+            batch_db.posterior_log_mean(),
+        )?;
+    }
+    Ok(())
 }
 
 /// The HVG selection and sketch a fit runs on its loaded cells.
@@ -390,17 +482,28 @@ pub struct ProjectSettings<'a> {
 /// HVG selection (when `s` asks for one) and the random projection of the
 /// loaded `data_vec`, batch-corrected by `batch_membership`: the half of
 /// [`load_and_project`] after the read.
-fn select_and_project(
+pub(crate) fn select_and_project(
     data_vec: &SparseIoVec,
     batch_membership: &[Box<str>],
     s: &ProjectSettings,
 ) -> anyhow::Result<(Mat, Option<HvgSelection>)> {
+    let selected_features = select_features(data_vec, s)?;
+    let proj_kn = project(data_vec, batch_membership, s, selected_features.as_ref())?;
+    Ok((proj_kn, selected_features))
+}
+
+/// The HVGs the sketch is weighted by, when the settings ask for any. They
+/// depend on the counts only, not on batch labels.
+fn select_features(
+    data_vec: &SparseIoVec,
+    s: &ProjectSettings,
+) -> anyhow::Result<Option<HvgSelection>> {
     // HVG-weighted projection: down-weight uninformative genes so the
     // random sketch (and hence the PB partitioning + cached cell_proj)
     // reflects variable biology. Collapsing still reads all genes.
     let hvg_enabled = s.max_features > 0 || s.feature_list_file.is_some();
     let must_train = load_must_train(s.must_train_file, hvg_enabled)?;
-    let selected_features = hvg_enabled
+    hvg_enabled
         .then(|| {
             select_hvg_streaming(
                 data_vec,
@@ -410,9 +513,18 @@ fn select_and_project(
                 s.block_size,
             )
         })
-        .transpose()?;
+        .transpose()
+}
 
-    let proj_kn = if let Some(sel) = selected_features.as_ref() {
+/// The batch-corrected random sketch of the loaded cells, HVG-weighted
+/// when `selected` is given.
+fn project(
+    data_vec: &SparseIoVec,
+    batch_membership: &[Box<str>],
+    s: &ProjectSettings,
+    selected: Option<&HvgSelection>,
+) -> anyhow::Result<Mat> {
+    let proj_kn = if let Some(sel) = selected {
         let weights = sel.row_weights(data_vec.num_rows());
         data_vec
             .project_columns_weighted(s.proj_dim, s.block_size, Some(batch_membership), &weights)?
@@ -427,7 +539,7 @@ fn select_and_project(
             .proj
     };
     info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
-    Ok((proj_kn, selected_features))
+    Ok(proj_kn)
 }
 
 /// Sketch and multilevel-collapse an already loaded `data_vec` with its
@@ -452,6 +564,8 @@ pub fn collapse_loaded_finest(
 }
 
 pub struct LoadCollapseArgs<'a> {
+    /// The cell cycle as a second axis of batch ([`crate::cell_cycle::covariate`]).
+    pub cell_cycle: &'a crate::cell_cycle::covariate::CycleCovariateArgs,
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
     pub preload: bool,
@@ -618,7 +732,9 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         proj_kn,
         selected_features: _,
         output_keep_idx,
+        batch_files,
     } = load_and_project(&LoadProjectArgs {
+        cell_cycle: args.cell_cycle,
         data_files: args.data_files,
         batch_files: args.batch_files,
         preload: args.preload,
@@ -704,16 +820,8 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
 
     // 4. Write delta output from finest level
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
-    if let (Some(batch_db), Some(out)) = (finest_collapsed.delta.as_ref(), args.out) {
-        let outfile = out.to_string() + ".delta.parquet";
-        info!("Writing batch delta: {outfile}");
-        let batch_names = data_vec.batch_names();
-        let gene_names = data_vec.row_names()?;
-        batch_db.to_melted_parquet(
-            &outfile,
-            (Some(&gene_names), Some("gene")),
-            (batch_names.as_deref(), Some("batch")),
-        )?;
+    if let Some(out) = args.out {
+        write_batch_delta(out, &data_vec, finest_collapsed)?;
     }
 
     Ok(PreparedData {
@@ -723,6 +831,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         cell_to_pb_per_level,
         pb_tree,
         output_keep_idx,
+        batch_files,
     })
 }
 
