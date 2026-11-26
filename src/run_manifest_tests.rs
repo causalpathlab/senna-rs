@@ -440,3 +440,33 @@ fn a_manifest_before_v2_is_refused() {
     let err = RunManifest::load(&path).unwrap_err().to_string();
     assert!(err.contains("v1") && err.contains("Refit"), "{err}");
 }
+
+#[test]
+fn outputs_beside_a_run_are_only_those_in_its_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("fig").join("run.senna.json");
+    std::fs::create_dir_all(run.parent().unwrap()).unwrap();
+    let at = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    // Beside it, under any name, and through `..` that lands back there.
+    assert!(outputs_beside(
+        &run,
+        &at(&dir.path().join("fig").join("run"))
+    ));
+    assert!(outputs_beside(
+        &run,
+        &at(&dir.path().join("fig").join("other"))
+    ));
+    assert!(outputs_beside(
+        &run,
+        &at(&dir.path().join("fig").join("sub").join("..").join("alt"))
+    ));
+    // Anywhere else leaves the run alone.
+    assert!(!outputs_beside(
+        &run,
+        &at(&dir.path().join("scratch").join("run"))
+    ));
+    assert!(!outputs_beside(
+        &run,
+        &at(&dir.path().join("fig").join("sub").join("run"))
+    ));
+}

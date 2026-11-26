@@ -75,8 +75,8 @@ pub use inherit::{
 pub use paths::write_kind_only;
 pub use paths::{
     canonical_so_far, default_path, derive_out_prefix, from_cwd, load_for, manifest_dir,
-    manifest_path_for, normalize, out_prefix, rebase, rel_to_manifest, relative_to, resolve,
-    root_list_of, root_list_path,
+    manifest_path_for, normalize, out_prefix, outputs_beside, rebase, rel_to_manifest, relative_to,
+    resolve, root_list_of, root_list_path,
 };
 pub use run_kind::{CellSpace, ExpressionModel, RunKind};
 pub use sections::{

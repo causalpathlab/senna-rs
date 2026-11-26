@@ -52,8 +52,10 @@ pub struct LayoutCommonArgs {
                      cell projection, is what is laid out; the count data is not read.\n\
                      Without --out, files go beside it, named after it.\n\
                      \n\
-                     The manifest is then updated in place: `layout.methods` and\n\
-                     `layout.cell_coords` / `layout.pb_coords` point at the files just written."
+                     When the files go beside it (its directory), the manifest is then\n\
+                     updated in place: `layout.methods` and `layout.cell_coords` /\n\
+                     `layout.pb_coords` point at the files just written. With --out in\n\
+                     another directory the run's manifest is left as it was."
     )]
     pub from: Box<str>,
 
@@ -304,8 +306,17 @@ impl ResolvedViz {
     }
 
     /// Record the files just written under `manifest.layout` (relative to
-    /// the manifest's directory, so the run directory can move) and save it.
+    /// the manifest's directory, so the run directory can move) and save it,
+    /// when they sit beside the run ([`run_manifest::outputs_beside`]).
     fn record(&mut self, method: &str, written: &LayoutEntry) -> anyhow::Result<()> {
+        if !run_manifest::outputs_beside(&self.manifest_path, &self.out) {
+            info!(
+                "--out {} is outside the run's directory: {} is left as it was",
+                self.out,
+                self.manifest_path.display()
+            );
+            return Ok(());
+        }
         record_cell_layout(&mut self.manifest, &self.manifest_path, method, written)
     }
 }
