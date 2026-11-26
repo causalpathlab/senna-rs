@@ -334,6 +334,34 @@ impl RunManifest {
         Some(if Path::new(&all).is_file() { all } else { full })
     }
 
+    /// The run's per-cell latent or cell embedding
+    /// ([`RunOutputs::geometry_latent`]) read whole, and its path: a
+    /// log-simplex (topic proportions) exponentiated, so every reader sees
+    /// proportions. `None` when the run records none.
+    ///
+    /// # Errors
+    /// A recorded table that cannot be read.
+    pub fn read_cell_latent(
+        &self,
+        manifest_dir: &Path,
+    ) -> anyhow::Result<
+        Option<(
+            String,
+            crate::embed_common::MatWithNames<crate::embed_common::Mat>,
+        )>,
+    > {
+        use crate::embed_common::{IoOps, Mat};
+        let Some(rel) = self.outputs.geometry_latent() else {
+            return Ok(None);
+        };
+        let path = resolve(manifest_dir, rel).to_string_lossy().into_owned();
+        let mut named = Mat::from_parquet_with_row_names(&path, Some(0))?;
+        if self.kind.cell_space() == CellSpace::LogSimplex {
+            named.mat.apply(|v| *v = v.exp());
+        }
+        Ok(Some((path, named)))
+    }
+
     /// Change the manifest at `path` in place: load it, let `change` set
     /// what a later command adds (`rel` makes a written path relative to
     /// the manifest, as every recorded path is), and save it.

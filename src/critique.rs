@@ -662,18 +662,17 @@ fn load_model(
     levels: &[Level],
     judged: &[Judged],
 ) -> anyhow::Result<Model> {
-    let rel = m.outputs.geometry_latent().ok_or_else(|| {
+    let (
+        path,
+        MatWithNames {
+            rows, mat: latent, ..
+        },
+    ) = m.read_cell_latent(dir)?.ok_or_else(|| {
         anyhow::anyhow!(
             "{}: the manifest names no latent or cell embedding",
             m.prefix
         )
     })?;
-    let path = resolve(dir, rel).to_string_lossy().into_owned();
-    let MatWithNames {
-        rows,
-        mat: mut latent,
-        ..
-    } = Mat::from_parquet_with_row_names(&path, Some(0))?;
     let row_of_cell = tolerant_align(part_cells, &rows)
         .with_context(|| format!("model {name}: matching {path} to the partition's cells"))?;
     let matched = row_of_cell.iter().filter(|&&r| r != usize::MAX).count();
@@ -692,9 +691,6 @@ fn load_model(
          is it a fit of the same data?",
         100.0 * coverage
     );
-    if space == CellSpace::LogSimplex {
-        latent.apply(|v| *v = v.exp());
-    }
     let views = levels
         .iter()
         .zip(judged)

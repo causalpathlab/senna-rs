@@ -1,6 +1,5 @@
-//! The rank arithmetic of a critique: parameter checks, name alignment, the
-//! committee and its answers, merges, far shares, k-means++ seeding, and the
-//! cell-label composition.
+//! The rank arithmetic of a critique: parameter checks, the committee and
+//! its answers, merges, far shares and k-means++ seeding.
 
 use legume_numeric::matrix::table::TableReader;
 use rand::distr::weighted::WeightedIndex;
@@ -8,7 +7,8 @@ use rand::distr::Distribution;
 use rand::rngs::SmallRng;
 use rand::seq::IndexedRandom;
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
+pub(crate) use senna::cell_labels::{label_composition, tolerant_align};
 
 pub(crate) fn check_params(knn: usize, far_frac: f64, min_cells: usize) -> anyhow::Result<()> {
     anyhow::ensure!(knn >= 1, "--knn must be at least 1");
@@ -18,45 +18,6 @@ pub(crate) fn check_params(knn: usize, far_frac: f64, min_cells: usize) -> anyho
     );
     anyhow::ensure!(min_cells >= 1, "--min-cells must be at least 1");
     Ok(())
-}
-
-/// Position of every source name in `target`, or `usize::MAX` when absent.
-/// Identical lists match by position, repeats included. Otherwise a name
-/// that would be matched is refused when it repeats on either side, since no
-/// order says which row it means; a repeat that matches nothing is harmless.
-pub(crate) fn tolerant_align(
-    source: &[Box<str>],
-    target: &[Box<str>],
-) -> anyhow::Result<Vec<usize>> {
-    if source == target {
-        return Ok((0..source.len()).collect());
-    }
-    // A name repeated in `target` maps to `REPEATED`, refused only if looked up.
-    const REPEATED: usize = usize::MAX - 1;
-    let mut at: FxHashMap<&str, usize> =
-        FxHashMap::with_capacity_and_hasher(target.len(), Default::default());
-    for (i, n) in target.iter().enumerate() {
-        at.entry(n.as_ref())
-            .and_modify(|j| *j = REPEATED)
-            .or_insert(i);
-    }
-    let mut seen = vec![false; target.len()];
-    source
-        .iter()
-        .map(|n| match at.get(n.as_ref()).copied() {
-            None => Ok(usize::MAX),
-            Some(REPEATED) => Err(repeated(n)),
-            Some(j) if std::mem::replace(&mut seen[j], true) => Err(repeated(n)),
-            Some(j) => Ok(j),
-        })
-        .collect()
-}
-
-fn repeated(name: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "cell name {name} appears more than once, so cells cannot be matched by name; \
-         make the names unique (e.g. suffix each sample's barcodes)"
-    )
 }
 
 /// Rank of a point at distance `d` among `sorted` (ascending) distances: one
@@ -251,29 +212,6 @@ pub(crate) fn read_cell_labels<M: FromIterator<(Box<str>, Box<str>)>>(
                 (!matches!(&*label, "" | "NA" | "NaN")).then_some((cell, label))
             })
             .transpose()
-        })
-        .collect()
-}
-
-/// Per pseudobulk, the fraction of its labelled cells carrying each label;
-/// `None` for a pseudobulk with no labelled cell.
-pub(crate) fn label_composition(
-    pb_of_cell: &[usize],
-    label_of_cell: &[Option<u32>],
-    n_pb: usize,
-    n_labels: usize,
-) -> Vec<Option<Vec<f32>>> {
-    let mut count = vec![vec![0u32; n_labels]; n_pb];
-    for (&pb, label) in pb_of_cell.iter().zip(label_of_cell) {
-        if let (true, Some(k)) = (pb != usize::MAX, label) {
-            count[pb][*k as usize] += 1;
-        }
-    }
-    count
-        .into_iter()
-        .map(|c| {
-            let total: u32 = c.iter().sum();
-            (total > 0).then(|| c.iter().map(|&n| n as f32 / total as f32).collect())
         })
         .collect()
 }

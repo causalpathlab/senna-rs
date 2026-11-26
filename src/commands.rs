@@ -2,6 +2,7 @@
 //! [`LayoutCmd`], and the session paragraph `senna run` and `senna view` share.
 
 use crate::bge::BgeArgs;
+use crate::cell_cycle::CellCycleArgs;
 use crate::clustering::*;
 use crate::critique::CritiqueArgs;
 use crate::deconvolve::DeconvolveArgs;
@@ -485,6 +486,26 @@ pub(super) enum Commands {
                       (the verdict)."
     )]
     Probe(ProbeArgs),
+
+    #[command(
+        about = "Score each cell's S and G2/M programmes, phase and cycle angle.",
+        long_about = "Cell-cycle scores for a run's cells or for data files.\n\
+                      \n\
+                      The genes are Tirosh et al. 2016's S and G2/M sets (Science 352:189),\n\
+                      or a table of your own (--cycle-genes): phase, symbol[, current].\n\
+                      Each score is the set's mean log expression minus that of\n\
+                      expression-matched control genes (Seurat's AddModuleScore);\n\
+                      the phase is G1 when both are negative, else the higher.\n\
+                      The angle is the cell's direction on the cycle genes' top two\n\
+                      components, G1 near 0, S before G2/M.\n\
+                      With too few of the genes among the features, nothing is scored.\n\
+                      \n\
+                      Usage:\n\
+                      senna cell-cycle --from run.senna.json -o out --learn\n  \
+                      Writes {out}.cell_cycle.parquet (view_map values can colour by it)\n  \
+                      and with --learn {out}.cell_cycle.genes.parquet."
+    )]
+    CellCycle(CellCycleArgs),
 
     #[command(
         about = "Report where fits disagree on which pseudobulks are alike.",
