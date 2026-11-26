@@ -144,7 +144,9 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         proj_kn,
         selected_features,
         output_keep_idx,
+        batch_files,
     } = load_and_project(&LoadProjectArgs {
+        cell_cycle: &args.collapse.cell_cycle,
         data_files: &data_files,
         batch_files: &batch_files,
         preload: args.preload_data,
@@ -238,16 +240,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     // Borrowed, not moved: carrying the pseudobulks forward reads the rest of
     // `collapse_out` further down, and a partial move would put it out of reach.
-    if let Some(batch_db) = collapse_out.delta.as_ref() {
-        let outfile = args.out.to_string() + ".delta.parquet";
-        let batch_names = data_vec.batch_names();
-        let gene_names = data_vec.row_names()?;
-        batch_db.to_melted_parquet(
-            &outfile,
-            (Some(&gene_names), Some("gene")),
-            (batch_names.as_deref(), Some("batch")),
-        )?;
-    }
+    crate::topic::common::write_batch_delta(&args.out, &data_vec, &collapse_out)?;
 
     // 5. Nystrom projection
     let x_dn = match collapse_out.mu_adjusted.as_ref() {

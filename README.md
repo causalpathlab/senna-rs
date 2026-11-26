@@ -347,6 +347,41 @@ S before G2/M), a cycle position in the spirit of Revelio and tricycle.
   G2/M and on both) and `{out}.cell_cycle.clusters.parquet` (each cluster's
   phase shares, `one_phase` at 95% or more).
 
+### `--cell-cycle`: the cycle as a second axis of batch
+
+```sh
+senna bge data/*.zarr.zip --batch-files b/*.txt --cell-cycle difference -o run
+```
+
+Every fit that reads batch (`topic`, `masked-topic`, `vae`, `rbm`, `svd`,
+`ode`, `bge`) takes `--cell-cycle`. It scores the loaded cells as above, cuts
+the cycle into bins and makes each cell's batch label `batch|ccK`, so the
+collapse's per-gene batch δ, and every model that divides by it, is fitted per
+batch and bin. No exact phase is called; the bins only separate cells.
+
+- **Modes**: `difference` bins S − G2/M (resting cells share the balanced
+  bin, so S against G2/M is modelled and cycling against resting is kept);
+  `all` bins the standardised (S, G2/M).
+- **Bins**: k-means, k chosen from 1 to `--cycle-bins-max` (10) by BIC under
+  a spherical Gaussian with one variance (X-means), or fixed by
+  `--cycle-bins`. Nothing is binned when one bin is chosen or too few cycle
+  genes match.
+- **Guards**: cells are grouped by k-means on the top components of the fit's
+  random projection, with S and G2/M regressed out; a group at least 95% in one
+  bin keeps plain labels. A batch's bin with fewer than 10 cells merges into
+  its nearest bin.
+- **Labels** are joined by legume-genomic-types' `batch_label` (`|`). A fit
+  given labels an earlier `--cell-cycle` fit wrote bins its cells afresh.
+- **Writes** `{out}.cell_cycle_model.json` (bins, BIC by k, centroids,
+  cells per level), `{out}.cell_cycle.parquet` (scores, phase, angle and
+  `batch_label` per cell), one `{out}.cell_cycle.batch.{i}.txt` per data file
+  (every column a line; a column QC set aside keeps its plain label), which the
+  run's manifest records as its batch files, and `{out}.cycle_effect.parquet`:
+  per gene and bin, log δ averaged over batches and centred per gene.
+- **Not yet**: joint fits, multiome loads, a carried pseudobulk reference
+  (`--pb-reference`), and `senna predict` on a cycle model, which would need
+  the model's bins for new cells. Each refuses with a message.
+
 ## Tests
 
 `cargo test` runs the suite optimized, with debug assertions on.

@@ -92,6 +92,9 @@ pub struct JointSvdArgs {
 }
 
 pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
+    args.collapse
+        .cell_cycle
+        .ensure_off("joint fits, whose modalities carry their own batch labels")?;
     mkdir_parent(&args.out)?;
     args.collapse
         .reject_mixture_batch(senna::run_manifest::RunKind::JointSvd)?;

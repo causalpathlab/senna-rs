@@ -69,6 +69,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
          and simba runs",
         args.model
     );
+    crate::cell_cycle::covariate::ensure_no_cycle_axis(&args.model, "predict")?;
     anyhow::ensure!(
         kind.has_decoder_latent_fit() || (!args.decoder_only && args.refine_steps == 0),
         "--decoder-only / --refine-steps re-fit the latent against a topic decoder; {} is a \

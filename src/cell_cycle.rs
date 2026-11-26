@@ -18,6 +18,7 @@
 //! make-up, a cluster at least 95% one phase marked.
 
 mod check;
+pub(crate) mod covariate;
 mod score;
 #[cfg(test)]
 mod tests;

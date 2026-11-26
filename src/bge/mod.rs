@@ -75,6 +75,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         args.pb_reference.is_some(),
     )?;
     let is_multiome = multiome_plan.is_some();
+    args.collapse
+        .cell_cycle
+        .ensure_loadable(is_multiome, args.pb_reference.is_some())?;
 
     // Multiome mixes gene rows (RNA) and locus rows (ATAC peaks) on one axis,
     // so canonicalize per-name via `Mixed` (genes → gene rule, `chrX:s-e` →
@@ -215,8 +218,16 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .map(|(levels, names)| on_partition(&mut unified, levels, &names))
         .transpose()?;
 
+    // The cell cycle as a second axis of batch: `batch|bin` labels and
+    // the batch files they are written to, which the run records.
+    let cycle_files = cycle_batches(args, &mut unified, &data_files, batch_files)?;
+    let mut knobs = args.knobs(embedding_dim);
+    if let Some(files) = cycle_files.as_deref() {
+        knobs.batch_files = Some(files);
+    }
+
     driver::fit_embed_family(driver::EmbedPlan {
-        knobs: args.knobs(embedding_dim),
+        knobs,
         unified,
         data_files,
         multiome: run_multiome,
@@ -227,7 +238,16 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         init_from: args.init_from.as_deref(),
         train_args: senna::run_manifest::record_train_args(args)?,
         partition,
-    })
+    })?;
+    if cycle_files.is_some() {
+        // The per-level gene fold phase 2 divided by, read back as log δ.
+        let fold = format!("{}.batch_gene_fold.parquet", args.out);
+        if std::path::Path::new(&fold).is_file() {
+            let t = Mat::from_parquet_with_row_names(&fold, Some(0))?;
+            crate::cell_cycle::covariate::write_cycle_effect(&args.out, &t.rows, &t.cols, &t.mat)?;
+        }
+    }
+    Ok(())
 }
 
 /// Keep only the cells of a given partition (`levels`, finest last, over
@@ -268,4 +288,78 @@ fn on_partition(
     )?;
     aligned.reverse();
     Ok(aligned)
+}
+
+/// `--cell-cycle` on a bge fit: the cells' `batch|bin` labels in place of
+/// their batches, and the batch files written for them; `None` when the
+/// cycle is not modelled.
+fn cycle_batches(
+    args: &BgeArgs,
+    unified: &mut data_beans::bipartite_graph_embedding_input::BipartiteEmbeddingCells,
+    data_files: &[Box<str>],
+    batch_files: Option<&[Box<str>]>,
+) -> anyhow::Result<Option<Vec<Box<str>>>> {
+    use crate::cell_cycle::covariate::{model_cycle, CycleMode, CycleOutput};
+    use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
+    let cc = &args.collapse.cell_cycle;
+    // Checked here, not only in `model_cycle`: the sketch below is work.
+    if cc.mode == CycleMode::None {
+        return Ok(None);
+    }
+    let plain = unified.batch_labels();
+    let data = unified.count_backend();
+    let settings = crate::topic::common::ProjectSettings {
+        proj_dim: args.collapse.proj_dim,
+        block_size: args.block_size,
+        max_features: 0,
+        feature_list_file: None,
+        must_train_file: None,
+    };
+    let (proj_kn, _) = crate::topic::common::select_and_project(data, &plain, &settings)?;
+    let Some(cycle) = model_cycle(
+        data,
+        &plain,
+        &proj_kn,
+        cc,
+        args.block_size.unwrap_or(1024),
+        Some(CycleOutput {
+            out: &args.out,
+            batch_files,
+            ignore_batch: args.collapse.ignore_batch,
+        }),
+        || {
+            read_data_on_shared_rows(ReadSharedRowsArgs {
+                data_files: data_files.to_vec(),
+                preload: false,
+                keep_empty_barcodes: true,
+                ..Default::default()
+            })
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+    // The fit's own labels become `batch|bin`, indexed in first-seen order;
+    // a condition axis that copied the batch axis keeps copying it.
+    let condition_was_batch = unified.condition_names == unified.batch_names;
+    let mut index: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    let mut names: Vec<Box<str>> = Vec::new();
+    unified.batch_membership = cycle
+        .labels
+        .iter()
+        .map(|l| {
+            *index.entry(l).or_insert_with(|| {
+                names.push(l.clone());
+                (names.len() - 1) as u32
+            })
+        })
+        .collect();
+    unified.batch_names = names;
+    if condition_was_batch {
+        unified
+            .condition_membership
+            .clone_from(&unified.batch_membership);
+        unified.condition_names.clone_from(&unified.batch_names);
+    }
+    Ok(cycle.batch_files)
 }

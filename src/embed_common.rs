@@ -17,6 +17,19 @@ pub fn zscore_columns_inplace(x: &mut Mat) {
         }
     }
 }
+/// Mean and (population) standard deviation, with a floor so a constant
+/// slice cannot divide by zero; `(0, 1)` for an empty one.
+#[must_use]
+pub fn mean_sd(v: &[f32]) -> (f32, f32) {
+    if v.is_empty() {
+        return (0.0, 1.0);
+    }
+    let n = v.len() as f32;
+    let mu = v.iter().sum::<f32>() / n;
+    let var = v.iter().map(|x| (x - mu) * (x - mu)).sum::<f32>() / n;
+    (mu, var.sqrt().max(1e-8))
+}
+
 pub type DVec = nalgebra::DVector<f32>;
 
 pub use data_beans::qc_lib::{QcArgs, QcConfig};

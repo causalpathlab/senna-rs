@@ -1,6 +1,5 @@
 //! Projection-only families (`senna bge`, `senna simba`, `senna svd`): no
 //! decoder, only a fit onto the frozen dictionary.
-
 use crate::topic::model_metadata::load_dictionary;
 use crate::topic::predict_eval::{mean_finite, resolve_eval_genes, Reconstruction};
 use senna::embed_common::*;
@@ -354,16 +353,4 @@ struct CellScore {
     total: f32,
     spearman: f32,
     pearson_log1p: f32,
-}
-
-/// Mean and (population) standard deviation, with a floor so a constant slice
-/// cannot divide by zero.
-fn mean_sd(v: &[f32]) -> (f32, f32) {
-    if v.is_empty() {
-        return (0.0, 1.0);
-    }
-    let n = v.len() as f32;
-    let mu = v.iter().sum::<f32>() / n;
-    let var = v.iter().map(|x| (x - mu) * (x - mu)).sum::<f32>() / n;
-    (mu, var.sqrt().max(1e-8))
 }
