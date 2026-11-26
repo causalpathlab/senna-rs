@@ -6,25 +6,13 @@
 //! table (`to_srgb_senna`), so the pixels stay those senna always drew.
 
 pub use legume_tui::map::colour::{
-    activity_ramp, highlight_ink, oklch, to_linear as linear_rgb, to_srgb_senna, Lin as Rgb,
+    highlight_ink, oklch, to_linear as linear_rgb, to_srgb_senna, Lin as Rgb,
 };
 
 /// The page, its text and points with no group: shared with `senna run`.
 pub use crate::tui::style::{BACKGROUND, MUTED, TEXT, THEME};
 /// Text drawn on the map (labels, titles).
 pub const INK: [u8; 3] = THEME.ink;
-
-/// The diverging ramp for signed levels, blue through white to red, from
-/// −1 to 1 in 256 steps.
-#[must_use]
-pub fn diverging_ramp() -> &'static [Rgb] {
-    static RAMP: std::sync::OnceLock<Vec<Rgb>> = std::sync::OnceLock::new();
-    RAMP.get_or_init(|| {
-        (0..256)
-            .map(|i| legume_tui::map::colour::diverging_lin(i as f32 / 127.5 - 1.0))
-            .collect()
-    })
-}
 
 /// Point colour of category `i` of `n`: the page's palette.
 #[must_use]

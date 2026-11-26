@@ -313,7 +313,12 @@ impl App {
     /// changed (on screen, lupin's elapsed time counts as a change).
     fn background(&mut self, on_screen: bool) -> bool {
         // A slow read answered: what waited on it is done again, and drawn.
-        let answered = self.scene.poll_loads();
+        // Outliers found in the background: the camera fits the rest.
+        let outliers = self.scene.outliers_arrived();
+        if outliers {
+            self.vp = None;
+        }
+        let answered = self.scene.poll_loads() | outliers;
         if answered {
             self.restart();
         }
@@ -536,7 +541,7 @@ impl App {
             // Following an agent, its window; else the whole map.
             self.vp = Some(match self.agent_window() {
                 Some(window) => render::frame(window, w, h),
-                None => render::fit(self.scene.current().points.bounds, w, h),
+                None => render::fit(self.scene.fit_bounds(), w, h),
             });
             self.restart();
         }

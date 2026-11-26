@@ -4,6 +4,7 @@
 //! is a background load, shared by every view of the run.
 
 use super::*;
+use crate::view::colour_scale::Transform;
 use crate::view::CellStat;
 use data_beans::utilities::name_matching::names_matching;
 use std::sync::Mutex;
@@ -20,6 +21,9 @@ pub struct RowStat {
     pub rows: Option<Box<str>>,
     /// Per this many of the cell's counts in the run's own data.
     pub per_run: Option<u32>,
+    /// Divided by the same statistic over the rows matching this, as
+    /// methylated over methylated and unmethylated.
+    pub per_rows: Option<Box<str>>,
 }
 
 impl RowStat {
@@ -40,7 +44,22 @@ impl RowStat {
             measure,
             rows: rows.map(Into::into),
             per_run,
+            per_rows: None,
         })
+    }
+
+    /// This statistic divided by the same over the rows matching
+    /// `pattern`; not with a rate per the run's totals.
+    pub fn per_rows(mut self, pattern: Option<&str>) -> Result<Self, String> {
+        let Some(p) = pattern else {
+            return Ok(self);
+        };
+        names_matching(&[], p).map_err(|e| format!("per_rows: {e}"))?;
+        if self.per_run.is_some() {
+            return Err("per_rows or per_run_umi, not both".into());
+        }
+        self.per_rows = Some(p.into());
+        Ok(self)
     }
 
     /// What the key says: `features detected matching /methylated$ per 1k
@@ -50,6 +69,7 @@ impl RowStat {
         let mut name = match self.measure {
             CellStat::Total => "total counts",
             CellStat::Detected => "features detected",
+            CellStat::Mean => "mean count",
         }
         .to_string();
         if let Some(p) = &self.rows {
@@ -60,12 +80,16 @@ impl RowStat {
             Some(k) => name += &format!(" per {k} run UMIs"),
             None => {}
         }
+        if let Some(p) = &self.per_rows {
+            name += &format!(" / matching {p}");
+        }
         name
     }
 }
 
-/// Each column's total and features detected over some rows, read once.
-type RowSums = legume_tui::work::Loading<(Vec<f32>, Vec<f32>)>;
+/// Each column's total and features detected over some rows, and how many
+/// rows, read once.
+type RowSums = legume_tui::work::Loading<(Vec<f32>, Vec<f32>, usize)>;
 
 /// One read: of the extra file it holds (the run's own counts: `None`),
 /// over the rows matching a pattern.
@@ -114,7 +138,8 @@ impl RowSumLoads {
             if rows.is_empty() {
                 return Err(format!("no feature name matches {pattern_owned}"));
             }
-            o.column_stats(Some(&rows))
+            let (total, detected) = o.column_stats(Some(&rows))?;
+            Ok((total, detected, rows.len()))
         }));
         reads.push(RowRead {
             extra,
@@ -153,32 +178,28 @@ impl Activity {
         let run_totals = stat
             .per_run
             .map(|_| self.loads.totals.answer(self.patient).map(drop));
-        let (total, detected) = match &stat.rows {
-            Some(p) => {
-                let read = self.loads.row_sums.of(&self.loads, source, p)?;
-                let sums = read.answer(self.patient)?;
-                (sums.0.clone(), sums.1.clone())
-            }
-            None => {
-                if source == Source::Observed {
-                    self.loads.totals.answer(self.patient)?;
-                }
-                let sums = self.counts(source)?.totals()?;
-                (sums.0.clone(), sums.1.clone())
-            }
-        };
+        // The denominator's read starts before the numerator is waited on.
+        if let Some(p) = &stat.per_rows {
+            self.loads.row_sums.of(&self.loads, source, p)?;
+        }
+        let raw = self.row_measure(stat.measure, stat.rows.as_deref(), source)?;
         run_totals.transpose()?;
-        let raw = match stat.measure {
-            CellStat::Total => total,
-            CellStat::Detected => detected,
-        };
+        if let Some(p) = &stat.per_rows {
+            let den = self.row_measure(stat.measure, Some(p), source)?;
+            let values = Self::on_points(&raw, &rows)
+                .iter()
+                .zip(Self::on_points(&den, &rows))
+                .map(|(&n, d)| if d > 0.0 { n / d } else { f32::NAN })
+                .collect();
+            // A fraction starts at zero.
+            return Ok(Levels::from_values(values, false).starting_at_zero());
+        }
         let on_points = Self::on_points(&raw, &rows);
         let Some(k) = stat.per_run else {
-            let values = match stat.measure {
-                CellStat::Total => on_points.into_iter().map(f32::ln_1p).collect(),
-                CellStat::Detected => on_points,
-            };
-            return Ok(Levels::from_values(values, false));
+            // Counts on ln(1 + count) unless the colour scale says
+            // otherwise; the key's ticks are counts.
+            let natural = Transform::for_counts(stat.measure != CellStat::Detected);
+            return Ok(Levels::from_values(on_points, false).on(natural));
         };
         let run_rows = self.rows(Source::Observed, key, names)?;
         let umis = Self::on_points(&self.observed()?.totals()?.0, &run_rows);
@@ -189,5 +210,39 @@ impl Activity {
             .collect();
         // A rate starts at zero, as a share does.
         Ok(Levels::from_values(values, true))
+    }
+
+    /// `measure` per column of `source` over the rows matching `pattern`
+    /// (every row: `None`).
+    fn row_measure(
+        &mut self,
+        measure: CellStat,
+        pattern: Option<&str>,
+        source: Source,
+    ) -> Result<Vec<f32>, String> {
+        let pick = |total: &[f32], detected: &[f32], n: usize| match measure {
+            CellStat::Total => total.to_vec(),
+            CellStat::Detected => detected.to_vec(),
+            CellStat::Mean => {
+                let n = n.max(1) as f32;
+                total.iter().map(|t| t / n).collect()
+            }
+        };
+        match pattern {
+            Some(p) => {
+                let read = self.loads.row_sums.of(&self.loads, source, p)?;
+                let (total, detected, n) = read.answer(self.patient)?;
+                Ok(pick(total, detected, *n))
+            }
+            None => {
+                if source == Source::Observed {
+                    self.loads.totals.answer(self.patient)?;
+                }
+                let counts = self.counts(source)?;
+                let n = counts.features.names.len();
+                let (total, detected) = counts.totals()?;
+                Ok(pick(total, detected, n))
+            }
+        }
     }
 }

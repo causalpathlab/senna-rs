@@ -131,6 +131,20 @@ impl App {
                 self.scene.toggle_velocity();
                 self.redecorate();
             }
+            KeyCode::Char('O') => {
+                self.scene.cycle_outliers();
+                // The camera fits the layout again, with or without them.
+                self.vp = None;
+                self.restart();
+                let mode = self.scene.outliers.mode;
+                self.message = Some(match self.scene.current_outliers() {
+                    Some(f) => format!("outliers: {}", f.describe()),
+                    None if mode == super::super::outliers::Mode::Off => {
+                        "outliers: off, every point counts".into()
+                    }
+                    None => format!("outliers: {}, finding them…", mode.name()),
+                });
+            }
             KeyCode::Char(']') => self.change(|s| s.step_focus(1)),
             KeyCode::Char('[') => self.change(|s| s.step_focus(-1)),
             KeyCode::Char('t') => {

@@ -22,7 +22,30 @@ use std::sync::Arc;
 pub(crate) struct Files<'a> {
     pub png: Option<&'a Path>,
     pub pdf: Option<&'a Path>,
+    pub svg: Option<&'a Path>,
     pub legend: Option<&'a Path>,
+}
+
+/// How a panel's file holds its text: in the pixels (PNG), or as text
+/// over the raster (PDF, SVG).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Png,
+    Pdf,
+    Svg,
+}
+
+impl Kind {
+    /// The kind `path`'s extension names, if any.
+    pub(crate) fn of(path: &Path) -> Option<Self> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        match ext.as_str() {
+            "png" => Some(Self::Png),
+            "pdf" => Some(Self::Pdf),
+            "svg" => Some(Self::Svg),
+            _ => None,
+        }
+    }
 }
 
 /// What [`save`] wrote: the files, the panel's pixels, and a note when the
@@ -52,42 +75,50 @@ pub(crate) fn save(
     let px = panel.check().map_err(|e| anyhow!(e))?;
     let hidden = hidden(scene, panel)?;
     let entries = entries(scene, &hidden);
-    // A PNG has its text in the pixels, a PDF as text; the legend is
-    // either, as its extension says.
-    let write = |path: &Path, frame: Frame, pdf: bool| -> Result<()> {
-        if pdf {
-            panel.write_pdf(&[panel.page(frame)], path)
-        } else {
-            panel
+    // A PNG has its text in the pixels, a PDF or an SVG as text over the
+    // points' raster; the legend is any, as its extension says.
+    let write = |path: &Path, frame: Frame, kind: Kind| -> Result<()> {
+        match kind {
+            Kind::Pdf => panel.write_pdf(&[panel.page(frame)], path),
+            Kind::Svg => panel.write_svg(&panel.page(frame), path),
+            Kind::Png => panel
                 .png(&frame)
-                .and_then(|bytes| std::fs::write(path, bytes))
+                .and_then(|bytes| std::fs::write(path, bytes)),
         }
         .with_context(|| format!("writing {}", path.display()))
     };
     let mut wrote = Vec::new();
     let mut note = None;
-    for (path, pdf) in [(files.png, false), (files.pdf, true)] {
+    for (path, kind) in [
+        (files.png, Kind::Png),
+        (files.pdf, Kind::Pdf),
+        (files.svg, Kind::Svg),
+    ] {
         let Some(path) = path else { continue };
-        let (frame, n) = draw(scene, panel, window, &hidden, &entries, pdf);
+        let (frame, n) = draw(scene, panel, window, &hidden, &entries, kind != Kind::Png);
         note = n;
-        write(path, frame, pdf)?;
+        write(path, frame, kind)?;
         wrote.push(path.to_path_buf());
     }
     if let Some(path) = files.legend {
-        let pdf = is_pdf(path);
-        let frame = panel
-            .key_frame(&entries, color::BACKGROUND, pdf)
-            .map_err(|e| anyhow!(e))?;
-        write(path, frame, pdf)?;
+        // Checked by the caller; anything else is written as a PNG.
+        let kind = Kind::of(path).unwrap_or(Kind::Png);
+        let keep = kind != Kind::Png;
+        let frame = match (scene.current_shown(), scene.key_parts()) {
+            (Some(_), None) => Err("the key is hidden (colour_scale key hidden)".to_string()),
+            (_, Some(k)) => panel.ramp_key_frame(
+                &k.key(),
+                color::linear_rgb(color::TEXT),
+                color::BACKGROUND,
+                keep,
+            ),
+            _ => panel.key_frame(&entries, color::BACKGROUND, keep),
+        }
+        .map_err(|e| anyhow!(e))?;
+        write(path, frame, kind)?;
         wrote.push(path.to_path_buf());
     }
     Ok(Saved { wrote, px, note })
-}
-
-/// Whether `path` names a PDF; anything else is written as a PNG.
-fn is_pdf(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
 /// Which groups of the grouping shown the panel leaves out: those hidden
@@ -148,11 +179,19 @@ fn draw(
     keep_text: bool,
 ) -> (Frame, Option<String>) {
     let px = panel.check().expect("checked by save");
-    let areas = panel.areas(entries, px);
+    let ramp = scene.key_parts();
+    let areas = match &ramp {
+        Some(k) => panel.ramp_areas(&k.key(), k.place, px),
+        None => panel.areas(entries, px),
+    };
     let space = scene.current();
     let groups = scene.groups();
-    let kept = |i: usize| groups.is_none_or(|g| g[i] == NONE || !hidden[g[i] as usize]);
-    let bounds = window.unwrap_or_else(|| kept_bounds(&space.points.xy, kept, space.points.bounds));
+    let out = scene.current_outliers().map(|f| f.out);
+    let kept = |i: usize| {
+        groups.is_none_or(|g| g[i] == NONE || !hidden[g[i] as usize])
+            && out.as_ref().is_none_or(|o| !o[i])
+    };
+    let bounds = window.unwrap_or_else(|| kept_bounds(&space.points.xy, kept, scene.fit_bounds()));
     let [x0, y0, x1, y1] = areas.map;
     let n = (0..space.points.xy.len()).filter(|&i| kept(i)).count();
     let radius = panel.point_radius_px(n, (x1 - x0, y1 - y0));
@@ -183,7 +222,11 @@ fn draw(
 
     let (regular, bold) = panel.fonts();
     let mut note = None;
-    match (panel.labels, areas.key) {
+    if let (Some(k), Some(area)) = (&ramp, areas.key) {
+        let ink = color::linear_rgb(color::TEXT);
+        panel.draw_ramp_key(&mut frame, &k.key(), ink, area);
+    }
+    match (panel.labels, areas.key.filter(|_| ramp.is_none())) {
         (Labels::Legend, Some(key)) => {
             panel.draw_key(&mut frame, &entries[..areas.shown], key);
             if areas.shown < entries.len() {
@@ -289,7 +332,11 @@ fn spread(labels: &[Label], (w, h): (usize, usize), moved: Offsets<u32>) -> Offs
 }
 
 /// The bounds of the points `kept`, or `all` when none is.
-fn kept_bounds(xy: &[[f32; 2]], kept: impl Fn(usize) -> bool, all: [f32; 4]) -> [f32; 4] {
+pub(super) fn kept_bounds(
+    xy: &[[f32; 2]],
+    kept: impl Fn(usize) -> bool,
+    all: [f32; 4],
+) -> [f32; 4] {
     let empty = [
         f32::INFINITY,
         f32::INFINITY,
@@ -357,7 +404,7 @@ pub(crate) fn shaped_height(width_in: f32, [x0, y0, x1, y1]: [f32; 4]) -> f32 {
 
 /// Why panel flags without a file to save are refused, on screen or off.
 pub(super) const NEEDS_A_FILE: &str =
-    "panel flags (--height, --point-pt, --hide, ...) need a file: pass --pdf, --png or --legend";
+    "panel flags (--height, --point-pt, --hide, ...) need a file: pass --pdf, --png, --svg or --legend";
 
 /// `senna view --pdf/--png/--legend` with panel flags: the one run's
 /// starting map saved as the panel they ask for, `--width` inches wide
@@ -368,15 +415,19 @@ pub(super) fn from_flags(args: &super::ViewArgs, scenes: &[Scene]) -> Result<()>
     };
     let flags = &args.panel;
     ensure!(
-        args.export.pdf.is_some() || flags.png.is_some() || flags.legend.is_some(),
+        args.export.pdf.is_some()
+            || flags.png.is_some()
+            || flags.svg.is_some()
+            || flags.legend.is_some(),
         NEEDS_A_FILE
     );
     let width = args.export.width;
-    let height = shaped_height(width, scene.current().points.bounds);
+    let height = shaped_height(width, scene.fit_bounds());
     let panel = flags.panel(width, height, args.export.dpi);
     let files = Files {
         png: flags.png.as_deref(),
         pdf: args.export.pdf.as_deref(),
+        svg: flags.svg.as_deref(),
         legend: flags.legend.as_deref(),
     };
     let saved = save(scene, &panel, None, &files)?;

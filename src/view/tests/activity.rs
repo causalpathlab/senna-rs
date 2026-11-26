@@ -308,16 +308,19 @@ fn an_extra_file_shows_features_and_per_cell_stats_on_the_run_s_cells() {
     let (l, spelled) = a.levels("gene1", Source::Extra, 0, &run).unwrap();
     assert_eq!(&*spelled, "GENE1");
     // Columns c2, c0, zz, c1 hold 1, 2, 3, 4 reads of GENE1.
-    let want = [2f32, 4.0, 1.0].map(f32::ln_1p);
-    assert_eq!(&l.values[..3], &want);
+    // Counts, drawn on ln(1 + count).
+    assert_eq!(&l.values[..3], &[2.0, 4.0, 1.0]);
+    assert_eq!(l.natural, crate::view::colour_scale::Transform::Log1p);
     assert!(l.values[3].is_nan() && l.zero_is_off);
 
     let total = a
         .stat_levels(&Stat::Total, &[], Source::Extra, 0, &run)
         .unwrap();
-    // c0 (column 1) has 2 reads only; c2 (column 0) has 1 + 3.
-    assert_eq!(total.values[0], 2f32.ln_1p());
-    assert_eq!(total.values[2], 4f32.ln_1p());
+    // c0 (column 1) has 2 reads only; c2 (column 0) has 1 + 3: counts,
+    // drawn on ln(1 + count).
+    assert_eq!(total.values[0], 2.0);
+    assert_eq!(total.values[2], 4.0);
+    assert_eq!(total.natural, crate::view::colour_scale::Transform::Log1p);
     let detected = a
         .stat_levels(&Stat::Detected, &[], Source::Extra, 0, &run)
         .unwrap();
@@ -420,7 +423,7 @@ fn the_run_s_own_totals_are_read_on_the_side() {
     let total = a
         .stat_levels(&Stat::Total, &[], Source::Observed, 0, &cells)
         .unwrap();
-    assert_eq!(total.values, [4f32.ln_1p(), 2f32.ln_1p()]);
+    assert_eq!(total.values, [4.0, 2.0]);
 }
 
 #[test]

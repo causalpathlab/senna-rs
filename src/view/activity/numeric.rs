@@ -27,6 +27,13 @@ pub(in crate::view) fn best(
         .collect()
 }
 
+/// The `p`-quantile of `sample` (non-empty), by a linear-time selection
+/// that reorders it.
+pub(in crate::view) fn quantile(sample: &mut [f32], p: f32) -> f32 {
+    let k = ((sample.len() - 1) as f32 * p.clamp(0.0, 1.0)) as usize;
+    *sample.select_nth_unstable_by(k, f32::total_cmp).1
+}
+
 /// The upper median of the finite values.
 pub(super) fn median_of(v: &[f32]) -> Option<f32> {
     let mut finite: Vec<f32> = v.iter().copied().filter(|v| v.is_finite()).collect();

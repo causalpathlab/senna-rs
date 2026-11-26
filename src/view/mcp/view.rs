@@ -151,6 +151,8 @@ pub(in crate::view) struct MapArgs {
     pub(super) extra: Option<Vec<PathBuf>>,
     pub(super) cell_stat: Option<cell_colour::CellStatArg>,
     pub(super) values: Option<cell_colour::ValuesArg>,
+    pub(super) colour_scale: Option<crate::view::colour_scale::ColourScale>,
+    pub(super) outliers: Option<crate::view::outliers::Outliers>,
 }
 
 /// How the run's velocity field is drawn over the cells, or not.
@@ -349,6 +351,7 @@ impl Open {
             "time": s.pick == Some(Pick::Time) && s.current_shown().is_some(),
             "stage2": stage2,
             "cell_colour": cell_colour::state(s),
+            "outliers": s.current_outliers().map(|f| json!({"mode": f.mode, "rule": f.rule, "points": f.n, "of": f.of, "fitted": f.bounds})),
             "chart": ChartArg::of(s),
             "velocity": VelocityArg::from(s.velocity_drawn()),
             "legend": legend,
@@ -424,7 +427,7 @@ impl Open {
 
     /// The camera for an image `width` wide at the window's shape.
     pub(super) fn viewport(&self, width: usize) -> Viewport {
-        let [x0, y0, x1, y1] = self.window.unwrap_or(self.scene.current().points.bounds);
+        let [x0, y0, x1, y1] = self.window.unwrap_or(self.scene.fit_bounds());
         let aspect = (y1 - y0) / (x1 - x0).max(1e-6);
         let h = ((width as f32 * aspect).round() as usize).clamp(1, MAX_SIDE);
         match self.window {
@@ -606,6 +609,9 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         ensure!(data.times.is_some(), features::NO_TIMES);
     }
     check_stage2(a, s, data)?;
+    if let Some(o) = &a.outliers {
+        o.check().map_err(|e| anyhow!("outliers: {e}"))?;
+    }
     let mut cells = cell_colour::check(a, s, data)?;
     if let Some(chart) = a.chart {
         chart.check(data.has_stage2())?;
@@ -638,6 +644,13 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         scene.focus = focus;
     }
     cells.open_extra(scene);
+    if let Some(cs) = &a.colour_scale {
+        scene.set_colour_scale(cs.clone());
+    }
+    if let Some(o) = a.outliers.clone().filter(|o| *o != scene.outliers) {
+        scene.set_outliers(o);
+        moved = true;
+    }
     match a.observed {
         Some(true) => scene.source = scene.count_source(),
         Some(false) => scene.source = Source::Expected,
@@ -672,7 +685,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
 }
 
 /// The view_map arguments a published view sets.
-const VIEW_KEYS: [&str; 16] = [
+const VIEW_KEYS: [&str; 18] = [
     "round",
     "map",
     "space",
@@ -689,6 +702,8 @@ const VIEW_KEYS: [&str; 16] = [
     "extra",
     "cell_stat",
     "values",
+    "colour_scale",
+    "outliers",
 ];
 
 /// An agent's published view ([`Open::view_state`]): the manifest it
@@ -844,6 +859,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "extra": cell_colour::spec("extra"),
                     "cell_stat": cell_colour::spec("cell_stat"),
                     "values": cell_colour::spec("values"),
+                    "colour_scale": cell_colour::spec("colour_scale"),
+                    "outliers": cell_colour::spec("outliers"),
                     "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "World window [x0, y0, x1, y1]"},
                     "fit": {"type": "boolean", "description": "true: the whole map"},
                     "center": xy("Move the window's centre to this world point"),

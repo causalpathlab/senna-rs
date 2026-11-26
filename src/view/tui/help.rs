@@ -215,6 +215,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("I", "on the gain map: one donor's deviation at every cell's state, the next donor in turn, then each cell's own again"),
             ("v", "the run's velocity field (its cell_velocity table) over the cells: streamlines, arrows, off, in turn"),
             ("(  )", "streamlines sparser, denser"),
+            ("O", "outlying points: fit the map to the rest (outliers pinned to its edge), hide them too, off, in turn; isolated points on t-SNE/UMAP, a 0.5-99.5% range of x and y on diffusion and other spectral maps"),
             ("space  b", "sidebar on or off"),
             (
                 "<  >",

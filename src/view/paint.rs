@@ -2,7 +2,7 @@
 
 use super::*;
 use legume_tui::map::labels::{place, Placed};
-use legume_tui::map::legend::{draw_legend, draw_ramp_key};
+use legume_tui::map::legend::{draw_legend, draw_ramp_key_in};
 use legume_tui::map::raster::{edge, ring};
 
 impl Scene {
@@ -23,10 +23,12 @@ impl Scene {
                 size: 0.8 * self.scale,
                 levels: None,
                 order: None,
+                outliers: None,
             });
             keys.push((b, None, None, 0, 0, true));
         }
         let shown = self.current_shown();
+        let flags = self.current_outliers();
         let merge = self.review.as_ref().and_then(|r| r.merge.as_ref());
         let selected = merge.map(|m| m.levels.as_slice());
         let cursor = self.merge_cursor_group();
@@ -39,8 +41,12 @@ impl Scene {
             cursor,
             muted: false,
             size: self.scale * if space.backdrop.is_some() { 1.5 } else { 1.0 },
-            levels: shown.map(|s| (&s.levels, s.levels.ramp(&self.ramp))),
+            levels: shown.map(|s| (&s.levels, s.levels.ramp())),
             order: None,
+            outliers: flags.map(|f| match f.mode {
+                outliers::Mode::Hide => Strays::Hide(f.out),
+                _ => Strays::Pin(f.bounds),
+            }),
         });
         keys.push((
             self.space,
@@ -348,15 +354,17 @@ impl Scene {
             }
         }
         let font = Font::for_cell_height(cell_px * 0.8 * self.text_scale, false);
-        if let Some(s) = self.current_shown() {
-            reserved.push(draw_ramp_key(
+        if let Some(k) = self.key_parts() {
+            let bounds = [0.0, 0.0, frame.w as f32, frame.h as f32];
+            reserved.push(draw_ramp_key_in(
                 frame,
-                &s.title,
-                s.levels.ramp(&self.ramp),
+                &k.key(),
                 font,
                 color::linear_rgb(color::INK),
+                bounds,
+                k.place,
             ));
-        } else if self.show_labels {
+        } else if self.current_shown().is_none() && self.show_labels {
             reserved.extend(draw_legend(frame, &self.legend(), font, None));
         }
         if self.show_labels {

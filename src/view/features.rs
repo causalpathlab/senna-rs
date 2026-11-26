@@ -484,7 +484,8 @@ impl Scene {
             }
         };
         match result {
-            Ok((levels, title)) => {
+            Ok((mut levels, title)) => {
+                levels.fit(&self.colour_scale);
                 self.shown_ids += 1;
                 self.shown = Some(Shown {
                     id: self.shown_ids,

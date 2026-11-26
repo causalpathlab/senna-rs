@@ -287,10 +287,10 @@ impl Scene {
                 let whose = donor
                     .as_deref()
                     .map_or_else(|| "own donor".to_string(), |d| format!("as {d}"));
+                // The range is on the key's ticks, as the colour scale sets it.
                 let title = format!(
-                    "{} log gain · {whose} · ±{:.2} · faded |z| < {}",
+                    "{} log gain · {whose} · faded |z| < {}",
                     s.genes[g],
-                    levels.hi,
                     gains::Z_FULL
                 );
                 Ok((levels, title))

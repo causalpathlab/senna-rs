@@ -577,7 +577,7 @@ impl Deck {
                     tile.proto = fit_protocol(&self.picker, frame.to_image(), inner).ok();
                     continue;
                 }
-                let vp = deck::camera(app.vp, app.scene.current().points.bounds, w, h);
+                let vp = deck::camera(app.vp, app.scene.fit_bounds(), w, h);
                 tile.job = Some(Job::new(vp, color::BACKGROUND, &app.scene.layers()));
             }
         }
@@ -790,7 +790,7 @@ fn view_at(app: &App, wp: usize, cell_px: f32) -> (&Scene, Viewport, f32) {
     let (vw, vh) = app.view_px();
     let vw = vw.max(1.0);
     let hp = ((wp as f32 * vh / vw).round() as usize).max(1);
-    let vp = deck::camera(app.vp, app.scene.current().points.bounds, wp, hp);
+    let vp = deck::camera(app.vp, app.scene.fit_bounds(), wp, hp);
     (&app.scene, vp, cell_px * wp as f32 / vw)
 }
 

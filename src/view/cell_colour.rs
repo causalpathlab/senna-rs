@@ -17,10 +17,12 @@ use std::sync::Arc;
 /// A per-cell statistic to start on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum CellStat {
-    /// `ln(1 + total count)`.
+    /// The total count (on ln(1 + count) unless a colour scale says).
     Total,
     /// How many features have a count.
     Detected,
+    /// The mean count over the features (those matching `--rows`).
+    Mean,
 }
 
 /// What the cells start coloured by, as a number of each.
@@ -51,6 +53,15 @@ pub struct CellArgs {
 
     #[arg(
         long,
+        value_name = "REGEX",
+        requires = "cell_stat",
+        conflicts_with = "per_run_umi",
+        help = "With --cell-stat: divided by the same statistic over the features matching REGEX, as --rows '/methylated$' --per-rows '/(un)?methylated$' for a methylated fraction"
+    )]
+    pub per_rows: Option<String>,
+
+    #[arg(
+        long,
         value_name = "FILE[:COLUMN]",
         conflicts_with = "cell_stat",
         help = "Start coloured by a number per cell from a table (TSV, CSV or parquet): its first column names the cell (matched to the run's as --extra matches), COLUMN (default: the last numeric one) the value; `u` in the view"
@@ -63,7 +74,14 @@ impl CellArgs {
     /// features, else one over rows or per the run's totals.
     pub(crate) fn stat(&self) -> Result<Option<Stat>, String> {
         self.cell_stat
-            .map(|m| cell_stat(m, self.rows.as_deref(), self.per_run_umi))
+            .map(|m| {
+                cell_stat(
+                    m,
+                    self.rows.as_deref(),
+                    self.per_run_umi,
+                    self.per_rows.as_deref(),
+                )
+            })
             .transpose()
     }
 
@@ -85,11 +103,12 @@ pub(crate) fn cell_stat(
     measure: CellStat,
     rows: Option<&str>,
     per_run: Option<u32>,
+    per_rows: Option<&str>,
 ) -> Result<Stat, String> {
-    Ok(match (rows, per_run, measure) {
-        (None, None, CellStat::Total) => Stat::Total,
-        (None, None, CellStat::Detected) => Stat::Detected,
-        _ => Stat::Rows(RowStat::new(measure, rows, per_run)?),
+    Ok(match (rows, per_run, per_rows, measure) {
+        (None, None, None, CellStat::Total) => Stat::Total,
+        (None, None, None, CellStat::Detected) => Stat::Detected,
+        _ => Stat::Rows(RowStat::new(measure, rows, per_run)?.per_rows(per_rows)?),
     })
 }
 
