@@ -305,11 +305,28 @@ fn covariate_batches(
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
 ) -> anyhow::Result<Option<Vec<Box<str>>>> {
-    use crate::covariate::{model_covariates, CovariateOutput};
+    use crate::covariate::CovariateOutput;
     use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
+    let block = args.block_size.unwrap_or(1024);
     let cv = &args.collapse.covariates;
     let plain = unified.batch_labels();
+    // Labels with parts of their own, before any pass over the data: `all`
+    // leaves them be, a list is refused.
+    let compound = plain
+        .iter()
+        .any(|l| genomic_data::covariate::plain_batch(l).is_err());
+    if !cv.enabled(&[(
+        compound,
+        "batch labels that already have parts of their own",
+    )])? {
+        return Ok(None);
+    }
     let data = unified.count_backend();
+    // Scored first: the projection the bins need is made only when some
+    // covariate is scored.
+    let Some(scored) = crate::covariate::score(data, cv, block)? else {
+        return Ok(None);
+    };
     let settings = crate::topic::common::ProjectSettings {
         proj_dim: args.collapse.proj_dim,
         block_size: args.block_size,
@@ -318,12 +335,11 @@ fn covariate_batches(
         must_train_file: None,
     };
     let (proj_kn, _) = crate::topic::common::select_and_project(data, &plain, &settings)?;
-    let Some(modelled) = model_covariates(
+    let Some(modelled) = crate::covariate::bin(
         data,
+        scored,
         &plain,
         &proj_kn,
-        cv,
-        args.block_size.unwrap_or(1024),
         Some(CovariateOutput {
             out: &args.out,
             batch_files,

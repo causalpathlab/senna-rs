@@ -103,6 +103,45 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     write_run_manifest_with(desc, |_, _| {})
 }
 
+/// The covariate files at `prefix` that this run does not own, removed, so
+/// none is read as this run's (predict would bin a query by a stale model):
+/// batch files it does not record, and when none of the batch files it
+/// records is a covariate batch file, the model, cells and effect too. Run
+/// when the fit has finished, so a fit that fails leaves the run before it
+/// as it was.
+///
+/// # Errors
+/// A file that exists but cannot be removed.
+fn sweep_covariate_files(prefix: &str, batch: &[String]) -> anyhow::Result<()> {
+    use genomic_data::covariate::files;
+    let labels_are_covariates = batch.iter().any(|b| files::is_batch(b));
+    let recorded = |p: &str| {
+        batch
+            .iter()
+            .any(|b| super::same_file(Path::new(b), Path::new(p)))
+    };
+    let stale: Vec<String> = files::all(prefix)
+        .into_iter()
+        .filter(|p| {
+            if files::is_batch(p) {
+                !recorded(p)
+            } else {
+                !labels_are_covariates
+            }
+        })
+        .collect();
+    for p in &stale {
+        std::fs::remove_file(p)?;
+    }
+    if !stale.is_empty() {
+        log::info!(
+            "covariate files no longer this run's, removed: {}",
+            stale.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// [`write_run_manifest`], with `edit` applied before the one write: for a
 /// run that records more than [`RunDescription`] says, so its manifest is
 /// never there without it. `edit` is given the outputs' base name.
@@ -119,6 +158,7 @@ pub fn write_run_manifest_with(
         )?,
         (None, None) => {}
     }
+    sweep_covariate_files(desc.prefix, desc.data_batch)?;
     let basename = Path::new(desc.prefix).file_name().map_or_else(
         || desc.prefix.to_string(),
         |s| s.to_string_lossy().into_owned(),
@@ -204,4 +244,40 @@ pub fn write_run_manifest_with(
     edit(&mut m, &basename);
 
     m.save(Path::new(&path))
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::sweep_covariate_files;
+    use genomic_data::covariate::files;
+
+    #[test]
+    fn a_run_keeps_only_the_covariate_files_it_records() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let out = dir.path().join("run").to_string_lossy().into_owned();
+        let write_all = |n: usize| -> std::io::Result<()> {
+            std::fs::write(files::model(&out), "{}")?;
+            std::fs::write(files::cells(&out), "x")?;
+            for i in 0..n {
+                std::fs::write(files::batch(&out, i), "b0\n")?;
+            }
+            Ok(())
+        };
+        // Covariate labels recorded for one file: the second, stale, goes.
+        write_all(2)?;
+        sweep_covariate_files(&out, &[files::batch(&out, 0)])?;
+        assert_eq!(
+            files::all(&out),
+            [
+                files::model(&out),
+                files::cells(&out),
+                files::batch(&out, 0)
+            ]
+        );
+        // Plain batch files recorded: every covariate file goes.
+        write_all(2)?;
+        sweep_covariate_files(&out, &["plain.txt".into()])?;
+        assert!(files::all(&out).is_empty());
+        Ok(())
+    }
 }

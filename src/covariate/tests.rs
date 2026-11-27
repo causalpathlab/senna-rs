@@ -115,3 +115,24 @@ fn a_run_fitted_with_the_former_cell_cycle_flag_is_refused_for_new_cells() -> an
     assert!(super::query_batches(&prefix, &data, batch).is_err());
     Ok(())
 }
+
+#[test]
+fn a_two_track_backend_is_scored_on_its_spliced_rows() {
+    let names: Vec<Box<str>> = [
+        "A/count/spliced",
+        "A/count/unspliced",
+        "B/count/spliced",
+        "B/count/unspliced",
+    ]
+    .into_iter()
+    .map(Box::from)
+    .collect();
+    assert_eq!(super::scored_rows(&names), Some(vec![0, 2]));
+    let spliced_only: Vec<Box<str>> = ["A/count/spliced", "B/count/spliced"]
+        .into_iter()
+        .map(Box::from)
+        .collect();
+    assert_eq!(super::scored_rows(&spliced_only), None);
+    let plain: Vec<Box<str>> = ["A", "B"].into_iter().map(Box::from).collect();
+    assert_eq!(super::scored_rows(&plain), None);
+}
