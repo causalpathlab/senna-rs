@@ -72,8 +72,10 @@ pub struct CovariateOutput<'a> {
 }
 
 /// Each loaded cell's `batch|cvK` label ([`genomic_data::covariate::model_covariates`]
-/// over every row) and, with `output`, the model, the cells' scores and the
-/// batch files written; `None` when nothing is modelled.
+/// over every row, or a two-track backend's spliced rows) and, with `output`, the model, the cells' scores and the
+/// batch files written; `None` when nothing is modelled. For a fit that has
+/// its projection anyway; one that makes it only to bin calls [`score`],
+/// then [`bin`].
 ///
 /// # Errors
 /// As the shared module, or a file that cannot be written.
@@ -86,17 +88,75 @@ pub fn model_covariates(
     output: Option<CovariateOutput<'_>>,
     reread: impl FnOnce() -> anyhow::Result<data_beans::aux::data_loading::SparseDataWithBatch>,
 ) -> anyhow::Result<Option<Modelled>> {
+    let rows = scored_rows(&data.row_names()?);
     let Some(m) = genomic_data::covariate::model_covariates(
         &Blocks(data),
         batch,
         proj_kn,
         args,
-        None,
+        rows.as_deref(),
         block,
     )?
     else {
         return Ok(None);
     };
+    written(data, m, output, reread).map(Some)
+}
+
+/// Every loaded cell scored on the chosen covariates' gene sets, over every
+/// row (a two-track backend's spliced rows); `None` when none is scored ([`genomic_data::covariate::score_covariates`]).
+///
+/// # Errors
+/// As the shared module.
+pub fn score(
+    data: &SparseIoVec,
+    args: &CovariateArgs,
+    block: usize,
+) -> anyhow::Result<Option<genomic_data::covariate::Scored>> {
+    let rows = scored_rows(&data.row_names()?);
+    genomic_data::covariate::score_covariates(&Blocks(data), args, rows.as_deref(), block)
+}
+
+/// The rows a cell's covariates are scored on: with two-track rows
+/// (`{gene}/count/spliced` beside `{gene}/count/unspliced`, as `senna ode`
+/// reads), the spliced track alone, a cell's ordinary RNA; otherwise every
+/// row (`None`). Scored on both, a gene set would match one track per gene
+/// and a cell's totals would count its reads twice over.
+fn scored_rows(names: &[Box<str>]) -> Option<Vec<usize>> {
+    let unspliced = names.iter().any(|n| n.ends_with("/count/unspliced"));
+    let spliced: Vec<usize> = (0..names.len())
+        .filter(|&r| names[r].ends_with("/count/spliced"))
+        .collect();
+    (unspliced && !spliced.is_empty()).then_some(spliced)
+}
+
+/// The scored cells binned under `batch` and `proj_kn`, with `output`
+/// written as by [`model_covariates`]; `None` when nothing is binned.
+///
+/// # Errors
+/// As the shared module, or a file that cannot be written.
+pub fn bin(
+    data: &SparseIoVec,
+    scored: genomic_data::covariate::Scored,
+    batch: &[Box<str>],
+    proj_kn: &DMatrix<f32>,
+    output: Option<CovariateOutput<'_>>,
+    reread: impl FnOnce() -> anyhow::Result<data_beans::aux::data_loading::SparseDataWithBatch>,
+) -> anyhow::Result<Option<Modelled>> {
+    let Some(m) = scored.bin(batch, proj_kn)? else {
+        return Ok(None);
+    };
+    written(data, m, output, reread).map(Some)
+}
+
+/// `m`'s labels and, with `output`, its model, cells and batch files
+/// written beside the run.
+fn written(
+    data: &SparseIoVec,
+    m: genomic_data::covariate::Modelled,
+    output: Option<CovariateOutput<'_>>,
+    reread: impl FnOnce() -> anyhow::Result<data_beans::aux::data_loading::SparseDataWithBatch>,
+) -> anyhow::Result<Modelled> {
     let batch_files = output
         .map(|o| {
             senna::embed_common::mkdir_parent(o.out)?;
@@ -120,10 +180,10 @@ pub fn model_covariates(
             anyhow::Ok(written)
         })
         .transpose()?;
-    Ok(Some(Modelled {
+    Ok(Modelled {
         labels: m.labels,
         batch_files,
-    }))
+    })
 }
 
 /// The batch files of covariate labels a run recorded, for a fit reusing its
@@ -137,7 +197,9 @@ pub fn recorded_batch_files(
     dir: &std::path::Path,
     prefix: &str,
 ) -> Option<Vec<Box<str>>> {
-    (!m.data.batch.is_empty() && std::path::Path::new(&model_path(prefix)).is_file()).then(|| {
+    (m.data.batch.iter().any(|b| files::is_batch(b))
+        && std::path::Path::new(&model_path(prefix)).is_file())
+    .then(|| {
         m.data
             .batch
             .iter()
@@ -202,6 +264,17 @@ pub fn query_batches(
                 !std::path::Path::new(&cycle).is_file(),
                 "{model} was fitted with --cell-cycle ({cycle}), whose batch|ccK δ held-out \
                  cells cannot be binned for: refit it with --covariate"
+            );
+            // A run whose recorded batch files are covariate labels has a
+            // batch|cvK δ: without its model, held-out cells would take
+            // plain labels that match none of it.
+            let recorded = senna::run_manifest::load_for(model)
+                .map(|(m, _)| m.data.batch)
+                .unwrap_or_default();
+            anyhow::ensure!(
+                !recorded.iter().any(|b| files::is_batch(b)),
+                "{model} recorded covariate batch labels but its model {path} is missing: \
+                 refit it, or restore the model"
             );
             batch
         }

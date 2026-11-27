@@ -739,7 +739,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1195,7 +1195,7 @@ dependencies = [
  "indicatif",
  "indicatif-log-bridge",
  "legume-genomic-types",
- "legume-numeric 0.10.16",
+ "legume-numeric 0.10.17",
  "libz-sys",
  "log",
  "nalgebra",
@@ -1441,7 +1441,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2336,7 +2336,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -2582,7 +2582,7 @@ checksum = "3d29407db961492b5744bb1439c08414810ab34e0f85e9f8822afbaebc616176"
 dependencies = [
  "anyhow",
  "indicatif",
- "legume-numeric 0.9.8",
+ "legume-numeric 0.10.17",
  "log",
  "nalgebra",
  "rand 0.10.4",
@@ -2595,14 +2595,13 @@ dependencies = [
 
 [[package]]
 name = "legume-genomic-types"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "524dcdc8a459312eeda154a889bfe3615b954cc584866e10c8f62fb627797a31"
+version = "0.6.6"
+source = "git+https://github.com/causalpathlab/legume-genomic-types?branch=main#42eefe2a81bc1d5c20c0b969a6b69a309054052e"
 dependencies = [
  "anyhow",
  "clap",
  "dashmap",
- "legume-numeric 0.10.16",
+ "legume-numeric 0.10.17",
  "log",
  "nalgebra",
  "nalgebra-sparse",
@@ -2624,7 +2623,7 @@ dependencies = [
  "indicatif",
  "legume-enrichment",
  "legume-genomic-types",
- "legume-numeric 0.10.16",
+ "legume-numeric 0.10.17",
  "log",
  "nalgebra",
  "rand 0.10.4",
@@ -2687,9 +2686,8 @@ dependencies = [
 
 [[package]]
 name = "legume-numeric"
-version = "0.10.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e63ec4a415df6a20a35711c44018492432848d8399c655998888a5804e6a84c5"
+version = "0.10.17"
+source = "git+https://github.com/causalpathlab/legume-numeric?branch=main#b6cd0761534e53a1939a876f538baf43f2db5291"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -4450,7 +4448,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4546,7 +4544,7 @@ dependencies = [
  "legume-genomic-types",
  "legume-graph-embedding",
  "legume-mcp",
- "legume-numeric 0.10.16",
+ "legume-numeric 0.10.17",
  "legume-numeric 0.9.8",
  "legume-tui",
  "log",
@@ -4964,7 +4962,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5642,7 +5640,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5933,7 +5931,7 @@ checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
  "serde",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
