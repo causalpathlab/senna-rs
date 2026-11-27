@@ -1,6 +1,6 @@
 [package]
 name = "senna-rs"
-version = "0.25.104"
+version = "0.25.105"
 edition = "2021"
 rust-version = "1.91"
 license = "MIT"
@@ -101,7 +101,3 @@ rustix = { version = "1", features = ["fs", "termios"] }
 [profile.test]
 opt-level = 2
 debug = "line-tables-only"
-
-[patch.crates-io]
-legume-numeric = { git = "https://github.com/causalpathlab/legume-numeric", branch = "main" }
-legume-genomic-types = { git = "https://github.com/causalpathlab/legume-genomic-types", branch = "main" }
