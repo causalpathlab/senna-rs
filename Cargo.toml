@@ -1,6 +1,6 @@
 [package]
 name = "senna-rs"
-version = "0.25.102"
+version = "0.25.104"
 edition = "2021"
 rust-version = "1.91"
 license = "MIT"
@@ -101,9 +101,3 @@ rustix = { version = "1", features = ["fs", "termios"] }
 [profile.test]
 opt-level = 2
 debug = "line-tables-only"
-
-# Until legume-numeric 0.10.16 and legume-genomic-types 0.6.5 are published
-# (removed in the release that publishes this crate).
-[patch.crates-io]
-legume-numeric = { git = "https://github.com/causalpathlab/legume-numeric", branch = "main" }
-legume-genomic-types = { git = "https://github.com/causalpathlab/legume-genomic-types", branch = "main" }
