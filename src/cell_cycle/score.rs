@@ -24,18 +24,14 @@ use data_beans::sparse_data_visitors::VisitColumnsOps;
 use data_beans::sparse_io_vector::SparseIoVec;
 use genomic_data::cell_cycle::{CycleGenes, CyclePhase};
 use genomic_data::name_matching::GeneIndex;
+use legume_numeric::matrix::covariate::score::SCALE;
+use legume_numeric::matrix::covariate::ExpressionBins;
 use nalgebra::{DMatrix, SymmetricEigen};
-use rand::seq::IndexedRandom;
 use rand::SeedableRng;
 use std::sync::{Arc, Mutex};
 
-/// Expression bins controls are drawn from, and controls per set gene.
-const N_BINS: usize = 24;
-const N_CONTROLS: usize = 100;
 /// Fewest matched genes of either phase to score at all.
 pub const MIN_MATCHED: usize = 10;
-/// Counts per cell the expression is normalised to.
-const SCALE: f32 = 1e4;
 
 /// A cell's phase as the scores call it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,10 +150,17 @@ pub fn score(
 
     // The module scores' weights over every gene, controls drawn from one
     // set of expression bins.
-    let bins = ExpressionBins::new(&mean);
+    let bins = ExpressionBins::new(&mean, &(0..d).collect::<Vec<_>>());
     let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
-    let w_s = bins.weights(&s_rows, &mut rng);
-    let w_g2m = bins.weights(&g2m_rows, &mut rng);
+    let dense = |w: Vec<(usize, f32)>| {
+        let mut out = vec![0f64; d];
+        for (g, x) in w {
+            out[g] = f64::from(x);
+        }
+        out
+    };
+    let w_s = dense(bins.weights(&s_rows, &mut rng));
+    let w_g2m = dense(bins.weights(&g2m_rows, &mut rng));
 
     // The cycle genes, each once, standardised: a cell's value is its
     // zero-level `base[k]` plus `x / sd[k]` where the gene is expressed.
@@ -380,48 +383,6 @@ impl Cross {
     }
 }
 
-/// Genes in 24 equal-size bins of their mean expression, from which a
-/// module score's controls are drawn (Seurat's `AddModuleScore`).
-struct ExpressionBins {
-    bin: Vec<usize>,
-    members: Vec<Vec<usize>>,
-}
-
-impl ExpressionBins {
-    fn new(mean: &[f64]) -> Self {
-        let d = mean.len();
-        let mut by_mean: Vec<usize> = (0..d).collect();
-        by_mean.sort_by(|&a, &b| mean[a].total_cmp(&mean[b]));
-        let mut bin = vec![0usize; d];
-        let mut members: Vec<Vec<usize>> = vec![Vec::new(); N_BINS];
-        for (rank, &g) in by_mean.iter().enumerate() {
-            bin[g] = rank * N_BINS / d;
-            members[bin[g]].push(g);
-        }
-        Self { bin, members }
-    }
-
-    /// A module score's weights over every gene: `1/|set|` on the set,
-    /// `−1/|controls|` on controls drawn from each set gene's bin.
-    fn weights(&self, set: &[usize], rng: &mut rand::rngs::SmallRng) -> Vec<f64> {
-        let mut controls: Vec<usize> = Vec::new();
-        for &g in set {
-            let pool = &self.members[self.bin[g]];
-            controls.extend(pool.sample(rng, N_CONTROLS.min(pool.len())));
-        }
-        controls.sort_unstable();
-        controls.dedup();
-        let mut w = vec![0f64; self.bin.len()];
-        for &g in &controls {
-            w[g] -= 1.0 / controls.len() as f64;
-        }
-        for &g in set {
-            w[g] += 1.0 / set.len() as f64;
-        }
-        w
-    }
-}
-
 /// Turn the angles so G1 cells' circular mean is 0, and run S before G2/M.
 fn orient(angle: &mut [f32], phase: &[Phase]) {
     let circ_mean = |p: Phase, a: &[f32]| {
@@ -489,21 +450,6 @@ mod tests {
         assert_eq!(Phase::call(0.3, 0.1), Phase::S);
         assert_eq!(Phase::call(-0.1, 0.2), Phase::G2M);
         assert_eq!(Phase::call(0.1, 0.1), Phase::Undecided);
-    }
-
-    #[test]
-    fn module_weights_sum_to_zero_with_controls_from_the_set_s_bins() {
-        let mean: Vec<f64> = (0..480).map(|g| g as f64).collect();
-        let set = [5usize, 300];
-        let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
-        let w = ExpressionBins::new(&mean).weights(&set, &mut rng);
-        assert!(w.iter().sum::<f64>().abs() < 1e-9);
-        // Controls come from the set genes' bins (20 genes a bin here).
-        for (g, &x) in w.iter().enumerate() {
-            if x < 0.0 {
-                assert!(g / 20 == 0 || g / 20 == 15, "gene {g}");
-            }
-        }
     }
 
     #[test]

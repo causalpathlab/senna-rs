@@ -146,7 +146,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         output_keep_idx,
         batch_files,
     } = load_and_project(&LoadProjectArgs {
-        cell_cycle: &args.collapse.cell_cycle,
+        covariates: &args.collapse.covariates,
         data_files: &data_files,
         batch_files: &batch_files,
         preload: args.preload_data,

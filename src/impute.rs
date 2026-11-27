@@ -662,17 +662,16 @@ fn svd_matching_latents(
     let (train_genes, u_dk) = crate::topic::model_metadata::load_dictionary(&args.model)?;
     let column_sum_norm = crate::svd::project::column_sum_norm(&args.model);
     info!("Loading new data for the dictionary projection");
-    let new_loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
-        ReadSharedRowsArgs {
-            data_files: args.data_files.clone(),
-            batch_files: args.batch_files.clone(),
-            preload: args.preload_data,
-            ..Default::default()
+    let new_data = crate::predict::read_query(
+        &args.data_files,
+        crate::predict::QueryBatches::Register {
+            files: args.batch_files.as_deref(),
+            model: &args.model,
         },
+        args.preload_data,
+        &crate::topic::eval::QueryNameOpts::default(),
         &train_genes,
-    )?)?;
-    let mut new_data: SparseIoVec = new_loaded.data;
-    new_data.register_batch_membership(&new_loaded.batch);
+    )?;
     let new_cell_names = new_data.column_names()?;
     // Both sides are divided by the model's trained per-batch δ before they
     // are projected, each cell by its own batch's.

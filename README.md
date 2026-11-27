@@ -347,40 +347,55 @@ S before G2/M), a cycle position in the spirit of Revelio and tricycle.
   G2/M and on both) and `{out}.cell_cycle.clusters.parquet` (each cluster's
   phase shares, `one_phase` at 95% or more).
 
-### `--cell-cycle`: the cycle as a second axis of batch
+### `--covariate`: per-cell programmes as a second axis of batch
 
 ```sh
-senna bge data/*.zarr.zip --batch-files b/*.txt --cell-cycle difference -o run
+senna bge data/*.zarr.zip --batch-files b/*.txt -o run              # --covariate all
+senna svd data/*.zarr.zip --covariate cycle,sex -o run2
+senna topic data/*.zarr.zip --covariate none -o run3
 ```
 
 Every fit that reads batch (`topic`, `masked-topic`, `vae`, `rbm`, `svd`,
-`ode`, `bge`) takes `--cell-cycle`. It scores the loaded cells as above, cuts
-the cycle into bins and makes each cell's batch label `batch|ccK`, so the
-collapse's per-gene batch δ, and every model that divides by it, is fitted per
-batch and bin. No exact phase is called; the bins only separate cells.
+`ode`, `bge`) scores per-cell covariates, bins them together and makes each
+cell's batch label `batch|cvK`, so the collapse's per-gene batch δ (and bge's
+gene fold), and every model that divides by it, is fitted per batch and bin.
+The scoring and binning are legume-numeric's (`matrix::covariate`), shared
+with pinto and chickpea.
 
-- **Modes**: `difference` bins S − G2/M (resting cells share the balanced
-  bin, so S against G2/M is modelled and cycling against resting is kept);
-  `all` bins the standardised (S, G2/M).
-- **Bins**: k-means, k chosen from 1 to `--cycle-bins-max` (10) by BIC under
-  a spherical Gaussian with one variance (X-means), or fixed by
-  `--cycle-bins`. Nothing is binned when one bin is chosen or too few cycle
-  genes match.
-- **Guards**: cells are grouped by k-means on the top components of the fit's
-  random projection, with S and G2/M regressed out; a group at least 95% in one
-  bin keeps plain labels. A batch's bin with fewer than 10 cells merges into
-  its nearest bin.
-- **Labels** are joined by legume-genomic-types' `batch_label` (`|`). A fit
-  given labels an earlier `--cell-cycle` fit wrote bins its cells afresh.
-- **Writes** `{out}.cell_cycle_model.json` (bins, BIC by k, centroids,
-  cells per level), `{out}.cell_cycle.parquet` (scores, phase, angle and
-  `batch_label` per cell), one `{out}.cell_cycle.batch.{i}.txt` per data file
-  (every column a line; a column QC set aside keeps its plain label), which the
-  run's manifest records as its batch files, and `{out}.cycle_effect.parquet`:
+- **Covariates** (gene sets in legume-genomic-types, each source cited in
+  `data/covariate_gene_sets.tsv`): `cycle` (S, G2/M; Tirosh 2016), `mito`
+  and `ribo` (count shares; HGNC groups), `sex` (XIST against RPS4Y1, EIF1AY,
+  DDX3Y, KDM5D; Staedtler 2013), `stress` (dissociation genes; van den Brink
+  2017), `hypoxia`, `interferon` (alpha, gamma; MSigDB Hallmark).
+  `--covariate-genes FILE` (covariate, set, kind `share|module`, symbol) adds
+  covariates or replaces built-in ones. A covariate whose genes do not match
+  the features is skipped.
+- **`all`** (the default) bins the covariates with groups of their own, each
+  judged on its scores together; the rest are set aside and named. A list
+  bins exactly those; `none` models nothing. A run recorded before this flag
+  replays as `none`.
+- **Binning**: each score is centred by its batch's median (a shift between
+  batches is the batch δ's), standardised robustly (median, MAD and IQR; a
+  soft clip at 5), and binned by one Gaussian mixture with diagonal
+  covariances, fitted by EM from several seeded starts. The number of bins
+  (at most `--covariate-bins-max`, 10) is chosen by ICL, which charges
+  overlapping bins so a skewed single hump stays whole
+  (`--covariate-criterion bic` for the BIC), or fixed by `--covariate-bins`.
+- **Guards**: groups of like cells (the fit's random projection with the
+  scores regressed out) at least 95% in one bin keep plain labels; a batch's
+  bin under 10 cells merges into its nearest.
+- **Writes** `{out}.covariate_model.json` (the scores' weights by gene, each
+  covariate's own bins, the scales, the mixture, each batch's bins and cells
+  per level), `{out}.covariates.parquet` (every score and `batch_label` per
+  cell), one `{out}.covariate.batch.{i}.txt` per data file (every column a
+  line; a column QC set aside keeps its plain label), which the run's
+  manifest records as its batch files, and `{out}.covariate_effect.parquet`:
   per gene and bin, log δ averaged over batches and centred per gene.
-- **Not yet**: joint fits, multiome loads, a carried pseudobulk reference
-  (`--pb-reference`), and `senna predict` on a cycle model, which would need
-  the model's bins for new cells. Each refuses with a message.
+- **`senna predict`** bins held-out cells with the recorded model, so a
+  trained batch's cells find its `batch|cvK` δ (cells of a group the fit kept
+  plain are binned: new cells form no groups).
+- **Not modelled** (`all` says so in the log; a list is refused): joint fits,
+  multiome loads and a carried pseudobulk reference (`--pb-reference`).
 
 ## Tests
 

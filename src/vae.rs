@@ -266,7 +266,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         output_keep_idx,
         batch_files,
     } = load_and_collapse(&LoadCollapseArgs {
-        cell_cycle: &args.collapse.cell_cycle,
+        covariates: &args.collapse.covariates,
         data_files: &data_files,
         batch_files: &batch_files,
         preload: args.preload_data,

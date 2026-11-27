@@ -1,5 +1,6 @@
-use crate::cell_cycle::covariate::{model_cycle, CycleOutput};
+use crate::covariate::{model_covariates, CovariateOutput};
 use data_beans::alg::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
+use reuse::{keep_preprocessing, reuse_preprocessing};
 pub use senna::embed_common::preferred_posterior_mean;
 use senna::embed_common::*;
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
@@ -8,6 +9,7 @@ use candle_core::Device;
 
 mod blocks;
 mod levels;
+mod reuse;
 
 pub(crate) use blocks::{
     device_concurrency, expand_delta_for_block, map_blocks, process_blocks, process_blocks_at,
@@ -42,7 +44,7 @@ pub struct PreparedData {
     /// output writers via `Mat::select_rows`.
     pub output_keep_idx: Option<Vec<usize>>,
     /// The batch files this fit's labels came from, for the manifest to
-    /// record: the given ones, or the `batch|bin` files `--cell-cycle`
+    /// record: the given ones, or the `batch|cvK` files `--covariate`
     /// wrote, one per data file.
     pub batch_files: Option<Vec<Box<str>>>,
 }
@@ -72,8 +74,8 @@ pub struct ProjectedData {
 /// Args for [`load_and_project`] — the read + batch + HVG + project
 /// portion shared by topic, masked-topic, and svd routines.
 pub struct LoadProjectArgs<'a> {
-    /// The cell cycle as a second axis of batch ([`crate::cell_cycle::covariate`]).
-    pub cell_cycle: &'a crate::cell_cycle::covariate::CycleCovariateArgs,
+    /// Covariates as a second axis of batch ([`crate::covariate`]).
+    pub covariates: &'a crate::covariate::CovariateArgs,
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
     pub preload: bool,
@@ -181,103 +183,6 @@ fn read_args(
     }
 }
 
-/// The run at `run`'s kept preprocessing ([`crate::topic::prep`]) applied to
-/// this one's files: read without QC, the rows and cells QC kept there kept
-/// here, its HVG selection and projection taken as they are. `None` when it
-/// kept none, or it does not fit this run's files and sketch width.
-fn reuse_preprocessing(args: &LoadProjectArgs, run: &str) -> anyhow::Result<Option<ProjectedData>> {
-    let (m, dir) = senna::run_manifest::load_for(run)?;
-    let prefix = senna::run_manifest::resolve(&dir, &m.prefix);
-    let Some(prep) = crate::topic::prep::Prep::read(&prefix.to_string_lossy())? else {
-        return Ok(None);
-    };
-    if prep.proj_kn.nrows() != args.proj_dim {
-        return Ok(None);
-    }
-    let SparseDataWithBatch {
-        data: mut data_vec,
-        batch: mut batch_membership,
-        ..
-    } = read_data_on_shared_rows(read_args(args, None))?;
-    let by_name = |names: &[Box<str>], kept: &[Box<str>]| -> Vec<bool> {
-        let kept: std::collections::HashSet<&str> = kept.iter().map(AsRef::as_ref).collect();
-        names.iter().map(|n| kept.contains(n.as_ref())).collect()
-    };
-    let rows = data_vec.row_names()?;
-    if rows != prep.rows {
-        data_vec.mask_rows(&by_name(&rows, &prep.rows))?;
-        if data_vec.row_names()? != prep.rows {
-            return Ok(None);
-        }
-    }
-    let cells = data_vec.column_names()?;
-    if cells != prep.cells {
-        let keep = by_name(&cells, &prep.cells);
-        data_vec.mask_columns(&keep)?;
-        batch_membership = data_beans::qc_lib::filter_by_keep(&batch_membership, &keep);
-        if data_vec.column_names()? != prep.cells {
-            return Ok(None);
-        }
-    }
-    if args.ignore_batch {
-        senna::senna_input::collapse_to_single_batch(&mut batch_membership);
-    }
-    let selected_features = prep.hvg.map(|names| {
-        let at: std::collections::HashMap<&str, usize> = prep
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.as_ref(), i))
-            .collect();
-        let selected_indices: Vec<usize> = names
-            .iter()
-            .filter_map(|n| at.get(n.as_ref()).copied())
-            .collect();
-        let index_map = selected_indices
-            .iter()
-            .enumerate()
-            .map(|(new_i, &old_i)| (old_i, new_i))
-            .collect();
-        HvgSelection {
-            selected_indices,
-            selected_names: names,
-            index_map,
-        }
-    });
-    info!(
-        "Preprocessing of {run}: {} cells, {} rows, its HVG selection and projection reused",
-        prep.cells.len(),
-        prep.rows.len()
-    );
-    Ok(Some(ProjectedData {
-        batch_files: args.batch_files.clone(),
-        data_vec,
-        batch_membership,
-        proj_kn: prep.proj_kn,
-        selected_features,
-        output_keep_idx: prep.output,
-    }))
-}
-
-/// Keep `done`'s preprocessing at `args.out` for a later fit (not with
-/// carried pseudobulks, whose columns are not cells).
-fn keep_preprocessing(args: &LoadProjectArgs, done: &ProjectedData) -> anyhow::Result<()> {
-    let Some(out) = args.out.filter(|_| args.pb_reference.is_none()) else {
-        return Ok(());
-    };
-    crate::topic::prep::Prep {
-        cells: done.data_vec.column_names()?,
-        rows: done.data_vec.row_names()?,
-        hvg: done
-            .selected_features
-            .as_ref()
-            .map(|s| s.selected_names.clone()),
-        output: done.output_keep_idx.clone(),
-        proj_kn: done.proj_kn.clone(),
-    }
-    .write(out)
-}
-
 /// Read sparse files, resolve batch membership, optionally pick HVGs,
 /// then run the random projection. Used by `load_and_collapse` and by
 /// `senna svd` so the pre-collapse pipeline is identical across routines.
@@ -295,7 +200,8 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
          weights are applied by position. Pass --no-pb-reference for this round and let it \
          re-collapse."
     );
-    args.cell_cycle.ensure_loadable(
+    let covariates_on = crate::covariate::loadable(
+        args.covariates,
         args.multiome.is_some()
             || args.column_alignment == data_beans::sparse_io_vector::ColumnAlignment::Union,
         args.pb_reference.is_some(),
@@ -307,9 +213,8 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
             args.pb_reference.is_none()
                 && args.feature_mask_fn.is_none()
                 && args.qc_report_out.is_none()
-                && args.cell_cycle.mode == crate::cell_cycle::covariate::CycleMode::None
         })
-        .map(|run| reuse_preprocessing(args, run))
+        .map(|run| reuse_preprocessing(args, run, covariates_on))
         .transpose()?
         .flatten()
     {
@@ -386,38 +291,43 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         selected_features.as_ref(),
     )?;
 
-    // The cell cycle as a second axis of batch: bins from the projection
-    // under plain labels, then the sketch again under `batch|bin` (on the
-    // same HVGs, which do not depend on the labels).
+    // Covariates as a second axis of batch: bins from the projection under
+    // plain labels, then the sketch again under `batch|cvK` (on the same
+    // HVGs, which do not depend on the labels).
     let mut batch_files = args.batch_files.clone();
-    if let Some(cycle) = model_cycle(
-        &data_vec,
-        &batch_membership,
-        &proj_kn,
-        args.cell_cycle,
-        args.block_size.unwrap_or(1024),
-        args.out.map(|out| CycleOutput {
-            out,
-            batch_files: args.batch_files.as_deref(),
-            ignore_batch: args.ignore_batch,
-        }),
-        || {
-            read_data_on_shared_rows(ReadSharedRowsArgs {
-                keep_empty_barcodes: true,
-                preload: false,
-                ..read_args(args, None)
-            })
-        },
-    )? {
-        batch_membership = cycle.labels;
+    let modelled = if covariates_on {
+        model_covariates(
+            &data_vec,
+            &batch_membership,
+            &proj_kn,
+            args.covariates,
+            args.block_size.unwrap_or(1024),
+            args.out.map(|out| CovariateOutput {
+                out,
+                batch_files: args.batch_files.as_deref(),
+                ignore_batch: args.ignore_batch,
+            }),
+            || {
+                read_data_on_shared_rows(ReadSharedRowsArgs {
+                    keep_empty_barcodes: true,
+                    preload: false,
+                    ..read_args(args, None)
+                })
+            },
+        )?
+    } else {
+        None
+    };
+    if let Some(m) = modelled {
+        batch_membership = m.labels;
         proj_kn = project(
             &data_vec,
             &batch_membership,
             &settings,
             selected_features.as_ref(),
         )?;
-        if cycle.batch_files.is_some() {
-            batch_files = cycle.batch_files;
+        if m.batch_files.is_some() {
+            batch_files = m.batch_files;
         }
     }
 
@@ -434,9 +344,9 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
 }
 
 /// `{out}.delta.parquet`, the collapse's per-gene batch δ melted by gene and
-/// batch, when it fitted one, and the cell cycle's share of it when its
-/// levels carry cycle bins, `{out}.cycle_effect.parquet`
-/// ([`crate::cell_cycle::covariate::write_cycle_effect`]).
+/// batch, when it fitted one, and the covariates' share of it when its
+/// levels carry covariate bins, `{out}.covariate_effect.parquet`
+/// ([`crate::covariate::outputs::write_covariate_effect`]).
 ///
 /// # Errors
 /// A table that cannot be written.
@@ -459,7 +369,7 @@ pub(crate) fn write_batch_delta(
     )?;
     if let Some(levels) = batch_names.as_deref() {
         use legume_numeric::param::traits::Inference;
-        crate::cell_cycle::covariate::write_cycle_effect(
+        crate::covariate::outputs::write_covariate_effect(
             out,
             &gene_names,
             levels,
@@ -564,8 +474,8 @@ pub fn collapse_loaded_finest(
 }
 
 pub struct LoadCollapseArgs<'a> {
-    /// The cell cycle as a second axis of batch ([`crate::cell_cycle::covariate`]).
-    pub cell_cycle: &'a crate::cell_cycle::covariate::CycleCovariateArgs,
+    /// Covariates as a second axis of batch ([`crate::covariate`]).
+    pub covariates: &'a crate::covariate::CovariateArgs,
     pub data_files: &'a [Box<str>],
     pub batch_files: &'a Option<Vec<Box<str>>>,
     pub preload: bool,
@@ -734,7 +644,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         output_keep_idx,
         batch_files,
     } = load_and_project(&LoadProjectArgs {
-        cell_cycle: args.cell_cycle,
+        covariates: args.covariates,
         data_files: args.data_files,
         batch_files: args.batch_files,
         preload: args.preload,

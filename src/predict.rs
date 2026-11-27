@@ -69,7 +69,6 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
          and simba runs",
         args.model
     );
-    crate::cell_cycle::covariate::ensure_no_cycle_axis(&args.model, "predict")?;
     anyhow::ensure!(
         kind.has_decoder_latent_fit() || (!args.decoder_only && args.refine_steps == 0),
         "--decoder-only / --refine-steps re-fit the latent against a topic decoder; {} is a \
@@ -231,9 +230,13 @@ fn feature_mean_on(model: &str, training_genes: &[Box<str>]) -> anyhow::Result<V
 /// How [`read_query`] treats the cells' batches.
 #[derive(Clone, Copy)]
 pub(crate) enum QueryBatches<'a> {
-    /// Register each cell's batch: from these files, or one batch per data
-    /// file when `None`.
-    Register(Option<&'a [Box<str>]>),
+    /// Register each cell's batch: from `files`, or one batch per data file
+    /// when `None`; made `batch|cvK` by the covariate model the run `model`
+    /// recorded, when it has one, so trained batches find their δ.
+    Register {
+        files: Option<&'a [Box<str>]>,
+        model: &'a str,
+    },
     /// The caller never reads batches; skip the registration pass.
     Ignore,
 }
@@ -249,7 +252,7 @@ pub(crate) fn read_query(
     training_genes: &[Box<str>],
 ) -> anyhow::Result<SparseIoVec> {
     let batch_files = match batches {
-        QueryBatches::Register(files) => files,
+        QueryBatches::Register { files, .. } => files,
         QueryBatches::Ignore => None,
     };
     let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
@@ -263,8 +266,9 @@ pub(crate) fn read_query(
         training_genes,
     )?)?;
     let mut data_vec = loaded.data;
-    if matches!(batches, QueryBatches::Register(_)) {
-        data_vec.register_batch_membership(&loaded.batch);
+    if let QueryBatches::Register { model, .. } = batches {
+        let batch = crate::covariate::query_batches(model, &data_vec, loaded.batch)?;
+        data_vec.register_batch_membership(&batch);
     }
     info!(
         "Query data: {} features × {} cells",

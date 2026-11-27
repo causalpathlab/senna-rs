@@ -298,7 +298,10 @@ impl BgeEmbedding {
         use crate::predict::QueryBatches as Read;
         let data_vec = crate::predict::read_query(
             files,
-            batches.map_or(Read::Ignore, |b| Read::Register(b.files)),
+            batches.map_or(Read::Ignore, |b| Read::Register {
+                files: b.files,
+                model: b.model,
+            }),
             preload,
             qopts,
             &self.gene_names,

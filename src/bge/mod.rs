@@ -75,9 +75,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         args.pb_reference.is_some(),
     )?;
     let is_multiome = multiome_plan.is_some();
-    args.collapse
-        .cell_cycle
-        .ensure_loadable(is_multiome, args.pb_reference.is_some())?;
+    let covariates_on = crate::covariate::loadable(
+        &args.collapse.covariates,
+        is_multiome,
+        args.pb_reference.is_some(),
+    )?;
 
     // Multiome mixes gene rows (RNA) and locus rows (ATAC peaks) on one axis,
     // so canonicalize per-name via `Mixed` (genes → gene rule, `chrX:s-e` →
@@ -218,11 +220,15 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .map(|(levels, names)| on_partition(&mut unified, levels, &names))
         .transpose()?;
 
-    // The cell cycle as a second axis of batch: `batch|bin` labels and
+    // Covariates as a second axis of batch: `batch|cvK` labels and
     // the batch files they are written to, which the run records.
-    let cycle_files = cycle_batches(args, &mut unified, &data_files, batch_files)?;
+    let covariate_files = if covariates_on {
+        covariate_batches(args, &mut unified, &data_files, batch_files)?
+    } else {
+        None
+    };
     let mut knobs = args.knobs(embedding_dim);
-    if let Some(files) = cycle_files.as_deref() {
+    if let Some(files) = covariate_files.as_deref() {
         knobs.batch_files = Some(files);
     }
 
@@ -239,12 +245,12 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         train_args: senna::run_manifest::record_train_args(args)?,
         partition,
     })?;
-    if cycle_files.is_some() {
+    if covariate_files.is_some() {
         // The per-level gene fold phase 2 divided by, read back as log δ.
         let fold = format!("{}.batch_gene_fold.parquet", args.out);
         if std::path::Path::new(&fold).is_file() {
             let t = Mat::from_parquet_with_row_names(&fold, Some(0))?;
-            crate::cell_cycle::covariate::write_cycle_effect(&args.out, &t.rows, &t.cols, &t.mat)?;
+            crate::covariate::outputs::write_covariate_effect(&args.out, &t.rows, &t.cols, &t.mat)?;
         }
     }
     Ok(())
@@ -290,22 +296,18 @@ fn on_partition(
     Ok(aligned)
 }
 
-/// `--cell-cycle` on a bge fit: the cells' `batch|bin` labels in place of
-/// their batches, and the batch files written for them; `None` when the
-/// cycle is not modelled.
-fn cycle_batches(
+/// `--covariate` on a bge fit: the cells' `batch|cvK` labels in place of
+/// their batches, and the batch files written for them; `None` when no
+/// covariate is modelled.
+fn covariate_batches(
     args: &BgeArgs,
     unified: &mut data_beans::bipartite_graph_embedding_input::BipartiteEmbeddingCells,
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
 ) -> anyhow::Result<Option<Vec<Box<str>>>> {
-    use crate::cell_cycle::covariate::{model_cycle, CycleMode, CycleOutput};
+    use crate::covariate::{model_covariates, CovariateOutput};
     use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
-    let cc = &args.collapse.cell_cycle;
-    // Checked here, not only in `model_cycle`: the sketch below is work.
-    if cc.mode == CycleMode::None {
-        return Ok(None);
-    }
+    let cv = &args.collapse.covariates;
     let plain = unified.batch_labels();
     let data = unified.count_backend();
     let settings = crate::topic::common::ProjectSettings {
@@ -316,13 +318,13 @@ fn cycle_batches(
         must_train_file: None,
     };
     let (proj_kn, _) = crate::topic::common::select_and_project(data, &plain, &settings)?;
-    let Some(cycle) = model_cycle(
+    let Some(modelled) = model_covariates(
         data,
         &plain,
         &proj_kn,
-        cc,
+        cv,
         args.block_size.unwrap_or(1024),
-        Some(CycleOutput {
+        Some(CovariateOutput {
             out: &args.out,
             batch_files,
             ignore_batch: args.collapse.ignore_batch,
@@ -339,12 +341,12 @@ fn cycle_batches(
     else {
         return Ok(None);
     };
-    // The fit's own labels become `batch|bin`, indexed in first-seen order;
+    // The fit's own labels become `batch|cvK`, indexed in first-seen order;
     // a condition axis that copied the batch axis keeps copying it.
     let condition_was_batch = unified.condition_names == unified.batch_names;
     let mut index: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
     let mut names: Vec<Box<str>> = Vec::new();
-    unified.batch_membership = cycle
+    unified.batch_membership = modelled
         .labels
         .iter()
         .map(|l| {
@@ -361,5 +363,5 @@ fn cycle_batches(
             .clone_from(&unified.batch_membership);
         unified.condition_names.clone_from(&unified.batch_names);
     }
-    Ok(cycle.batch_files)
+    Ok(modelled.batch_files)
 }
