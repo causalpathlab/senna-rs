@@ -149,7 +149,10 @@ pub(super) fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     let qopts = args.query_name_opts()?;
     let data_vec = read_query(
         &args.data_files,
-        QueryBatches::Register(args.batch_files.as_deref()),
+        QueryBatches::Register {
+            files: args.batch_files.as_deref(),
+            model: &args.model,
+        },
         args.preload_data,
         &qopts,
         &training_genes,

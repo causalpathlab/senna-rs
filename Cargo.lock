@@ -28,9 +28,9 @@ dependencies = [
 
 [[package]]
 name = "ahash"
-version = "0.8.13"
+version = "0.8.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fca89247609239eeb6915e6991111866b92d7b31025e69302bbf430cc4d2c38"
+checksum = "54dae3d1d7b8956f3506c4e999a74e77f932a59153ccf38ab8cf96db74bb9dc0"
 dependencies = [
  "cfg-if",
  "const-random",
@@ -67,9 +67,9 @@ dependencies = [
 
 [[package]]
 name = "allocator-api2"
-version = "0.2.21"
+version = "0.2.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+checksum = "57b212daf2e827b1ccdd778b7eb48ba433e58cb0e4f27b43cd6b7a608425a014"
 
 [[package]]
 name = "android_system_properties"
@@ -417,7 +417,7 @@ dependencies = [
  "lz4_flex 0.12.3",
  "pkg-config",
  "snap",
- "zstd 0.13.5",
+ "zstd 0.13.6",
 ]
 
 [[package]]
@@ -673,9 +673,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.9"
+version = "4.6.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "844c5c0b65be192cb68d570cca1b21a6444431d24e39c084dc0336177015337c"
+checksum = "50066ca966813ca8957ee15361752f19424a8ff620dbe9c8993d9f99d99b04b3"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -683,9 +683,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.7"
+version = "4.6.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0797fb7aeb1406c84efac526901f7ec3ead2124f946b494e72879d4b54704d"
+checksum = "a0ed97c96ef4efb3cc84e09fa388df4463e7cc3224ec38d7b1d9e45749333590"
 dependencies = [
  "anstream",
  "anstyle",
@@ -796,9 +796,9 @@ dependencies = [
 
 [[package]]
 name = "constant_time_eq"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9eb6feb175df65d0a3ccd3e73484e940d0ac664e8034f0519fd49a93db3071d9"
+checksum = "144e7f1de087984240b7816d47f698b414979faa6f40839c5b86d6bd47db57b7"
 dependencies = [
  "rustversion",
 ]
@@ -996,7 +996,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11247e6c4f83c2b15748f4873805483deaa2bbc855e773817c07a9f987f55c62"
 dependencies = [
  "dispatch2",
- "nix 0.31.4",
+ "nix 0.32.0",
  "windows-sys 0.61.2",
 ]
 
@@ -1195,7 +1195,7 @@ dependencies = [
  "indicatif",
  "indicatif-log-bridge",
  "legume-genomic-types",
- "legume-numeric 0.10.14",
+ "legume-numeric 0.10.16",
  "libz-sys",
  "log",
  "nalgebra",
@@ -2247,9 +2247,9 @@ dependencies = [
 
 [[package]]
 name = "hdf5-metno-sys"
-version = "0.12.6"
+version = "0.12.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a451b31c0db010dc0f78d5d9b19dc541afc159e1b87d540c35c95e258e655a96"
+checksum = "0d731b808b02d933220f24c0d3c4fb550ab6764004bb08cac32a3428c53c777e"
 dependencies = [
  "libc",
  "libloading 0.8.9",
@@ -2582,7 +2582,7 @@ checksum = "3d29407db961492b5744bb1439c08414810ab34e0f85e9f8822afbaebc616176"
 dependencies = [
  "anyhow",
  "indicatif",
- "legume-numeric 0.10.14",
+ "legume-numeric 0.10.16",
  "log",
  "nalgebra",
  "rand 0.10.4",
@@ -2595,17 +2595,20 @@ dependencies = [
 
 [[package]]
 name = "legume-genomic-types"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45e84834f5449c8be6899db62feb39136f1a39bb164cceefb6f94439b03ec172"
+version = "0.6.5"
+source = "git+https://github.com/causalpathlab/legume-genomic-types?branch=main#51ab806688c3296d7c59883c073d201df98f3cd3"
 dependencies = [
  "anyhow",
+ "clap",
  "dashmap",
- "legume-numeric 0.10.14",
+ "legume-numeric 0.10.16",
  "log",
  "nalgebra",
+ "nalgebra-sparse",
  "rayon",
  "rustc-hash",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2620,7 +2623,7 @@ dependencies = [
  "indicatif",
  "legume-enrichment",
  "legume-genomic-types",
- "legume-numeric 0.10.14",
+ "legume-numeric 0.10.16",
  "log",
  "nalgebra",
  "rand 0.10.4",
@@ -2683,9 +2686,8 @@ dependencies = [
 
 [[package]]
 name = "legume-numeric"
-version = "0.10.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c10f05b89dc8ff37e990283f77acd86c9ef3be8112656cf87e4b709e2788f531"
+version = "0.10.16"
+source = "git+https://github.com/causalpathlab/legume-numeric?branch=main#078604f0258d0bc62412eb96a70d26b5726b4232"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -2833,9 +2835,9 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "litrs"
-version = "1.0.1"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
+checksum = "02b614978e47ce529faee66579f2b2fe19c94aa96d910a6a9a8043b2b02d8175"
 
 [[package]]
 name = "lock_api"
@@ -2904,7 +2906,7 @@ version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef1d73c59a56771343712b22ea5615092c612c16ba291c0979e3105dfeec4890"
 dependencies = [
- "sha2 0.11.1",
+ "sha2 0.11.2",
 ]
 
 [[package]]
@@ -3245,6 +3247,18 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77730ed34f01f4990cb2ea67fec715ecebc6fab9a6396cf83c5529b13f581bdc"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -3688,7 +3702,7 @@ dependencies = [
  "simdutf8",
  "snap",
  "twox-hash",
- "zstd 0.13.5",
+ "zstd 0.13.6",
 ]
 
 [[package]]
@@ -4542,7 +4556,7 @@ dependencies = [
  "legume-genomic-types",
  "legume-graph-embedding",
  "legume-mcp",
- "legume-numeric 0.10.14",
+ "legume-numeric 0.10.16",
  "legume-numeric 0.9.8",
  "legume-tui",
  "log",
@@ -4648,9 +4662,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.1"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
+checksum = "5b0e5c7d67bc53f435386b2130fdc900488c5703770f6d8a4633060e34288a27"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
@@ -5178,9 +5192,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.20+spec-1.1.0"
+version = "0.25.21+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e76360e201d6dbd6583e17795ba71a88f47365a9139c8450a7979c32303b8e73"
+checksum = "88497dab46de5bf343ec66b05c251e48c6213f3e9170c70a70a823f7abe886a4"
 dependencies = [
  "indexmap",
  "toml_datetime",
@@ -5190,9 +5204,9 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.6+spec-1.1.0"
+version = "1.1.7+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6769c452d71ba30696c6b37770c439a9cc9110f47f7d5cdbeda79840ef5ea31"
+checksum = "0bb28d6e049a9766c3bd91a8326e6179f5b132dec87906bb97018ef7a2f3431a"
 dependencies = [
  "winnow 1.0.5",
 ]
@@ -6056,7 +6070,7 @@ dependencies = [
  "zarrs_metadata_ext",
  "zarrs_plugin",
  "zarrs_storage",
- "zstd 0.13.5",
+ "zstd 0.13.6",
 ]
 
 [[package]]
@@ -6218,18 +6232,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.64"
+version = "0.8.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed43f3060383c64b000f3c630550aebdfa9d3b76d48de32390483dd2cc7e0865"
+checksum = "cba8a86aee14fc8cc6c208af60854b3d4ab7185a9a369a12c648faa2716ff42a"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.64"
+version = "0.8.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5cbd820fe3e35fb38c83b6dc7e6b1618bc46e0cd10073ae94e8d52dc468d8b9"
+checksum = "f89bca3b96ceb3cfcb4572790402f977442270d252b9a8504ebc258760c55f94"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6307,7 +6321,7 @@ dependencies = [
  "libc",
  "lzma-rust2",
  "memchr",
- "nix 0.31.4",
+ "nix 0.32.0",
  "pbkdf2",
  "ppmd-rust",
  "sha1",
@@ -6316,7 +6330,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeroize",
  "zopfli",
- "zstd 0.14.4",
+ "zstd 0.14.5",
 ]
 
 [[package]]
@@ -6345,45 +6359,45 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50adf04cf3ec914b0b9905c9dde90c80fe74bfd701e331fc80a39c512c525278"
+checksum = "b04655dc7bf4abd8ebe23dac6bef20fceea52a29ad19e37a4101b3951d7e8b45"
 dependencies = [
- "zstd-safe 7.4.1",
+ "zstd-safe 7.4.2",
 ]
 
 [[package]]
 name = "zstd"
-version = "0.14.4"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad5020ab8f27bfc0024ad0a07aed6bf022a16208f479686fbed4fdd0c85eb0b3"
+checksum = "465cb081cac3a28a84ef547702dba1fe0f4a9f22e4e57a0b675ceee028c2af80"
 dependencies = [
- "zstd-safe 8.3.0",
+ "zstd-safe 8.4.0",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.4.1"
+version = "7.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "498d94ad68720c89b4fbe41b9090850651e68cb2dd9210ce7ffbff3a94653819"
+checksum = "df2575690b2a3eccad509fe7898cdde32a5afca06a06449ff4dcfb318c7b7281"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "8.3.0"
+version = "8.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a9ea9cc2576c2fcc104e9cec04f46e3ede564f4fbc206831e4ef7e859a4140d"
+checksum = "9b09bddd92c53b91833f4df03e0ea07e02d8367cfcd15a3b9acda94fc273f793"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.1.3+zstd.1.5.7"
+version = "2.2.0+zstd.1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f729a06d0257428fd9d997ac8db7e1407bd0262ab016b085b36bc52957c0052d"
+checksum = "c3f4089cda6dda4dc43c43dd9f8964140064fd2f752f3da46c3a483c3c175160"
 dependencies = [
  "cc",
  "pkg-config",

@@ -329,9 +329,12 @@ pub(crate) struct CollapseArgs {
     )]
     pub(crate) ignore_batch: bool,
 
+    /// Covariates binned as a second axis of batch. A run recorded without
+    /// them replays without them ([`crate::covariate::CovariateArgs`]'s
+    /// `Default`), though the command line defaults to `all`.
     #[command(flatten)]
     #[serde(default)]
-    pub(crate) cell_cycle: crate::cell_cycle::covariate::CycleCovariateArgs,
+    pub(crate) covariates: crate::covariate::CovariateArgs,
 
     #[arg(
         long,

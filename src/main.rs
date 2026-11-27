@@ -43,6 +43,7 @@ mod cell_cycle;
 mod cluster_bhc;
 mod clustering;
 mod commands;
+mod covariate;
 mod critique;
 mod deconvolve;
 mod docs;

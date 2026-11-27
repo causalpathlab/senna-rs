@@ -141,7 +141,10 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 
     let mut data_vec = read_query(
         a.data_files,
-        QueryBatches::Register(a.batch_files),
+        QueryBatches::Register {
+            files: a.batch_files,
+            model: a.model,
+        },
         a.preload,
         a.query_name_opts,
         &training_genes,
