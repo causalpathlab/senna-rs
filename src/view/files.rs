@@ -14,6 +14,32 @@ pub fn modified(path: &Path) -> Option<SystemTime> {
 
 pub use senna::run_manifest::same_file;
 
+/// A file as it was read: its path (absolute, so a watcher elsewhere opens
+/// it too) and when it was last changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    pub file: PathBuf,
+    modified: Option<SystemTime>,
+}
+
+impl FileStamp {
+    /// `path`'s stamp; taken before the file is read, so a rewrite in
+    /// between is read again.
+    pub fn of(path: &Path) -> std::io::Result<Self> {
+        let modified = modified(path);
+        Ok(Self {
+            file: std::path::absolute(path)?,
+            modified,
+        })
+    }
+
+    /// Whether `path` is this file, unchanged since it was stamped.
+    #[must_use]
+    pub fn is(&self, path: &Path) -> bool {
+        same_file(path, &self.file) && modified(path) == self.modified
+    }
+}
+
 /// Files next to `path` whose name ends with `suffix`, sorted.
 #[must_use]
 pub fn siblings(path: &Path, suffix: &str) -> Vec<PathBuf> {

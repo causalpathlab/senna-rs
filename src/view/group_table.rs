@@ -5,10 +5,10 @@
 
 use super::cell_colour::{check_table, match_rows};
 use super::data::{Axis, LabelKind, Labels};
-use super::files::modified;
+use super::files::FileStamp;
 use super::Scene;
 use anyhow::{ensure, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 /// A group's name and its colour (8-bit sRGB).
@@ -16,10 +16,9 @@ pub(crate) type GroupColour = (Box<str>, [u8; 3]);
 
 /// A table's groups matched to the run's cells.
 pub(crate) struct GroupTable {
-    /// The table (absolute, so a watcher elsewhere opens it too), when it
-    /// was last changed, and its column, as asked again.
-    pub file: PathBuf,
-    modified: Option<std::time::SystemTime>,
+    /// The table, as read.
+    pub stamp: FileStamp,
+    /// Its column, as asked again.
     pub column: Option<Box<str>>,
     /// Each group's colour given, over the palette's (a colour chosen in
     /// the style menu wins); never saved beside the run.
@@ -41,6 +40,7 @@ impl GroupTable {
         cells: &[Box<str>],
     ) -> Result<Self> {
         let shown = path.to_string_lossy();
+        let stamp = FileStamp::of(path)?;
         check_table(path, column)?;
         let read: Vec<(Box<str>, Box<str>)> = crate::critique::read_cell_labels(&shown, column)?;
         let labels = Labels::new(LabelKind::Groups, match_rows(cells, read, path)?, &[]);
@@ -54,8 +54,7 @@ impl GroupTable {
             );
         }
         Ok(Self {
-            file: std::path::absolute(path)?,
-            modified: modified(path),
+            stamp,
             column: column.map(Into::into),
             colours,
             labels,
@@ -66,10 +65,10 @@ impl GroupTable {
     /// How the table matched the run's cells.
     #[must_use]
     pub fn said(&self) -> String {
-        let file = self
-            .file
+        let path = &self.stamp.file;
+        let file = path
             .file_name()
-            .map_or(self.file.to_string_lossy(), |f| f.to_string_lossy());
+            .map_or(path.to_string_lossy(), |f| f.to_string_lossy());
         format!(
             "groups: {} groups from {file} · {} of the run's {} cells matched",
             self.labels.levels.len(),
@@ -82,10 +81,7 @@ impl GroupTable {
     /// file unchanged since it was read.
     #[must_use]
     pub fn is(&self, file: &Path, column: Option<&str>, colours: &[GroupColour]) -> bool {
-        std::path::absolute(file).is_ok_and(|f| f == self.file)
-            && modified(file) == self.modified
-            && self.column.as_deref() == column
-            && self.colours == colours
+        self.stamp.is(file) && self.column.as_deref() == column && self.colours == colours
     }
 }
 
@@ -141,6 +137,8 @@ impl Scene {
             None => self.data.labels.push(table.labels.clone()),
         }
         self.group_table = Some(table);
+        // Forgetting the groups forgets what is cached by the grouping's
+        // index, which the new table takes over ([`Scene::refresh_groups`]).
         self.groups = None;
         self.refresh_groups();
         if colour {

@@ -112,11 +112,13 @@ fn quantile(xs: &[f32], q: f64) -> f32 {
     v.get(idx).copied().unwrap_or(f32::NEG_INFINITY)
 }
 
-/// Per-cell fit = predictive log-likelihood / count (depth-invariant).
+/// Per-cell fit = predictive log-likelihood / count (depth-invariant); NaN
+/// for a cell with no counts, which has nothing to fit (0 would read as a
+/// perfect fit, as `predict` notes), and is left out of the verdict.
 fn per_cell_fit(llik: &[f32], total: &[f32]) -> Vec<f32> {
     llik.iter()
         .zip(total)
-        .map(|(&l, &t)| if t > 0.0 { l / t } else { 0.0 })
+        .map(|(&l, &t)| if t > 0.0 { l / t } else { f32::NAN })
         .collect()
 }
 
@@ -327,10 +329,20 @@ fn write_verdict(v: Verdict<'_>) -> anyhow::Result<()> {
         q_names,
     } = v;
 
-    let thr = quantile(&cal_fit, args.alpha);
-    let n = q_fit.len();
-    anyhow::ensure!(n > 0, "probe: query has no cells");
-    let n_flag = q_fit.iter().filter(|&&f| f < thr).count();
+    // A cell with no counts (a NaN fit) is left out of the verdict; the
+    // table lists it, not flagged.
+    let scored =
+        |fit: &[f32]| -> Vec<f32> { fit.iter().copied().filter(|f| !f.is_nan()).collect() };
+    let (cal, query) = (scored(&cal_fit), scored(&q_fit));
+    anyhow::ensure!(!query.is_empty(), "probe: query has no cells with counts");
+    anyhow::ensure!(
+        !cal.is_empty(),
+        "probe: the calibration has no cells with counts"
+    );
+    let thr = quantile(&cal, args.alpha);
+    let n = query.len();
+    let unscored = q_fit.len() - n;
+    let n_flag = query.iter().filter(|&&f| f < thr).count();
     let rate = n_flag as f64 / n as f64;
 
     // One-sided test: are more query cells flagged than the null FPR α?
@@ -373,6 +385,7 @@ fn write_verdict(v: Verdict<'_>) -> anyhow::Result<()> {
         "alpha": args.alpha,
         "threshold": thr,
         "cells": n,
+        "cells_without_counts": unscored,
         "flagged": n_flag,
         "flag_rate": rate,
         "p_value": pval,

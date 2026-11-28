@@ -195,27 +195,17 @@ pub(crate) fn write_dictionary_tensor(
     gene_names: &[Box<str>],
     out_prefix: &str,
 ) -> anyhow::Result<()> {
-    let dict_tensor = dict_tensor.to_device(&candle_core::Device::Cpu)?;
-
+    let dict_dk: Mat = Mat::from_tensor(&dict_tensor.to_device(&candle_core::Device::Cpu)?)?;
+    let dict_dk = match coarsening {
+        Some(fc) => fc.expand_log_dict_dk(&dict_dk, n_features_full),
+        None => dict_dk,
+    };
+    senna::output_helpers::save_dictionary(out_prefix, &dict_dk, gene_names)?;
     if let Some(fc) = coarsening {
-        let dict_dk: Mat = Mat::from_tensor(&dict_tensor)?;
-        let expanded_dk = fc.expand_log_dict_dk(&dict_dk, n_features_full);
-        expanded_dk.to_parquet_with_names(
-            &(out_prefix.to_string() + ".dictionary.parquet"),
-            (Some(gene_names), Some("gene")),
-            Some(&axis_id_names("T", expanded_dk.ncols())),
-        )?;
         info!(
-            "Expanded dictionary from {} to {} features",
-            fc.num_coarse, n_features_full
+            "Expanded dictionary from {} to {n_features_full} features",
+            fc.num_coarse
         );
-    } else {
-        let k_topics = dict_tensor.dims().last().copied().unwrap_or(0);
-        dict_tensor.to_parquet_with_names(
-            &(out_prefix.to_string() + ".dictionary.parquet"),
-            (Some(gene_names), Some("gene")),
-            Some(&axis_id_names("T", k_topics)),
-        )?;
     }
     Ok(())
 }
@@ -246,11 +236,7 @@ pub(crate) fn write_loadings_expanded<Dec: DecoderModuleT + ?Sized>(
     };
     let table_dk: Mat = Mat::from_tensor(&dict_tensor)?;
     let expanded = fc.expand_rows_dk(&table_dk, n_features_full);
-    expanded.to_parquet_with_names(
-        &(out_prefix.to_string() + ".dictionary.parquet"),
-        (Some(gene_names), Some("gene")),
-        Some(&axis_id_names("T", expanded.ncols())),
-    )?;
+    senna::output_helpers::save_dictionary(out_prefix, &expanded, gene_names)?;
     info!(
         "Expanded loadings from {} to {n_features_full} features",
         fc.num_coarse

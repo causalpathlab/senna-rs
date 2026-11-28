@@ -37,3 +37,14 @@ fn from_a_run_alone_clusters_its_cell_table_into_its_own_prefix() {
     let (m, _) = RunManifest::load(Path::new(&from)).unwrap();
     assert_eq!(m.cluster.clusters.as_deref(), Some("run.clusters.parquet"));
 }
+
+#[test]
+fn degree_correction_is_on_by_default_and_can_be_turned_off() {
+    let dc = |extra: &[&str]| {
+        let argv = [&["clustering", "--latent", "z.parquet", "-o", "o"], extra].concat();
+        Cli::try_parse_from(argv).unwrap().args.degree_corrected
+    };
+    assert!(dc(&[]));
+    assert!(dc(&["--degree-corrected"]));
+    assert!(!dc(&["--degree-corrected", "false"]));
+}

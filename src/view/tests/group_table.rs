@@ -1,6 +1,7 @@
 use super::*;
 use crate::view::cell_colour::{file_and_column, run_cells};
 use crate::view::data::Axis;
+use std::path::PathBuf;
 
 fn table(dir: &tempfile::TempDir, text: &str) -> PathBuf {
     let path = dir.path().join("groups.tsv");
@@ -169,7 +170,7 @@ fn a_table_is_the_same_until_its_file_changes() {
     let path = table(&dir, "cell\tg\nc1\tA\n");
     let run: Vec<Box<str>> = ["c1".into()].to_vec();
     let t = GroupTable::read(&path, None, Vec::new(), &run).unwrap();
-    assert!(t.file.is_absolute());
+    assert!(t.stamp.file.is_absolute());
     assert!(t.is(&path, None, &[]));
     assert!(!t.is(&path, Some("g"), &[]));
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
@@ -192,4 +193,24 @@ fn a_table_whose_header_is_one_name_short_is_refused_as_values_are() {
         .err()
         .unwrap();
     assert!(err.to_string().contains("one more field"), "{err}");
+}
+
+#[test]
+fn another_table_s_labels_sit_at_its_own_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = crate::view::tests::scene();
+    let open = |s: &mut Scene, name: &str, text: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        let t = GroupTable::read(&path, None, Vec::new(), run_cells(&s.data)).unwrap();
+        s.open_groups(Arc::new(t), true);
+    };
+    open(&mut s, "one.tsv", "cell\tg\nc1\tA\nc2\tB\n");
+    let first = s.group_centre(0).expect("A labelled");
+    s.layers(); // draw once, caching the orders too
+    open(&mut s, "two.tsv", "cell\tg\nc3\tA\nc4\tB\n");
+    let second = s.group_centre(0).expect("A labelled");
+    // One cell per group: its label sits on that cell (c1, then c3).
+    assert_eq!(first, s.current().points.xy[0]);
+    assert_eq!(second, s.current().points.xy[2]);
 }
