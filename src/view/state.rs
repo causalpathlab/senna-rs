@@ -90,6 +90,10 @@ impl Scene {
         let g = labels.align(&self.current().points);
         let sizes = data::group_counts(g.iter().copied(), labels.levels.len());
         self.groups = Some((self.space, li, g, sizes));
+        // Label anchors and draw orders are cached by grouping index, which
+        // a grouping replaced in place keeps: made again from these groups.
+        self.medians.borrow_mut().take();
+        self.orders.borrow_mut().clear();
     }
 
     /// Change group `g`'s style in the current grouping and save the book.

@@ -123,13 +123,24 @@ pub fn read_data_on_shared_columns(
     let mut batch_stack = vec![];
 
     if let Some(batch_files) = &args.batch_files {
-        for (data_vec, batch_file) in data_stack.stack.iter_mut().zip(batch_files) {
-            let ntot = data_vec.num_columns();
-            let mut batch_membership = Vec::with_capacity(ntot);
-
-            info!("Reading batch file: {batch_file}");
-            for s in read_lines(batch_file)? {
-                batch_membership.push(s.to_string().into_boxed_str());
+        // One batch file per data file, in the data files' (modality ×
+        // batch) order: a modality's labels are its files' labels in turn.
+        for (data_vec, modality_files) in data_stack
+            .stack
+            .iter_mut()
+            .zip(batch_files.chunks(nfiles_per_type))
+        {
+            let cells_of_file = data_vec.num_columns_by_data()?;
+            let mut batch_membership = Vec::with_capacity(data_vec.num_columns());
+            for (batch_file, &cells) in modality_files.iter().zip(&cells_of_file) {
+                info!("Reading batch file: {batch_file}");
+                let labels = read_lines(batch_file)?;
+                anyhow::ensure!(
+                    labels.len() == cells,
+                    "batch file {batch_file} lists {} labels for its data file's {cells} cells",
+                    labels.len()
+                );
+                batch_membership.extend(labels);
             }
             batch_stack.push(batch_membership);
         }
@@ -176,47 +187,6 @@ pub fn read_data_on_shared_columns(
         output_keep_idx,
     })
 }
-
-// /// Build an affine transformation matrix that will help reduce
-// /// dimensions in training
-// ///
-// /// * `collapsed`: data matrices derived from collapsing operations
-// /// * `target_size`: targeting size
-// pub fn build_row_aggregator(collapsed: &CollapsedOut, target_size: usize) -> anyhow::Result<Mat> {
-//     if collapsed.mu_observed.nrows() > target_size {
-//         let log_x_nd = collapsed.mu_adjusted.as_ref().map_or_else(
-//             || {
-//                 collapsed
-//                     .mu_observed
-//                     .posterior_log_mean()
-//                     .transpose()
-//                     .clone()
-//             },
-//             |x| x.posterior_log_mean().transpose().clone(),
-//         );
-
-//         let kk = target_size.ilog2() as usize;
-//         info!(
-//             "reduce data features: {} -> {}",
-//             log_x_nd.ncols(),
-//             target_size,
-//         );
-
-//         let membership = row_membership_matrix(binary_sort_columns(&log_x_nd, kk)?)?;
-
-//         if membership.ncols() != target_size {
-//             let d_available = membership.ncols().min(target_size);
-//             let mut ret = Mat::zeros(membership.nrows(), target_size);
-//             ret.columns_range_mut(0..d_available)
-//                 .copy_from(&membership.columns_range(0..d_available));
-//             Ok(ret)
-//         } else {
-//             Ok(membership)
-//         }
-//     } else {
-//         Ok(Mat::identity(collapsed.mu_observed.nrows(), target_size))
-//     }
-// }
 
 /// The column of each of the run's `cells` among a file's `columns`: by
 /// name, as senna matches cells everywhere; when that finds fewer than nine
@@ -271,6 +241,70 @@ mod tests {
     /// Names as boxed strings.
     fn boxed(names: &[&str]) -> Vec<Box<str>> {
         names.iter().map(|&n| n.into()).collect()
+    }
+
+    /// Two modalities of two files each: each modality's labels are its two
+    /// files' labels in turn, and a file whose count is off is refused.
+    #[test]
+    fn each_modality_takes_the_batch_labels_of_its_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+        let rows: Vec<Box<str>> = boxed(&["g0", "g1"]);
+        let mut data = Vec::new();
+        for (modality, file, cells) in [
+            ("m0", "a", 3),
+            ("m0", "b", 2),
+            ("m1", "a", 3),
+            ("m1", "b", 2),
+        ] {
+            // A modality's files hold the same cells as the other's, under
+            // the same file names (`rna/s1`, `atac/s1`).
+            std::fs::create_dir_all(dir.path().join(modality)).unwrap();
+            let cols: Vec<Box<str>> = (0..cells).map(|c| format!("{file}c{c}").into()).collect();
+            let at = path(&format!("{modality}/{file}.zarr.zip"));
+            let entries = (0..cells).map(|c| (0, c, 1.0)).collect();
+            crate::sparse_output::write_backend(
+                &at,
+                crate::sparse_output::Entries::Triplets(entries),
+                &rows,
+                &cols,
+            )
+            .unwrap();
+            data.push(at.into_boxed_str());
+        }
+        let label = |i: usize, text: &str| {
+            let at = path(&format!("batch{i}.txt"));
+            std::fs::write(&at, text).unwrap();
+            at.into_boxed_str()
+        };
+        let batch_files: Vec<Box<str>> = ["a\na\na\n", "b\nb\n", "a\na\na\n", "b\nb\n"]
+            .iter()
+            .enumerate()
+            .map(|(i, text)| label(i, text))
+            .collect();
+        let read = || {
+            read_data_on_shared_columns(ReadSharedColumnsArgs {
+                data_files: data.clone(),
+                batch_files: Some(batch_files.clone()),
+                num_types: 2,
+                preload: false,
+                qc: None,
+                qc_block_size: None,
+                qc_report_out: None,
+            })
+        };
+        let want = boxed(&["a", "a", "a", "b", "b"]);
+        assert_eq!(read().unwrap().batch_stack, vec![want.clone(), want]);
+        // One label too many in a file and one short in the next: the
+        // modality's total is right, the file's is not.
+        label(2, "a\na\na\na\n");
+        label(3, "b\n");
+        let err = read().err().unwrap();
+        assert!(
+            err.to_string()
+                .contains("4 labels for its data file's 3 cells"),
+            "{err}"
+        );
     }
 
     #[test]

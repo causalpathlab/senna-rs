@@ -5,6 +5,7 @@
 
 use super::activity::{RowStat, Source, Stat};
 use super::data::Dataset;
+use super::files::FileStamp;
 use super::group_table::GroupTable;
 use super::{Levels, Pick, Scene};
 use crate::critique::read_cell_labels;
@@ -254,8 +255,9 @@ fn header_one_short(path: &str) -> anyhow::Result<bool> {
 
 /// A number per cell of the run, read from a table.
 pub(crate) struct CellValues {
-    /// The table and its column, as asked again.
-    pub file: PathBuf,
+    /// The table, as read.
+    pub stamp: FileStamp,
+    /// Its column, as asked again.
     pub column: Box<str>,
     /// The column and the file, as the key says them.
     pub title: String,
@@ -274,6 +276,7 @@ impl CellValues {
         column: Option<&str>,
         cells: &[Box<str>],
     ) -> anyhow::Result<Self> {
+        let stamp = FileStamp::of(path)?;
         let (column, read) = read_numbers(path, column)?;
         let by_cell: HashMap<Box<str>, f32> = match_rows(cells, read, path)?.into_iter().collect();
         let file = path
@@ -281,11 +284,18 @@ impl CellValues {
             .map_or(path.to_string_lossy(), |f| f.to_string_lossy());
         Ok(Self {
             title: format!("{column} · {file}"),
-            file: path.to_path_buf(),
+            stamp,
             column,
             by_cell,
             of: cells.len(),
         })
+    }
+
+    /// Whether `self` is `file`'s `column` (else the column read), the
+    /// file unchanged since it was read.
+    #[must_use]
+    pub fn is(&self, file: &Path, column: Option<&str>) -> bool {
+        self.stamp.is(file) && column.is_none_or(|c| *c == *self.column)
     }
 
     /// How the table matched the run's cells.

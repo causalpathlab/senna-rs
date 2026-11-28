@@ -498,10 +498,10 @@ impl Scene {
         }
         scene.apply_cell_args(&args.cells);
         if let Some(want) = args.focus.as_ref().or(args.zoom_into.as_ref()) {
+            // As the agent names a group: any case, or a cluster id.
             scene.focus = scene
-                .levels()
-                .iter()
-                .position(|l| l == want)
+                .colour
+                .and_then(|at| scene.data.labels[at].group(want))
                 .map(|i| i as u32);
             if scene.focus.is_none() {
                 log::warn!("view: no group `{want}` in the starting grouping");

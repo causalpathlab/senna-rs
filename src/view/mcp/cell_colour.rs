@@ -50,10 +50,22 @@ pub(in crate::view) struct GroupsArg {
     colours: Option<std::collections::BTreeMap<String, String>>,
 }
 
+/// Whether `data` holds the scene's own run's cells: not when a round swaps
+/// in another run, whose cells a table open now was not matched to.
+fn this_run(s: &Scene, data: &Dataset) -> bool {
+    std::ptr::eq(data, &s.data) || crate::view::state::same_run(&s.data, data)
+}
+
 /// `a`'s table of groups, matched to `data`'s cells, and whether it is new:
 /// the one open is kept when it is the same table, column and colours (a
 /// watcher applies the agent's whole view each time it changes).
-fn groups_of(a: &MapArgs, s: &Scene, data: &Dataset) -> Result<Option<(Arc<GroupTable>, bool)>> {
+/// `this_run`: `data` holds the scene's own run's cells ([`this_run`]).
+fn groups_of(
+    a: &MapArgs,
+    s: &Scene,
+    data: &Dataset,
+    this_run: bool,
+) -> Result<Option<(Arc<GroupTable>, bool)>> {
     let Some(g) = &a.groups else {
         return Ok(None);
     };
@@ -64,8 +76,6 @@ fn groups_of(a: &MapArgs, s: &Scene, data: &Dataset) -> Result<Option<(Arc<Group
             .map(|(n, c)| (n.as_str(), c.as_str())),
     )?;
     let column = g.column.as_deref();
-    // Matched to this run's cells: not when a round swaps in another run.
-    let this_run = std::ptr::eq(data, &s.data) || crate::view::state::same_run(&s.data, data);
     let open = s
         .group_table
         .as_ref()
@@ -105,6 +115,8 @@ pub(super) fn check(a: &MapArgs, s: &Scene, data: &Dataset) -> Result<CellColour
         "colour by a feature, the time, a cell statistic or values: one of them"
     );
     let cells = run_cells(data);
+    // What is open was matched to the scene's cells: kept only for its run.
+    let this_run = this_run(s, data);
     let open = s
         .data
         .loads
@@ -112,7 +124,7 @@ pub(super) fn check(a: &MapArgs, s: &Scene, data: &Dataset) -> Result<CellColour
         .as_ref()
         .and_then(|x| x.try_get()?.as_ref().ok());
     let extra = match a.extra.as_deref() {
-        Some(paths) if open.is_some_and(|x| x.paths == paths) => None,
+        Some(paths) if this_run && open.is_some_and(|x| x.paths == paths) => None,
         Some(paths) => Some(Arc::new(ExtraFiles::ready(Ok(read_extra(paths, cells)?)))),
         None => None,
     };
@@ -124,8 +136,8 @@ pub(super) fn check(a: &MapArgs, s: &Scene, data: &Dataset) -> Result<CellColour
     Ok(CellColouring {
         extra,
         stat,
-        values: values_of(a, s, cells)?,
-        groups: groups_of(a, s, data)?,
+        values: values_of(a, s, data, this_run)?,
+        groups: groups_of(a, s, data, this_run)?,
     })
 }
 
@@ -155,21 +167,27 @@ impl CellStatArg {
     }
 }
 
-fn values_of(a: &MapArgs, s: &Scene, cells: &[Box<str>]) -> Result<Option<Arc<CellValues>>> {
+fn values_of(
+    a: &MapArgs,
+    s: &Scene,
+    data: &Dataset,
+    this_run: bool,
+) -> Result<Option<Arc<CellValues>>> {
     let Some(v) = &a.values else {
         return Ok(None);
     };
+    let column = v.column.as_deref();
     let open = s
         .cell_colour
         .values
         .as_ref()
-        .filter(|o| o.file == v.file && v.column.as_deref().is_none_or(|c| *c == *o.column));
+        .filter(|o| this_run && o.is(&v.file, column));
     match open {
         Some(o) => Ok(Some(o.clone())),
         None => Ok(Some(Arc::new(CellValues::read(
             &v.file,
-            v.column.as_deref(),
-            cells,
+            column,
+            run_cells(data),
         )?))),
     }
 }
@@ -210,10 +228,10 @@ pub(super) fn publish(s: &Scene, state: &mut Value) {
             .iter()
             .map(|(n, c)| (n.to_string(), json!(super::view::hex8(*c))))
             .collect();
-        json!({"file": t.file, "column": t.column, "colours": colours})
+        json!({"file": t.stamp.file, "column": t.column, "colours": colours})
     });
     state["values"] = match (&s.pick, &s.cell_colour.values) {
-        (Some(Pick::Values), Some(v)) => json!({"file": v.file, "column": v.column}),
+        (Some(Pick::Values), Some(v)) => json!({"file": v.stamp.file, "column": v.column}),
         _ => Value::Null,
     };
 }

@@ -179,7 +179,11 @@ pub struct ClusteringArgs {
     #[arg(
         long,
         default_value_t = true,
-        help = "Use degree-corrected HSBM (default true)"
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_name = "BOOL",
+        help = "Use degree-corrected HSBM (default true; `--degree-corrected false` turns it off)"
     )]
     degree_corrected: bool,
 

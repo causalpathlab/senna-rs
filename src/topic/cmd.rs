@@ -31,6 +31,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             inh.source_kind
         );
     }
+    senna::run_manifest::InheritedFromManifest::ensure_replayable(inherited.as_ref(), "topic")?;
     let data_files = senna::run_manifest::InheritedFromManifest::resolve_data(
         inherited.as_ref(),
         &args.data_files,

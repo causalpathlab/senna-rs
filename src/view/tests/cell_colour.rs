@@ -50,3 +50,25 @@ fn a_table_s_values_colour_the_cells_it_matches_and_leave_the_rest_grey() {
     std::fs::write(&r, "score\nc1\t1\n").unwrap();
     assert!(CellValues::read(&r, None, &run).is_err());
 }
+
+#[test]
+fn a_values_table_is_the_same_until_its_file_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v.tsv");
+    std::fs::write(&path, "cell\tumi\tscore\nc1\t3\t1.5\n").unwrap();
+    let run: Vec<Box<str>> = ["c1".into()].to_vec();
+    let v = CellValues::read(&path, None, &run).unwrap();
+    assert!(v.stamp.file.is_absolute());
+    // No column named: the one read; another column is another table.
+    assert!(v.is(&path, None));
+    assert!(v.is(&path, Some("score")));
+    assert!(!v.is(&path, Some("umi")));
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    assert!(!v.is(&path, None));
+}

@@ -2,6 +2,7 @@
 //! (`stage2`): the per-(gene, donor) deviations and their batch jackknife,
 //! and each cell's donor, state coordinates and sample's matched distance.
 
+use data_beans::utilities::name_matching::GeneIndex;
 use legume_numeric::matrix::parquet::{
     read_parquet_string_columns_by_name, read_table_columns, ParquetReader,
 };
@@ -15,6 +16,8 @@ pub(crate) struct Stage2 {
     donor_index: HashMap<Box<str>, usize>,
     pub genes: Vec<Box<str>>,
     gene_index: HashMap<Box<str>, usize>,
+    /// The genes as every feature lookup in the view matches them.
+    matcher: GeneIndex,
     /// Coefficients per deviation: the intercept, then one per state axis.
     width: usize,
     /// `[gene][donor][width]`: the full fits.
@@ -231,6 +234,7 @@ impl Stage2 {
             .map(|(i, c)| (c, i))
             .collect();
         Ok(Self {
+            matcher: GeneIndex::build(&dev.genes),
             donors: dev.donors,
             donor_index: dev.donor_index,
             genes: dev.genes,
@@ -246,12 +250,13 @@ impl Stage2 {
         })
     }
 
-    /// The row of `gene`, matched as spelled, else ignoring case.
+    /// The row of `gene`, matched as spelled, else as any feature is
+    /// (case, symbol, Ensembl id: [`GeneIndex::match_gene`]).
     pub(crate) fn gene(&self, name: &str) -> Result<usize, String> {
         self.gene_index
             .get(name)
             .copied()
-            .or_else(|| self.genes.iter().position(|g| g.eq_ignore_ascii_case(name)))
+            .or_else(|| self.matcher.match_gene(name))
             .ok_or_else(|| format!("{name} has no stage-2 deviation"))
     }
 

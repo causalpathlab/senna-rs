@@ -14,8 +14,13 @@ fn names(v: &[&str]) -> Vec<Box<str>> {
 /// two cells of donor B. Only (g1, B) deviates: 1 + 2·state, and 0.5 + 2·state
 /// and 1.5 + 2·state without each batch.
 pub(crate) fn tables(dir: &std::path::Path) -> RunManifest {
+    tables_of_genes(dir, ["g0", "g1"])
+}
+
+/// [`tables`] with the two genes named `genes`.
+fn tables_of_genes(dir: &std::path::Path, [g0, g1]: [&str; 2]) -> RunManifest {
     let at = |f: &str| dir.join(f).to_string_lossy().into_owned();
-    let gene = names(&["g0", "g0", "g0", "g1", "g1", "g1"]);
+    let gene = names(&[g0, g0, g0, g1, g1, g1]);
     let donor = names(&["A", "B", "C", "A", "B", "C"]);
     let only_g1_b = |v: f32| -> Vec<f32> { (0..6).map(|r| if r == 4 { v } else { 0.0 }).collect() };
     let (i, s) = (only_g1_b(1.0), only_g1_b(2.0));
@@ -150,4 +155,18 @@ fn u_steps_through_the_counts_statistics_then_stage_2_s_exclusivity_then_off() {
             None
         ]
     );
+}
+
+#[test]
+fn a_gene_is_found_as_any_feature_is_by_its_symbol() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = tables_of_genes(
+        dir.path(),
+        ["ENSG00000000001_CD3E", "ENSG00000000002_MS4A1"],
+    );
+    let s = Stage2::load(&m, dir.path()).unwrap();
+    assert_eq!(s.gene("ENSG00000000001_CD3E"), Ok(0));
+    assert_eq!(s.gene("ms4a1"), Ok(1));
+    assert_eq!(s.gene("ENSG00000000002"), Ok(1));
+    assert!(s.gene("CD19").is_err());
 }
