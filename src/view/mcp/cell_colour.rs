@@ -6,6 +6,7 @@ use super::view::MapArgs;
 use crate::view::activity::{read_extra, ExtraFiles, Stat};
 use crate::view::cell_colour::{cell_stat, run_cells, CellValues};
 use crate::view::data::Dataset;
+use crate::view::group_table::{colours, GroupTable};
 use crate::view::{CellStat, Pick, Scene};
 use anyhow::{ensure, Result};
 use serde::Deserialize;
@@ -40,12 +41,52 @@ pub(in crate::view) struct ValuesArg {
     column: Option<String>,
 }
 
+/// Groups per cell from a table, shown as the `groups` grouping.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::view) struct GroupsArg {
+    file: PathBuf,
+    column: Option<String>,
+    colours: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// `a`'s table of groups, matched to `data`'s cells, and whether it is new:
+/// the one open is kept when it is the same table, column and colours (a
+/// watcher applies the agent's whole view each time it changes).
+fn groups_of(a: &MapArgs, s: &Scene, data: &Dataset) -> Result<Option<(Arc<GroupTable>, bool)>> {
+    let Some(g) = &a.groups else {
+        return Ok(None);
+    };
+    let given = colours(
+        g.colours
+            .iter()
+            .flatten()
+            .map(|(n, c)| (n.as_str(), c.as_str())),
+    )?;
+    let column = g.column.as_deref();
+    // Matched to this run's cells: not when a round swaps in another run.
+    let this_run = std::ptr::eq(data, &s.data) || crate::view::state::same_run(&s.data, data);
+    let open = s
+        .group_table
+        .as_ref()
+        .filter(|o| this_run && o.is(&g.file, column, &given));
+    Ok(Some(match open {
+        Some(open) => (open.clone(), false),
+        None => (
+            Arc::new(GroupTable::read(&g.file, column, given, run_cells(data))?),
+            true,
+        ),
+    }))
+}
+
 /// What the arguments ask for, read and checked before the view changes.
 pub(super) struct CellColouring {
     extra: Option<Arc<ExtraFiles>>,
     /// `Some(None)`: off.
     stat: Option<Option<Stat>>,
     values: Option<Arc<CellValues>>,
+    /// The table of groups, and whether it is new.
+    groups: Option<(Arc<GroupTable>, bool)>,
 }
 
 /// Read and check `a`'s extra file, statistic and table against `data`,
@@ -84,6 +125,7 @@ pub(super) fn check(a: &MapArgs, s: &Scene, data: &Dataset) -> Result<CellColour
         extra,
         stat,
         values: values_of(a, s, cells)?,
+        groups: groups_of(a, s, data)?,
     })
 }
 
@@ -162,6 +204,14 @@ pub(super) fn publish(s: &Scene, state: &mut Value) {
     };
     state["colour_scale"] = json!(s.colour_scale);
     state["outliers"] = json!(s.outliers);
+    state["groups"] = s.group_table.as_ref().map_or(Value::Null, |t| {
+        let colours: serde_json::Map<String, Value> = t
+            .colours
+            .iter()
+            .map(|(n, c)| (n.to_string(), json!(super::view::hex8(*c))))
+            .collect();
+        json!({"file": t.file, "column": t.column, "colours": colours})
+    });
     state["values"] = match (&s.pick, &s.cell_colour.values) {
         (Some(Pick::Values), Some(v)) => json!({"file": v.file, "column": v.column}),
         _ => Value::Null,
@@ -169,6 +219,21 @@ pub(super) fn publish(s: &Scene, state: &mut Value) {
 }
 
 impl CellColouring {
+    /// The table of groups asked for.
+    pub(super) fn groups(&self) -> Option<&GroupTable> {
+        self.groups.as_ref().map(|(t, _)| &**t)
+    }
+
+    /// Open the table of groups asked for (unless it is open), with
+    /// `colour` coloured by it: before the grouping and focus apply.
+    pub(super) fn open_groups(&mut self, scene: &mut Scene, colour: bool) {
+        match self.groups.take() {
+            Some((t, true)) => scene.open_groups(t, colour),
+            Some((_, false)) if colour => scene.colour_by_groups(),
+            _ => {}
+        }
+    }
+
     /// Open the extra file: before the source and feature apply, so they
     /// may be the extra file's.
     pub(super) fn open_extra(&mut self, scene: &mut Scene) {
@@ -225,6 +290,11 @@ pub(super) fn spec(name: &str) -> Value {
                 "file": {"type": "string", "description": "A table (TSV, CSV or parquet) whose first column names the cell, matched to the run's cells by name or barcode"},
                 "column": {"type": "string", "description": "The value column [default: the last numeric one]"}
             }, "required": ["file"], "additionalProperties": false, "description": "Colour the cells by a number each from a table, unmatched cells grey; the note says how many cells matched; feature \"\" shows the groups again"}),
+        "groups" => json!({"type": "object", "properties": {
+                "file": {"type": "string", "description": "A table (TSV, CSV or parquet) whose first column names the cell, matched to the run's cells by name or barcode"},
+                "column": {"type": "string", "description": "The group column [default: the second]; empty and NA cells have no group"},
+                "colours": {"type": "object", "additionalProperties": {"type": "string"}, "description": "A colour per group name, as {\"B_cell\": \"#c34e54\"}; the rest take the palette's"}
+            }, "required": ["file"], "additionalProperties": false, "description": "Show a table's groups as the `groups` grouping (legend, counts, focus and view_export as any grouping), unmatched cells grey; coloured by it unless colour_by names another. Kept for the run's other rounds; the note says how many cells matched"}),
         "colour_scale" => colour_scale_spec(),
         "outliers" => json!({"type": "object", "properties": {
                 "mode": {"enum": ["off", "fit", "hide"], "description": "fit: the camera (and an export) fits the rest and outliers are drawn pinned to its edge; hide: they are not drawn either; off: every point counts"},

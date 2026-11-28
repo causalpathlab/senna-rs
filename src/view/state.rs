@@ -81,7 +81,9 @@ impl Scene {
             return;
         };
         let labels = &self.data.labels[li];
-        self.styles = self.book.resolve(labels.title(), &labels.levels);
+        self.styles = self
+            .book
+            .resolve(labels.title(), &labels.levels, self.given_colours(labels));
         if matches!(&self.groups, Some((s, l, ..)) if *s == self.space && *l == li) {
             return;
         }
@@ -187,11 +189,18 @@ impl Scene {
         // A new annotation round of the same run points at the same model
         // and data files; keep what was read from them.
         let same_run = same_run(&self.data, &data);
-        // The same run read again keeps the batches it had (or is reading,
-        // or found none of); another run reads its own on the side.
-        let batch = self
-            .label_index(LabelKind::Batch)
-            .map(|i| self.data.labels[i].clone());
+        // Groupings the view added on top of the round's: the same run read
+        // again keeps the batches it had (or is reading, or found none of)
+        // and the table's groups, which name the same cells; another run
+        // reads its own batches on the side, and the table's cells are not
+        // its.
+        let carried: Vec<data::Labels> = self
+            .data
+            .labels
+            .iter()
+            .filter(|l| matches!(l.kind, LabelKind::Batch | LabelKind::Groups))
+            .cloned()
+            .collect();
         let loads = self.data.loads.clone();
         let stage2 = |d: &Dataset| d.run.as_ref().map(|(m, _)| m.stage2.clone());
         let stage2_changed = stage2(&self.data) != stage2(&data);
@@ -205,10 +214,13 @@ impl Scene {
             if stage2_changed {
                 self.take_up_stage2();
             }
-            if let Some(b) = batch.filter(|_| self.label_index(LabelKind::Batch).is_none()) {
-                self.data.labels.push(b);
+            for l in carried {
+                if self.label_index(l.kind).is_none() {
+                    self.data.labels.push(l);
+                }
             }
         } else {
+            self.group_table = None;
             self.batches_taken = false;
             self.answered = 0;
             // The other run's velocities are its own.

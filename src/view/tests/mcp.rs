@@ -630,3 +630,47 @@ fn a_published_view_carries_its_table_of_values_and_a_cell_statistic() {
     );
     assert!(agent_view(&published).is_ok());
 }
+
+#[test]
+fn a_table_s_groups_colour_the_map_and_a_watcher_opens_the_same_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let table = dir.path().join("g.tsv");
+    std::fs::write(
+        &table,
+        "cell\tcell_type\nc1\tB_cell\nc2\tacinar\nc3\tB_cell\n",
+    )
+    .unwrap();
+    let mut agent = open();
+    let out = agent
+        .map(args(json!({
+            "groups": {"file": table, "colours": {"B_cell": "#c34e54"}},
+            "focus": "acinar",
+            "width": 16
+        })))
+        .unwrap();
+    assert_eq!(state(&out)["colour_by"], "groups");
+    let published = agent.view_state();
+    assert_eq!(published["groups"]["colours"]["B_cell"], "#c34e54");
+    let (_, a) = agent_view(&published).unwrap();
+    let mut watcher = open();
+    apply(&mut watcher.scene, &a).unwrap();
+    assert_eq!(watcher.view_state()["groups"], published["groups"]);
+    assert_eq!(watcher.view_state()["colour_by"], "groups");
+    assert_eq!(watcher.scene.focused_name().as_deref(), Some("acinar"));
+    // Applied again, the open table is kept, focus and all.
+    let kept = watcher.scene.group_table.clone().unwrap();
+    apply(&mut watcher.scene, &a).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &kept,
+        watcher.scene.group_table.as_ref().unwrap()
+    ));
+    // Another grouping asked for beside the table colours by that one.
+    agent
+        .map(args(
+            json!({"groups": {"file": table}, "colour_by": "cluster"}),
+        ))
+        .unwrap();
+    assert_eq!(agent.view_state()["colour_by"], "cluster");
+    assert!(agent.map(args(json!({"colour_by": "groups"}))).is_ok());
+    assert_eq!(agent.view_state()["colour_by"], "groups");
+}

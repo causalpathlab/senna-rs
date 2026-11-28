@@ -117,9 +117,16 @@ impl Book {
         }
     }
 
-    /// Resolve every group of a grouping for drawing, `n` groups in all.
+    /// Resolve every group of a grouping for drawing, `n` groups in all: a
+    /// colour stored here, else one `given` for its name (not stored), else
+    /// the palette's.
     #[must_use]
-    pub fn resolve(&self, grouping: &str, levels: &[Box<str>]) -> Vec<Resolved> {
+    pub fn resolve(
+        &self,
+        grouping: &str,
+        levels: &[Box<str>],
+        given: &[(Box<str>, [u8; 3])],
+    ) -> Vec<Resolved> {
         let n = levels.len();
         levels
             .iter()
@@ -128,6 +135,7 @@ impl Book {
                 let s = self.get(grouping, name);
                 let colour = s
                     .colour
+                    .or_else(|| given.iter().find(|(g, _)| g == name).map(|(_, c)| *c))
                     .map_or_else(|| color::category(i, n), color::linear_rgb);
                 let ink = color::ink_for(colour);
                 Resolved {
