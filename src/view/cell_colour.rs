@@ -5,6 +5,7 @@
 
 use super::activity::{RowStat, Source, Stat};
 use super::data::Dataset;
+use super::group_table::GroupTable;
 use super::{Levels, Pick, Scene};
 use crate::critique::read_cell_labels;
 use clap::Args;
@@ -67,6 +68,21 @@ pub struct CellArgs {
         help = "Start coloured by a number per cell from a table (TSV, CSV or parquet): its first column names the cell (matched to the run's as --extra matches), COLUMN (default: the last numeric one) the value; `u` in the view"
     )]
     pub values: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "FILE[:COLUMN]",
+        help = "Start coloured by groups from a table (TSV, CSV or parquet): its first column names the cell (matched to the run's by name or barcode), COLUMN (default: the second) the group; shown as the `groups` grouping, unmatched cells grey"
+    )]
+    pub groups: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "FILE|NAME=#RRGGBB,...",
+        requires = "groups",
+        help = "With --groups: each group's colour, from a table of group and #rrggbb (its first two columns) or as NAME=#RRGGBB pairs joined by commas"
+    )]
+    pub group_colours: Option<String>,
 }
 
 impl CellArgs {
@@ -92,6 +108,13 @@ impl CellArgs {
         if let Some(arg) = &self.values {
             let (file, column) = file_and_column(arg);
             read_numbers(&file, column)?;
+        }
+        if let Some(arg) = &self.groups {
+            let (file, column) = file_and_column(arg);
+            check_table(&file, column)?;
+        }
+        if let Some(c) = &self.group_colours {
+            super::group_table::parse_colours(c)?;
         }
         Ok(())
     }
@@ -135,11 +158,7 @@ pub(crate) fn read_numbers(
     column: Option<&str>,
 ) -> anyhow::Result<(Box<str>, CellNumbers)> {
     let shown = path.to_string_lossy();
-    let header = TableReader::open(&shown)?.header().to_vec();
-    anyhow::ensure!(
-        is_parquet_path(&shown) || !header_one_short(&shown)?,
-        "{shown}: its rows have one more field than its header names (R's write.table without col.names = NA?): name the cell column too"
-    );
+    let header = check_table(path, None)?;
     let numbers = |c: &str| -> anyhow::Result<Option<CellNumbers>> {
         let read: Vec<(Box<str>, Box<str>)> = read_cell_labels(&shown, Some(c))?;
         let parsed: Option<Vec<_>> = read
@@ -166,6 +185,54 @@ pub(crate) fn read_numbers(
             .find_map(|c| Some((c.clone(), numbers(c).ok()??)))
             .ok_or_else(|| anyhow::anyhow!("{shown}: no numeric column")),
     }
+}
+
+/// The header of the table at `path`, with `column` among its names (else
+/// a column after the cell's); a text table whose header is one name
+/// short is refused, as its names would sit one column off. Nothing past
+/// the first rows is read.
+pub(crate) fn check_table(path: &Path, column: Option<&str>) -> anyhow::Result<Vec<Box<str>>> {
+    let shown = path.to_string_lossy();
+    let table = TableReader::open(&shown)?;
+    anyhow::ensure!(
+        is_parquet_path(&shown) || !header_one_short(&shown)?,
+        "{shown}: its rows have one more field than its header names (R's write.table without col.names = NA?): name the cell column too"
+    );
+    match column {
+        Some(c) => {
+            table.select(&[c])?;
+        }
+        None => anyhow::ensure!(
+            table.header().len() > 1,
+            "{shown}: no column after the cell's"
+        ),
+    }
+    Ok(table.header().to_vec())
+}
+
+/// The rows of a table read from `path` whose cell (its first column) is
+/// one of `cells`, by name or barcode as an extra file's cells match
+/// ([`senna::senna_input::match_cells`]), keyed by the run's name. A table
+/// with none of them is refused.
+pub(crate) fn match_rows<T: Default>(
+    cells: &[Box<str>],
+    rows: Vec<(Box<str>, T)>,
+    path: &Path,
+) -> anyhow::Result<Vec<(Box<str>, T)>> {
+    let (names, mut values): (Vec<Box<str>>, Vec<T>) = rows.into_iter().unzip();
+    let matched: Vec<(Box<str>, T)> = senna::senna_input::match_cells(cells, &names)
+        .into_iter()
+        .map(|(cell, row)| (cell, std::mem::take(&mut values[row as usize])))
+        .collect();
+    let file = path
+        .file_name()
+        .map_or(path.to_string_lossy(), |f| f.to_string_lossy());
+    anyhow::ensure!(
+        !matched.is_empty(),
+        "none of the run's {} cells are named in {file}",
+        cells.len()
+    );
+    Ok(matched)
 }
 
 /// Whether a text table's first row has one field more than its header:
@@ -208,19 +275,10 @@ impl CellValues {
         cells: &[Box<str>],
     ) -> anyhow::Result<Self> {
         let (column, read) = read_numbers(path, column)?;
-        let names: Vec<Box<str>> = read.iter().map(|(cell, _)| cell.clone()).collect();
-        let by_cell: HashMap<Box<str>, f32> = senna::senna_input::match_cells(cells, &names)
-            .into_iter()
-            .map(|(cell, row)| (cell, read[row as usize].1))
-            .collect();
+        let by_cell: HashMap<Box<str>, f32> = match_rows(cells, read, path)?.into_iter().collect();
         let file = path
             .file_name()
             .map_or(path.to_string_lossy(), |f| f.to_string_lossy());
-        anyhow::ensure!(
-            !by_cell.is_empty(),
-            "none of the run's {} cells have a value in {file}",
-            cells.len()
-        );
         Ok(Self {
             title: format!("{column} · {file}"),
             file: path.to_path_buf(),
@@ -271,6 +329,25 @@ impl Scene {
             match CellValues::read(&file, column, run_cells(&self.data)) {
                 Ok(v) => self.show_values(Arc::new(v)),
                 Err(e) => self.note = Some(format!("values: {e}")),
+            }
+        }
+        if let Some(arg) = &args.groups {
+            let (file, column) = file_and_column(arg);
+            let colours = args
+                .group_colours
+                .as_deref()
+                .map(super::group_table::parse_colours)
+                .transpose();
+            match colours.and_then(|c| {
+                GroupTable::read(&file, column, c.unwrap_or_default(), run_cells(&self.data))
+            }) {
+                // Coloured by a number per cell asked for too, the table
+                // is one grouping more.
+                Ok(t) => {
+                    let numbers = matches!(self.pick, Some(Pick::Stat(_) | Pick::Values));
+                    self.open_groups(Arc::new(t), !numbers);
+                }
+                Err(e) => self.note = Some(format!("groups: {e}")),
             }
         }
     }

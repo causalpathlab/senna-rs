@@ -152,6 +152,8 @@ pub enum LabelKind {
     Previous,
     /// A run's lineage of each cell, from its `cell_time` table.
     Lineage,
+    /// Groups from a table given to the view (`--groups`).
+    Groups,
 }
 
 impl LabelKind {
@@ -170,6 +172,7 @@ impl LabelKind {
             LabelKind::Changed => "changed",
             LabelKind::Previous => "previous annotation",
             LabelKind::Lineage => "lineage",
+            LabelKind::Groups => "groups",
         }
     }
 

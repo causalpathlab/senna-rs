@@ -151,6 +151,7 @@ pub(in crate::view) struct MapArgs {
     pub(super) extra: Option<Vec<PathBuf>>,
     pub(super) cell_stat: Option<cell_colour::CellStatArg>,
     pub(super) values: Option<cell_colour::ValuesArg>,
+    pub(super) groups: Option<cell_colour::GroupsArg>,
     pub(super) colour_scale: Option<crate::view::colour_scale::ColourScale>,
     pub(super) outliers: Option<crate::view::outliers::Outliers>,
 }
@@ -571,7 +572,16 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
     let choices: Vec<usize> = (0..data.labels.len())
         .filter(|&i| data.labels[i].axis() == axis)
         .collect();
+    // A table of groups is coloured by unless colour_by names another.
+    let mut cells = cell_colour::check(a, s, data)?;
+    let groups = cells.groups();
+    let to_groups = groups.is_some()
+        && axis == crate::view::LabelKind::Groups.axis()
+        && a.colour_by
+            .as_deref()
+            .is_none_or(|c| c.eq_ignore_ascii_case("groups"));
     let colour = match &a.colour_by {
+        _ if to_groups => None,
         Some(by) if by.eq_ignore_ascii_case("none") => Some(None),
         Some(by) => Some(Some(grouping_named(data, &choices, by)?)),
         None => None,
@@ -595,8 +605,15 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         Some(f) => Some(match focus_name(f)? {
             None => None,
             Some(name) => {
-                let li = shown.ok_or_else(|| anyhow!("no grouping shown: pass colour_by"))?;
-                Some(group_of(&data.labels[li], &name)?)
+                let labels = match groups.filter(|_| to_groups) {
+                    Some(t) => &t.labels,
+                    None => {
+                        let li =
+                            shown.ok_or_else(|| anyhow!("no grouping shown: pass colour_by"))?;
+                        &data.labels[li]
+                    }
+                };
+                Some(group_of(labels, &name)?)
             }
         }),
     };
@@ -612,7 +629,6 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
     if let Some(o) = &a.outliers {
         o.check().map_err(|e| anyhow!("outliers: {e}"))?;
     }
-    let mut cells = cell_colour::check(a, s, data)?;
     if let Some(chart) = a.chart {
         chart.check(data.has_stage2())?;
     }
@@ -636,6 +652,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
         scene.set_space(at);
         moved = true;
     }
+    cells.open_groups(scene, to_groups);
     // The grouping shown, asked for again, keeps its focus and feature.
     if let Some(li) = colour.filter(|&li| li != scene.colour) {
         scene.set_colour(li);
@@ -685,7 +702,7 @@ pub(in crate::view) fn apply(scene: &mut Scene, a: &MapArgs) -> Result<bool> {
 }
 
 /// The view_map arguments a published view sets.
-const VIEW_KEYS: [&str; 18] = [
+const VIEW_KEYS: [&str; 19] = [
     "round",
     "map",
     "space",
@@ -702,6 +719,7 @@ const VIEW_KEYS: [&str; 18] = [
     "extra",
     "cell_stat",
     "values",
+    "groups",
     "colour_scale",
     "outliers",
 ];
@@ -795,7 +813,11 @@ fn nearest(xy: &[[f32; 2]], at: [f32; 2]) -> Option<usize> {
 }
 
 fn hex(c: color::Rgb) -> String {
-    let [r, g, b] = color::to_srgb_senna(c);
+    hex8(color::to_srgb_senna(c))
+}
+
+/// An 8-bit sRGB colour as `#rrggbb`.
+pub(super) fn hex8([r, g, b]: [u8; 3]) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
@@ -847,7 +869,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "round": {"type": "string", "description": "A lupin round of the run (its manifest), shown in its place"},
                     "map": {"type": "string", "description": "Layout method, as view_open lists the maps"},
                     "space": {"enum": ["cells", "features-on-cells", "features"], "description": "Which points"},
-                    "colour_by": {"type": "string", "description": "A grouping view_open lists (annotation, cluster, topic, batch, …), or none"},
+                    "colour_by": {"type": "string", "description": "A grouping view_open lists (annotation, cluster, topic, batch, groups once a table is open, …), or none"},
                     "focus": {"type": ["string", "integer", "array"], "items": group, "maxItems": 1, "description": "One group of the grouping shown, by name or cluster id (3, C3, K3), alone or as a list of one; the rest are dimmed. \"\" or [] clears"},
                     "feature": {"type": "string", "description": "Colour cells by one feature's level; \"\" shows the groups again"},
                     "observed": {"type": "boolean", "description": "The feature's observed counts instead of the model's expected level"},
@@ -859,6 +881,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                     "extra": cell_colour::spec("extra"),
                     "cell_stat": cell_colour::spec("cell_stat"),
                     "values": cell_colour::spec("values"),
+                    "groups": cell_colour::spec("groups"),
                     "colour_scale": cell_colour::spec("colour_scale"),
                     "outliers": cell_colour::spec("outliers"),
                     "bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "World window [x0, y0, x1, y1]"},

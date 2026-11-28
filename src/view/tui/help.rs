@@ -66,7 +66,7 @@ const BROWSE_HELP: &[(&str, &[(&str, &str)])] = &[
             ("[  ]", "focus the previous / next group (drawn on top)"),
             (
                 "c",
-                "colour by the next grouping (annotation, cluster, topic, …)",
+                "colour by the next grouping (annotation, cluster, topic, batch, the --groups table, …)",
             ),
             ("tab  shift-tab", "cells, features on cells, features, of this layout"),
             ("m", "next layout method (umap, phate, …)"),

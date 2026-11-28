@@ -11,6 +11,7 @@ mod decide;
 mod deck;
 mod features;
 mod files;
+mod group_table;
 pub(crate) mod mcp;
 pub(crate) mod outliers;
 mod paint;
@@ -411,6 +412,8 @@ pub(crate) struct Scene {
     velocity_moved: std::cell::RefCell<Option<Moved>>,
     /// The `u` cycle's statistic and table the flags or the agent set.
     cell_colour: cell_colour::CellColour,
+    /// The table of groups shown as the `groups` grouping (`--groups`).
+    group_table: Option<std::sync::Arc<group_table::GroupTable>>,
     /// Outlying points ([`outliers`]), and those found on the layout last
     /// asked, by its space, size and bounds.
     outliers: outliers::Outliers,
@@ -468,6 +471,7 @@ impl Scene {
             stream_lanes: args.stream_density.unwrap_or(velocity::LANES),
             velocity_moved: std::cell::RefCell::new(None),
             cell_colour: Default::default(),
+            group_table: None,
             outliers: args.outliers.outliers().unwrap_or_default(),
             outlier_flags: Default::default(),
         };
@@ -587,6 +591,7 @@ impl Scene {
             stream_lanes: self.stream_lanes,
             velocity_moved: std::cell::RefCell::new(self.velocity_moved.borrow().clone()),
             cell_colour: self.cell_colour.clone(),
+            group_table: self.group_table.clone(),
             outliers: self.outliers.clone(),
             outlier_flags: Default::default(),
         };
